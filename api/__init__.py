@@ -2,7 +2,7 @@
 
 from flask import Flask
 
-from api.routes import image_caption, image_embed, object_detection, pose_estimation, stt, tts
+from api.routes import image_caption, object_detection, pose_estimation, stt, tts
 
 
 def create_app() -> Flask:
@@ -13,7 +13,7 @@ def create_app() -> Flask:
     app.register_blueprint(object_detection.bp)
     app.register_blueprint(pose_estimation.bp)
     app.register_blueprint(image_caption.bp)
-    app.register_blueprint(image_embed.bp)
+    # app.register_blueprint(image_embed.bp)
 
     @app.get("/")
     def index():
@@ -25,7 +25,7 @@ def create_app() -> Flask:
                 "object_detection": "yolo",
                 "pose_estimation": "yolo_pose",
                 "image_caption": "paligemma",
-                "image_embed": "clip",
+                # "image_embed": "clip",
             },
             "endpoints": [
                 "/stt/transcribe",
@@ -33,7 +33,7 @@ def create_app() -> Flask:
                 "/object-detection/detect",
                 "/pose-estimation/estimate",
                 "/image-caption/caption", "/image-caption/caption-batch",
-                "/image-embed/embed-image", "/image-embed/embed-text", "/image-embed/similarity",
+                # "/image-embed/embed-image", "/image-embed/embed-text", "/image-embed/similarity",
             ],
         }
 

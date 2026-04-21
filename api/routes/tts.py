@@ -7,7 +7,8 @@ from services.tts import TTS
 
 bp = Blueprint("tts", __name__, url_prefix="/tts")
 
-_tts = TTS(provider="elevenlabs")
+# _tts = TTS(provider="elevenlabs", voice_id="fDeOZu1sNd7qahm2fV4k")
+_tts = TTS(provider="piper", voice_path="voices/en_US-lessac-medium.onnx")
 
 
 def _infer_content_type(formats: list[str]) -> str:

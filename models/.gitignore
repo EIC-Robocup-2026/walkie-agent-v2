@@ -1,9 +1,0 @@
-# Ignore model weight files but keep the directory structure
-*
-
-# Keep this file and subdirectory markers
-!.gitignore
-!huggingface/
-!huggingface/.gitkeep
-!ultralytics/
-!ultralytics/.gitkeep

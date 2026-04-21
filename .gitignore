@@ -16,3 +16,6 @@ wheels/
 *.safetensors
 *.gguf
 *.ot
+
+# Env
+.env

@@ -23,7 +23,7 @@ class PiperProvider(TTSProvider):
         self.output_format = config.get("output_format", f"pcm_{self.sample_rate}")
 
         try:
-            from services.tts.providers.piper_tts import PiperVoice
+            from piper import PiperVoice
         except ImportError as exc:
             raise ImportError(
                 "piper-tts is required for the Piper provider. "
