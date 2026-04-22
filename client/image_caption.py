@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from PIL import Image
-
-from .base import WalkieBaseClient, _pil_to_bytes
+import numpy as np
+from .base import WalkieBaseClient, _numpy_to_bytes, _pil_to_bytes
 
 
 class ImageCaptionClient(WalkieBaseClient):
@@ -28,11 +28,11 @@ class ImageCaptionClient(WalkieBaseClient):
         )
     """
 
-    def caption(self, image: Image.Image, prompt: str | None = None) -> str:
+    def caption(self, image: Image.Image | np.ndarray, prompt: str | None = None) -> str:
         """Generate a caption for a single *image*.
 
         Args:
-            image: A PIL Image (RGB).
+            image: A PIL Image (RGB) or numpy array (BGR).
             prompt: Optional prompt to guide the captioning model.
 
         Returns:
@@ -41,20 +41,23 @@ class ImageCaptionClient(WalkieBaseClient):
         Raises:
             WalkieAPIError: If the server returns a failure response.
         """
-        files = {"image": ("image.png", _pil_to_bytes(image), "image/png")}
+        if isinstance(image, np.ndarray):
+            files = {"image": ("image.jpg", _numpy_to_bytes(image, fmt="JPEG"), "image/jpeg")}
+        else:
+            files = {"image": ("image.png", _pil_to_bytes(image), "image/png")}
         form_data = {"prompt": prompt} if prompt is not None else {}
         data = self._post_files("/image-caption/caption", files=files, data=form_data)
         return data["caption"]
 
     def caption_batch(
         self,
-        images: list[Image.Image],
+        images: list[Image.Image | np.ndarray],
         prompts: list[str] | None = None,
     ) -> list[str]:
         """Generate captions for multiple images.
 
         Args:
-            images: List of PIL Images (RGB).
+            images: List of PIL Images (RGB) or numpy arrays (BGR).
             prompts: Optional list of prompts, one per image.  Must be the
                 same length as *images* if provided.
 
@@ -64,10 +67,12 @@ class ImageCaptionClient(WalkieBaseClient):
         Raises:
             WalkieAPIError: If the server returns a failure response.
         """
-        files = [
-            ("images", (f"image_{i}.png", _pil_to_bytes(img), "image/png"))
-            for i, img in enumerate(images)
-        ]
+        files = []
+        for i, img in enumerate(images):
+            if isinstance(img, np.ndarray):
+                files.append(("images", (f"image_{i}.jpg", _numpy_to_bytes(img, fmt="JPEG"), "image/jpeg")))
+            else:
+                files.append(("images", (f"image_{i}.png", _pil_to_bytes(img), "image/png")))
         form_data = (
             [("prompts", p) for p in prompts]
             if prompts is not None

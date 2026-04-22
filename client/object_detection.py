@@ -1,13 +1,25 @@
 """HTTP client for the Object Detection API — /object-detection/*"""
 
 from __future__ import annotations
+from dataclasses import dataclass
 
+import cv2
+import numpy as np
 from PIL import Image
 
-from services.object_detection.base import DetectedObject
+from .base import WalkieBaseClient, _b64_to_pil, _numpy_to_bytes, _pil_to_bytes
 
-from .base import WalkieBaseClient, _b64_to_pil, _pil_to_bytes
+@dataclass
+class DetectedObject:
+    """A single detected object from an image."""
 
+    mask: "tuple[tuple[int, int], ...] | None"  # (y, x) coordinates or None
+    bbox: tuple[int, int, int, int]  # (x1, y1, x2, y2)
+    area_ratio: float  # fraction of image area
+    # Optional: set by providers that output class and confidence (e.g. YOLO)
+    class_id: int | None = None
+    class_name: str | None = None
+    confidence: float | None = None
 
 class ObjectDetectionClient(WalkieBaseClient):
     """Client for the ``/object-detection`` blueprint.
@@ -24,11 +36,21 @@ class ObjectDetectionClient(WalkieBaseClient):
             print(obj.class_name, obj.confidence, obj.bbox)
     """
 
-    def detect(self, image: Image.Image) -> list[DetectedObject]:
+    def detect(
+        self,
+        image: Image.Image | np.ndarray,
+        max_size: int = 640,
+        jpeg_quality: int = 85,
+    ) -> list[DetectedObject]:
         """Detect objects in *image*.
 
         Args:
-            image: A PIL Image (RGB) to run detection on.
+            image: A PIL Image (RGB) or BGR numpy array to run detection on.
+            max_size: Longest edge is scaled down to this before sending.
+                      YOLO resizes internally anyway, so full resolution adds
+                      no accuracy but costs encoding time and bandwidth.
+            jpeg_quality: JPEG quality (1-95). 85 is a good balance of speed
+                          vs. detection accuracy.
 
         Returns:
             List of :class:`~services.object_detection.base.DetectedObject`.
@@ -36,9 +58,22 @@ class ObjectDetectionClient(WalkieBaseClient):
         Raises:
             WalkieAPIError: If the server returns a failure response.
         """
+        if isinstance(image, np.ndarray):
+            h, w = image.shape[:2]
+            if max(w, h) > max_size:
+                scale = max_size / max(w, h)
+                image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LINEAR)
+            image_bytes = _numpy_to_bytes(image, fmt="JPEG", quality=jpeg_quality)
+        else:
+            w, h = image.size
+            if max(w, h) > max_size:
+                scale = max_size / max(w, h)
+                image = image.resize((int(w * scale), int(h * scale)), Image.BILINEAR)
+            image_bytes = _pil_to_bytes(image, fmt="JPEG", quality=jpeg_quality)
+
         data = self._post_files(
             "/object-detection/detect",
-            files={"image": ("image.png", _pil_to_bytes(image), "image/png")},
+            files={"image": ("image.jpg", image_bytes, "image/jpeg")},
         )
         return [_deserialize_detection(d) for d in data]
 
@@ -55,6 +90,5 @@ def _deserialize_detection(d: dict) -> DetectedObject:
         class_id=d.get("class_id"),
         class_name=d.get("class_name"),
         confidence=d.get("confidence"),
-        cropped_image=_b64_to_pil(d.get("cropped_image_b64")),
         mask=None,  # mask_b64 is a PNG-encoded mask — skip reconstruction for now
     )

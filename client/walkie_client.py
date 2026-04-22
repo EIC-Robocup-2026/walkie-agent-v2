@@ -9,7 +9,7 @@ from .stt import STTClient
 from .tts import TTSClient
 
 
-class WalkieClient:
+class WalkieAIClient:
     """Unified client for the walkie-agent-v2 HTTP API.
 
     Composes all service sub-clients under one object.  Each sub-client
@@ -18,9 +18,9 @@ class WalkieClient:
 
     Example::
 
-        from client import WalkieClient
+        from client import WalkieAIClient
 
-        walkie = WalkieClient(base_url="http://localhost:5000")
+        walkie = WalkieAIClient(base_url="http://localhost:5000")
 
         # Speech-to-Text
         text = walkie.stt.transcribe(audio_bytes)

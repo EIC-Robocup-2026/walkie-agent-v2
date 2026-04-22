@@ -2,9 +2,9 @@
 
 Quick start::
 
-    from client import WalkieClient, WalkieAPIError
+    from client import WalkieAIClient, WalkieAPIError
 
-    walkie = WalkieClient(base_url="http://localhost:5000")
+    walkie = WalkieAIClient(base_url="http://localhost:5000")
 
     text    = walkie.stt.transcribe(audio_bytes)
     audio   = walkie.tts.synthesize("Hello!")
@@ -19,10 +19,10 @@ from .object_detection import ObjectDetectionClient
 from .pose_estimation import PoseEstimationClient
 from .stt import STTClient
 from .tts import TTSClient
-from .walkie_client import WalkieClient
+from .walkie_client import WalkieAIClient
 
 __all__ = [
-    "WalkieClient",
+    "WalkieAIClient",
     "WalkieAPIError",
     "STTClient",
     "TTSClient",

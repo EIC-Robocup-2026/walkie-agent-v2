@@ -6,6 +6,8 @@ import base64
 import io
 from typing import Any
 
+import cv2
+import numpy as np
 import requests
 from PIL import Image
 
@@ -14,10 +16,28 @@ class WalkieAPIError(Exception):
     """Raised when the API returns ``{"success": false, ...}``."""
 
 
-def _pil_to_bytes(image: Image.Image, fmt: str = "PNG") -> bytes:
-    """Encode a PIL Image to bytes."""
+def _numpy_to_bytes(arr: np.ndarray, fmt: str = "JPEG", quality: int = 85) -> bytes:
+    """Encode a BGR numpy array to bytes via cv2 (faster than PIL).
+
+    Avoids the channel-swap + PIL object allocation + PIL encoder overhead.
+    cv2 JPEG encoding uses libjpeg-turbo internally.
+    """
+    if fmt.upper() in ("JPEG", "JPG"):
+        ok, buf = cv2.imencode(".jpg", arr, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    else:
+        ok, buf = cv2.imencode(".png", arr)
+    if not ok:
+        raise RuntimeError(f"cv2.imencode failed for format {fmt!r}")
+    return buf.tobytes()
+
+
+def _pil_to_bytes(image: Image.Image, fmt: str = "PNG", quality: int = 85) -> bytes:
+    """Encode a PIL Image to bytes (fallback for callers that already hold a PIL object)."""
     buf = io.BytesIO()
-    image.save(buf, format=fmt)
+    save_kwargs: dict = {"format": fmt}
+    if fmt.upper() in ("JPEG", "JPG"):
+        save_kwargs["quality"] = quality
+    image.save(buf, **save_kwargs)
     return buf.getvalue()
 
 
