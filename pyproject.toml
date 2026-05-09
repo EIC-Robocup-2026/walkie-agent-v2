@@ -18,6 +18,7 @@ dependencies = [
     "scipy>=1.17.1",
     "silero-vad>=6.2.1",
     "sounddevice>=0.5.5",
+    "walkie-sdk",
 ]
 
 [project.optional-dependencies]
@@ -28,3 +29,6 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv.sources]
+walkie-sdk = { git = "https://github.com/EIC-Robocup-2026/walkie-sdk.git" }

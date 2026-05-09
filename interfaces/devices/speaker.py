@@ -3,6 +3,7 @@
 import contextlib
 import io
 import os
+import threading
 import time
 from typing import Callable, Iterator
 
@@ -112,7 +113,7 @@ class Speaker:
         frames_per_buffer: int = 1024,
     ) -> None:
         """Initialize speaker.
-        
+
         Args:
             device: Audio output device index. Use list_output_devices() to see options.
                    If None, uses the default output device.
@@ -124,16 +125,39 @@ class Speaker:
         self.sample_rate = sample_rate
         self.channels = channels
         self.frames_per_buffer = frames_per_buffer
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
 
-    def play(self, audio_data: bytes, format: str = "pcm_24000") -> None:
-        """Play complete audio (blocking).
-        
+    def play(
+        self,
+        audio_data: bytes,
+        format: str = "pcm_24000",
+        blocking: bool = True,
+    ) -> None:
+        """Play complete audio.
+
         Args:
             audio_data: Audio data as bytes.
             format: Audio format string (e.g., "pcm_24000", "mp3_44100_128").
+            blocking: If True, blocks until playback completes. If False, plays
+                in a background thread and returns immediately.
         """
+        if blocking:
+            self._play(audio_data, format)
+            return
+
+        self.stop()
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._play,
+            args=(audio_data, format),
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _play(self, audio_data: bytes, format: str) -> None:
         codec, sample_rate, _ = _parse_format(format)
-        
+
         if codec == "mp3":
             try:
                 from pydub import AudioSegment
@@ -155,11 +179,15 @@ class Speaker:
             frames_per_buffer=self.frames_per_buffer,
             device=self.device,
         )
-        
+
+        # Chunk writes so the stop event can interrupt mid-playback.
+        bytes_per_frame = 2 * self.channels  # paInt16 = 2 bytes per sample
+        chunk_bytes = self.frames_per_buffer * bytes_per_frame
         try:
-            stream.write(audio_data)
-            # Wait for buffer to drain before closing
-            # Buffer drain time = frames_per_buffer / sample_rate + small margin
+            for offset in range(0, len(audio_data), chunk_bytes):
+                if self._stop_event.is_set():
+                    break
+                stream.write(audio_data[offset:offset + chunk_bytes])
             drain_time = (self.frames_per_buffer / sample_rate) + 0.1
             time.sleep(drain_time)
         finally:
@@ -171,25 +199,48 @@ class Speaker:
         audio_stream: Iterator[bytes],
         format: str = "pcm_24000",
         stream_handler: Callable[[bytes], None] | None = None,
+        blocking: bool = True,
     ) -> bytes:
         """Play audio chunks in real-time as they arrive.
-        
+
         Args:
             audio_stream: Iterator yielding audio chunks.
             format: Audio format string (e.g., "pcm_24000").
             stream_handler: Optional callback for each chunk (e.g., for logging).
-            
+            blocking: If True, blocks until the stream is exhausted and returns
+                the full audio. If False, plays in a background thread and
+                returns b"" immediately.
+
         Returns:
-            Complete audio data as bytes.
+            Complete audio data as bytes when blocking=True, else b"".
         """
+        if blocking:
+            return self._play_stream(audio_stream, format, stream_handler)
+
+        self.stop()
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._play_stream,
+            args=(audio_stream, format, stream_handler),
+            daemon=True,
+        )
+        self._thread.start()
+        return b""
+
+    def _play_stream(
+        self,
+        audio_stream: Iterator[bytes],
+        format: str,
+        stream_handler: Callable[[bytes], None] | None,
+    ) -> bytes:
         codec, sample_rate, _ = _parse_format(format)
-        
+
         if codec != "pcm":
             raise ValueError(
                 f"Streaming playback only supports PCM format, got '{codec}'. "
                 "Use output_format like 'pcm_24000' for streaming."
             )
-        
+
         if stream_handler is None:
             stream_handler = lambda x: None
 
@@ -199,28 +250,27 @@ class Speaker:
             frames_per_buffer=self.frames_per_buffer,
             device=self.device,
         )
-        
+
         audio = b""
         try:
             for chunk in audio_stream:
+                if self._stop_event.is_set():
+                    break
                 print(f"Playing chunk: {len(chunk)} bytes")
                 stream.write(chunk)
                 stream_handler(chunk)
                 audio += chunk
-            # Wait for buffer to drain before closing
-            # Buffer drain time = frames_per_buffer / sample_rate + small margin
             drain_time = (self.frames_per_buffer / sample_rate) + 0.1
             time.sleep(drain_time)
         finally:
             stream.close()
             p.terminate()
-        
+
         return audio
 
     def stop(self) -> None:
-        """Stop any currently playing audio.
-        
-        Note: With PyAudio's blocking API, this is a no-op.
-        Audio stops when the stream is closed.
-        """
-        pass
+        """Stop any currently playing audio started with blocking=False."""
+        if self._thread is not None and self._thread.is_alive():
+            self._stop_event.set()
+            self._thread.join(timeout=2.0)
+        self._thread = None
