@@ -10,24 +10,33 @@ class WalkieInterface:
         self._camera = Camera(robot)
         self._nav = robot.nav
         self._status = robot.status
-    
+        self._tools = robot.tools
+        self._arm = robot.arm
+
     @property
     def speaker(self) -> Speaker:
         return self._speaker
-    
+
     @property
     def microphone(self) -> Microphone:
         return self._microphone
-    
+
     @property
     def camera(self) -> Camera:
         return self._camera
-    
+
     @property
     def nav(self):
         return self._nav
-    
+
     @property
     def status(self):
         return self._status
-        
+
+    @property
+    def tools(self):
+        return self._tools
+
+    @property
+    def arm(self):
+        return self._arm

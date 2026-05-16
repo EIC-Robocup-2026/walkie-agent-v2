@@ -1,3 +1,3 @@
-from .walkie_db import *
+from .walkie_db import WalkieVectorDB
 
-__all__ = ["ObjectRecord", "SceneRecord", "PersonRecord", "WalkieVectorDB"]
+__all__ = ["WalkieVectorDB"]
