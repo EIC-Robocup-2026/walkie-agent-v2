@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .image_caption import ImageCaptionClient
+from .image_embed import ImageEmbedClient
 from .object_detection import ObjectDetectionClient
 from .pose_estimation import PoseEstimationClient
 from .stt import STTClient
@@ -59,3 +60,4 @@ class WalkieAIClient:
         self.object_detection = ObjectDetectionClient(base_url=base_url, timeout=timeout)
         self.pose_estimation = PoseEstimationClient(base_url=base_url, timeout=timeout)
         self.image_caption = ImageCaptionClient(base_url=base_url, timeout=timeout)
+        self.image_embed = ImageEmbedClient(base_url=base_url, timeout=timeout)
