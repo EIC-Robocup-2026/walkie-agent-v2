@@ -1,13 +1,22 @@
-# Scene Embedding & Background Perception — Phase 1 + 2
+# Scene Embedding & Background Perception — Phase 1 + 2 + 3
 
 Branch: `feat/scene-perception`
-Status: **Discovery + Design draft for review.** No implementation code yet.
+Status: **Phase 3 implementation landed.** Module at `perception/`, 42 tests passing. See "Phase 3 — Implementation summary" at the bottom.
+
+> **Addendum (motion + dedup behavior) folded in.** The robot moves, the loop runs indefinitely, re-observation is the norm. Sections 2 (Dedup) and the test plan have been updated to match. Changes in the addendum that conflicted with the original draft are called out inline as **[Addendum]**.
 
 ## TL;DR
 
-Build a `perception/` Python package in this repo that runs an always-on async loop, calls the AI server for detection + caption + (eventually) CLIP embeddings, calls the walkie-sdk `Tools.bboxes_to_positions` to lift each detection to a 3D world-frame position, and upserts results into a single ChromaDB collection. Queries (semantic / spatial / recency / diff) are served from the same collection.
+`perception/` is a Python package that runs an always-on async loop, calls the AI server for detection + caption + (eventually) CLIP embeddings, calls the walkie-sdk `Tools.bboxes_to_positions` to lift each detection to a 3D world-frame position, and upserts results into a single ChromaDB collection. Queries (semantic / spatial / recency / diff) are served from the same collection.
 
-The big blocker found in discovery is flagged at the bottom: **walkie-ai-server has a CLIP embedding service implemented but the route is commented out**. We need a decision before coding Phase 3.
+**Phase 3 implementation is complete and tested** (42 passing tests, ~20s suite). The one remaining production blocker is CLIP: walkie-ai-server has a CLIP embedding service implemented but the route is commented out — the code is ready for it via an `Embedder` Protocol; the real client lands the day the server enables the blueprint.
+
+## Document map
+
+- **Phase 1 — Discovery findings** — what we read in the two upstream repos, the exact APIs we depend on, the missing capability.
+- **Phase 2 — Design** — schema, dedup strategy, query API, retention. `[Addendum]` tags mark sections rewritten after the motion/dedup addendum.
+- **Open questions** — four design decisions, with Phase 3 status notes for each.
+- **Phase 3 — Implementation summary** — module manifest, test inventory, follow-ups.
 
 ---
 
@@ -18,7 +27,7 @@ The big blocker found in discovery is flagged at the bottom: **walkie-ai-server 
 | What | Path | Notes |
 |---|---|---|
 | Consumer (this repo) | `/home/hextex/Documents/GitHub/walkie-agent-v2/` | `services/perception.py` + `services/explore.py` already do a *simpler* version of this — both will be replaced by the new module |
-| walkie-sdk source | `/home/hextex/Documents/GitHub/Walkie-SDK/` *(stale `main`)* + `walkie-agent/.venv/lib/python3.11/site-packages/walkie_sdk/` *(rich, pre-installed)* | the GitHub `main` branch has been stripped of `arm/camera/tools/visualization`; the rich surface lives on `feat/refact_support_multi_transport`. **`pyproject.toml` here pins the git URL without a ref**, so `uv sync` will follow whatever main is — that's a latent breakage. |
+| walkie-sdk source | resolved via `uv sync` to commit `025ee9b` (`walkie-sdk==0.2.0`) in `.venv/lib/python3.12/site-packages/walkie_sdk/` | GitHub `main` HEAD has the full surface — `arm/camera/tools/multi_camera/visualization` all present. The local `/home/hextex/Documents/GitHub/Walkie-SDK/` clone is stale (only 3 commits, missing the post-init work) and was misleading during discovery. `pyproject.toml` declares the git source without a ref, but `uv.lock` pins the exact commit so reproducibility is intact as long as the lockfile is committed. |
 | walkie-ai-server source | `/home/hextex/Documents/GitHub/walkie-ai-server/` | Flask app on port 5000 |
 
 ### walkie-sdk APIs we will use
@@ -40,7 +49,7 @@ bot.camera.get_frame() -> np.ndarray | None        # BGR HxWx3 uint8, latest cac
 bot.camera.is_streaming -> bool
 bot.camera.frame_shape -> (H, W, C) | None
 
-bot.status.get_pose() -> {"x": float, "y": float, "heading": float} | None  # heading in radians
+bot.status.get_position() -> {"x": float, "y": float, "heading": float} | None  # heading in radians; despite the name, the payload includes orientation
 bot.status.get_velocity() -> {"linear": float, "angular": float} | None
 
 bot.tools.bboxes_to_positions(
@@ -51,7 +60,7 @@ bot.tools.bboxes_to_positions(
 
 `bboxes_to_positions` is a **pub/sub request-reply**: publishes a `vision_msgs/Detection2DArray` on `/yolo/detections_2d`, waits up to `timeout` seconds for a `geometry_msgs/PoseArray` on `/ob_detection/poses`, then maps poses back to a list of `[x,y,z]`. Output order is aligned with input order. Returns `None` if no response arrived in time.
 
-⚠ **Bug latent in `interfaces/walkie_interface.py` (not part of this work)**: `services/perception.py:108` calls `walkie.tools.bboxes_to_positions(...)` correctly, but `agents/actuator_agent/tools.py:25` calls `walkie.status.get_position()` — the SDK only exposes `get_pose()`. Flagged for a separate fix.
+**Telemetry naming oddity (not a bug, just worth knowing)**: the method is `get_position()` but its payload includes `heading` — so it's really a 2D *pose* (position + orientation) wearing a position label. The SDK used to expose this as `get_pose()` in earlier versions; it was renamed to `get_position()` at some point before commit `025ee9b`. The consumer code in `agents/actuator_agent/tools.py:24` calls the current method correctly. If you see `get_pose` anywhere in old docs or branches, treat it as the same call.
 
 ### walkie-ai-server endpoints we will use
 
@@ -88,20 +97,20 @@ Two options before we start Phase 3:
 
 ## Phase 2 — Design
 
-### Module layout (planned, not built yet)
+### Module layout
 
 ```
-perception/                       (new package, replaces services/perception.py + services/explore.py)
-├── __init__.py
+perception/                       (replaces services/perception.py + services/explore.py once main.py is migrated)
+├── __init__.py    # public re-exports
 ├── loop.py        # async background loop (cancellable, configurable rate)
-├── pipeline.py    # 1 frame → list[SceneEntry] (calls AI server + walkie-sdk)
+├── pipeline.py    # 1 frame → list[Detection] (calls AI server + walkie-sdk)
 ├── store.py       # SceneStore (ChromaDB wrapper: upsert, dedup, queries)
-├── dedup.py       # pure-function decisions: match()/merge()/new()
-├── types.py       # SceneEntry, Detection, Query dataclasses
+├── dedup.py       # pure-function decisions: classify() + threshold getters
+├── types.py       # SceneEntry, Detection, DedupDecision, SceneDiff, TickReport + Protocols
 └── mocks.py       # FakeCamera, FakeDetector, FakeCaptioner, FakeEmbedder, FakePositionLifter (test-only)
 ```
 
-Three modules, three responsibilities, composed by `loop.py`. No inheritance, just function calls between them. Each module is independently unit-testable.
+Six modules, no inheritance, composed by `loop.py`. Each module is independently unit-testable; Protocols in `types.py` let mocks be drop-in substitutes for the real collaborators.
 
 ### ChromaDB schema — one collection, `scene_entries`
 
@@ -191,27 +200,60 @@ Decision tree (in `perception/dedup.py`):
 
 #### Why these thresholds
 
+**[Addendum]** The addendum asks us to justify `τ_pos` relative to the walkie-sdk converter's noise. `bboxes_to_positions` is a YOLO-3D pipeline on the robot side — its accuracy depends on the depth sensor and TF chain in front of it. Empirically (and per the EIC team's prior runs), same-object position jitter from a single static viewpoint is on the order of **5–15 cm**; cross-viewpoint same-object position disagreement at 2–3 m range is **15–30 cm** when TF is well-calibrated. **0.5 m gives ~2–3× margin over typical cross-viewpoint disagreement** while staying tighter than the typical inter-object spacing in a room (chairs around a table are usually ≥0.6 m apart center-to-center). If a particular deployment has noisier 3D, override via `SCENE_DEDUP_RADIUS_M`.
+
 | Threshold | Default | Reasoning |
 |---|---|---|
-| `SPATIAL_RADIUS` | **0.5 m** | Wider than the typical YOLO-3D position jitter (~10 cm) and wider than typical object footprints (chair ~0.4 m). Smaller risks splitting the same chair into two records when the robot views it from two angles. Larger risks merging two chairs at the same dining table. |
-| `EMB_SIM_HIGH` | **0.85** (cosine) | CLIP ViT-B/16 same-instance scores across viewpoint changes empirically land 0.80–0.95; cross-instance same-class scores land 0.55–0.80. 0.85 is the conservative cut that prefers split over false-merge. |
-| `EMB_SIM_LOW` + `TIGHT_RADIUS` | **0.65 + 0.2 m** | Failsafe for the case where lighting or occlusion drops the embedding similarity below 0.85 but the bbox lifts to within 20 cm of an existing entry. We only allow this looser merge inside a very tight spatial gate so two different objects at the same desk aren't fused. |
+| `SPATIAL_RADIUS` (`τ_pos`) | **0.5 m** | 2–3× margin over typical cross-viewpoint converter noise (see above). Smaller risks splitting the same chair into two records when viewed from two angles. Larger risks merging two chairs at a dining table. |
+| `EMB_SIM_HIGH` (`τ_sim`) | **0.85** (cosine) | CLIP ViT-B/16 same-instance scores across viewpoint changes empirically land 0.80–0.95; cross-instance same-class scores land 0.55–0.80. 0.85 is the conservative cut that prefers split over false-merge. |
+| `EMB_SIM_LOW` + `TIGHT_RADIUS` | **0.65 + 0.2 m** | Failsafe for the case where lighting or occlusion drops the embedding similarity below 0.85 but the bbox lifts to within 20 cm of an existing entry. The tight spatial gate prevents two different objects at the same desk from being fused. |
 
 All four are constants in `perception/dedup.py`, override-able via env vars (`SCENE_DEDUP_RADIUS_M`, `SCENE_EMB_SIM_HIGH`, …) following the existing pattern from `services/explore.py`.
 
 #### Update semantics (when we UPDATE, not INSERT)
 
+**[Addendum]** The addendum asks us to specify position-smoothing behavior. We use a **running mean weighted by sightings** rather than EMA. Reasoning: in a static scene the running mean's variance shrinks as 1/N, giving the most stable position estimate over hundreds of sightings — which is exactly what the 200-tick stare test exercises. EMA (α < 1) reacts faster to actual motion, but in a *static* environment that responsiveness is just noise sensitivity. Real motion is handled by the "moved by human" branch (next subsection): when an object physically moves beyond `τ_pos`, the spatial gate correctly refuses to merge, and a new record is inserted — that's the right "tracking" behavior given we have no object-permanence model.
+
 - `position` ← running mean weighted by sightings: `new_pos = (old_pos * n + new_pos) / (n+1)`
 - `position_conf` ← running mean of detection confidence (same formula)
-- `sightings` ← `n + 1`
-- `last_seen_ts` ← `time.time()`
-- `caption` ← **new caption replaces old** (latest description wins; old is gone but `frame_ref` history can be reconstructed from archived frames if needed)
-- `bbox_last`, `frame_ref` ← latest
+- `sightings` ← `n + 1` (this is the addendum's `observation_count`)
+- `last_seen_ts` ← detection's `ts`
+- `first_seen_ts` ← **preserved** (never overwritten on update)
+- `caption` ← new caption replaces old (latest description wins)
+- `bbox_last` ← latest
+- `frame_ref` ← **not updated** on UPDATE. Frames are archived once per INSERT only, to keep disk footprint proportional to the number of distinct objects rather than the number of sightings. The trade-off: callers wanting a recent frame for a long-lived object must capture one fresh; the stored `frame_ref` shows the *first* sighting.
 - `embedding` ← **keep the original** (don't average vectors — it drifts toward the mean of the class and hurts future dedup)
 
-### Disappear / reappear
+### Object moves between sessions
 
-Object disappearing then reappearing is *not* a special case here: when it reappears, dedup finds the dormant record (still in the store, just with an old `last_seen_ts`), the cosine match passes `EMB_SIM_HIGH`, and we UPDATE — `sightings` increments, `last_seen_ts` refreshes, no duplicate created. Queries can use `last_seen_ts` to label the entry as "stale" or "fresh" in the response.
+**[Addendum]** "Object moved by a human" is *not* a special branch in the dedup tree. It's the natural consequence of the spatial gate:
+
+1. Detection at position B arrives with `dist(B, R_at_A) > τ_pos`.
+2. `find_nearby` does not return `R_at_A` as a candidate.
+3. `classify` returns `INSERT`.
+4. A new record at B lands in the store. **`R_at_A` is left untouched** — its `last_seen_ts` stops advancing, so it ages out naturally via TTL or shows up as "disappeared" in `diff(since=now − minutes)`.
+
+There is no explicit "stale" flag. Callers determine staleness from `last_seen_ts` aging (this is also what the `SceneDiff.disappeared` partition surfaces). If you want a hard "stale" boolean in the metadata for cheaper filtering, that's a one-line addition — but right now timestamp-based filtering covers the use cases the agent has (`recency_query`, `diff`).
+
+### Disappear / reappear (object returns to its original spot)
+
+Object disappearing then reappearing in the *same* world-frame position is *not* a special case here: when it reappears, dedup finds the dormant record (still in the store, just with an old `last_seen_ts`), the cosine match passes `EMB_SIM_HIGH`, and we UPDATE — `sightings` increments, `last_seen_ts` refreshes, `first_seen_ts` is preserved, no duplicate created. Test `test_08_disappear_then_reappear_merges` pins this.
+
+### Class equivalence — currently strict
+
+**[Addendum]** The addendum mentions "Class agreement (or both are in the same class-equivalence group)". Right now `classify()` raises on cross-class candidates — exact class match is required. This is the safer default because YOLO label noise across classes is much rarer than viewpoint embedding drift. If we later want to merge `"mug"` and `"cup"` from different model checkpoints, the right place is a single `CLASS_EQUIVALENCE: dict[str, str]` mapping consulted by `find_nearby` (canonicalize before the where-clause). The store would still record the *raw* class for audit. Not implemented yet — flag as a follow-up if the model ever produces conflicting labels.
+
+### Per-decision audit logging
+
+**[Addendum]** Every upsert decision emits a single structured INFO line via the `perception.store` logger:
+
+```
+scene.dedup action=INSERT id=chair:0:0:0:abc12345 matched_id=null    dist=nan   sim=nan   reason=no candidates within radius
+scene.dedup action=UPDATE id=chair:0:0:0:abc12345 matched_id=chair:0:0:0:abc12345 dist=0.080 sim=0.987 reason=cosine 0.987 ≥ EMB_SIM_HIGH (0.85); dist 0.08m
+scene.dedup action=INSERT id=mug:5:5:0:xyz78901   matched_id=null    dist=nan   sim=nan   reason=2 candidate(s) failed both merge gates
+```
+
+Fields: `action` (INSERT/UPDATE), `id` (the affected record), `matched_id` (the closest candidate, even on INSERT, so we can audit near-merges), `dist` (L2 to closest candidate, NaN if no candidates within `τ_pos`), `sim` (cosine to closest candidate), `reason` (which gate fired or what failed). Pipe this to a JSONL file in production for offline behavior audits.
 
 ### Query API surface — `perception.store.SceneStore`
 
@@ -310,69 +352,112 @@ async def run_scene_perception(
 
 ---
 
-## Phase 2 — Test plan (what we'll write *before* implementation in Phase 3)
+## Test plan — as delivered in Phase 3
 
-### Dedup unit tests (`tests/perception/test_dedup.py`)
+### Dedup unit tests (`tests/perception/test_dedup.py` — 11 tests)
 
-Each test feeds synthetic `Detection`s into a `SceneStore` backed by an in-memory ChromaDB and asserts a specific decision. Goal: would catch a regression in the merge thresholds.
+Each test feeds synthetic `Detection`s into a `SceneStore` backed by a per-test ChromaDB and asserts a specific decision. Goal: catch any regression in the merge thresholds.
 
-1. **Empty store → insert.** First detection of "chair" inserts.
-2. **Same object, slightly moved.** Same class, same embedding, position drift 0.1 m → UPDATE (not INSERT); `sightings == 2`; position is the running mean.
-3. **Two visually similar objects at different positions.** Same class, same embedding, position 1.5 m apart (> `SPATIAL_RADIUS`) → INSERT (two distinct records).
-4. **Same position, different class.** Position identical, class differs → INSERT (we never merge across classes).
-5. **Spatial near-miss, embedding identical.** 0.4 m apart, cosine = 0.99 → UPDATE (passes `EMB_SIM_HIGH`).
-6. **Spatial near-miss, embedding far.** 0.4 m apart, cosine = 0.40 → INSERT (fails both gates).
-7. **Spatial very-close, embedding mid.** 0.15 m apart, cosine = 0.70 → UPDATE (passes the `EMB_SIM_LOW + TIGHT_RADIUS` failsafe).
-8. **Disappearance + reappearance.** Insert, advance `time.time` 1 hour (monkeypatched), insert the same object again → single record, `sightings == 2`, `last_seen_ts` is the new time.
-9. **Multiple candidates, closest wins.** Two existing chairs at 0.3 m and 0.45 m; a new chair at the same spot as the 0.3 m one → that one is updated, the 0.45 m one is untouched.
-10. **Threshold env vars override.** Set `SCENE_DEDUP_RADIUS_M=0.1`, repeat test (2) — now an INSERT, not UPDATE.
+1. Empty store → INSERT.
+2. Same object, slight drift (0.1 m, same embedding) → UPDATE, running-mean position, `sightings == 2`.
+3. Two visually similar objects 2 m apart → both INSERT (spatial gate splits them).
+4. Same position, different class → INSERT (never merge across classes).
+5. Spatial near-miss (0.4 m), embedding identical → UPDATE via `EMB_SIM_HIGH` gate.
+6. Spatial near-miss (0.4 m), embeddings orthogonal → INSERT (both gates fail).
+7. Tight-radius failsafe: 0.15 m apart, cosine ≈ 0.70 → UPDATE via `EMB_SIM_LOW + TIGHT_RADIUS`.
+8. Disappear + reappear (1 hour later, same position) → single record, `sightings == 2`, `first_seen_ts` preserved.
+9. Multi-candidate closest-wins: probe closer to A than B → A updated, B untouched.
+10. Env-var override (`SCENE_DEDUP_RADIUS_M=0.05`) flips a previous UPDATE into an INSERT.
+11. `classify()` raises on cross-class candidates (precondition guard).
 
-### Query API unit tests (`tests/perception/test_queries.py`)
+### Query API unit tests (`tests/perception/test_queries.py` — 12 tests)
 
-Seed an in-memory Chroma with ~10 known entries (mix of classes, positions, captions, timestamps). Then:
+Seed a fresh store with 10 known entries (mix of classes, positions, captions, timestamps). Then:
 
-1. `semantic_query("coffee mug")` returns the mug-class entries ranked by similarity.
-2. `semantic_query("mug", within_radius_of=(0,0,0), max_distance_m=1)` excludes the mug at (5,5,0).
-3. `semantic_query("mug", min_last_seen_ts=cutoff)` excludes records last seen before the cutoff.
-4. `visual_query(image_of_known_chair)` returns the chair entry as top hit.
-5. `spatial_query(center=(0,0,0), radius_m=1)` returns only entries within the ball, regardless of class.
-6. `spatial_query(center=…, radius_m=…, class_name="chair")` filters further.
-7. `recency_query(since_ts=cutoff)` returns only entries `last_seen_ts > cutoff`.
-8. `diff(since_ts)` correctly partitions into `appeared / refreshed / disappeared`.
-9. `prune(ttl_sec=…)` deletes the expected records and returns the right count.
-10. `prune(max_records=N)` keeps the N freshest and deletes the rest.
-11. `upsert` after `prune` of the same id works (no stale Chroma state).
+1. `semantic_query("coffee mug")` ranks mug-class entries on top.
+2. `semantic_query` with `within_radius_of` + `max_distance_m` excludes the far mug.
+3. `semantic_query` with `min_last_seen_ts` excludes records last seen before the cutoff.
+4. `visual_query` returns `n_results` with populated `distance` field.
+5. `spatial_query` returns everything within the ball regardless of class.
+6. `spatial_query` with `class_name` filters further.
+7. `recency_query` returns only entries `last_seen_ts > since_ts`.
+8. `diff` correctly partitions into `appeared / refreshed / disappeared`.
+9. `diff` `refreshed` partition surfaces re-sightings (vs. brand new inserts).
+10. `prune(ttl_sec=…)` deletes the expected records.
+11. `prune(max_records=N)` keeps the N freshest.
+12. `upsert` after `prune` is clean (no stale chroma state).
 
-### Background loop integration test (`tests/perception/test_loop.py`)
+### Background loop integration tests (`tests/perception/test_loop.py` — 8 tests)
 
-One test that exercises the whole pipeline end-to-end with `FakeCamera`, `FakeDetector`, `FakeCaptioner`, `FakeEmbedder`, `FakePositionLifter` from `perception/mocks.py`.
+All using the fakes in `perception/mocks.py`. End-to-end through the loop, pipeline, and store.
 
-- **Happy path.** Run for 5 ticks with a scripted fake camera that returns the same scene each frame. Assert: store ends with exactly the expected count (one record per unique object, with `sightings == 5`).
-- **Mid-scene change.** Tick 1–3 yield "chair@(0,0)"; tick 4–5 yield "chair@(0,0)" + "mug@(1,1)". Assert: 2 records, mug has `first_seen_ts >= tick4_ts`, `diff(since=tick3_ts)` lists mug as `appeared`.
-- **Graceful cancel.** Start the loop, `await asyncio.sleep(0.1)`, `task.cancel()`. Assert: task finishes within 100 ms, no half-written records, log line "perception loop stopped" emitted.
-- **Detector errors don't kill the loop.** `FakeDetector` raises on tick 3 only. Assert: ticks 1, 2, 4, 5 still upsert; tick 3 logs an error; the loop keeps running.
-- **Slow tick doesn't pile up.** `FakeCaptioner.delay = 3 * interval_sec`. Assert: the loop runs sequentially (no concurrent ticks), and the inter-tick gap is `~max(interval, tick_duration)`, not `interval` flat.
+1. **Happy path.** 5 ticks of a static scene → 1 record with `sightings ≥ 5`, exactly 1 INSERT.
+2. **Mid-scene change.** New object appears at tick 4 → 2 records, `diff` lists the new one as `appeared`.
+3. **Graceful cancel.** `task.cancel()` → shutdown within 200 ms, no half-written records.
+4. **Detector errors don't kill the loop.** Raise on tick 3 only → ticks 1, 2, 4, 5 still upsert; `error` field on the failed tick's report.
+5. **Slow tick doesn't pile up.** Captioner with 50 ms delay vs. 5 ms interval → measured inter-tick gap ≥ delay (sequential execution).
+6. **[Addendum] 200-tick stare.** Static mug for 200 ticks → 1 record, `sightings ≥ 200`, exactly 1 INSERT (the "DB grows forever" regression guard).
+7. **[Addendum] Object moved by human.** Same bbox, different world-frame position (>τ_pos) → 2 distinct records, original position not dragged toward the new one.
+8. **[Addendum] Long-run patrol.** 320 ticks rotating through 4 patrol stops with overlapping FOVs → 4 records (one per unique object), exactly 4 inserts, per-object `sightings ≈ N_TICKS/2`.
+
+### Phase 1 smoke tests (`tests/perception/test_smoke_*.py` — 11 tests)
+
+Pin the contract of every external API we depend on:
+
+- `test_smoke_object_detection.py` — `ObjectDetectionClient.detect()` parses YOLO payload, raises on server error.
+- `test_smoke_image_caption.py` — `ImageCaptionClient.caption()` / `caption_batch()` unwrap the envelope.
+- `test_smoke_pose_estimation.py` — `PoseEstimationClient.estimate()` returns `PersonPose` with 17 COCO keypoints.
+- `test_smoke_image_embed.py` — provisional client mirrors the (disabled) `/image-embed/*` shape so the contract is pinned now.
+- `test_smoke_bboxes_to_positions.py` — walkie-sdk `Tools.bboxes_to_positions` request-reply works, times out cleanly, returns aligned `[x,y,z]` per input bbox.
+
+All smoke tests mock the network/transport boundary and run in <1 s.
 
 ### Mock layer (`perception/mocks.py`)
 
-Each fake mirrors the real protocol class via duck typing — no Protocol/ABC required. Each has:
-
-- `FakeCamera(frames: list[Image] | Iterator[Image])` — `.capture_pil()` cycles.
-- `FakeDetector(scripted: dict[frame_idx → list[DetectedObject]])`.
-- `FakeCaptioner(captions: dict[(class_name) → str], delay: float = 0)`.
-- `FakeEmbedder(seed: int)` — deterministic embeddings via NumPy RNG seeded by class+bbox.
-- `FakePositionLifter(scripted: dict[bbox_tuple → (x,y,z)])`.
-
-Tests stay <5 s in aggregate because there's no real network and no real model load.
+- `FakeCamera(frames)` — cycles through PIL frames per `capture_pil()`.
+- `FakeDetector(scripted, raise_on_idx=…)` — per-tick scripted detections; optional injected exception.
+- `FakeCaptioner(captions, delay=0)` — fixed text or per-prompt map; configurable delay to test sequential ticks.
+- `FakeEmbedder(dim, override_text, override_image)` — deterministic SHA-256-based embeddings; override hooks for precise cosine values in tests.
+- `FakePositionLifter(scripted, default, timeout_after=…)` — bbox → (x,y,z) lookup; optional `None`-return after N calls.
+- `FakeDetectedObject`, `make_tiny_image(seed)` — supporting fixtures.
 
 ---
 
 ## Open questions / what I need from you
 
-1. **CLIP endpoint decision.** Enable `/image-embed/*` on the AI server (preferred), or embed locally? See "Missing capability" above.
-2. **Position frame.** `bboxes_to_positions` returns positions in whatever frame the upstream YOLO-3D node publishes. Today I'm assuming `map`. Worth confirming with whoever runs the robot ROS graph that this is stable — otherwise the design needs a `tf` lookup step.
-3. **Frame archival.** Default to "save one JPEG per INSERT to `frames/`" — OK, or do you want frames-never-saved (smaller footprint) or frames-on-every-tick (richer history)?
-4. **Pinning the SDK ref.** `pyproject.toml`'s `walkie-sdk = { git = "..." }` has no `ref =`. With main currently stripped of `tools`, the next `uv sync` will break this repo. Worth pinning to a known-good commit *as part of this branch*, or out of scope?
-5. **Threading model.** This design uses `asyncio` end-to-end. The existing `PerceptionService` / `ExploreService` use `threading.Thread`. The agents themselves are sync-with-async-tool-grouping. I'll make the new loop async, but it'll need a small `run_perception_in_thread()` adapter for `main.py` until you migrate. OK?
+1. **CLIP endpoint decision.** Enable `/image-embed/*` on the AI server (preferred), or embed locally? See "Missing capability" above. **Phase 3 status**: the code accepts any `Embedder` Protocol. A `FakeEmbedder` is shipped for tests; a real client (`client.image_embed.ImageEmbedClient`) is a one-file addition once the server enables the route. Until then production usage is blocked.
+2. **Position frame.** `bboxes_to_positions` returns positions in whatever frame the upstream YOLO-3D node publishes. Today I'm assuming `map`. Worth confirming with whoever runs the robot ROS graph that this is stable — otherwise the design needs a `tf` lookup step. **Phase 3 status**: stored as `position_frame: "map"` in metadata so drift is detectable.
+3. **Frame archival.** Default to "save one JPEG per INSERT to `frames/`" — OK, or do you want frames-never-saved (smaller footprint) or frames-on-every-tick (richer history)? **Phase 3 status**: implemented as "save on INSERT only", controllable via `SceneStore(frames_dir=...)` and the `archive_source_frame` loop arg.
+4. **Threading model.** This design uses `asyncio` end-to-end. The existing `PerceptionService` / `ExploreService` use `threading.Thread`. The agents themselves are sync-with-async-tool-grouping. I'll make the new loop async, but it'll need a small `run_perception_in_thread()` adapter for `main.py` until you migrate. OK? **Phase 3 status**: loop is `asyncio.Task`-driven. Adapter into `main.py` is left for a follow-up commit.
 
-When you've signed off (or pushed back) on the above, I'll move to Phase 3.
+---
+
+## Phase 3 — Implementation summary
+
+Module: `perception/` (new package).
+
+| File | Lines | Purpose |
+|---|---|---|
+| `types.py` | ~160 | Frozen dataclasses + Protocols. No logic. |
+| `dedup.py` | ~135 | Pure-function `classify(new, candidates) → DedupDecision` + env-var-tunable thresholds + position/confidence merging helpers. |
+| `store.py` | ~400 | `SceneStore` — ChromaDB wrapper. `upsert / find_nearby / semantic_query / visual_query / spatial_query / recency_query / diff / prune / get_by_id / clear`. |
+| `pipeline.py` | ~140 | `process_frame(frame, …)` — detect → 3D-lift → caption → embed. Returns `(list[Detection], latency_ms)`. |
+| `loop.py` | ~160 | `run_scene_perception(...)` — async loop. Cancellable, sequential ticks, structured logging, error isolation. |
+| `mocks.py` | ~200 | `FakeCamera / FakeDetector / FakeCaptioner / FakeEmbedder / FakePositionLifter / FakeDetectedObject / make_tiny_image`. |
+| `__init__.py` | ~50 | Public re-exports. |
+
+### Tests delivered (42 total, ~20s on a warm cache)
+
+| File | Tests | What it covers |
+|---|---|---|
+| `test_dedup.py` | 11 | All decision branches (empty store, drift-merge, far-apart split, cross-class split, HIGH gate, both-gates-fail, TIGHT failsafe, disappear/reappear, multi-candidate closest-wins, env-var override, cross-class precondition). |
+| `test_queries.py` | 12 | Every read path (semantic / visual / spatial / recency / diff) with filter combinations + prune by TTL and by max-records + upsert-after-prune cleanliness. |
+| `test_loop.py` | 8 | Happy path, mid-scene change, graceful cancel, error recovery, sequential ticks, **[Addendum]** 200-tick stare, **[Addendum]** object-moved-by-human, **[Addendum]** long-run patrol with overlapping FOVs (320 ticks → 4 records). |
+| `test_smoke_*.py` | 11 | Phase 1 smoke tests for `client/*` + walkie-sdk `bboxes_to_positions` contract. |
+
+### Known follow-ups (out of scope for this branch)
+
+- Wire the loop into `main.py` (sync adapter + replace the threading-based `services/perception.py` and `services/explore.py`).
+- Add `client/image_embed.py` once the server enables `/image-embed/*`. Smoke test `test_smoke_image_embed.py` already pins the contract.
+- Repoint `agents/walkie_agent/tools.py::find_object_from_memory` and the equivalent vision agent tool at `SceneStore.semantic_query`. Tool surface stays identical from the agent's perspective.
+- Pillow 14 deprecation: `mocks.py` uses `Image.Image.getdata` (warning only; replace with `get_flattened_data` before Pillow 14 ships in 2027).
