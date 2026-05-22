@@ -18,6 +18,10 @@ def _xyxy_to_cxcywh(bbox) -> list[float]:
 _LEFT_SHOULDER, _RIGHT_SHOULDER = 5, 6
 _LEFT_WRIST, _RIGHT_WRIST = 9, 10
 
+_CAPTION_IMAGE_MARGIN = 10
+def _crop_image(img, bbox):
+    x1, y1, x2, y2 = bbox
+    return img.crop(crop_box=(x1 - _CAPTION_IMAGE_MARGIN, y1 - _CAPTION_IMAGE_MARGIN, x2 + _CAPTION_IMAGE_MARGIN, y2 + _CAPTION_IMAGE_MARGIN))
 
 def _summarize_pose(pose) -> str:
     kpts = {kp.index: kp for kp in pose.keypoints}
@@ -117,8 +121,9 @@ class PerceptionService(threading.Thread):
             caption = ""
             if self.caption_objects:
                 try:
+                    cropped_img = _crop_image(img, o.bbox)
                     caption = self.walkieAI.image_caption.caption(
-                        img, prompt=f"Describe the {o.class_name}."
+                        cropped_img, prompt=f"Describe the {o.class_name} in detail."
                     )
                 except Exception:  # noqa: BLE001
                     caption = ""
