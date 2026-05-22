@@ -56,7 +56,7 @@ class PerceptionService(threading.Thread):
         output_path: str | Path,
         *,
         interval: float = 2.0,
-        caption_objects: bool = False,
+        caption_objects: bool = True,
         position_timeout: float = 2.0,
         verbose: bool = True,
     ) -> None:
@@ -98,6 +98,7 @@ class PerceptionService(threading.Thread):
         positions: list = []
         if objects:
             try:
+                # print(objects)
                 positions = (
                     self.walkie.tools.bboxes_to_positions(
                         [_xyxy_to_cxcywh(o.bbox) for o in objects],
@@ -105,6 +106,7 @@ class PerceptionService(threading.Thread):
                     )
                     or []
                 )
+                # print(positions)
             except Exception as e:  # noqa: BLE001
                 self._log(f"bboxes_to_positions failed: {e}")
                 positions = []

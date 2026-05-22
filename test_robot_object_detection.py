@@ -1,6 +1,8 @@
 from client import WalkieAIClient
-import cv2
+# import cv2
 import time
+import os
+from dotenv import load_dotenv
 
 from walkie_sdk import WalkieRobot
 from interfaces.walkie_interface import WalkieInterface
@@ -17,9 +19,12 @@ def get_robot() -> WalkieRobot:
     )
 
 def test_object_detection():
+    load_dotenv()
     robot = get_robot()
     walkie = WalkieInterface(robot)
-    walkieAI = WalkieAIClient()
+    walkieAI = WalkieAIClient(
+        base_url=os.getenv("WALKIE_AI_BASE_URL", "http://localhost:5000"),
+    )
     print("Walkie Client initialized")
 
     # cap = cv2.VideoCapture(0)
@@ -43,16 +48,17 @@ def test_object_detection():
 
         detections = walkieAI.object_detection.detect(frame)
         # Show the detections
-        for detection in detections:
-            cv2.rectangle(frame, (detection.bbox[0], detection.bbox[1]), (detection.bbox[2], detection.bbox[3]), (0, 0, 255), 2)
-            cv2.putText(frame, detection.class_name, (detection.bbox[0], detection.bbox[3]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-        cv2.imshow("Object Detection", frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+        # for detection in detections:
+        #     cv2.rectangle(frame, (detection.bbox[0], detection.bbox[1]), (detection.bbox[2], detection.bbox[3]), (0, 0, 255), 2)
+        #     cv2.putText(frame, detection.class_name, (detection.bbox[0], detection.bbox[3]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+        # cv2.imshow("Object Detection", frame)
+        # if cv2.waitKey(1) & 0xFF == ord('q'):
+        #     break
         end_time = time.time()
         print(f"Time taken: {end_time - start_time} seconds. (FPS: {1 / (end_time - start_time)})")
+        time.sleep(1)
     # cap.release()
-    cv2.destroyAllWindows()
+    # cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     test_object_detection()
