@@ -125,9 +125,13 @@ class PerceptionService(threading.Thread):
                 try:
                     if o.class_name not in self.caption_filter:
                         continue
+                    if o.class_name == "Person":
+                        prompt = "Describe the person actions and clothes."
+                    else:
+                        prompt = f"Describe the {o.class_name}."
                     cropped_img = _crop_image(img, o.bbox)
                     caption = self.walkieAI.image_caption.caption(
-                        cropped_img, prompt=f"Describe the {o.class_name} in detail."
+                        cropped_img, prompt=prompt
                     )
                 except Exception as e:  # noqa: BLE001
                     print(f"Captioning error: {e}")
