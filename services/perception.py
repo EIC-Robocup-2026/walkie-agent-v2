@@ -120,15 +120,30 @@ class PerceptionService(threading.Thread):
         obj_records = []
 
         # Caption objects
+        captions_by_index: dict[int, str] = {}
         if self.caption_objects:
-            captions = self.walkieAI.image_caption.caption_batch(
-                [_crop_image(img, o.bbox) for o in objects if o.class_name not in self.caption_filter],
-                prompts=[f"Describe the {o.class_name}." for o in objects if o.class_name not in self.caption_filter]
-            )
-        
+            imgs = []
+            prompts = []
+            caption_indices: list[int] = []
+            for i, o in enumerate(objects):
+                if o.class_name not in self.caption_filter:
+                    continue
+                cropped_img = _crop_image(img, o.bbox)
+                if o.class_name == "Person":
+                    prompt = "Describe the person actions and clothes."
+                else:
+                    prompt = f"Describe the {o.class_name}."
+                imgs.append(cropped_img)
+                prompts.append(prompt)
+                caption_indices.append(i)
+            if imgs:
+                captions = self.walkieAI.image_caption.caption_batch(imgs, prompts=prompts)
+                for idx, cap in zip(caption_indices, captions):
+                    captions_by_index[idx] = cap or ""
+
         for i, o in enumerate(objects):
             pos = positions[i] if i < len(positions) and positions[i] else None
-            caption = captions[i] if i < len(captions) and captions[i] else ""
+            caption = captions_by_index.get(i, "")
             obj_records.append(
                 {
                     "class": o.class_name,
