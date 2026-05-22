@@ -61,6 +61,7 @@ class PerceptionService(threading.Thread):
         *,
         interval: float = 2.0,
         caption_objects: bool = True,
+        caption_filter: list[str] = [],
         position_timeout: float = 2.0,
         verbose: bool = True,
     ) -> None:
@@ -70,6 +71,7 @@ class PerceptionService(threading.Thread):
         self.output_path = Path(output_path)
         self.interval = interval
         self.caption_objects = caption_objects
+        self.caption_filter = caption_filter
         self.position_timeout = position_timeout
         self.verbose = verbose
         self._stop = threading.Event()
@@ -121,6 +123,8 @@ class PerceptionService(threading.Thread):
             caption = ""
             if self.caption_objects:
                 try:
+                    if o.class_name not in self.caption_filter:
+                        continue
                     cropped_img = _crop_image(img, o.bbox)
                     caption = self.walkieAI.image_caption.caption(
                         cropped_img, prompt=f"Describe the {o.class_name} in detail."

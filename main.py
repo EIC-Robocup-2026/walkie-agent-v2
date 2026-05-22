@@ -71,8 +71,8 @@ def run_ready_stage(walkieAI, walkie, db, model) -> None:
         walkie,
         RobotContext.get().perception_path,
         interval=float(os.getenv("PERCEPTION_INTERVAL_SEC", "2.0")),
-        caption_objects=os.getenv("PERCEPTION_CAPTION_OBJECTS", "0").lower()
-        in ("1", "true", "yes"),
+        caption_objects=os.getenv("PERCEPTION_CAPTION_OBJECTS", "0").lower() in ("1", "true", "yes"),
+        caption_filter=os.getenv("PERCEPTION_CAPTION_FILTER", "").split(","),
     )
     perception.start()
 
