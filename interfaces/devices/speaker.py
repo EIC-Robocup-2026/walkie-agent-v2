@@ -256,7 +256,7 @@ class Speaker:
             for chunk in audio_stream:
                 if self._stop_event.is_set():
                     break
-                print(f"Playing chunk: {len(chunk)} bytes")
+                # print(f"Playing chunk: {len(chunk)} bytes")
                 stream.write(chunk)
                 stream_handler(chunk)
                 audio += chunk
