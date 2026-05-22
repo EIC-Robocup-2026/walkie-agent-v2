@@ -162,9 +162,15 @@ uv run python -m tools.chroma_viewer            # http://localhost:8500
 uv run python -m tools.chroma_viewer --dirs chroma_db,chroma_db_scene --port 8500
 ```
 
-It enumerates every collection in each directory and renders rows from whatever metadata they carry (so it works for any collection, not just the ones above). Per record you get the full metadata, document, embedding stats (dim / L2 norm), and — when a record has a `frame_ref` — the archived JPEG inline. The search box does substring matching by default; switch the dropdown to **semantic** to run a CLIP/vector query (best-effort — falls back to substring with a warning if `walkie-ai-server` is down).
+It enumerates every collection in each directory and renders rows from whatever metadata they carry (so it works for any collection, not just the ones above). The UI gives you:
 
-**Live updates:** the header has an **auto-refresh** dropdown (off / 2s / 5s / 10s / 30s, remembered per-browser; initial value is `CHROMA_VIEWER_REFRESH_SEC`, default 5s). On each refresh the browse tables, counts, and substring search reflect the robot's latest writes — so you can watch the DB fill in real time. It pauses while you're typing in the search box. One caveat: **semantic (vector) search** results are loaded into the viewer's memory at startup and only refresh when you **restart** the viewer; browse and substring search are always live.
+- A persistent **sidebar** of stores → collections (with live count badges) and a **light/dark theme** toggle.
+- **Sortable columns**, **class-filter chips**, **colored class badges**, and inline **confidence/distance bars**.
+- A top-down **position map** (SVG scatter of each record's `x`/`y` in the map frame, colored by class, with the robot origin marked) — click a point to open that record.
+- **Frame thumbnails** with click-to-zoom **lightbox**; per record, the full metadata, document, archived JPEG, and an **embedding sparkline** + stats (dim / L2 norm).
+- **Search**: substring by default; switch the dropdown to **semantic** for a CLIP/vector query (best-effort — falls back to substring with a warning if `walkie-ai-server` is down).
+
+**Live updates:** the header has an **auto-refresh** dropdown (off / 2s / 5s / 10s / 30s with a countdown, remembered per-browser; initial value is `CHROMA_VIEWER_REFRESH_SEC`, default 5s). It refreshes by swapping just the content area — so your scroll position, theme, and search focus are preserved (no jarring full reload) — and pauses while you're typing. Browse tables, counts, and substring search reflect the robot's latest writes, so you can watch the DB fill in real time. One caveat: **semantic (vector) search** results are loaded into the viewer's memory at startup and only refresh when you **restart** the viewer; browse and substring search are always live.
 
 It only ever reads, so it's safe to run while the robot is writing. Config: `CHROMA_VIEWER_DIRS`, `CHROMA_VIEWER_PORT`, `CHROMA_VIEWER_REFRESH_SEC`, `SCENE_FRAMES_DIR` (see `.env.example`).
 
