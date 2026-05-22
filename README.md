@@ -82,6 +82,8 @@ Key variables (full list in `.env.example`):
 | `CHROMA_DIR` | `chroma_db` | Vector DB location (object memory). |
 | `PERCEPTION_PATH` | `perception.json` | Where the ready-stage snapshot is written. |
 | `PERCEPTION_INTERVAL_SEC` | `10.0` | How often the perception snapshot refreshes. |
+| `SCENE_PERCEPTION_ENABLED` | `1` | CLIP scene memory (see below). Set `0` to disable. |
+| `SCENE_CHROMA_DIR` | `chroma_db_scene` | Where the CLIP scene memory is persisted. |
 | `DISABLE_LISTENING` | *(unset)* | Set `1` to type prompts instead of using the mic. |
 
 ### 3. Start the dependencies
@@ -126,6 +128,45 @@ run_explore_stage(walkieAI, walkie, db)
 ```
 
 Then `uv run python main.py`, drive the robot around, and **press Enter** when done. It prints how many confident objects were stored. Re-comment the block afterward to go back to the ready stage.
+
+---
+
+## CLIP scene memory (long-term semantic search)
+
+During the **ready** stage the app also runs an always-on **scene-perception loop** that builds a semantic, spatial memory of what the robot sees. It is wired to walkie-ai-server's CLIP service:
+
+```
+camera → object_detection → bboxes_to_positions (3D) → image_caption + CLIP embed → ChromaDB (chroma_db_scene/)
+                                                                          (image_embed on walkie-ai-server)
+```
+
+Once it's populated, `find_object_from_memory` answers "where is the X?" via CLIP semantic search (`SceneStore.semantic_query`) and returns map-frame `(x, y, z)` coordinates the actuator can navigate to. It runs **alongside** the `perception.json` live snapshot — they serve different purposes (long-term catalogue vs. current view).
+
+**This depends on the server's `/image-embed` route.** On startup the app probes it once:
+
+- Route available → `[scene] CLIP scene memory ON (dim=…, N existing record(s))`, loop starts.
+- Route unavailable (it's commented out on walkie-ai-server by default) → `[scene] image-embed unavailable …; CLIP scene perception OFF`, the loop is skipped and `find_object_from_memory` falls back to the legacy `chroma_db/` from the explore stage. **The rest of the app runs normally either way.**
+
+To turn the CLIP route on, the server team uncomments `app.register_blueprint(image_embed.bp)` in `walkie-ai-server` and redeploys. No changes are needed on this side.
+
+Tuning knobs (all optional, see `.env.example`): `SCENE_PERCEPTION_ENABLED`, `SCENE_CHROMA_DIR`, `SCENE_FRAMES_DIR`, `SCENE_PERCEPTION_INTERVAL_SEC`, `SCENE_MIN_CONF`, `SCENE_CAPTION_PER_OBJECT`.
+
+---
+
+## Inspecting the vector DBs (Chroma viewer)
+
+A **read-only** web UI to browse everything the robot has stored — the explore-stage `objects` (and older `people` / `scenes`) collections in `chroma_db/`, plus the CLIP `scene_entries` memory in `chroma_db_scene/`:
+
+```bash
+uv run python -m tools.chroma_viewer            # http://localhost:8500
+uv run python -m tools.chroma_viewer --dirs chroma_db,chroma_db_scene --port 8500
+```
+
+It enumerates every collection in each directory and renders rows from whatever metadata they carry (so it works for any collection, not just the ones above). Per record you get the full metadata, document, embedding stats (dim / L2 norm), and — when a record has a `frame_ref` — the archived JPEG inline. The search box does substring matching by default; switch the dropdown to **semantic** to run a CLIP/vector query (best-effort — falls back to substring with a warning if `walkie-ai-server` is down).
+
+**Live updates:** the header has an **auto-refresh** dropdown (off / 2s / 5s / 10s / 30s, remembered per-browser; initial value is `CHROMA_VIEWER_REFRESH_SEC`, default 5s). On each refresh the browse tables, counts, and substring search reflect the robot's latest writes — so you can watch the DB fill in real time. It pauses while you're typing in the search box. One caveat: **semantic (vector) search** results are loaded into the viewer's memory at startup and only refresh when you **restart** the viewer; browse and substring search are always live.
+
+It only ever reads, so it's safe to run while the robot is writing. Config: `CHROMA_VIEWER_DIRS`, `CHROMA_VIEWER_PORT`, `CHROMA_VIEWER_REFRESH_SEC`, `SCENE_FRAMES_DIR` (see `.env.example`).
 
 ---
 
@@ -174,6 +215,7 @@ services/
   perception.py          Ready-stage snapshot writer.
 perception/              Scene store, dedup, async loop, embedders, pipeline.
 db/walkie_db.py          WalkieVectorDB (ChromaDB wrapper) for object memory.
+tools/chroma_viewer.py   Read-only web UI to inspect the ChromaDB stores.
 docs/                    Scene perception design docs (EN + TH).
 tests/                   pytest suite (perception).
 ```
