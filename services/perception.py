@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import threading
 import time
@@ -9,9 +10,45 @@ from pathlib import Path
 from interfaces.walkie_interface import WalkieInterface
 
 
+_CAMERA_HFOV_DEG = 110.0
+
+
 def _xyxy_to_cxcywh(bbox) -> list[float]:
     x1, y1, x2, y2 = bbox
     return [float((x1 + x2) / 2), float((y1 + y2) / 2), float(x2 - x1), float(y2 - y1)]
+
+
+def _bbox_heading(bbox, image_width: int, robot_heading: float) -> float:
+    x1, _, x2, _ = bbox
+    cx = (x1 + x2) / 2.0
+    offset = (cx - image_width / 2.0) / (image_width / 2.0)
+    angle_offset_rad = math.radians(offset * (_CAMERA_HFOV_DEG / 2.0))
+    return robot_heading - angle_offset_rad
+
+
+def _zone(offset: float, labels: tuple[str, str, str, str, str]) -> str:
+    if offset < -0.6:
+        return labels[0]
+    if offset < -0.2:
+        return labels[1]
+    if offset < 0.2:
+        return labels[2]
+    if offset < 0.6:
+        return labels[3]
+    return labels[4]
+
+
+_H_LABELS = ("left", "slightly left", "center", "slightly right", "right")
+_V_LABELS = ("top", "slightly top", "center", "slightly bottom", "bottom")
+
+
+def _frame_position(bbox, image_width: int, image_height: int) -> tuple[str, str]:
+    x1, y1, x2, y2 = bbox
+    cx = (x1 + x2) / 2.0
+    cy = (y1 + y2) / 2.0
+    h_off = (cx - image_width / 2.0) / (image_width / 2.0)
+    v_off = (cy - image_height / 2.0) / (image_height / 2.0)
+    return _zone(h_off, _H_LABELS), _zone(v_off, _V_LABELS)
 
 
 # COCO indices used to summarize "arm raised"
@@ -97,6 +134,9 @@ class PerceptionService(threading.Thread):
 
     def _snapshot(self) -> dict:
         img = self.walkie.camera.capture_pil()
+        image_width, image_height = img.size
+        pose = self.walkie.status.get_position() or {"x": 0.0, "y": 0.0, "heading": 0.0}
+        robot_heading = float(pose.get("heading", 0.0))
         objects = self.walkieAI.object_detection.detect(img)
         people = self.walkieAI.pose_estimation.estimate(img)
 
@@ -144,22 +184,30 @@ class PerceptionService(threading.Thread):
         for i, o in enumerate(objects):
             pos = positions[i] if i < len(positions) and positions[i] else None
             caption = captions_by_index.get(i, "")
+            frame_h, frame_v = _frame_position(o.bbox, image_width, image_height)
             obj_records.append(
                 {
                     "class": o.class_name,
                     "bbox": list(o.bbox),
                     "conf": o.confidence,
                     "position_3d": list(pos) if pos else None,
+                    "heading": _bbox_heading(o.bbox, image_width, robot_heading),
+                    "frame_h": frame_h,
+                    "frame_v": frame_v,
                     "caption": caption,
                 }
             )
 
         people_records = []
         for p in people:
+            frame_h, frame_v = _frame_position(p.bbox, image_width, image_height)
             people_records.append(
                 {
                     "bbox": list(p.bbox),
                     "conf": p.confidence,
+                    "heading": _bbox_heading(p.bbox, image_width, robot_heading),
+                    "frame_h": frame_h,
+                    "frame_v": frame_v,
                     "pose_summary": _summarize_pose(p),
                 }
             )
