@@ -15,7 +15,7 @@ from agents.walkie_agent import create_walkie_main_agent
 from client import WalkieAIClient
 from db.walkie_db import WalkieVectorDB
 from interfaces.walkie_interface import WalkieInterface
-from perception import RemoteCLIPEmbedder, SceneStore
+from perception import RemoteCLIPEmbedder, RobotPoseLifter, SceneStore
 from services import ExploreService, PerceptionService, ScenePerceptionService
 
 
@@ -24,8 +24,16 @@ ROBOT_IP = "127.0.0.1"
 
 
 def get_robot() -> WalkieRobot:
+    # ROS services (e.g. bboxes_to_positions -> get_3d_poses) and the camera
+    # both ride the same zenoh router. Without ros_protocol="zenoh" the SDK
+    # defaults ROS to rosbridge:9090, so service calls silently time out even
+    # though the camera (zenoh) works. Override via WALKIE_ROS_PROTOCOL.
+    ros_protocol = os.getenv("WALKIE_ROS_PROTOCOL", "zenoh")
+    ros_port = int(os.getenv("WALKIE_ROS_PORT", str(ZENOH_PORT if ros_protocol == "zenoh" else 9090)))
     return WalkieRobot(
         ip=ROBOT_IP,
+        ros_protocol=ros_protocol,
+        ros_port=ros_port,
         camera_protocol="zenoh",
         camera_port=ZENOH_PORT,
     )
@@ -119,11 +127,19 @@ def run_ready_stage(walkieAI, walkie, db, model) -> None:
     scene_store, scene_embedder = build_scene_store(walkieAI)
     scene_service = None
     if scene_store is not None and scene_embedder is not None:
+        # Position source for scene entries. "robot" (default) stamps each
+        # detection with the robot's own odom pose — coarse but robust when the
+        # SDK's get_3d_poses depth-lift is unavailable. "lift" uses the SDK
+        # depth+TF lifter (walkie.tools) for true per-object positions.
+        pos_source = os.getenv("SCENE_POSITION_SOURCE", "robot").lower()
+        scene_lifter = RobotPoseLifter(walkie.status) if pos_source == "robot" else None
+        print(f"[scene] position source: {pos_source}")
         scene_service = ScenePerceptionService(
             walkieAI,
             walkie,
             scene_store,
             scene_embedder,
+            lifter=scene_lifter,
             interval=float(os.getenv("SCENE_PERCEPTION_INTERVAL_SEC", "2.0")),
             min_confidence=float(os.getenv("SCENE_MIN_CONF", "0.0")),
             caption_per_object=_flag("SCENE_CAPTION_PER_OBJECT", "0"),

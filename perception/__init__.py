@@ -13,6 +13,7 @@ See ``docs/scene_perception_design.md`` for the schema and dedup strategy.
 """
 
 from .embedders import RemoteCLIPEmbedder
+from .lifters import RobotPoseLifter
 from .types import (
     CameraSource,
     Captioner,
@@ -38,6 +39,7 @@ __all__ = [
     "Embedder",
     "PositionLifter",
     "RemoteCLIPEmbedder",
+    "RobotPoseLifter",
     "SceneDiff",
     "SceneEntry",
     "SceneStore",

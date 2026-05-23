@@ -20,7 +20,7 @@ from typing import Optional
 
 from interfaces.walkie_interface import WalkieInterface
 from perception import SceneStore, run_scene_perception
-from perception.types import Embedder
+from perception.types import Embedder, PositionLifter
 
 
 _log = logging.getLogger("services.scene_perception")
@@ -41,6 +41,7 @@ class ScenePerceptionService(threading.Thread):
         store: SceneStore,
         embedder: Embedder,
         *,
+        lifter: Optional[PositionLifter] = None,
         interval: float = 2.0,
         position_timeout: float = 2.0,
         min_confidence: float = 0.0,
@@ -52,6 +53,9 @@ class ScenePerceptionService(threading.Thread):
         self.walkie = walkie
         self.store = store
         self.embedder = embedder
+        # Default to the SDK depth+TF lifter; callers can inject a coarser one
+        # (e.g. RobotPoseLifter) when get_3d_poses is unavailable.
+        self.lifter = lifter if lifter is not None else walkie.tools
         self.interval = interval
         self.position_timeout = position_timeout
         self.min_confidence = min_confidence
@@ -71,7 +75,7 @@ class ScenePerceptionService(threading.Thread):
                 detector=self.walkieAI.object_detection,
                 captioner=self.walkieAI.image_caption,
                 embedder=self.embedder,
-                lifter=self.walkie.tools,
+                lifter=self.lifter,
                 store=self.store,
                 interval_sec=self.interval,
                 position_timeout=self.position_timeout,
