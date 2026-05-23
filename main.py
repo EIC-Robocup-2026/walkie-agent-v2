@@ -24,11 +24,16 @@ ROBOT_IP = "127.0.0.1"
 
 
 def get_robot() -> WalkieRobot:
-    # ROS services (e.g. bboxes_to_positions -> get_3d_poses) and the camera
-    # both ride the same zenoh router. Without ros_protocol="zenoh" the SDK
-    # defaults ROS to rosbridge:9090, so service calls silently time out even
-    # though the camera (zenoh) works. Override via WALKIE_ROS_PROTOCOL.
-    ros_protocol = os.getenv("WALKIE_ROS_PROTOCOL", "zenoh")
+    # ROS services go over rosbridge, camera over zenoh (the SDK's own default
+    # split). bboxes_to_positions -> get_3d_poses uses the custom service type
+    # perception/srv/GetObPose; zenoh_ros2_sdk serializes client-side and has no
+    # definition for that package (its registry only knows standard ROS repos),
+    # so a zenoh service call fails outright. rosbridge_server is a ROS2 node
+    # with `perception` sourced, so it resolves the type server-side. Requires a
+    # rosbridge_server on the robot at ros_port (default 9090). To force zenoh
+    # (only if you've shipped the .srv into zenoh_ros2_sdk/messages), set
+    # WALKIE_ROS_PROTOCOL=zenoh.
+    ros_protocol = os.getenv("WALKIE_ROS_PROTOCOL", "rosbridge")
     ros_port = int(os.getenv("WALKIE_ROS_PORT", str(ZENOH_PORT if ros_protocol == "zenoh" else 9090)))
     return WalkieRobot(
         ip=ROBOT_IP,
