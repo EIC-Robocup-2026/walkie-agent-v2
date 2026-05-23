@@ -179,9 +179,8 @@ def main() -> None:
     model = build_model()
 
     # ── Stage 1: Explore ──
-    # Disable for testing stage
-    # ctx.stage = "explore"
-    # run_explore_stage(walkieAI, walkie, db)
+    ctx.stage = "explore"
+    run_explore_stage(walkieAI, walkie, db)
 
     # ── Stage 2: Ready ──
     ctx.stage = "ready"
