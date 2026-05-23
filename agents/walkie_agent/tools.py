@@ -7,6 +7,7 @@ from langchain_core.tools import tool
 
 from agents.core.tool_decorators import parallelable_tool, sequential_tool
 from agents.core.robot_context import RobotContext
+from agents.core.object_memory import lookup_object_in_memory
 from db.walkie_db import WalkieVectorDB
 from interfaces.walkie_interface import WalkieInterface
 
@@ -19,11 +20,16 @@ def make_walkie_main_tools(
     vision_agent,
     *,
     agent_name: str = "walkie",
+    scene_store=None,
 ):
     """Tools for the main Walkie agent.
 
     Sub-agents are wrapped as sequential tools (delegate_to_*). Object lookup
     is parallelable. Speak is sequential.
+
+    ``scene_store``: when supplied (a :class:`perception.SceneStore`),
+    ``find_object_from_memory`` queries the CLIP-backed scene memory;
+    otherwise it falls back to the legacy ``db``.
     """
 
     def _invoke_subagent(graph, task: str, prefix: str) -> str:
@@ -88,17 +94,9 @@ def make_walkie_main_tools(
         Returns:
             Top match(es) with map-frame coordinates.
         """
-        hits = db.query_objects(object_name, n_results=5)
-        if not hits:
-            return f"No record of '{object_name}' in memory."
-        lines = [f"Top matches for '{object_name}':"]
-        for h in hits:
-            x, y, z = h["position"]
-            lines.append(
-                f"- {h.get('class_name', '?')} @ ({x:+.2f}, {y:+.2f}, {z:+.2f}) "
-                f"conf={h.get('confidence', 0):.2f} caption={h.get('caption', '')!r}"
-            )
-        return "\n".join(lines)
+        return lookup_object_in_memory(
+            object_name, scene_store=scene_store, db=db, n_results=5
+        )
 
     @sequential_tool
     @tool(parse_docstring=True)

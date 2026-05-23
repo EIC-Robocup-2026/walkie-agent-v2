@@ -27,7 +27,11 @@ class WalkieVectorDB:
 
     OBJECTS_COLLECTION = "objects"
 
-    def __init__(self, persist_dir: str | Path = "chroma_db") -> None:
+    def __init__(
+        self,
+        persist_dir: str | Path = "chroma_db",
+        frames_dir: str | Path | None = None,
+    ) -> None:
         path = str(Path(persist_dir).resolve())
         self._client = chromadb.PersistentClient(
             path=path,
@@ -37,6 +41,11 @@ class WalkieVectorDB:
             name=self.OBJECTS_COLLECTION,
             metadata={"hnsw:space": "cosine"},
         )
+        # When set, add_object archives a JPEG crop of each object's bbox here
+        # and records its path in the `frame_ref` metadata field.
+        self._frames_dir = Path(frames_dir) if frames_dir else None
+        if self._frames_dir:
+            self._frames_dir.mkdir(parents=True, exist_ok=True)
 
     def add_object(
         self,
@@ -45,9 +54,21 @@ class WalkieVectorDB:
         confidence: float,
         caption: str = "",
         sightings: int = 1,
+        frame_ref: str = "",
+        source_image: Any = None,
+        bbox: tuple[int, int, int, int] | None = None,
     ) -> str:
+        """Insert a new object record.
+
+        If ``source_image`` (a PIL image) and ``bbox`` (xyxy) are given and the
+        store has a ``frames_dir``, the bbox crop is saved as a JPEG and its
+        path stored in ``frame_ref`` — so the object's picture is browsable
+        later. An explicit ``frame_ref`` takes precedence over cropping.
+        """
         obj_id = str(uuid.uuid4())
         x, y, z = position
+        if not frame_ref and source_image is not None and bbox is not None:
+            frame_ref = self._archive_crop(source_image, bbox, obj_id, class_name) or ""
         self._objects.add(
             ids=[obj_id],
             documents=[f"{class_name}: {caption}".strip(": ").strip()],
@@ -60,6 +81,7 @@ class WalkieVectorDB:
                     "confidence": float(confidence),
                     "sightings": int(sightings),
                     "caption": caption,
+                    "frame_ref": frame_ref,
                     "last_seen_ts": time.time(),
                 }
             ],
@@ -74,6 +96,9 @@ class WalkieVectorDB:
         confidence: float | None = None,
         caption: str | None = None,
         sightings: int | None = None,
+        frame_ref: str | None = None,
+        source_image: Any = None,
+        bbox: tuple[int, int, int, int] | None = None,
     ) -> None:
         existing = self._objects.get(ids=[obj_id])
         if not existing["ids"]:
@@ -87,6 +112,15 @@ class WalkieVectorDB:
             meta["sightings"] = int(sightings)
         if caption is not None:
             meta["caption"] = caption
+        if frame_ref is not None:
+            meta["frame_ref"] = frame_ref
+        elif not meta.get("frame_ref") and source_image is not None and bbox is not None:
+            # Backfill a picture for objects first promoted before we had one.
+            ref = self._archive_crop(
+                source_image, bbox, obj_id, str(meta.get("class_name", "object"))
+            )
+            if ref:
+                meta["frame_ref"] = ref
         meta["last_seen_ts"] = time.time()
         new_doc = f"{meta['class_name']}: {meta.get('caption', '')}".strip(": ").strip()
         self._objects.update(ids=[obj_id], documents=[new_doc], metadatas=[meta])
@@ -154,6 +188,36 @@ class WalkieVectorDB:
             name=self.OBJECTS_COLLECTION,
             metadata={"hnsw:space": "cosine"},
         )
+
+    def _archive_crop(
+        self,
+        image: Any,
+        bbox: tuple[int, int, int, int],
+        obj_id: str,
+        class_name: str,
+    ) -> str | None:
+        """Save the bbox crop of ``image`` (PIL, xyxy bbox) as a JPEG.
+
+        Returns the file path, or ``None`` if there's no ``frames_dir`` or the
+        crop fails — archiving must never break object promotion.
+        """
+        if self._frames_dir is None or image is None:
+            return None
+        try:
+            x1, y1, x2, y2 = (int(round(float(v))) for v in bbox)
+            w, h = image.size
+            x1 = max(0, min(x1, w - 1))
+            y1 = max(0, min(y1, h - 1))
+            x2 = max(x1 + 1, min(x2, w))
+            y2 = max(y1 + 1, min(y2, h))
+            crop = image.crop((x1, y1, x2, y2))
+            ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            fname = f"{ts}_{class_name}_{obj_id[:8]}.jpg"
+            path = self._frames_dir / fname
+            crop.save(path, format="JPEG", quality=85)
+            return str(path)
+        except Exception:  # noqa: BLE001 — never let archiving break promotion
+            return None
 
     @property
     def count(self) -> int:

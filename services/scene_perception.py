@@ -1,0 +1,101 @@
+"""Thread adapter for the async scene-perception loop.
+
+``main.py`` is synchronous and the rest of ``services/`` is built on
+``threading.Thread``; the CLIP perception loop in ``perception.loop`` is an
+``asyncio`` coroutine. This wraps it so it presents the same
+``start()`` / ``stop_and_join()`` surface as ``PerceptionService`` and
+``ExploreService``.
+
+The coroutine runs on a private event loop owned by this thread. Stopping
+cancels the task from the caller's thread via ``call_soon_threadsafe`` and
+relies on the loop's ``try/finally`` to flush an in-progress upsert.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import threading
+from typing import Optional
+
+from interfaces.walkie_interface import WalkieInterface
+from perception import SceneStore, run_scene_perception
+from perception.types import Embedder
+
+
+_log = logging.getLogger("services.scene_perception")
+
+
+class ScenePerceptionService(threading.Thread):
+    """Run :func:`perception.run_scene_perception` in a daemon thread.
+
+    Collaborators are pulled from the existing ``walkie`` / ``walkieAI``
+    objects, so this service owns nothing the rest of the app doesn't
+    already have — it just orchestrates them on a background event loop.
+    """
+
+    def __init__(
+        self,
+        walkieAI,
+        walkie: WalkieInterface,
+        store: SceneStore,
+        embedder: Embedder,
+        *,
+        interval: float = 2.0,
+        position_timeout: float = 2.0,
+        min_confidence: float = 0.0,
+        caption_per_object: bool = False,
+        archive_source_frame: bool = True,
+    ) -> None:
+        super().__init__(daemon=True, name="ScenePerceptionService")
+        self.walkieAI = walkieAI
+        self.walkie = walkie
+        self.store = store
+        self.embedder = embedder
+        self.interval = interval
+        self.position_timeout = position_timeout
+        self.min_confidence = min_confidence
+        self.caption_per_object = caption_per_object
+        self.archive_source_frame = archive_source_frame
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._task: Optional[asyncio.Task] = None
+        self._ready = threading.Event()
+
+    def run(self) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._loop = loop
+        self._task = loop.create_task(
+            run_scene_perception(
+                camera=self.walkie.camera,
+                detector=self.walkieAI.object_detection,
+                captioner=self.walkieAI.image_caption,
+                embedder=self.embedder,
+                lifter=self.walkie.tools,
+                store=self.store,
+                interval_sec=self.interval,
+                position_timeout=self.position_timeout,
+                min_confidence=self.min_confidence,
+                caption_per_object=self.caption_per_object,
+                archive_source_frame=self.archive_source_frame,
+            )
+        )
+        # Signal that _loop/_task are set, so a fast stop_and_join can find them.
+        self._ready.set()
+        try:
+            loop.run_until_complete(self._task)
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001 — log, don't take down the process
+            _log.exception("scene perception loop crashed")
+        finally:
+            loop.close()
+
+    def stop_and_join(self, timeout: float | None = None) -> None:
+        # Wait briefly for run() to publish the loop/task before cancelling,
+        # so an immediate stop after start() doesn't no-op.
+        self._ready.wait(timeout=2.0)
+        loop, task = self._loop, self._task
+        if loop is not None and task is not None:
+            loop.call_soon_threadsafe(task.cancel)
+        self.join(timeout)

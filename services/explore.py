@@ -29,6 +29,7 @@ class _Track:
     count: int = 1
     promoted_id: str | None = None
     last_caption: str = ""
+    last_bbox: tuple[int, int, int, int] | None = None
     last_seen_ts: float = field(default_factory=time.time)
 
     def update(self, position: Position, confidence: float) -> None:
@@ -131,6 +132,7 @@ class ExploreService(threading.Thread):
                 obj.class_name or "unknown",
                 tuple(pos[:3]),
                 float(obj.confidence or 0.0),
+                tuple(obj.bbox),
                 img,
             )
 
@@ -139,6 +141,7 @@ class ExploreService(threading.Thread):
         class_name: str,
         position: Position,
         confidence: float,
+        bbox: tuple[int, int, int, int],
         img,
     ) -> None:
         key = (class_name, self._bucket(position))
@@ -149,10 +152,12 @@ class ExploreService(threading.Thread):
                 mean_position=position,
                 mean_confidence=confidence,
                 count=1,
+                last_bbox=bbox,
             )
             self._tracks[key] = track
         else:
             track.update(position, confidence)
+            track.last_bbox = bbox
 
         if (
             track.count >= self.min_sightings
@@ -171,6 +176,8 @@ class ExploreService(threading.Thread):
                 position=track.mean_position,
                 confidence=max(track.mean_confidence, float(best.get("confidence", 0.0))),
                 sightings=int(best.get("sightings", 1)) + 1,
+                source_image=img,
+                bbox=track.last_bbox,
             )
             track.promoted_id = best["id"]
             self._log(
@@ -185,6 +192,8 @@ class ExploreService(threading.Thread):
                 position=track.mean_position,
                 confidence=track.mean_confidence,
                 sightings=track.count,
+                source_image=img,
+                bbox=track.last_bbox,
             )
             return
         # New entry — caption once on promotion.
@@ -202,6 +211,8 @@ class ExploreService(threading.Thread):
             confidence=track.mean_confidence,
             caption=caption,
             sightings=track.count,
+            source_image=img,
+            bbox=track.last_bbox,
         )
         track.promoted_id = obj_id
         self._log(

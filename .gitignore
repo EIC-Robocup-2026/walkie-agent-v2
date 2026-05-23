@@ -19,3 +19,13 @@ wheels/
 
 # Env
 .env
+
+# Scene perception artifacts (generated at runtime)
+chroma_db_scene/
+frames/
+object_frames/
+
+# Throwaway mock data for the Chroma viewer (tools/seed_mock_chroma.py)
+chroma_db_mock/
+chroma_db_scene_mock/
+frames_mock/

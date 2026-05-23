@@ -63,13 +63,14 @@ DEFAULT_REFRESH_SEC = os.getenv("CHROMA_VIEWER_REFRESH_SEC", "5")
 # Metadata keys promoted to table columns, in display order, when present.
 # ``id`` / ``frame`` / ``document`` / ``position`` / ``distance`` are handled
 # separately. Everything else still shows on the per-record detail page.
+# ``embedding_model`` is intentionally omitted — it's always the same model,
+# so it only clutters the table. It still shows on the per-record detail page.
 TABLE_KEYS = [
     "class_name",
     "confidence",
     "position_conf",
     "sightings",
     "last_seen_ts",
-    "embedding_model",
 ]
 SORTABLE = {
     "id", "class_name", "confidence", "position_conf",
@@ -490,75 +491,172 @@ def _header(base: str, key: str, cur_sort: str, cur_dir: str) -> str:
 
 
 def _render_table(di: int, coll: str, rows: list[dict], base: str,
-                  cur_sort: str, cur_dir: str) -> str:
+                  cur_sort: str, cur_dir: str, linked: bool = False) -> str:
     if not rows:
         return ("<div class='empty'><div class='empty-ico'>∅</div>"
                 "<p>No records to show.</p>"
                 "<p class='muted'>This collection is empty, or nothing matched "
                 "your filter. New rows appear here as the robot writes them.</p></div>")
     cols = _columns(rows)
-    out = ["<div class='card tablewrap'><table><thead><tr>"]
+    tcls = " class='linked'" if linked else ""
+    out = [f"<div class='card tablewrap'><table{tcls}><thead><tr>"]
     out += [_header(base, c, cur_sort, cur_dir) for c in cols]
     out.append("</tr></thead><tbody>")
     for r in rows:
-        out.append("<tr>")
+        out.append(f"<tr data-rid='{e(str(r['id']))}'>")
         out += [_cell(di, coll, c, r) for c in cols]
         out.append("</tr>")
     out.append("</tbody></table></div>")
     return "".join(out)
 
 
-def _render_map(di: int, coll: str, rows: list[dict]) -> str:
+def _render_map(di: int, coll: str, rows: list[dict], base: str = "",
+                colorby: str = "class", aspect: str = "fill") -> str:
     pts = []
     for r in rows:
         pos = _position(r["meta"])
-        if pos:
-            pts.append((pos[0], pos[1], str(r["meta"].get("class_name", "?")), str(r["id"])))
-    if len(pts) < 1:
+        if not pos:
+            continue
+        m = r["meta"]
+        try:
+            conf = float(m.get("position_conf", m.get("confidence")))
+        except (TypeError, ValueError):
+            conf = None
+        try:
+            ts = float(m.get("last_seen_ts"))
+        except (TypeError, ValueError):
+            ts = None
+        pts.append({"x": pos[0], "y": pos[1], "cls": str(m.get("class_name", "?")),
+                    "rid": str(r["id"]), "conf": conf, "ts": ts})
+    if not pts:
         return ""
-    xs = [p[0] for p in pts]
-    ys = [p[1] for p in pts]
+    xs = [p["x"] for p in pts] + [0.0]
+    ys = [p["y"] for p in pts] + [0.0]
     minx, maxx, miny, maxy = min(xs), max(xs), min(ys), max(ys)
-    minx, maxx = min(minx, 0.0), max(maxx, 0.0)  # keep origin in view
-    miny, maxy = min(miny, 0.0), max(maxy, 0.0)
     if maxx - minx < 1e-6:
         minx, maxx = minx - 1, maxx + 1
     if maxy - miny < 1e-6:
         miny, maxy = miny - 1, maxy + 1
-    W, H, pad = 680.0, 420.0, 28.0
-    px = lambda x: pad + (x - minx) / (maxx - minx) * (W - 2 * pad)
-    py = lambda y: H - (pad + (y - miny) / (maxy - miny) * (H - 2 * pad))  # flip y up
+    W, H, pad = 1040.0, 460.0, 48.0  # wide landscape rectangle
+    if aspect == "equal":  # true-to-scale: 1 m is the same in x and y (square cells)
+        scale = min((W - 2 * pad) / (maxx - minx), (H - 2 * pad) / (maxy - miny))
+        uw, uh = (maxx - minx) * scale, (maxy - miny) * scale
+        plot_l, plot_t = (W - uw) / 2, (H - uh) / 2
+        plot_r, plot_b = plot_l + uw, plot_t + uh
+        px = lambda x: plot_l + (x - minx) * scale
+        py = lambda y: plot_b - (y - miny) * scale
+    else:  # fill: x and y scaled independently to fill the rectangle
+        plot_l, plot_r, plot_t, plot_b = pad, W - pad, pad, H - pad
+        px = lambda x: plot_l + (x - minx) / (maxx - minx) * (plot_r - plot_l)
+        py = lambda y: plot_b - (y - miny) / (maxy - miny) * (plot_b - plot_t)
 
     svg = [f"<svg viewBox='0 0 {W:.0f} {H:.0f}' class='map' "
            f"preserveAspectRatio='xMidYMid meet'>"]
     svg.append(f"<rect x='0' y='0' width='{W:.0f}' height='{H:.0f}' class='map-bg'/>")
+
+    # 0.5 m grid (heavier line + tick label at each whole metre). Skipped if the
+    # span is so large the lines would just be noise.
+    step = 0.5
+    if (maxx - minx) <= 40 and (maxy - miny) <= 40:
+        for i in range(math.ceil(minx / step - 1e-9), math.floor(maxx / step + 1e-9) + 1):
+            gx = i * step
+            if abs(gx) < 1e-9:
+                continue  # origin axis drawn below
+            X = px(gx)
+            major = i % 2 == 0
+            svg.append(f"<line x1='{X:.1f}' y1='{plot_t:.1f}' x2='{X:.1f}' "
+                       f"y2='{plot_b:.1f}' class='map-grid{' major' if major else ''}'/>")
+            if major:
+                svg.append(f"<text x='{X:.1f}' y='{plot_b + 14:.1f}' text-anchor='middle' "
+                           f"class='map-tick'>{gx:.0f}</text>")
+        for i in range(math.ceil(miny / step - 1e-9), math.floor(maxy / step + 1e-9) + 1):
+            gy = i * step
+            if abs(gy) < 1e-9:
+                continue
+            Y = py(gy)
+            major = i % 2 == 0
+            svg.append(f"<line x1='{plot_l:.1f}' y1='{Y:.1f}' x2='{plot_r:.1f}' "
+                       f"y2='{Y:.1f}' class='map-grid{' major' if major else ''}'/>")
+            if major:
+                svg.append(f"<text x='{plot_l - 7:.1f}' y='{Y + 3:.1f}' text-anchor='end' "
+                           f"class='map-tick'>{gy:.0f}</text>")
+
     # axes through origin
     if minx <= 0 <= maxx:
-        svg.append(f"<line x1='{px(0):.1f}' y1='0' x2='{px(0):.1f}' y2='{H:.0f}' class='map-axis'/>")
+        svg.append(f"<line x1='{px(0):.1f}' y1='{plot_t:.1f}' x2='{px(0):.1f}' "
+                   f"y2='{plot_b:.1f}' class='map-axis'/>")
     if miny <= 0 <= maxy:
-        svg.append(f"<line x1='0' y1='{py(0):.1f}' x2='{W:.0f}' y2='{py(0):.1f}' class='map-axis'/>")
-    # origin (robot start)
+        svg.append(f"<line x1='{plot_l:.1f}' y1='{py(0):.1f}' x2='{plot_r:.1f}' "
+                   f"y2='{py(0):.1f}' class='map-axis'/>")
     if minx <= 0 <= maxx and miny <= 0 <= maxy:
         svg.append(f"<circle cx='{px(0):.1f}' cy='{py(0):.1f}' r='5' class='map-origin'/>"
                    f"<text x='{px(0) + 8:.1f}' y='{py(0) - 8:.1f}' class='map-olabel'>origin</text>")
-    for x, y, cls, rid in pts[:1000]:
+
+    tss = [p["ts"] for p in pts if p["ts"] is not None]
+    mints, maxts = (min(tss), max(tss)) if tss else (None, None)
+
+    def fill(p: dict) -> str:
+        if colorby == "confidence" and p["conf"] is not None:
+            return f"hsl({max(0.0, min(1.0, p['conf'])) * 120:.0f} 70% 50%)"
+        if colorby == "recency" and p["ts"] is not None and maxts and maxts > mints:
+            frac = (p["ts"] - mints) / (maxts - mints)
+            return f"hsl({frac * 120:.0f} 70% 50%)"
+        return f"hsl({_hue(p['cls'])} 70% 55%)"
+
+    for p in pts[:1000]:
+        x, y, cls, rid = p["x"], p["y"], p["cls"], p["rid"]
+        extra = ""
+        if p["conf"] is not None:
+            extra += f" conf={p['conf']:.2f}"
         svg.append(
             f"<a href='{_record_url(di, coll, rid)}'>"
-            f"<circle cx='{px(x):.1f}' cy='{py(y):.1f}' r='6' "
-            f"style='fill:hsl({_hue(cls)} 70% 55%)' class='map-pt'>"
-            f"<title>{e(cls)} — ({x:.2f}, {y:.2f})\n{e(rid)}</title></circle></a>"
+            f"<circle cx='{px(x):.1f}' cy='{py(y):.1f}' r='6' data-pt='{e(rid)}' "
+            f"data-x='{x:.3f}' data-y='{y:.3f}' "
+            f"style='fill:{fill(p)}' class='map-pt'>"
+            f"<title>{e(cls)} — ({x:.2f}, {y:.2f}){e(extra)}\n{e(rid)}</title></circle></a>"
         )
     svg.append("</svg>")
-    classes = sorted({p[2] for p in pts})
-    legend = "".join(
-        f"<span class='leg'><i style='background:hsl({_hue(c)} 70% 55%)'></i>{e(c)}</span>"
-        for c in classes
-    )
-    note = (f"x: {minx:.2f}…{maxx:.2f} · y: {miny:.2f}…{maxy:.2f} (m, map frame)")
+
+    # legend adapts to the colour mode
+    if colorby == "class":
+        legend = "".join(
+            f"<span class='leg'><i style='background:hsl({_hue(c)} 70% 55%)'></i>{e(c)}</span>"
+            for c in sorted({p["cls"] for p in pts})
+        )
+    elif colorby == "confidence":
+        legend = ("<span class='leg'>low 0.0</span><span class='gradient'></span>"
+                  "<span class='leg'>1.0 high</span>")
+    else:  # recency
+        lo = _rel_time(mints)[0] if mints else "older"
+        hi = _rel_time(maxts)[0] if maxts else "newer"
+        legend = (f"<span class='leg'>{e(lo)}</span><span class='gradient'></span>"
+                  f"<span class='leg'>{e(hi)}</span>")
+
+    controls = ""
+    if base:
+        def ctl(param: str, val: str, label: str, cur: str) -> str:
+            on = " on" if cur == val else ""
+            return f"<a class='mctl{on}' href='{_url(base, carry=True, **{param: val})}'>{label}</a>"
+        controls = (
+            "<div class='map-ctl'><span class='muted'>colour:</span>"
+            + ctl("colorby", "class", "class", colorby)
+            + ctl("colorby", "confidence", "conf", colorby)
+            + ctl("colorby", "recency", "recency", colorby)
+            + "<span class='muted'>· aspect:</span>"
+            + ctl("aspect", "fill", "fill", aspect)
+            + ctl("aspect", "equal", "equal", aspect)
+            + "<button type='button' class='mctl' id='measure-btn'>📏 measure</button>"
+            + "<span id='measure-out' class='muted'></span></div>"
+        )
+
+    cells = "square (true scale)" if aspect == "equal" else "rectangular (filled)"
+    note = (f"grid 0.5 m, cells {cells} · x: {minx:.2f}…{maxx:.2f} · "
+            f"y: {miny:.2f}…{maxy:.2f} (map frame) · click a row to highlight")
     return (
         "<details class='card map-card' open><summary>🗺 Position map "
         f"<span class='muted'>· {len(pts)} located</span></summary>"
-        f"<div class='map-body'>{''.join(svg)}<div class='legend'>{legend}</div>"
+        f"<div class='map-body'>{controls}{''.join(svg)}"
+        f"<div class='legend'>{legend}</div>"
         f"<p class='muted small'>{e(note)}</p></div></details>"
     )
 
@@ -608,6 +706,170 @@ def _pager(di: int, coll: str, page_num: int, pages: int) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Shared view helpers (nav, fetch, panels, charts)
+# --------------------------------------------------------------------------- #
+
+
+def _coll_nav(di: int, coll: str, active: str) -> str:
+    cq = quote(coll)
+    tabs = [
+        ("browse", f"/c/{di}/{cq}", "Browse"),
+        ("gallery", f"/c/{di}/{cq}/gallery", "Gallery"),
+        ("stats", f"/c/{di}/{cq}/stats", "Stats"),
+        ("changes", f"/c/{di}/{cq}/changes", "Changes"),
+    ]
+    out = ["<div class='tabs'>"]
+    for key, url, label in tabs:
+        out.append(f"<a class='tab{' on' if active == key else ''}' href='{url}'>{label}</a>")
+    out.append("</div>")
+    return "".join(out)
+
+
+def _load_rows(collection, class_filter: Optional[str], *, with_emb: bool = False):
+    where = {"class_name": class_filter} if class_filter else None
+    inc = ["metadatas", "documents"] + (["embeddings"] if with_emb else [])
+    return _rows(collection.get(where=where, include=inc, limit=BROWSE_FETCH_CAP),
+                 with_emb=with_emb)
+
+
+def _class_counts(collection) -> list[tuple[str, int]]:
+    res = collection.get(include=["metadatas"], limit=BROWSE_FETCH_CAP)
+    return Counter(
+        str(m.get("class_name")) for m in (res.get("metadatas") or [])
+        if m.get("class_name")
+    ).most_common()
+
+
+def _crumb(store: Store, di: int, coll: str, leaf: str) -> str:
+    return (f"<div class='crumb'><a href='/'>overview</a> / "
+            f"<code>{e(store.directory)}</code> / "
+            f"<a href='{_browse_path(di, coll)}'>{e(coll)}</a> / <b>{e(leaf)}</b></div>")
+
+
+def _agent_panel(q: str, rows: list[dict], n: int = 5) -> str:
+    """Mirror what the agent's ``find_object_from_memory`` tool would return."""
+    if not q:
+        return ""
+    lines = [f"find_object_from_memory({q!r}) →"]
+    if not rows:
+        lines.append(f"No record of '{q}' in memory.")
+    else:
+        lines.append(f"Top matches for '{q}':")
+        for r in rows[:n]:
+            m = r["meta"]
+            pos = _position(m) or (0.0, 0.0, 0.0)
+            try:
+                conf = float(m.get("position_conf", m.get("confidence", 0.0)))
+            except (TypeError, ValueError):
+                conf = 0.0
+            lines.append(
+                f"- {m.get('class_name', '?')} @ "
+                f"({pos[0]:+.2f}, {pos[1]:+.2f}, {pos[2]:+.2f}) "
+                f"conf={conf:.2f} sightings={m.get('sightings', 1)} "
+                f"caption={str(m.get('caption', ''))!r}"
+            )
+    body = e("\n".join(lines))
+    return ("<div class='section-h'>🤖 agent's-eye view</div>"
+            "<div class='card agentp'><div class='muted small' style='margin-bottom:6px'>"
+            "What the Walkie agent receives from this lookup:</div>"
+            f"<pre>{body}</pre></div>")
+
+
+def _similar(collection, rid: str, emb, n: int = 6) -> list[dict]:
+    """Nearest neighbours of ``emb`` in the same collection, excluding self."""
+    try:
+        vec = [float(v) for v in emb]
+    except (TypeError, ValueError):
+        return []
+    res = collection.query(
+        query_embeddings=[vec], n_results=min(n + 1, max(1, collection.count())),
+        include=["metadatas", "documents", "distances"],
+    )
+    ids = res["ids"][0]
+    metas = res["metadatas"][0]
+    docs = res["documents"][0]
+    dists = (res.get("distances") or [[None] * len(ids)])[0]
+    out = []
+    for cid, meta, doc, dist in zip(ids, metas, docs, dists):
+        if str(cid) == str(rid):
+            continue
+        out.append({"id": cid, "meta": dict(meta or {}), "doc": doc or "",
+                    "emb": None, "distance": dist})
+    return out[:n]
+
+
+def _render_similar(di: int, coll: str, neighbors: list[dict]) -> str:
+    if not neighbors:
+        return ""
+    rows = []
+    for r in neighbors:
+        m = r["meta"]
+        furl = _frame_url(m)
+        thumb = (f"<img class='thumb' data-zoom src='{furl}'>" if furl
+                 else "<span class='nothumb'></span>")
+        badge = _class_badge(m["class_name"]) if m.get("class_name") else ""
+        pos = _position(m)
+        posh = (f"<code class='muted'>{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}</code>"
+                if pos else "")
+        d = r.get("distance")
+        dist = _bar(1 - min(float(d), 2.0) / 2.0, f"{float(d):.4f}", hue=152) if d is not None else ""
+        rows.append(
+            f"<a class='simrow' href='{_record_url(di, coll, r['id'])}'>{thumb}"
+            f"<span class='simmeta'>{badge} {posh}</span>{dist}</a>"
+        )
+    return ("<div class='section-h'>similar (by embedding)</div>"
+            f"<div class='card simwrap'>{''.join(rows)}</div>")
+
+
+def _bars(items: list[tuple[str, int]], *, hue_by_label: bool = False,
+          maxn: int = 12) -> str:
+    if not items:
+        return "<p class='muted'>no data</p>"
+    top = items[:maxn]
+    mx = max(c for _, c in top) or 1
+    out = ["<div class='bars'>"]
+    for label, cnt in top:
+        w = cnt / mx * 100
+        h = _hue(label) if hue_by_label else 211
+        out.append(
+            f"<div class='barrow'><span class='barlabel' title='{e(label)}'>{e(label)}</span>"
+            f"<span class='bartrack'><span class='barv' style='width:{w:.1f}%;--h:{h}'></span></span>"
+            f"<span class='barn'>{cnt:,}</span></div>"
+        )
+    if len(items) > maxn:
+        out.append(f"<div class='muted small'>+{len(items) - maxn} more…</div>")
+    out.append("</div>")
+    return "".join(out)
+
+
+def _histogram(values: list[float], *, buckets: int = 10,
+               lo: Optional[float] = None, hi: Optional[float] = None) -> str:
+    vals = [v for v in values if v is not None]
+    if not vals:
+        return "<p class='muted'>no data</p>"
+    lo = min(vals) if lo is None else lo
+    hi = max(vals) if hi is None else hi
+    if hi - lo < 1e-9:
+        hi = lo + 1
+    counts = [0] * buckets
+    for v in vals:
+        b = int((v - lo) / (hi - lo) * buckets)
+        b = max(0, min(buckets - 1, b))
+        counts[b] += 1
+    mx = max(counts) or 1
+    out = ["<div class='hist'>"]
+    for i, c in enumerate(counts):
+        edge = lo + (i + 0.5) * (hi - lo) / buckets
+        out.append(
+            f"<span class='hbar' title='~{edge:.2f}: {c}' "
+            f"style='height:{c / mx * 100:.0f}%'></span>"
+        )
+    out.append("</div>")
+    out.append(f"<div class='histx'><span>{lo:.2f}</span><span>{hi:.2f}</span></div>")
+    return "".join(out)
+
+
+# --------------------------------------------------------------------------- #
 # Page shell
 # --------------------------------------------------------------------------- #
 
@@ -617,6 +879,9 @@ BASE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ title }} · Chroma Viewer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script>
 (function(){var t=localStorage.getItem('chromaViewerTheme')||'auto';
 var d=window.matchMedia&&window.matchMedia('(prefers-color-scheme:dark)').matches;
@@ -636,10 +901,10 @@ document.documentElement.setAttribute('data-theme',t==='auto'?(d?'dark':'light')
     color-scheme:dark;
   }
   *{box-sizing:border-box}
-  body{font:14px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;margin:0;
+  body{font:13.5px/1.5 'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;margin:0;
        background:var(--bg);color:var(--fg);height:100vh;display:flex;flex-direction:column}
   a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
-  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.92em}
+  code{font-family:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.92em}
   .muted{color:var(--muted)} .small{font-size:12px}
 
   .topbar{display:flex;align-items:center;gap:14px;background:var(--topbar);
@@ -691,7 +956,7 @@ document.documentElement.setAttribute('data-theme',t==='auto'?(d?'dark':'light')
      font-size:13px}
   tbody tr:last-child td{border-bottom:none}
   tbody tr:hover{background:var(--hover)}
-  .c-id a{font-family:ui-monospace,monospace;font-size:12px}
+  .c-id a{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:12px}
   .c-doc{max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .c-pos code{color:var(--muted)}
   .copy{margin-left:6px;border:none;background:transparent;color:var(--muted);cursor:pointer;
@@ -727,21 +992,32 @@ document.documentElement.setAttribute('data-theme',t==='auto'?(d?'dark':'light')
   .chip b{color:var(--muted);font-weight:600}
 
   details.map-card{padding:0} details.map-card summary{cursor:pointer;padding:11px 14px;
-     font-weight:600;user-select:none} .map-body{padding:0 14px 14px}
-  svg.map{width:100%;height:auto;border-radius:9px;border:1px solid var(--border);display:block}
-  .map-bg{fill:var(--bg)} .map-axis{stroke:var(--border);stroke-width:1;stroke-dasharray:4 4}
+     font-weight:600;user-select:none} .map-body{padding:0 14px 14px;text-align:center}
+  svg.map{width:100%;max-width:1040px;height:auto;border-radius:9px;border:1px solid var(--border);
+     display:block;margin:0 auto}
+  .map-bg{fill:var(--bg)}
+  .map-grid{stroke:var(--border);stroke-width:1;opacity:.4}
+  .map-grid.major{opacity:.8}
+  .map-tick{fill:var(--muted);font-size:9px;opacity:.85}
+  .map-axis{stroke:var(--muted);stroke-width:1.2;stroke-dasharray:5 4;opacity:.7}
   .map-pt{cursor:pointer;stroke:var(--card);stroke-width:1.5;transition:r .1s}
   .map-pt:hover{r:9} .map-origin{fill:none;stroke:var(--accent);stroke-width:2}
   .map-olabel{fill:var(--muted);font-size:11px}
-  .legend{display:flex;gap:12px;flex-wrap:wrap;margin:10px 0 2px}
+  @keyframes ptpulse{0%,100%{stroke-width:1.5}50%{stroke-width:5}}
+  .map-pt.hl{stroke:#fff;filter:drop-shadow(0 0 5px #fff);animation:ptpulse 1.1s ease-in-out infinite}
+  .map.map-dim .map-pt:not(.hl){opacity:.28}
+  .map.map-dim .map-grid,.map.map-dim .map-axis,.map.map-dim .map-tick{opacity:.2}
+  tr.row-hl{background:var(--chip-on)!important}
+  table.linked tbody tr{cursor:pointer}
+  .legend{display:flex;gap:12px;flex-wrap:wrap;margin:10px 0 2px;justify-content:center}
   .leg{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
   .leg i{width:10px;height:10px;border-radius:50%}
 
   dl.meta{display:grid;grid-template-columns:max-content 1fr;gap:7px 20px;margin:0;padding:14px 16px}
-  dl.meta dt{color:var(--muted);font-family:ui-monospace,monospace;font-size:12.5px}
+  dl.meta dt{color:var(--muted);font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:12.5px}
   dl.meta dd{margin:0;word-break:break-word}
   .detail-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}
-  .detail-head .idtxt{font-family:ui-monospace,monospace;font-size:13px;
+  .detail-head .idtxt{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px;
      background:var(--chip);padding:3px 9px;border-radius:7px}
   img.full{max-width:520px;width:100%;border-radius:10px;cursor:zoom-in;display:block}
   .spark{width:100%;height:60px;display:block}
@@ -759,6 +1035,64 @@ document.documentElement.setAttribute('data-theme',t==='auto'?(d?'dark':'light')
   .ov-card{padding:16px} .ov-card h3{margin:0 0 4px;font-size:15px}
   .ov-card .big{font-size:28px;font-weight:700;font-variant-numeric:tabular-nums}
   .ov-card .topc{margin-top:10px;display:flex;gap:6px;flex-wrap:wrap}
+
+  /* collection tab bar */
+  .tabs{display:flex;gap:4px;margin-bottom:14px;border-bottom:1px solid var(--border)}
+  .tab{padding:7px 14px;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px}
+  .tab:hover{text-decoration:none;color:var(--fg)}
+  .tab.on{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+
+  /* map controls + gradient legend + measure overlay */
+  .map-ctl{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:10px;font-size:12.5px}
+  .mctl{padding:3px 9px;border-radius:7px;background:var(--chip);color:var(--fg);
+        border:1px solid transparent;cursor:pointer;font-size:12.5px}
+  .mctl:hover{text-decoration:none;border-color:var(--border)} .mctl.on{background:var(--chip-on);font-weight:600}
+  .gradient{display:inline-block;width:120px;height:12px;border-radius:6px;
+        background:linear-gradient(90deg,hsl(0 70% 50%),hsl(60 70% 50%),hsl(120 70% 50%))}
+  .measure-line{stroke:var(--accent);stroke-width:2;stroke-dasharray:5 4}
+  .measure-pt{fill:none;stroke:var(--accent);stroke-width:2}
+  .measure-label{fill:var(--fg);font-size:12px;font-weight:600;paint-order:stroke;
+        stroke:var(--card);stroke-width:3px}
+
+  /* similar (record page) */
+  .simwrap{padding:8px;display:flex;flex-direction:column;gap:2px}
+  .simrow{display:flex;align-items:center;gap:12px;padding:6px 8px;border-radius:8px;color:var(--fg)}
+  .simrow:hover{background:var(--hover);text-decoration:none}
+  .simrow .thumb{height:40px} .simmeta{flex:1;display:flex;align-items:center;gap:10px}
+  .nothumb{width:40px;height:40px;border-radius:4px;background:var(--chip);display:inline-block}
+
+  /* agent panel */
+  .agentp{padding:14px} .agentp pre{margin:0;white-space:pre-wrap;font-size:12.5px;
+        background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px}
+
+  /* stats */
+  .statgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+  .statcard{padding:16px} .stat-h{margin:0 0 12px;font-size:14px}
+  .bars{display:flex;flex-direction:column;gap:7px}
+  .barrow{display:flex;align-items:center;gap:10px;font-size:12.5px}
+  .barlabel{width:84px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
+  .bartrack{flex:1;height:14px;background:var(--chip);border-radius:5px;overflow:hidden}
+  .barv{display:block;height:100%;background:hsl(var(--h) 70% 55% / .85)}
+  .barn{width:48px;text-align:right;font-variant-numeric:tabular-nums}
+  .hist{display:flex;align-items:flex-end;gap:3px;height:120px;padding-top:6px}
+  .hist .hbar{flex:1;background:var(--accent);border-radius:3px 3px 0 0;min-height:2px;opacity:.8}
+  .histx{display:flex;justify-content:space-between;color:var(--muted);font-size:11px;margin-top:4px}
+  ul.checks{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+  ul.checks li{font-size:12.5px} ul.checks li.ok{color:#16a34a} ul.checks li.bad{color:#d97706}
+
+  /* gallery */
+  .gal-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+  .gcard{background:var(--card);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+  .gimg{width:100%;height:120px;object-fit:cover;display:block;cursor:zoom-in;background:var(--chip)}
+  .gimg.noimg{display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px;cursor:default}
+  .gmeta{display:flex;align-items:center;justify-content:space-between;gap:6px;padding:7px 9px 2px}
+  .gid{display:block;padding:0 9px 9px;font-size:11px;font-family:'IBM Plex Mono',monospace;
+        overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  /* changes feed */
+  .changes-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}
+  .feedrow{display:flex;align-items:center;gap:9px;padding:6px 8px;border-radius:8px;color:var(--fg)}
+  .feedrow:hover{background:var(--hover);text-decoration:none} .feedrow .thumb{height:34px}
 
   .lightbox{position:fixed;inset:0;background:#000c;display:flex;align-items:center;
      justify-content:center;z-index:50;cursor:zoom-out;padding:24px}
@@ -806,12 +1140,83 @@ document.documentElement.setAttribute('data-theme',t==='auto'?(d?'dark':'light')
 
   // ---- delegated UI (survives partial refresh) ------------------------------
   var lb=document.getElementById('lightbox'),lbi=document.getElementById('lightbox-img');
+
+  // Row <-> map highlighting: click a table row to light up its point.
+  function cssEsc(s){return (window.CSS&&CSS.escape)?CSS.escape(s)
+    :String(s).replace(/["\\]/g,'\\$&');}
+  var curRid=null,curPt=null;
+  function clearMapHl(){
+    if(curPt){curPt.classList.remove('hl');curPt.setAttribute('r','6');curPt=null;}
+    document.querySelectorAll('tr.row-hl').forEach(function(r){r.classList.remove('row-hl');});
+    var m=document.querySelector('svg.map'); if(m)m.classList.remove('map-dim');
+    curRid=null;
+  }
+  function highlightOnMap(rid,row){
+    if(curRid===rid){clearMapHl();return;}   // click again to clear
+    clearMapHl();
+    var map=document.querySelector('svg.map'); if(!map)return;
+    var pt=map.querySelector('[data-pt="'+cssEsc(rid)+'"]'); if(!pt)return;
+    pt.classList.add('hl');pt.setAttribute('r','11');curPt=pt;
+    map.classList.add('map-dim');
+    if(row)row.classList.add('row-hl');
+    var a=pt.closest('a')||pt; a.parentNode.appendChild(a);  // raise above others
+    map.scrollIntoView({behavior:'smooth',block:'center'});
+    curRid=rid;
+  }
+
+  // ---- distance-measure tool on the map -------------------------------------
+  var SVGNS='http://www.w3.org/2000/svg',measureMode=false,measurePts=[];
+  function clearMeasure(){var l=document.getElementById('measure-layer');if(l)l.remove();measurePts=[];}
+  function drawMeasure(){
+    var svg=document.querySelector('svg.map');if(!svg)return;
+    var l=document.getElementById('measure-layer');
+    if(!l){l=document.createElementNS(SVGNS,'g');l.id='measure-layer';svg.appendChild(l);}
+    l.innerHTML='';
+    measurePts.forEach(function(p){
+      var c=document.createElementNS(SVGNS,'circle');
+      c.setAttribute('cx',p.cx);c.setAttribute('cy',p.cy);c.setAttribute('r',7);
+      c.setAttribute('class','measure-pt');l.appendChild(c);});
+    if(measurePts.length===2){
+      var a=measurePts[0],b=measurePts[1];
+      var ln=document.createElementNS(SVGNS,'line');
+      ln.setAttribute('x1',a.cx);ln.setAttribute('y1',a.cy);
+      ln.setAttribute('x2',b.cx);ln.setAttribute('y2',b.cy);
+      ln.setAttribute('class','measure-line');l.appendChild(ln);
+      var d=Math.hypot(b.x-a.x,b.y-a.y);
+      var t=document.createElementNS(SVGNS,'text');
+      t.setAttribute('x',(a.cx+b.cx)/2);t.setAttribute('y',(a.cy+b.cy)/2-6);
+      t.setAttribute('text-anchor','middle');t.setAttribute('class','measure-label');
+      t.textContent=d.toFixed(2)+' m';l.appendChild(t);
+      var o=document.getElementById('measure-out');if(o)o.textContent='= '+d.toFixed(2)+' m';}
+  }
+  function addMeasurePoint(c){
+    if(measurePts.length>=2)clearMeasure();
+    measurePts.push({x:parseFloat(c.getAttribute('data-x')),y:parseFloat(c.getAttribute('data-y')),
+      cx:parseFloat(c.getAttribute('cx')),cy:parseFloat(c.getAttribute('cy'))});
+    drawMeasure();
+  }
+  function setMeasure(on){
+    measureMode=on;var b=document.getElementById('measure-btn');
+    if(b){b.classList.toggle('on',on);b.textContent=on?'📏 click two points':'📏 measure';}
+    if(!on){clearMeasure();var o=document.getElementById('measure-out');if(o)o.textContent='';}
+  }
+
   document.addEventListener('click',function(ev){
+    var mb=ev.target.closest&&ev.target.closest('#measure-btn');
+    if(mb){ev.preventDefault();setMeasure(!measureMode);return;}
+    if(measureMode){var mc=ev.target.closest&&ev.target.closest('.map-pt');
+      if(mc){ev.preventDefault();addMeasurePoint(mc);return;}}
     var z=ev.target.closest&&ev.target.closest('[data-zoom]');
     if(z){ev.preventDefault();lbi.src=z.getAttribute('src');lb.hidden=false;return;}
     var c=ev.target.closest&&ev.target.closest('[data-copy]');
     if(c){navigator.clipboard&&navigator.clipboard.writeText(c.getAttribute('data-copy'));
       c.textContent='✓';setTimeout(function(){c.textContent='⧉';},900);return;}
+    if(ev.target.closest&&ev.target.closest('.map-bg')){clearMapHl();return;}
+    var row=ev.target.closest&&ev.target.closest('tr[data-rid]');
+    if(row){
+      if(ev.target.closest('a'))return;   // let the id link open the record
+      highlightOnMap(row.getAttribute('data-rid'),row);
+    }
   });
   lb.addEventListener('click',function(){lb.hidden=true;lbi.src='';});
   document.addEventListener('keydown',function(ev){
@@ -837,7 +1242,10 @@ document.documentElement.setAttribute('data-theme',t==='auto'?(d?'dark':'light')
     var m=document.querySelector('main'),top=m?m.scrollTop:0;
     box.classList.add('flash');
     try{var r=await fetch(partialUrl(),{cache:'no-store'});
-      if(r.ok){var t=await r.text();if(m){m.innerHTML=t;m.scrollTop=top;}}}
+      if(r.ok){var t=await r.text();if(m){m.innerHTML=t;m.scrollTop=top;
+        measureMode=false;measurePts=[];   // measure layer is gone with the swap
+        if(curRid){var s=curRid;curRid=null;curPt=null;   // re-apply across refresh
+          highlightOnMap(s,document.querySelector('tr[data-rid="'+cssEsc(s)+'"]'));}}}}
     catch(e){}
     finally{busy=false;setTimeout(function(){box.classList.remove('flash');},250);}
   }
@@ -981,11 +1389,14 @@ def browse(di: int, coll: str) -> str:
     cap_note = (f"<div class='warn'>Showing the first {BROWSE_FETCH_CAP:,} of "
                 f"{total:,} records (sorted/mapped within that sample).</div>"
                 if total > BROWSE_FETCH_CAP else "")
+    colorby = request.args.get("colorby", "class")
+    aspect = request.args.get("aspect", "fill")
+    map_html = _render_map(di, coll, rows_all, base, colorby, aspect)
     body = (
-        head + _toolbar(di, coll, q="", mode="substring")
-        + _class_chips(base, classes, class_filter) + cap_note
-        + _render_map(di, coll, rows_all)
-        + _render_table(di, coll, page_rows, base, sort, direction)
+        head + _coll_nav(di, coll, "browse")
+        + _toolbar(di, coll, q="", mode="substring")
+        + _class_chips(base, classes, class_filter) + cap_note + map_html
+        + _render_table(di, coll, page_rows, base, sort, direction, linked=bool(map_html))
         + _pager(di, coll, page_num, pages)
     )
     crumb = (f"<div class='crumb'><a href='/'>overview</a> / "
@@ -1035,11 +1446,16 @@ def search(di: int, coll: str) -> str:
     head = (f"<div class='page-head'><h1>Search · {e(coll)} "
             f"<span class='count'>· {len(rows)} result(s)</span></h1></div>")
     warn_html = f"<div class='warn'>{e(warn)}</div>" if warn else ""
+    colorby = request.args.get("colorby", "class")
+    aspect = request.args.get("aspect", "fill")
+    map_html = _render_map(di, coll, rows, base, colorby, aspect)
+    agent_html = _agent_panel(q, rows) if q else ""
     body = (
-        head + _toolbar(di, coll, q=q, mode=mode)
+        head + _coll_nav(di, coll, "browse")
+        + _toolbar(di, coll, q=q, mode=mode)
         + _class_chips(base, classes, class_filter) + warn_html
-        + _render_map(di, coll, rows)
-        + _render_table(di, coll, rows, base, sort, direction)
+        + agent_html + map_html
+        + _render_table(di, coll, rows, base, sort, direction, linked=bool(map_html))
     )
     crumb = (f"<div class='crumb'><a href='/'>overview</a> / "
              f"<code>{e(store.directory)}</code> / "
@@ -1096,10 +1512,192 @@ def record(di: int, coll: str, rid: str) -> str:
                      "<div class='card' style='padding:14px'><span class='muted'>"
                      "no embedding stored</span></div>")
 
+    if stats:  # nearest neighbours by this record's own embedding
+        try:
+            parts.append(_render_similar(di, coll, _similar(collection, r["id"], r["emb"])))
+        except Exception as ex:  # noqa: BLE001 — never break the detail page
+            parts.append(f"<div class='muted small'>similar lookup failed: {e(ex)}</div>")
+
     crumb = (f"<div class='crumb'><a href='/'>overview</a> / "
              f"<code>{e(store.directory)}</code> / "
              f"<a href='{_browse_path(di, coll)}'>{e(coll)}</a> / <b>record</b></div>")
     return render_page(str(r["id"]), crumb + "".join(parts), active=(di, coll))
+
+
+@app.route("/c/<int:di>/<coll>/gallery")
+def gallery(di: int, coll: str) -> str:
+    if di < 0 or di >= len(STORES):
+        abort(404)
+    store = STORES[di]
+    collection = store.collection(coll)
+    total = collection.count()
+    base = f"/c/{di}/{quote(coll)}/gallery"
+    class_filter = request.args.get("class") or None
+    rows = _load_rows(collection, class_filter)
+    rows.sort(key=_sort_key("last_seen_ts"), reverse=True)
+    classes = _class_counts(collection)
+
+    cards = []
+    for r in rows[:300]:
+        m = r["meta"]
+        furl = _frame_url(m)
+        img = (f"<img class='gimg' data-zoom src='{furl}'>" if furl
+               else "<div class='gimg noimg'>no image</div>")
+        badge = _class_badge(m["class_name"]) if m.get("class_name") else ""
+        ts = _ts_html(m.get("last_seen_ts")) if m.get("last_seen_ts") else ""
+        cards.append(
+            f"<div class='gcard'><a href='{_record_url(di, coll, r['id'])}'>{img}</a>"
+            f"<div class='gmeta'>{badge}<span class='muted small'>{ts}</span></div>"
+            f"<a class='gid' href='{_record_url(di, coll, r['id'])}'>{e(r['id'])}</a></div>"
+        )
+    grid = (f"<div class='gal-grid'>{''.join(cards)}</div>" if cards else
+            "<div class='empty'><div class='empty-ico'>🖼</div><p>No records.</p></div>")
+    head = (f"<div class='page-head'><h1>{e(coll)} "
+            f"<span class='count'>· gallery · {total:,} records</span></h1></div>")
+    body = (head + _coll_nav(di, coll, "gallery")
+            + _class_chips(base, classes, class_filter) + grid)
+    return render_page(f"gallery · {coll}", _crumb(store, di, coll, "gallery") + body,
+                       active=(di, coll))
+
+
+@app.route("/c/<int:di>/<coll>/stats")
+def stats(di: int, coll: str) -> str:
+    if di < 0 or di >= len(STORES):
+        abort(404)
+    store = STORES[di]
+    collection = store.collection(coll)
+    total = collection.count()
+    rows = _load_rows(collection, None, with_emb=True)
+    shown = len(rows)
+    classes = _class_counts(collection)
+
+    confs, sights = [], []
+    n_pos = n_frame = n_emb = 0
+    emb_models: set[str] = set()
+    emb_dims: set[str] = set()
+    for r in rows:
+        m = r["meta"]
+        try:
+            confs.append(float(m.get("position_conf", m.get("confidence"))))
+        except (TypeError, ValueError):
+            pass
+        try:
+            sights.append(float(m.get("sightings")))
+        except (TypeError, ValueError):
+            pass
+        if _position(m) is not None:
+            n_pos += 1
+        if m.get("frame_ref"):
+            n_frame += 1
+        if r["emb"] is not None and len(r["emb"]) > 0:
+            n_emb += 1
+        if m.get("embedding_model"):
+            emb_models.add(str(m.get("embedding_model")))
+        if m.get("embedding_dim") is not None:
+            emb_dims.add(str(m.get("embedding_dim")))
+
+    checks = []
+
+    def chk(ok: bool, label: str) -> None:
+        checks.append(f"<li class='{'ok' if ok else 'bad'}'>"
+                      f"{'✓' if ok else '⚠'} {e(label)}</li>")
+
+    chk(n_pos == shown, f"{n_pos}/{shown} have a 3D position")
+    chk(n_emb == shown, f"{n_emb}/{shown} have an embedding")
+    chk(n_frame > 0, f"{n_frame}/{shown} have a frame image")
+    chk(len(emb_dims) <= 1, f"embedding dim(s): {', '.join(sorted(emb_dims)) or '—'}")
+    chk(len(emb_models) <= 1, f"embedding model(s): {', '.join(sorted(emb_models)) or '—'}")
+
+    def card(title: str, inner: str) -> str:
+        return f"<div class='card statcard'><h3 class='stat-h'>{e(title)}</h3>{inner}</div>"
+
+    note = (f"<div class='warn'>Computed over the first {shown:,} of {total:,} "
+            f"records.</div>" if total > shown else "")
+    grid = ("<div class='statgrid'>"
+            + card("Records by class", _bars(classes, hue_by_label=True))
+            + card("Confidence", _histogram(confs, lo=0.0, hi=1.0))
+            + card("Sightings", _histogram(sights))
+            + card("Consistency", f"<ul class='checks'>{''.join(checks)}</ul>")
+            + "</div>")
+    head = (f"<div class='page-head'><h1>{e(coll)} "
+            f"<span class='count'>· stats · {total:,} records</span></h1></div>")
+    body = head + _coll_nav(di, coll, "stats") + note + grid
+    return render_page(f"stats · {coll}", _crumb(store, di, coll, "stats") + body,
+                       active=(di, coll))
+
+
+@app.route("/c/<int:di>/<coll>/changes")
+def changes(di: int, coll: str) -> str:
+    if di < 0 or di >= len(STORES):
+        abort(404)
+    store = STORES[di]
+    collection = store.collection(coll)
+    base = f"/c/{di}/{quote(coll)}/changes"
+    since = request.args.get("since", 300, type=int)
+    rows = _load_rows(collection, None)
+    now = time.time()
+    cutoff = now - since
+    have_first = any("first_seen_ts" in r["meta"] for r in rows)
+
+    appeared, refreshed, gone = [], [], []
+    for r in rows:
+        m = r["meta"]
+        try:
+            last = float(m.get("last_seen_ts"))
+        except (TypeError, ValueError):
+            continue
+        try:
+            first = float(m.get("first_seen_ts"))
+        except (TypeError, ValueError):
+            first = None
+        if have_first and first is not None and first > cutoff:
+            appeared.append(r)
+        elif last > cutoff:
+            refreshed.append(r)
+        else:
+            gone.append(r)
+    for lst in (appeared, refreshed, gone):
+        lst.sort(key=_sort_key("last_seen_ts"), reverse=True)
+
+    def feed(items: list[dict]) -> str:
+        if not items:
+            return "<p class='muted'>none</p>"
+        out = []
+        for r in items[:100]:
+            m = r["meta"]
+            furl = _frame_url(m)
+            th = f"<img class='thumb' data-zoom src='{furl}'>" if furl else ""
+            badge = _class_badge(m["class_name"]) if m.get("class_name") else ""
+            out.append(
+                f"<a class='feedrow' href='{_record_url(di, coll, r['id'])}'>{th}{badge}"
+                f"<span class='muted small'>{_ts_html(m.get('last_seen_ts'))}</span></a>"
+            )
+        return "".join(out)
+
+    windows = [(60, "1m"), (300, "5m"), (900, "15m"), (3600, "1h"),
+               (21600, "6h"), (86400, "24h")]
+    picker = "".join(
+        f"<a class='mctl{' on' if since == s else ''}' href='{_url(base, since=s)}'>{l}</a>"
+        for s, l in windows
+    )
+    if have_first:
+        cols = (f"<div><div class='section-h'>🟢 appeared ({len(appeared)})</div>{feed(appeared)}</div>"
+                f"<div><div class='section-h'>🔄 refreshed ({len(refreshed)})</div>{feed(refreshed)}</div>"
+                f"<div><div class='section-h'>⚪ disappeared ({len(gone)})</div>{feed(gone)}</div>")
+        hint = ""
+    else:
+        cols = (f"<div><div class='section-h'>🟢 recently seen ({len(refreshed)})</div>{feed(refreshed)}</div>"
+                f"<div><div class='section-h'>⚪ stale ({len(gone)})</div>{feed(gone)}</div>")
+        hint = ("<div class='muted small' style='margin-bottom:8px'>This collection "
+                "has no <code>first_seen_ts</code>, so appeared/refreshed can't be "
+                "split — showing recently-seen vs stale.</div>")
+    head = (f"<div class='page-head'><h1>{e(coll)} "
+            f"<span class='count'>· changes</span></h1></div>")
+    body = (head + _coll_nav(di, coll, "changes")
+            + f"<div class='map-ctl'><span class='muted'>window:</span>{picker}</div>"
+            + hint + f"<div class='changes-grid'>{cols}</div>")
+    return render_page(f"changes · {coll}", _crumb(store, di, coll, "changes") + body,
+                       active=(di, coll))
 
 
 @app.route("/frame")

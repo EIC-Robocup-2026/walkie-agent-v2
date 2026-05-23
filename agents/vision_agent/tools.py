@@ -6,6 +6,7 @@ from langchain_core.tools import tool
 
 from agents.core.tool_decorators import parallelable_tool, sequential_tool
 from agents.core.robot_context import RobotContext
+from agents.core.object_memory import lookup_object_in_memory
 from db.walkie_db import WalkieVectorDB
 from interfaces.walkie_interface import WalkieInterface
 
@@ -34,11 +35,16 @@ def make_vision_tools(
     db: WalkieVectorDB,
     *,
     agent_name: str = "vision",
+    scene_store=None,
 ):
     """Build the vision sub-agent's tool list.
 
     Detection / caption / pose / memory tools are parallelable.
     speak is sequential.
+
+    ``scene_store``: when supplied (a :class:`perception.SceneStore`),
+    ``find_object_from_memory`` queries the CLIP-backed scene memory;
+    otherwise it falls back to the legacy ``db``.
     """
 
     def _capture():
@@ -102,8 +108,9 @@ def make_vision_tools(
     def find_object_from_memory(object_name: str) -> str:
         """Search the long-term object database for a previously-seen object.
 
-        Use when the user asks "where is the X?" — this queries the catalogue
-        built during the explore stage and returns map-frame coordinates.
+        Use when the user asks "where is the X?" — this queries the scene
+        memory (CLIP) built by the always-on perception loop, or the legacy
+        explore-stage catalogue, and returns map-frame coordinates.
 
         Args:
             object_name: Name or description of the object (e.g. "coffee mug").
@@ -111,18 +118,9 @@ def make_vision_tools(
         Returns:
             Known location(s) with coordinates, or a message if not found.
         """
-        hits = db.query_objects(object_name, n_results=5)
-        if not hits:
-            return f"No record of '{object_name}' in memory."
-        lines = [f"Top matches for '{object_name}':"]
-        for h in hits:
-            x, y, z = h["position"]
-            lines.append(
-                f"- {h.get('class_name', '?')} @ ({x:+.2f}, {y:+.2f}, {z:+.2f}) "
-                f"conf={h.get('confidence', 0):.2f} sightings={h.get('sightings', '?')} "
-                f"caption={h.get('caption', '')!r}"
-            )
-        return "\n".join(lines)
+        return lookup_object_in_memory(
+            object_name, scene_store=scene_store, db=db, n_results=5
+        )
 
     @parallelable_tool
     @tool

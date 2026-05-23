@@ -27,7 +27,6 @@ from .types import (
     PositionLifter,
 )
 
-
 _log = logging.getLogger("perception.pipeline")
 
 
