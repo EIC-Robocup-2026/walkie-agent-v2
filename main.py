@@ -136,7 +136,7 @@ def run_ready_stage(walkieAI, walkie, db, model) -> None:
         # detection with the robot's own odom pose — coarse but robust when the
         # SDK's get_3d_poses depth-lift is unavailable. "lift" uses the SDK
         # depth+TF lifter (walkie.tools) for true per-object positions.
-        pos_source = os.getenv("SCENE_POSITION_SOURCE", "robot").lower()
+        pos_source = os.getenv("SCENE_POSITION_SOURCE", "lift").lower()
         scene_lifter = RobotPoseLifter(walkie.status) if pos_source == "robot" else None
         print(f"[scene] position source: {pos_source}")
         scene_service = ScenePerceptionService(
