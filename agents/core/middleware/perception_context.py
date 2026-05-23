@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import time
 from typing import Any, Awaitable, Callable
@@ -8,6 +9,22 @@ from langchain.agents.middleware import AgentMiddleware, ModelRequest
 from langchain_core.messages import SystemMessage
 
 from ..robot_context import RobotContext
+
+
+def _heading_str(heading) -> str:
+    if heading is None:
+        return ""
+    return f" heading={math.degrees(float(heading)):+.0f}°"
+
+
+def _frame_str(rec: dict) -> str:
+    h = rec.get("frame_h")
+    v = rec.get("frame_v")
+    if not h and not v:
+        return ""
+    if h == "center" and v == "center":
+        return " frame=center"
+    return f" frame=({h or '?'}, {v or '?'})"
 
 
 def _format_objects(objs: list[dict]) -> str:
@@ -26,7 +43,9 @@ def _format_objects(objs: list[dict]) -> str:
             pos_str = "(unknown)"
         cap_str = f' "{cap}"' if cap else ""
         conf_str = f" conf={conf:.2f}" if conf is not None else ""
-        lines.append(f"  - {cls} @ {pos_str}{conf_str}{cap_str}")
+        heading_str = _heading_str(o.get("heading"))
+        frame_str = _frame_str(o)
+        lines.append(f"  - {cls} @ {pos_str}{conf_str}{heading_str}{frame_str}{cap_str}")
     return "\n".join(lines)
 
 
@@ -38,7 +57,9 @@ def _format_people(people: list[dict]) -> str:
         bbox = p.get("bbox")
         pose = p.get("pose_summary") or p.get("pose") or ""
         bbox_str = f"bbox={tuple(bbox)}" if bbox else "bbox=?"
-        lines.append(f"  - person {bbox_str} pose: {pose or 'unknown'}")
+        heading_str = _heading_str(p.get("heading"))
+        frame_str = _frame_str(p)
+        lines.append(f"  - person {bbox_str}{heading_str}{frame_str} pose: {pose or 'unknown'}")
     return "\n".join(lines)
 
 

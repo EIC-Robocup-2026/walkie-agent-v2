@@ -59,16 +59,16 @@ class ObjectDetectionClient(WalkieBaseClient):
             WalkieAPIError: If the server returns a failure response.
         """
         if isinstance(image, np.ndarray):
-            h, w = image.shape[:2]
-            if max(w, h) > max_size:
-                scale = max_size / max(w, h)
-                image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LINEAR)
+            # h, w = image.shape[:2]
+            # if max(w, h) > max_size:
+            #     scale = max_size / max(w, h)
+            #     image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LINEAR)
             image_bytes = _numpy_to_bytes(image, fmt="JPEG", quality=jpeg_quality)
         else:
-            w, h = image.size
-            if max(w, h) > max_size:
-                scale = max_size / max(w, h)
-                image = image.resize((int(w * scale), int(h * scale)), Image.BILINEAR)
+            # w, h = image.size
+            # if max(w, h) > max_size:
+            #     scale = max_size / max(w, h)
+            #     image = image.resize((int(w * scale), int(h * scale)), Image.BILINEAR)
             image_bytes = _pil_to_bytes(image, fmt="JPEG", quality=jpeg_quality)
 
         data = self._post_files(
