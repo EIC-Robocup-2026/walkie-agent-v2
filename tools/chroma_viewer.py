@@ -56,7 +56,7 @@ from flask import Flask, Response, abort, render_template_string, request, send_
 load_dotenv()
 
 PAGE_SIZE = 50
-SEARCH_SCAN_CAP = 5000   # max rows scanned for a substring search
+SEARCH_SCAN_CAP = 5000  # max rows scanned for a substring search
 BROWSE_FETCH_CAP = 3000  # max rows pulled for sort/filter/map before paginating
 DEFAULT_REFRESH_SEC = os.getenv("CHROMA_VIEWER_REFRESH_SEC", "5")
 
@@ -73,8 +73,15 @@ TABLE_KEYS = [
     "last_seen_ts",
 ]
 SORTABLE = {
-    "id", "class_name", "confidence", "position_conf",
-    "sightings", "last_seen_ts", "first_seen_ts", "distance", "position",
+    "id",
+    "class_name",
+    "confidence",
+    "position_conf",
+    "sightings",
+    "last_seen_ts",
+    "first_seen_ts",
+    "distance",
+    "position",
 }
 
 app = Flask(__name__)
@@ -204,8 +211,14 @@ def _emb_stats(vec) -> Optional[dict[str, Any]]:
     if not vals:
         return None
     norm = math.sqrt(sum(v * v for v in vals))
-    return {"dim": len(vals), "norm": norm, "min": min(vals),
-            "max": max(vals), "head": vals[:8], "vals": vals}
+    return {
+        "dim": len(vals),
+        "norm": norm,
+        "min": min(vals),
+        "max": max(vals),
+        "head": vals[:8],
+        "vals": vals,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -396,8 +409,15 @@ def _semantic_search(coll, q: str, rows_sample: list[dict]) -> list[dict[str, An
     dists = (res.get("distances") or [[None] * len(ids)])[0]
     out = []
     for rid, meta, doc, dist in zip(ids, metas, docs, dists):
-        out.append({"id": rid, "meta": dict(meta or {}), "doc": doc or "",
-                    "emb": None, "distance": dist})
+        out.append(
+            {
+                "id": rid,
+                "meta": dict(meta or {}),
+                "doc": doc or "",
+                "emb": None,
+                "distance": dist,
+            }
+        )
     return out
 
 
@@ -416,17 +436,27 @@ def _cell(di: int, coll: str, key: str, r: dict) -> str:
         )
     if key == "frame":
         furl = _frame_url(meta)
-        return f"<td><img class='thumb' data-zoom src='{furl}' loading='lazy'></td>" if furl else "<td></td>"
+        return (
+            f"<td><img class='thumb' data-zoom src='{furl}' loading='lazy'></td>"
+            if furl
+            else "<td></td>"
+        )
     if key == "document":
         return f"<td class='c-doc' title='{e(r['doc'])}'>{e(r['doc'])}</td>"
     if key == "class_name":
-        return f"<td>{_class_badge(meta.get('class_name', ''))}</td>" if meta.get("class_name") else "<td></td>"
+        return (
+            f"<td>{_class_badge(meta.get('class_name', ''))}</td>"
+            if meta.get("class_name")
+            else "<td></td>"
+        )
     if key == "position":
         pos = _position(meta)
         if not pos:
             return "<td></td>"
-        return ("<td class='c-pos'>"
-                f"<code>{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}</code></td>")
+        return (
+            "<td class='c-pos'>"
+            f"<code>{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}</code></td>"
+        )
     if key in ("confidence", "position_conf"):
         try:
             f = float(meta[key])
@@ -438,7 +468,9 @@ def _cell(di: int, coll: str, key: str, r: dict) -> str:
         if d is None:
             return "<td></td>"
         # cosine distance ~[0,2]; nearer = fuller bar
-        return f"<td>{_bar(1 - min(float(d), 2.0) / 2.0, f'{float(d):.4f}', hue=152)}</td>"
+        return (
+            f"<td>{_bar(1 - min(float(d), 2.0) / 2.0, f'{float(d):.4f}', hue=152)}</td>"
+        )
     if _is_ts_key(key):
         return f"<td>{_ts_html(meta.get(key))}</td>"
     if key == "embedding_model":
@@ -472,12 +504,20 @@ def _columns(rows: list[dict]) -> list[str]:
 
 
 def _header(base: str, key: str, cur_sort: str, cur_dir: str) -> str:
-    label = {"id": "id", "frame": "frame", "document": "document",
-             "class_name": "class", "position": "position (x, y, z)",
-             "confidence": "confidence", "position_conf": "pos conf",
-             "sightings": "sightings", "last_seen_ts": "last seen",
-             "first_seen_ts": "first seen", "embedding_model": "model",
-             "distance": "distance"}.get(key, key)
+    label = {
+        "id": "id",
+        "frame": "frame",
+        "document": "document",
+        "class_name": "class",
+        "position": "position (x, y, z)",
+        "confidence": "confidence",
+        "position_conf": "pos conf",
+        "sightings": "sightings",
+        "last_seen_ts": "last seen",
+        "first_seen_ts": "first seen",
+        "embedding_model": "model",
+        "distance": "distance",
+    }.get(key, key)
     if key not in SORTABLE:
         return f"<th>{e(label)}</th>"
     nxt = "desc" if (cur_sort == key and cur_dir == "asc") else "asc"
@@ -490,13 +530,22 @@ def _header(base: str, key: str, cur_sort: str, cur_dir: str) -> str:
     return f"<th class='{cls}'><a href='{url}'>{e(label)}{arrow}</a></th>"
 
 
-def _render_table(di: int, coll: str, rows: list[dict], base: str,
-                  cur_sort: str, cur_dir: str, linked: bool = False) -> str:
+def _render_table(
+    di: int,
+    coll: str,
+    rows: list[dict],
+    base: str,
+    cur_sort: str,
+    cur_dir: str,
+    linked: bool = False,
+) -> str:
     if not rows:
-        return ("<div class='empty'><div class='empty-ico'>∅</div>"
-                "<p>No records to show.</p>"
-                "<p class='muted'>This collection is empty, or nothing matched "
-                "your filter. New rows appear here as the robot writes them.</p></div>")
+        return (
+            "<div class='empty'><div class='empty-ico'>∅</div>"
+            "<p>No records to show.</p>"
+            "<p class='muted'>This collection is empty, or nothing matched "
+            "your filter. New rows appear here as the robot writes them.</p></div>"
+        )
     cols = _columns(rows)
     tcls = " class='linked'" if linked else ""
     out = [f"<div class='card tablewrap'><table{tcls}><thead><tr>"]
@@ -510,8 +559,14 @@ def _render_table(di: int, coll: str, rows: list[dict], base: str,
     return "".join(out)
 
 
-def _render_map(di: int, coll: str, rows: list[dict], base: str = "",
-                colorby: str = "class", aspect: str = "fill") -> str:
+def _render_map(
+    di: int,
+    coll: str,
+    rows: list[dict],
+    base: str = "",
+    colorby: str = "class",
+    aspect: str = "fill",
+) -> str:
     pts = []
     for r in rows:
         pos = _position(r["meta"])
@@ -526,8 +581,16 @@ def _render_map(di: int, coll: str, rows: list[dict], base: str = "",
             ts = float(m.get("last_seen_ts"))
         except (TypeError, ValueError):
             ts = None
-        pts.append({"x": pos[0], "y": pos[1], "cls": str(m.get("class_name", "?")),
-                    "rid": str(r["id"]), "conf": conf, "ts": ts})
+        pts.append(
+            {
+                "x": pos[0],
+                "y": pos[1],
+                "cls": str(m.get("class_name", "?")),
+                "rid": str(r["id"]),
+                "conf": conf,
+                "ts": ts,
+            }
+        )
     if not pts:
         return ""
     xs = [p["x"] for p in pts] + [0.0]
@@ -550,47 +613,67 @@ def _render_map(di: int, coll: str, rows: list[dict], base: str = "",
         px = lambda x: plot_l + (x - minx) / (maxx - minx) * (plot_r - plot_l)
         py = lambda y: plot_b - (y - miny) / (maxy - miny) * (plot_b - plot_t)
 
-    svg = [f"<svg viewBox='0 0 {W:.0f} {H:.0f}' class='map' "
-           f"preserveAspectRatio='xMidYMid meet'>"]
+    svg = [
+        f"<svg viewBox='0 0 {W:.0f} {H:.0f}' class='map' "
+        f"preserveAspectRatio='xMidYMid meet'>"
+    ]
     svg.append(f"<rect x='0' y='0' width='{W:.0f}' height='{H:.0f}' class='map-bg'/>")
 
     # 0.5 m grid (heavier line + tick label at each whole metre). Skipped if the
     # span is so large the lines would just be noise.
     step = 0.5
     if (maxx - minx) <= 40 and (maxy - miny) <= 40:
-        for i in range(math.ceil(minx / step - 1e-9), math.floor(maxx / step + 1e-9) + 1):
+        for i in range(
+            math.ceil(minx / step - 1e-9), math.floor(maxx / step + 1e-9) + 1
+        ):
             gx = i * step
             if abs(gx) < 1e-9:
                 continue  # origin axis drawn below
             X = px(gx)
             major = i % 2 == 0
-            svg.append(f"<line x1='{X:.1f}' y1='{plot_t:.1f}' x2='{X:.1f}' "
-                       f"y2='{plot_b:.1f}' class='map-grid{' major' if major else ''}'/>")
+            svg.append(
+                f"<line x1='{X:.1f}' y1='{plot_t:.1f}' x2='{X:.1f}' "
+                f"y2='{plot_b:.1f}' class='map-grid{' major' if major else ''}'/>"
+            )
             if major:
-                svg.append(f"<text x='{X:.1f}' y='{plot_b + 14:.1f}' text-anchor='middle' "
-                           f"class='map-tick'>{gx:.0f}</text>")
-        for i in range(math.ceil(miny / step - 1e-9), math.floor(maxy / step + 1e-9) + 1):
+                svg.append(
+                    f"<text x='{X:.1f}' y='{plot_b + 14:.1f}' text-anchor='middle' "
+                    f"class='map-tick'>{gx:.0f}</text>"
+                )
+        for i in range(
+            math.ceil(miny / step - 1e-9), math.floor(maxy / step + 1e-9) + 1
+        ):
             gy = i * step
             if abs(gy) < 1e-9:
                 continue
             Y = py(gy)
             major = i % 2 == 0
-            svg.append(f"<line x1='{plot_l:.1f}' y1='{Y:.1f}' x2='{plot_r:.1f}' "
-                       f"y2='{Y:.1f}' class='map-grid{' major' if major else ''}'/>")
+            svg.append(
+                f"<line x1='{plot_l:.1f}' y1='{Y:.1f}' x2='{plot_r:.1f}' "
+                f"y2='{Y:.1f}' class='map-grid{' major' if major else ''}'/>"
+            )
             if major:
-                svg.append(f"<text x='{plot_l - 7:.1f}' y='{Y + 3:.1f}' text-anchor='end' "
-                           f"class='map-tick'>{gy:.0f}</text>")
+                svg.append(
+                    f"<text x='{plot_l - 7:.1f}' y='{Y + 3:.1f}' text-anchor='end' "
+                    f"class='map-tick'>{gy:.0f}</text>"
+                )
 
     # axes through origin
     if minx <= 0 <= maxx:
-        svg.append(f"<line x1='{px(0):.1f}' y1='{plot_t:.1f}' x2='{px(0):.1f}' "
-                   f"y2='{plot_b:.1f}' class='map-axis'/>")
+        svg.append(
+            f"<line x1='{px(0):.1f}' y1='{plot_t:.1f}' x2='{px(0):.1f}' "
+            f"y2='{plot_b:.1f}' class='map-axis'/>"
+        )
     if miny <= 0 <= maxy:
-        svg.append(f"<line x1='{plot_l:.1f}' y1='{py(0):.1f}' x2='{plot_r:.1f}' "
-                   f"y2='{py(0):.1f}' class='map-axis'/>")
+        svg.append(
+            f"<line x1='{plot_l:.1f}' y1='{py(0):.1f}' x2='{plot_r:.1f}' "
+            f"y2='{py(0):.1f}' class='map-axis'/>"
+        )
     if minx <= 0 <= maxx and miny <= 0 <= maxy:
-        svg.append(f"<circle cx='{px(0):.1f}' cy='{py(0):.1f}' r='5' class='map-origin'/>"
-                   f"<text x='{px(0) + 8:.1f}' y='{py(0) - 8:.1f}' class='map-olabel'>origin</text>")
+        svg.append(
+            f"<circle cx='{px(0):.1f}' cy='{py(0):.1f}' r='5' class='map-origin'/>"
+            f"<text x='{px(0) + 8:.1f}' y='{py(0) - 8:.1f}' class='map-olabel'>origin</text>"
+        )
 
     tss = [p["ts"] for p in pts if p["ts"] is not None]
     mints, maxts = (min(tss), max(tss)) if tss else (None, None)
@@ -624,19 +707,25 @@ def _render_map(di: int, coll: str, rows: list[dict], base: str = "",
             for c in sorted({p["cls"] for p in pts})
         )
     elif colorby == "confidence":
-        legend = ("<span class='leg'>low 0.0</span><span class='gradient'></span>"
-                  "<span class='leg'>1.0 high</span>")
+        legend = (
+            "<span class='leg'>low 0.0</span><span class='gradient'></span>"
+            "<span class='leg'>1.0 high</span>"
+        )
     else:  # recency
         lo = _rel_time(mints)[0] if mints else "older"
         hi = _rel_time(maxts)[0] if maxts else "newer"
-        legend = (f"<span class='leg'>{e(lo)}</span><span class='gradient'></span>"
-                  f"<span class='leg'>{e(hi)}</span>")
+        legend = (
+            f"<span class='leg'>{e(lo)}</span><span class='gradient'></span>"
+            f"<span class='leg'>{e(hi)}</span>"
+        )
 
     controls = ""
     if base:
+
         def ctl(param: str, val: str, label: str, cur: str) -> str:
             on = " on" if cur == val else ""
             return f"<a class='mctl{on}' href='{_url(base, carry=True, **{param: val})}'>{label}</a>"
+
         controls = (
             "<div class='map-ctl'><span class='muted'>colour:</span>"
             + ctl("colorby", "class", "class", colorby)
@@ -650,8 +739,10 @@ def _render_map(di: int, coll: str, rows: list[dict], base: str = "",
         )
 
     cells = "square (true scale)" if aspect == "equal" else "rectangular (filled)"
-    note = (f"grid 0.5 m, cells {cells} · x: {minx:.2f}…{maxx:.2f} · "
-            f"y: {miny:.2f}…{maxy:.2f} (map frame) · click a row to highlight")
+    note = (
+        f"grid 0.5 m, cells {cells} · x: {minx:.2f}…{maxx:.2f} · "
+        f"y: {miny:.2f}…{maxy:.2f} (map frame) · click a row to highlight"
+    )
     return (
         "<details class='card map-card' open><summary>🗺 Position map "
         f"<span class='muted'>· {len(pts)} located</span></summary>"
@@ -661,7 +752,9 @@ def _render_map(di: int, coll: str, rows: list[dict], base: str = "",
     )
 
 
-def _class_chips(base: str, classes: list[tuple[str, int]], active: Optional[str]) -> str:
+def _class_chips(
+    base: str, classes: list[tuple[str, int]], active: Optional[str]
+) -> str:
     if not classes:
         return ""
     chips = [
@@ -681,8 +774,9 @@ def _class_chips(base: str, classes: list[tuple[str, int]], active: Optional[str
 def _toolbar(di: int, coll: str, *, q: str, mode: str) -> str:
     sub = "selected" if mode != "semantic" else ""
     sem = "selected" if mode == "semantic" else ""
-    clear = (f"<a class='btn ghost' href='{_browse_path(di, coll)}'>clear</a>"
-             if q else "")
+    clear = (
+        f"<a class='btn ghost' href='{_browse_path(di, coll)}'>clear</a>" if q else ""
+    )
     return (
         f"<form class='toolbar' action='{_search_path(di, coll)}' method='get'>"
         f"<input id='searchq' type='text' name='q' value='{e(q)}' "
@@ -697,12 +791,20 @@ def _pager(di: int, coll: str, page_num: int, pages: int) -> str:
     if pages <= 1:
         return ""
     base = _browse_path(di, coll)
-    prev = (f"<a class='btn ghost' href='{_url(base, carry=True, page=page_num - 1)}'>← prev</a>"
-            if page_num > 1 else "<span class='btn ghost disabled'>← prev</span>")
-    nxt = (f"<a class='btn ghost' href='{_url(base, carry=True, page=page_num + 1)}'>next →</a>"
-           if page_num < pages else "<span class='btn ghost disabled'>next →</span>")
-    return (f"<div class='pager'>{prev}"
-            f"<span class='muted'>page {page_num} / {pages}</span>{nxt}</div>")
+    prev = (
+        f"<a class='btn ghost' href='{_url(base, carry=True, page=page_num - 1)}'>← prev</a>"
+        if page_num > 1
+        else "<span class='btn ghost disabled'>← prev</span>"
+    )
+    nxt = (
+        f"<a class='btn ghost' href='{_url(base, carry=True, page=page_num + 1)}'>next →</a>"
+        if page_num < pages
+        else "<span class='btn ghost disabled'>next →</span>"
+    )
+    return (
+        f"<div class='pager'>{prev}"
+        f"<span class='muted'>page {page_num} / {pages}</span>{nxt}</div>"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -720,7 +822,9 @@ def _coll_nav(di: int, coll: str, active: str) -> str:
     ]
     out = ["<div class='tabs'>"]
     for key, url, label in tabs:
-        out.append(f"<a class='tab{' on' if active == key else ''}' href='{url}'>{label}</a>")
+        out.append(
+            f"<a class='tab{' on' if active == key else ''}' href='{url}'>{label}</a>"
+        )
     out.append("</div>")
     return "".join(out)
 
@@ -728,22 +832,27 @@ def _coll_nav(di: int, coll: str, active: str) -> str:
 def _load_rows(collection, class_filter: Optional[str], *, with_emb: bool = False):
     where = {"class_name": class_filter} if class_filter else None
     inc = ["metadatas", "documents"] + (["embeddings"] if with_emb else [])
-    return _rows(collection.get(where=where, include=inc, limit=BROWSE_FETCH_CAP),
-                 with_emb=with_emb)
+    return _rows(
+        collection.get(where=where, include=inc, limit=BROWSE_FETCH_CAP),
+        with_emb=with_emb,
+    )
 
 
 def _class_counts(collection) -> list[tuple[str, int]]:
     res = collection.get(include=["metadatas"], limit=BROWSE_FETCH_CAP)
     return Counter(
-        str(m.get("class_name")) for m in (res.get("metadatas") or [])
+        str(m.get("class_name"))
+        for m in (res.get("metadatas") or [])
         if m.get("class_name")
     ).most_common()
 
 
 def _crumb(store: Store, di: int, coll: str, leaf: str) -> str:
-    return (f"<div class='crumb'><a href='/'>overview</a> / "
-            f"<code>{e(store.directory)}</code> / "
-            f"<a href='{_browse_path(di, coll)}'>{e(coll)}</a> / <b>{e(leaf)}</b></div>")
+    return (
+        f"<div class='crumb'><a href='/'>overview</a> / "
+        f"<code>{e(store.directory)}</code> / "
+        f"<a href='{_browse_path(di, coll)}'>{e(coll)}</a> / <b>{e(leaf)}</b></div>"
+    )
 
 
 def _agent_panel(q: str, rows: list[dict], n: int = 5) -> str:
@@ -769,10 +878,12 @@ def _agent_panel(q: str, rows: list[dict], n: int = 5) -> str:
                 f"caption={str(m.get('caption', ''))!r}"
             )
     body = e("\n".join(lines))
-    return ("<div class='section-h'>🤖 agent's-eye view</div>"
-            "<div class='card agentp'><div class='muted small' style='margin-bottom:6px'>"
-            "What the Walkie agent receives from this lookup:</div>"
-            f"<pre>{body}</pre></div>")
+    return (
+        "<div class='section-h'>🤖 agent's-eye view</div>"
+        "<div class='card agentp'><div class='muted small' style='margin-bottom:6px'>"
+        "What the Walkie agent receives from this lookup:</div>"
+        f"<pre>{body}</pre></div>"
+    )
 
 
 def _similar(collection, rid: str, emb, n: int = 6) -> list[dict]:
@@ -782,7 +893,8 @@ def _similar(collection, rid: str, emb, n: int = 6) -> list[dict]:
     except (TypeError, ValueError):
         return []
     res = collection.query(
-        query_embeddings=[vec], n_results=min(n + 1, max(1, collection.count())),
+        query_embeddings=[vec],
+        n_results=min(n + 1, max(1, collection.count())),
         include=["metadatas", "documents", "distances"],
     )
     ids = res["ids"][0]
@@ -793,8 +905,15 @@ def _similar(collection, rid: str, emb, n: int = 6) -> list[dict]:
     for cid, meta, doc, dist in zip(ids, metas, docs, dists):
         if str(cid) == str(rid):
             continue
-        out.append({"id": cid, "meta": dict(meta or {}), "doc": doc or "",
-                    "emb": None, "distance": dist})
+        out.append(
+            {
+                "id": cid,
+                "meta": dict(meta or {}),
+                "doc": doc or "",
+                "emb": None,
+                "distance": dist,
+            }
+        )
     return out[:n]
 
 
@@ -805,24 +924,37 @@ def _render_similar(di: int, coll: str, neighbors: list[dict]) -> str:
     for r in neighbors:
         m = r["meta"]
         furl = _frame_url(m)
-        thumb = (f"<img class='thumb' data-zoom src='{furl}'>" if furl
-                 else "<span class='nothumb'></span>")
+        thumb = (
+            f"<img class='thumb' data-zoom src='{furl}'>"
+            if furl
+            else "<span class='nothumb'></span>"
+        )
         badge = _class_badge(m["class_name"]) if m.get("class_name") else ""
         pos = _position(m)
-        posh = (f"<code class='muted'>{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}</code>"
-                if pos else "")
+        posh = (
+            f"<code class='muted'>{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}</code>"
+            if pos
+            else ""
+        )
         d = r.get("distance")
-        dist = _bar(1 - min(float(d), 2.0) / 2.0, f"{float(d):.4f}", hue=152) if d is not None else ""
+        dist = (
+            _bar(1 - min(float(d), 2.0) / 2.0, f"{float(d):.4f}", hue=152)
+            if d is not None
+            else ""
+        )
         rows.append(
             f"<a class='simrow' href='{_record_url(di, coll, r['id'])}'>{thumb}"
             f"<span class='simmeta'>{badge} {posh}</span>{dist}</a>"
         )
-    return ("<div class='section-h'>similar (by embedding)</div>"
-            f"<div class='card simwrap'>{''.join(rows)}</div>")
+    return (
+        "<div class='section-h'>similar (by embedding)</div>"
+        f"<div class='card simwrap'>{''.join(rows)}</div>"
+    )
 
 
-def _bars(items: list[tuple[str, int]], *, hue_by_label: bool = False,
-          maxn: int = 12) -> str:
+def _bars(
+    items: list[tuple[str, int]], *, hue_by_label: bool = False, maxn: int = 12
+) -> str:
     if not items:
         return "<p class='muted'>no data</p>"
     top = items[:maxn]
@@ -842,8 +974,13 @@ def _bars(items: list[tuple[str, int]], *, hue_by_label: bool = False,
     return "".join(out)
 
 
-def _histogram(values: list[float], *, buckets: int = 10,
-               lo: Optional[float] = None, hi: Optional[float] = None) -> str:
+def _histogram(
+    values: list[float],
+    *,
+    buckets: int = 10,
+    lo: Optional[float] = None,
+    hi: Optional[float] = None,
+) -> str:
     vals = [v for v in values if v is not None]
     if not vals:
         return "<p class='muted'>no data</p>"
@@ -1273,7 +1410,9 @@ def _sidebar(active: Optional[tuple[int, str]]) -> str:
     out = []
     for di, store in enumerate(STORES):
         out.append("<div class='store'>")
-        out.append(f"<div class='store-name' title='{e(store.path)}'>{e(store.directory)}</div>")
+        out.append(
+            f"<div class='store-name' title='{e(store.path)}'>{e(store.directory)}</div>"
+        )
         if store.error:
             out.append(f"<div class='side-err'>{e(store.error)}</div>")
         else:
@@ -1291,11 +1430,16 @@ def _sidebar(active: Optional[tuple[int, str]]) -> str:
     return "".join(out)
 
 
-def render_page(title: str, body: str, *, active: Optional[tuple[int, str]] = None) -> str:
+def render_page(
+    title: str, body: str, *, active: Optional[tuple[int, str]] = None
+) -> str:
     if request.args.get("_partial"):
         return body  # auto-refresh fetches just the <main> contents
     return render_template_string(
-        BASE, title=title, body=body, sidebar=_sidebar(active),
+        BASE,
+        title=title,
+        body=body,
+        sidebar=_sidebar(active),
         default_refresh=DEFAULT_REFRESH_SEC,
     )
 
@@ -1307,11 +1451,15 @@ def render_page(title: str, body: str, *, active: Optional[tuple[int, str]] = No
 
 @app.route("/")
 def home() -> str:
-    out = ["<div class='page-head'><h1>Overview</h1>"
-           "<div class='muted'>ChromaDB stores discovered on disk.</div></div>"]
+    out = [
+        "<div class='page-head'><h1>Overview</h1>"
+        "<div class='muted'>ChromaDB stores discovered on disk.</div></div>"
+    ]
     for di, store in enumerate(STORES):
-        out.append(f"<div class='section-h'>{e(store.directory)} "
-                   f"<span class='muted' style='text-transform:none'>· {e(store.path)}</span></div>")
+        out.append(
+            f"<div class='section-h'>{e(store.directory)} "
+            f"<span class='muted' style='text-transform:none'>· {e(store.path)}</span></div>"
+        )
         if store.error:
             out.append(f"<div class='warn'>{e(store.error)}</div>")
             continue
@@ -1343,7 +1491,9 @@ def _top_classes(store: Store, name: str, k: int = 3) -> list[tuple[str, int]]:
     except Exception:  # noqa: BLE001
         return []
     counter = Counter(
-        str(m.get("class_name")) for m in (res.get("metadatas") or []) if m.get("class_name")
+        str(m.get("class_name"))
+        for m in (res.get("metadatas") or [])
+        if m.get("class_name")
     )
     return counter.most_common(k)
 
@@ -1367,7 +1517,8 @@ def browse(di: int, coll: str) -> str:
     # class breakdown from a quick scan (independent of the active filter)
     cls_res = collection.get(include=["metadatas"], limit=BROWSE_FETCH_CAP)
     classes = Counter(
-        str(m.get("class_name")) for m in (cls_res.get("metadatas") or [])
+        str(m.get("class_name"))
+        for m in (cls_res.get("metadatas") or [])
         if m.get("class_name")
     ).most_common()
 
@@ -1382,25 +1533,37 @@ def browse(di: int, coll: str) -> str:
     page_num = max(1, request.args.get("page", 1, type=int))
     pages = max(1, math.ceil(len(rows_all) / PAGE_SIZE))
     page_num = min(page_num, pages)
-    page_rows = rows_all[(page_num - 1) * PAGE_SIZE: page_num * PAGE_SIZE]
+    page_rows = rows_all[(page_num - 1) * PAGE_SIZE : page_num * PAGE_SIZE]
 
-    head = (f"<div class='page-head'><h1>{e(coll)} "
-            f"<span class='count'>· {total:,} records</span></h1></div>")
-    cap_note = (f"<div class='warn'>Showing the first {BROWSE_FETCH_CAP:,} of "
-                f"{total:,} records (sorted/mapped within that sample).</div>"
-                if total > BROWSE_FETCH_CAP else "")
+    head = (
+        f"<div class='page-head'><h1>{e(coll)} "
+        f"<span class='count'>· {total:,} records</span></h1></div>"
+    )
+    cap_note = (
+        f"<div class='warn'>Showing the first {BROWSE_FETCH_CAP:,} of "
+        f"{total:,} records (sorted/mapped within that sample).</div>"
+        if total > BROWSE_FETCH_CAP
+        else ""
+    )
     colorby = request.args.get("colorby", "class")
     aspect = request.args.get("aspect", "fill")
     map_html = _render_map(di, coll, rows_all, base, colorby, aspect)
     body = (
-        head + _coll_nav(di, coll, "browse")
+        head
+        + _coll_nav(di, coll, "browse")
         + _toolbar(di, coll, q="", mode="substring")
-        + _class_chips(base, classes, class_filter) + cap_note + map_html
-        + _render_table(di, coll, page_rows, base, sort, direction, linked=bool(map_html))
+        + _class_chips(base, classes, class_filter)
+        + cap_note
+        + map_html
+        + _render_table(
+            di, coll, page_rows, base, sort, direction, linked=bool(map_html)
+        )
         + _pager(di, coll, page_num, pages)
     )
-    crumb = (f"<div class='crumb'><a href='/'>overview</a> / "
-             f"<code>{e(store.directory)}</code> / <b>{e(coll)}</b></div>")
+    crumb = (
+        f"<div class='crumb'><a href='/'>overview</a> / "
+        f"<code>{e(store.directory)}</code> / <b>{e(coll)}</b></div>"
+    )
     return render_page(coll, crumb + body, active=(di, coll))
 
 
@@ -1443,23 +1606,30 @@ def search(di: int, coll: str) -> str:
         str(r["meta"].get("class_name")) for r in rows if r["meta"].get("class_name")
     ).most_common()
 
-    head = (f"<div class='page-head'><h1>Search · {e(coll)} "
-            f"<span class='count'>· {len(rows)} result(s)</span></h1></div>")
+    head = (
+        f"<div class='page-head'><h1>Search · {e(coll)} "
+        f"<span class='count'>· {len(rows)} result(s)</span></h1></div>"
+    )
     warn_html = f"<div class='warn'>{e(warn)}</div>" if warn else ""
     colorby = request.args.get("colorby", "class")
     aspect = request.args.get("aspect", "fill")
     map_html = _render_map(di, coll, rows, base, colorby, aspect)
     agent_html = _agent_panel(q, rows) if q else ""
     body = (
-        head + _coll_nav(di, coll, "browse")
+        head
+        + _coll_nav(di, coll, "browse")
         + _toolbar(di, coll, q=q, mode=mode)
-        + _class_chips(base, classes, class_filter) + warn_html
-        + agent_html + map_html
+        + _class_chips(base, classes, class_filter)
+        + warn_html
+        + agent_html
+        + map_html
         + _render_table(di, coll, rows, base, sort, direction, linked=bool(map_html))
     )
-    crumb = (f"<div class='crumb'><a href='/'>overview</a> / "
-             f"<code>{e(store.directory)}</code> / "
-             f"<a href='{_browse_path(di, coll)}'>{e(coll)}</a> / <b>search</b></div>")
+    crumb = (
+        f"<div class='crumb'><a href='/'>overview</a> / "
+        f"<code>{e(store.directory)}</code> / "
+        f"<a href='{_browse_path(di, coll)}'>{e(coll)}</a> / <b>search</b></div>"
+    )
     return render_page(f"search · {coll}", crumb + body, active=(di, coll))
 
 
@@ -1476,9 +1646,11 @@ def record(di: int, coll: str, rid: str) -> str:
     r = rows[0]
     meta = r["meta"]
 
-    parts = [f"<div class='page-head'><div class='detail-head'>"
-             f"<span class='idtxt'>{e(r['id'])}</span>"
-             f"<button class='btn ghost' data-copy='{e(r['id'])}'>⧉ copy id</button>"]
+    parts = [
+        f"<div class='page-head'><div class='detail-head'>"
+        f"<span class='idtxt'>{e(r['id'])}</span>"
+        f"<button class='btn ghost' data-copy='{e(r['id'])}'>⧉ copy id</button>"
+    ]
     if meta.get("class_name"):
         parts.append(_class_badge(meta["class_name"]))
     parts.append("</div>")
@@ -1488,10 +1660,14 @@ def record(di: int, coll: str, rid: str) -> str:
 
     frame = _frame_url(meta)
     if frame:
-        parts.append(f"<div class='card' style='padding:14px'>"
-                     f"<img class='full' data-zoom src='{frame}'></div>")
+        parts.append(
+            f"<div class='card' style='padding:14px'>"
+            f"<img class='full' data-zoom src='{frame}'></div>"
+        )
 
-    parts.append("<div class='section-h'>metadata</div><div class='card'><dl class='meta'>")
+    parts.append(
+        "<div class='section-h'>metadata</div><div class='card'><dl class='meta'>"
+    )
     for k in sorted(meta.keys()):
         parts.append(f"<dt>{e(k)}</dt><dd>{_meta_value(k, meta[k])}</dd>")
     parts.append("</dl></div>")
@@ -1508,19 +1684,27 @@ def record(di: int, coll: str, rid: str) -> str:
             f"<dt>head[0:8]</dt><dd><code>{e(head)}</code></dd></dl></div>"
         )
     else:
-        parts.append("<div class='section-h'>embedding</div>"
-                     "<div class='card' style='padding:14px'><span class='muted'>"
-                     "no embedding stored</span></div>")
+        parts.append(
+            "<div class='section-h'>embedding</div>"
+            "<div class='card' style='padding:14px'><span class='muted'>"
+            "no embedding stored</span></div>"
+        )
 
     if stats:  # nearest neighbours by this record's own embedding
         try:
-            parts.append(_render_similar(di, coll, _similar(collection, r["id"], r["emb"])))
+            parts.append(
+                _render_similar(di, coll, _similar(collection, r["id"], r["emb"]))
+            )
         except Exception as ex:  # noqa: BLE001 — never break the detail page
-            parts.append(f"<div class='muted small'>similar lookup failed: {e(ex)}</div>")
+            parts.append(
+                f"<div class='muted small'>similar lookup failed: {e(ex)}</div>"
+            )
 
-    crumb = (f"<div class='crumb'><a href='/'>overview</a> / "
-             f"<code>{e(store.directory)}</code> / "
-             f"<a href='{_browse_path(di, coll)}'>{e(coll)}</a> / <b>record</b></div>")
+    crumb = (
+        f"<div class='crumb'><a href='/'>overview</a> / "
+        f"<code>{e(store.directory)}</code> / "
+        f"<a href='{_browse_path(di, coll)}'>{e(coll)}</a> / <b>record</b></div>"
+    )
     return render_page(str(r["id"]), crumb + "".join(parts), active=(di, coll))
 
 
@@ -1541,8 +1725,11 @@ def gallery(di: int, coll: str) -> str:
     for r in rows[:300]:
         m = r["meta"]
         furl = _frame_url(m)
-        img = (f"<img class='gimg' data-zoom src='{furl}'>" if furl
-               else "<div class='gimg noimg'>no image</div>")
+        img = (
+            f"<img class='gimg' data-zoom src='{furl}'>"
+            if furl
+            else "<div class='gimg noimg'>no image</div>"
+        )
         badge = _class_badge(m["class_name"]) if m.get("class_name") else ""
         ts = _ts_html(m.get("last_seen_ts")) if m.get("last_seen_ts") else ""
         cards.append(
@@ -1550,14 +1737,26 @@ def gallery(di: int, coll: str) -> str:
             f"<div class='gmeta'>{badge}<span class='muted small'>{ts}</span></div>"
             f"<a class='gid' href='{_record_url(di, coll, r['id'])}'>{e(r['id'])}</a></div>"
         )
-    grid = (f"<div class='gal-grid'>{''.join(cards)}</div>" if cards else
-            "<div class='empty'><div class='empty-ico'>🖼</div><p>No records.</p></div>")
-    head = (f"<div class='page-head'><h1>{e(coll)} "
-            f"<span class='count'>· gallery · {total:,} records</span></h1></div>")
-    body = (head + _coll_nav(di, coll, "gallery")
-            + _class_chips(base, classes, class_filter) + grid)
-    return render_page(f"gallery · {coll}", _crumb(store, di, coll, "gallery") + body,
-                       active=(di, coll))
+    grid = (
+        f"<div class='gal-grid'>{''.join(cards)}</div>"
+        if cards
+        else "<div class='empty'><div class='empty-ico'>🖼</div><p>No records.</p></div>"
+    )
+    head = (
+        f"<div class='page-head'><h1>{e(coll)} "
+        f"<span class='count'>· gallery · {total:,} records</span></h1></div>"
+    )
+    body = (
+        head
+        + _coll_nav(di, coll, "gallery")
+        + _class_chips(base, classes, class_filter)
+        + grid
+    )
+    return render_page(
+        f"gallery · {coll}",
+        _crumb(store, di, coll, "gallery") + body,
+        active=(di, coll),
+    )
 
 
 @app.route("/c/<int:di>/<coll>/stats")
@@ -1599,31 +1798,44 @@ def stats(di: int, coll: str) -> str:
     checks = []
 
     def chk(ok: bool, label: str) -> None:
-        checks.append(f"<li class='{'ok' if ok else 'bad'}'>"
-                      f"{'✓' if ok else '⚠'} {e(label)}</li>")
+        checks.append(
+            f"<li class='{'ok' if ok else 'bad'}'>{'✓' if ok else '⚠'} {e(label)}</li>"
+        )
 
     chk(n_pos == shown, f"{n_pos}/{shown} have a 3D position")
     chk(n_emb == shown, f"{n_emb}/{shown} have an embedding")
     chk(n_frame > 0, f"{n_frame}/{shown} have a frame image")
     chk(len(emb_dims) <= 1, f"embedding dim(s): {', '.join(sorted(emb_dims)) or '—'}")
-    chk(len(emb_models) <= 1, f"embedding model(s): {', '.join(sorted(emb_models)) or '—'}")
+    chk(
+        len(emb_models) <= 1,
+        f"embedding model(s): {', '.join(sorted(emb_models)) or '—'}",
+    )
 
     def card(title: str, inner: str) -> str:
         return f"<div class='card statcard'><h3 class='stat-h'>{e(title)}</h3>{inner}</div>"
 
-    note = (f"<div class='warn'>Computed over the first {shown:,} of {total:,} "
-            f"records.</div>" if total > shown else "")
-    grid = ("<div class='statgrid'>"
-            + card("Records by class", _bars(classes, hue_by_label=True))
-            + card("Confidence", _histogram(confs, lo=0.0, hi=1.0))
-            + card("Sightings", _histogram(sights))
-            + card("Consistency", f"<ul class='checks'>{''.join(checks)}</ul>")
-            + "</div>")
-    head = (f"<div class='page-head'><h1>{e(coll)} "
-            f"<span class='count'>· stats · {total:,} records</span></h1></div>")
+    note = (
+        f"<div class='warn'>Computed over the first {shown:,} of {total:,} "
+        f"records.</div>"
+        if total > shown
+        else ""
+    )
+    grid = (
+        "<div class='statgrid'>"
+        + card("Records by class", _bars(classes, hue_by_label=True))
+        + card("Confidence", _histogram(confs, lo=0.0, hi=1.0))
+        + card("Sightings", _histogram(sights))
+        + card("Consistency", f"<ul class='checks'>{''.join(checks)}</ul>")
+        + "</div>"
+    )
+    head = (
+        f"<div class='page-head'><h1>{e(coll)} "
+        f"<span class='count'>· stats · {total:,} records</span></h1></div>"
+    )
     body = head + _coll_nav(di, coll, "stats") + note + grid
-    return render_page(f"stats · {coll}", _crumb(store, di, coll, "stats") + body,
-                       active=(di, coll))
+    return render_page(
+        f"stats · {coll}", _crumb(store, di, coll, "stats") + body, active=(di, coll)
+    )
 
 
 @app.route("/c/<int:di>/<coll>/changes")
@@ -1674,30 +1886,51 @@ def changes(di: int, coll: str) -> str:
             )
         return "".join(out)
 
-    windows = [(60, "1m"), (300, "5m"), (900, "15m"), (3600, "1h"),
-               (21600, "6h"), (86400, "24h")]
+    windows = [
+        (60, "1m"),
+        (300, "5m"),
+        (900, "15m"),
+        (3600, "1h"),
+        (21600, "6h"),
+        (86400, "24h"),
+    ]
     picker = "".join(
         f"<a class='mctl{' on' if since == s else ''}' href='{_url(base, since=s)}'>{l}</a>"
         for s, l in windows
     )
     if have_first:
-        cols = (f"<div><div class='section-h'>🟢 appeared ({len(appeared)})</div>{feed(appeared)}</div>"
-                f"<div><div class='section-h'>🔄 refreshed ({len(refreshed)})</div>{feed(refreshed)}</div>"
-                f"<div><div class='section-h'>⚪ disappeared ({len(gone)})</div>{feed(gone)}</div>")
+        cols = (
+            f"<div><div class='section-h'>🟢 appeared ({len(appeared)})</div>{feed(appeared)}</div>"
+            f"<div><div class='section-h'>🔄 refreshed ({len(refreshed)})</div>{feed(refreshed)}</div>"
+            f"<div><div class='section-h'>⚪ disappeared ({len(gone)})</div>{feed(gone)}</div>"
+        )
         hint = ""
     else:
-        cols = (f"<div><div class='section-h'>🟢 recently seen ({len(refreshed)})</div>{feed(refreshed)}</div>"
-                f"<div><div class='section-h'>⚪ stale ({len(gone)})</div>{feed(gone)}</div>")
-        hint = ("<div class='muted small' style='margin-bottom:8px'>This collection "
-                "has no <code>first_seen_ts</code>, so appeared/refreshed can't be "
-                "split — showing recently-seen vs stale.</div>")
-    head = (f"<div class='page-head'><h1>{e(coll)} "
-            f"<span class='count'>· changes</span></h1></div>")
-    body = (head + _coll_nav(di, coll, "changes")
-            + f"<div class='map-ctl'><span class='muted'>window:</span>{picker}</div>"
-            + hint + f"<div class='changes-grid'>{cols}</div>")
-    return render_page(f"changes · {coll}", _crumb(store, di, coll, "changes") + body,
-                       active=(di, coll))
+        cols = (
+            f"<div><div class='section-h'>🟢 recently seen ({len(refreshed)})</div>{feed(refreshed)}</div>"
+            f"<div><div class='section-h'>⚪ stale ({len(gone)})</div>{feed(gone)}</div>"
+        )
+        hint = (
+            "<div class='muted small' style='margin-bottom:8px'>This collection "
+            "has no <code>first_seen_ts</code>, so appeared/refreshed can't be "
+            "split — showing recently-seen vs stale.</div>"
+        )
+    head = (
+        f"<div class='page-head'><h1>{e(coll)} "
+        f"<span class='count'>· changes</span></h1></div>"
+    )
+    body = (
+        head
+        + _coll_nav(di, coll, "changes")
+        + f"<div class='map-ctl'><span class='muted'>window:</span>{picker}</div>"
+        + hint
+        + f"<div class='changes-grid'>{cols}</div>"
+    )
+    return render_page(
+        f"changes · {coll}",
+        _crumb(store, di, coll, "changes") + body,
+        active=(di, coll),
+    )
 
 
 @app.route("/frame")
@@ -1743,11 +1976,16 @@ def _sparkline(vals: list[float], width: float = 480.0, height: float = 60.0) ->
         y = height - (v - lo) / rng * height
         pts.append(f"{x:.1f},{y:.1f}")
     mid = height - (0 - lo) / rng * height if lo <= 0 <= hi else None
-    midline = (f"<line class='mid' x1='0' y1='{mid:.1f}' x2='{width:.0f}' y2='{mid:.1f}'/>"
-               if mid is not None else "")
-    return (f"<svg class='spark' viewBox='0 0 {width:.0f} {height:.0f}' "
-            f"preserveAspectRatio='none'>{midline}"
-            f"<path d='M{' L'.join(pts)}'/></svg>")
+    midline = (
+        f"<line class='mid' x1='0' y1='{mid:.1f}' x2='{width:.0f}' y2='{mid:.1f}'/>"
+        if mid is not None
+        else ""
+    )
+    return (
+        f"<svg class='spark' viewBox='0 0 {width:.0f} {height:.0f}' "
+        f"preserveAspectRatio='none'>{midline}"
+        f"<path d='M{' L'.join(pts)}'/></svg>"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1765,7 +2003,7 @@ def main() -> None:
     ap.add_argument(
         "--port", type=int, default=int(os.getenv("CHROMA_VIEWER_PORT", "8500"))
     )
-    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--host", default="0.0.0.0")
     args = ap.parse_args()
 
     dirs = [d.strip() for d in args.dirs.split(",") if d.strip()]
