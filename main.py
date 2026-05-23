@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import sys
 
@@ -185,6 +186,18 @@ def run_ready_stage(walkieAI, walkie, db, model) -> None:
 
 def main() -> None:
     load_dotenv()
+    # Keep third-party libs quiet, but surface perception.* INFO logs — including
+    # the `scene.dedup action=INSERT/UPDATE ... dist=.. sim=.. reason=..` lines
+    # that explain why a detection merged vs created a new record. Tune the
+    # perception verbosity with WALKIE_LOG_LEVEL (default INFO).
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    logging.getLogger("perception").setLevel(
+        os.getenv("WALKIE_LOG_LEVEL", "INFO").upper()
+    )
     robot = get_robot()
     walkieAI = WalkieAIClient(
         base_url=os.getenv("WALKIE_AI_BASE_URL", "http://localhost:5000"),
