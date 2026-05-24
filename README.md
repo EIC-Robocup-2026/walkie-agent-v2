@@ -21,27 +21,27 @@ This repo orchestrates a LangChain/LangGraph **multi-agent system** over a real 
 
 ---
 
-## TL;DR — the commands you'll actually run
+## TL;DR — the three commands you'll actually run
 
 ```bash
 uv sync                                  # one-time: install deps (incl. walkie-sdk)
 cp .env.example .env                      # one-time: then set OPENROUTER_API_KEY + WALKIE_AI_BASE_URL
 ```
 
-Day to day it's three commands (often three terminals): **collect → inspect → command.**
+Then it's three things, usually in their own terminals:
 
 ```bash
-# 1. Build/refresh the scene catalogue: wipes it, then drive the robot to fill it.
+# 1. Run the robot + agent (press Enter once to skip the legacy explore prompt).
+uv run python main.py                        # add DISABLE_LISTENING=1 to type instead of speaking
+
+# 2. Collect the scene: wipe the catalogue, then drive the robot to fill it.
 uv run python -m tools.scene_explore -y      # press Enter when you're done driving
 
-# 2. Inspect what got stored — read-only web UI at http://localhost:8500
-uv run python -m tools.chroma_viewer
-
-# 3. Command the robot (press Enter once to skip the legacy explore prompt).
-DISABLE_LISTENING=1 uv run python main.py    # type instructions; drop the prefix to use the mic
+# 3. Open the DB viewer so anyone on the LAN can browse it.
+uv run python -m tools.chroma_viewer         # then open http://<ip-of-this-box>:8500
 ```
 
-Steps 1–2 need **`walkie-ai-server`** (with its `/image-embed` route) up at `WALKIE_AI_BASE_URL`. Each command is explained in full below.
+The viewer binds `0.0.0.0`, so teammates just open `http://<ip-of-the-box-running-it>:8500` in their own browser — run it on the box that holds `chroma_db_scene/`. `main.py` and `scene_explore` need **`walkie-ai-server`** up at `WALKIE_AI_BASE_URL` (collection also uses its `/image-embed` route); the viewer is standalone read-only and only calls the server for *semantic* search — plain browsing works without it. Each command is explained in full below.
 
 ---
 
@@ -208,6 +208,8 @@ A **read-only** web UI to browse everything the robot has stored — the explore
 uv run python -m tools.chroma_viewer            # http://localhost:8500
 uv run python -m tools.chroma_viewer --dirs chroma_db,chroma_db_scene --port 8500
 ```
+
+**Sharing it on the LAN:** the viewer binds `0.0.0.0` by default, so once it's running, anyone on the same network opens `http://<ip-of-the-box-running-it>:8500` — no flags needed. Run it on the machine that holds the Chroma dirs (the one running `main.py` / `scene_explore`), since it reads those files locally. To pin a different port use `--port` (or `CHROMA_VIEWER_PORT`).
 
 It enumerates every collection in each directory and renders rows from whatever metadata they carry (so it works for any collection, not just the ones above). The UI gives you:
 
