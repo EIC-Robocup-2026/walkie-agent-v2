@@ -231,17 +231,18 @@ def run_ready_stage(walkieAI, walkie, db, model) -> None:
 
 def main() -> None:
     load_dotenv()
-    # Keep third-party libs quiet, but surface perception.* INFO logs — including
-    # the `scene.dedup action=INSERT/UPDATE ... dist=.. sim=.. reason=..` lines
-    # that explain why a detection merged vs created a new record. Tune the
-    # perception verbosity with WALKIE_LOG_LEVEL (default INFO).
+    # Keep third-party libs quiet. Perception emits INFO logs — per-tick summaries
+    # plus the `scene.dedup action=INSERT/UPDATE ...` lines — but default them to
+    # WARNING here so they don't bury the prompt while you're commanding the robot.
+    # Set WALKIE_LOG_LEVEL=INFO to watch them. (tools/scene_explore.py defaults to
+    # INFO instead, since there the whole point is to watch collection happen.)
     logging.basicConfig(
         level=logging.WARNING,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
     )
     logging.getLogger("perception").setLevel(
-        os.getenv("WALKIE_LOG_LEVEL", "INFO").upper()
+        os.getenv("WALKIE_LOG_LEVEL", "WARNING").upper()
     )
     robot = get_robot()
     walkieAI = WalkieAIClient(
