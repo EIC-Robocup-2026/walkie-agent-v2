@@ -122,6 +122,9 @@ class TickReport:
     n_updates: int
     n_skipped: int
     """Detections we received but discarded (e.g. 3D lift failed)."""
+    n_pruned: int = 0
+    """Records evicted by the periodic prune on this tick (0 on most ticks —
+    pruning runs on its own cadence, not every tick)."""
     latency_ms: dict[str, float] = field(default_factory=dict)
     """Per-stage wall time in milliseconds: ``capture``, ``detect``,
     ``lift``, ``caption``, ``embed``, ``store``."""

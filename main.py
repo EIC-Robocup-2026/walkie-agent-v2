@@ -65,6 +65,31 @@ def _flag(name: str, default: str = "0") -> bool:
     return os.getenv(name, default).lower() in ("1", "true", "yes")
 
 
+_DISABLED = ("", "0", "off", "none", "false", "no")
+
+
+def _opt_float(name: str, default: str = "") -> float | None:
+    """Parse an env float, treating empty/0/off/none as 'disabled' (None)."""
+    raw = os.getenv(name, default).strip()
+    if raw.lower() in _DISABLED:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _opt_int(name: str, default: str = "") -> int | None:
+    """Parse an env int, treating empty/0/off/none as 'disabled' (None)."""
+    raw = os.getenv(name, default).strip()
+    if raw.lower() in _DISABLED:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 def build_scene_store(walkieAI):
     """Construct the CLIP embedder + SceneStore, probing walkie-ai-server first.
 
@@ -91,6 +116,10 @@ def build_scene_store(walkieAI):
         persist_dir=os.getenv("SCENE_CHROMA_DIR", "chroma_db_scene"),
         embedder=embedder,
         frames_dir=os.getenv("SCENE_FRAMES_DIR", "frames"),
+        # Refresh the archived thumbnail on every re-sighting so the viewer
+        # shows the latest frame, not the first-ever one. Set to 0 to keep the
+        # original insert frame for an entry's whole life.
+        refresh_frame_on_update=_flag("SCENE_FRAME_REFRESH_ON_UPDATE", "1"),
     )
     print(
         f"[scene] CLIP scene memory ON (dim={dim}, {store.count} existing record(s))"
@@ -140,6 +169,18 @@ def run_ready_stage(walkieAI, walkie, db, model) -> None:
         pos_source = os.getenv("SCENE_POSITION_SOURCE", "lift").lower()
         scene_lifter = RobotPoseLifter(walkie.status) if pos_source == "robot" else None
         print(f"[scene] position source: {pos_source}")
+        # Eviction: without this, removed objects linger in the scene store
+        # forever. TTL ages out objects not re-seen for SCENE_PRUNE_TTL_SEC;
+        # the radius gates the sweep to the robot's vicinity so objects in
+        # rooms it hasn't revisited aren't wrongly deleted while it roams.
+        prune_ttl = _opt_float("SCENE_PRUNE_TTL_SEC", "60")
+        prune_radius = _opt_float("SCENE_PRUNE_RADIUS_M", "2.5")
+        prune_max = _opt_int("SCENE_PRUNE_MAX_RECORDS", "")
+        if prune_ttl is not None or prune_max is not None:
+            print(
+                f"[scene] prune: ttl={prune_ttl}s radius={prune_radius}m "
+                f"max_records={prune_max}"
+            )
         scene_service = ScenePerceptionService(
             walkieAI,
             walkie,
@@ -149,6 +190,10 @@ def run_ready_stage(walkieAI, walkie, db, model) -> None:
             interval=float(os.getenv("SCENE_PERCEPTION_INTERVAL_SEC", "2.0")),
             min_confidence=float(os.getenv("SCENE_MIN_CONF", "0.0")),
             caption_per_object=_flag("SCENE_CAPTION_PER_OBJECT", "0"),
+            prune_ttl_sec=prune_ttl,
+            prune_interval_sec=float(os.getenv("SCENE_PRUNE_INTERVAL_SEC", "10")),
+            prune_radius_m=prune_radius,
+            prune_max_records=prune_max,
         )
         scene_service.start()
 

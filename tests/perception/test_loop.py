@@ -517,3 +517,68 @@ def test_loop_long_patrol_db_size_matches_unique_objects(fake_world):
             f"{entry.class_name} sightings={entry.sightings}, "
             f"expected ~{expected}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Eviction (periodic prune wired into the loop)
+# ---------------------------------------------------------------------------
+
+
+def test_loop_prunes_object_after_it_is_removed(fake_world):
+    """An object seen then removed ages out once TTL elapses, near the robot."""
+    # Chair visible for the first 3 ticks, then gone from view.
+    detector = FakeDetector(
+        {i: [FakeDetectedObject("chair", 56, 0.9, (10, 10, 60, 60))] for i in range(3)}
+    )
+    lifter = FakePositionLifter(default=[1.0, 1.0, 0.0])
+
+    async def factory(on_tick):
+        return await run_scene_perception(
+            camera=fake_world["camera"],
+            detector=detector,
+            captioner=fake_world["captioner"],
+            embedder=fake_world["embedder"],
+            lifter=lifter,
+            store=fake_world["store"],
+            interval_sec=0.01,
+            archive_source_frame=False,
+            prune_ttl_sec=0.05,
+            prune_interval_sec=0.01,
+            prune_radius_m=1.0,
+            pose_provider=lambda: (1.0, 1.0, 0.0),  # robot stays near the object
+            on_tick=on_tick,
+        )
+
+    reports = asyncio.run(_run_for_n_ticks(factory, n=25, interval=0.01))[0]
+    assert fake_world["store"].count == 0
+    assert sum(r.n_pruned for r in reports) >= 1
+
+
+def test_loop_does_not_prune_object_robot_has_left(fake_world):
+    """Roaming safety: a stale object far from the robot is NOT evicted."""
+    detector = FakeDetector(
+        {i: [FakeDetectedObject("chair", 56, 0.9, (10, 10, 60, 60))] for i in range(3)}
+    )
+    lifter = FakePositionLifter(default=[1.0, 1.0, 0.0])
+
+    async def factory(on_tick):
+        return await run_scene_perception(
+            camera=fake_world["camera"],
+            detector=detector,
+            captioner=fake_world["captioner"],
+            embedder=fake_world["embedder"],
+            lifter=lifter,
+            store=fake_world["store"],
+            interval_sec=0.01,
+            archive_source_frame=False,
+            prune_ttl_sec=0.05,
+            prune_interval_sec=0.01,
+            prune_radius_m=1.0,
+            pose_provider=lambda: (100.0, 100.0, 0.0),  # robot wandered far away
+            on_tick=on_tick,
+        )
+
+    reports = asyncio.run(_run_for_n_ticks(factory, n=25, interval=0.01))[0]
+    # TTL elapsed, but the object is outside the prune radius → it survives.
+    assert fake_world["store"].count == 1
+    assert sum(r.n_pruned for r in reports) == 0

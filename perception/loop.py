@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import replace
 from typing import Awaitable, Callable, Optional
 
 from PIL import Image
@@ -52,6 +53,11 @@ async def run_scene_perception(
     min_confidence: float = 0.0,
     caption_per_object: bool = False,
     archive_source_frame: bool = True,
+    prune_ttl_sec: Optional[float] = None,
+    prune_interval_sec: float = 30.0,
+    prune_radius_m: Optional[float] = None,
+    prune_max_records: Optional[int] = None,
+    pose_provider: Optional[Callable[[], Optional[tuple[float, float, float]]]] = None,
     on_tick: Optional[Callable[[TickReport], None]] = None,
 ) -> None:
     """Run the perception loop until the surrounding task is cancelled.
@@ -60,13 +66,26 @@ async def run_scene_perception(
     keep it cheap. For prometheus/file logging, prefer subscribing to the
     ``perception.loop`` logger; the loop emits one structured INFO line
     per tick on its own.
+
+    Eviction: when ``prune_ttl_sec`` (and/or ``prune_max_records``) is set,
+    every ``prune_interval_sec`` the loop calls :meth:`SceneStore.prune` so
+    objects that have been removed from the world stop lingering in the store.
+    With ``prune_radius_m`` and a ``pose_provider`` the TTL sweep is gated to
+    the robot's current vicinity — out-of-view objects elsewhere are never
+    wrongly evicted (see :meth:`SceneStore.prune`).
     """
     _log.info(
-        "perception loop start interval=%.2fs caption_per_object=%s",
+        "perception loop start interval=%.2fs caption_per_object=%s "
+        "prune_ttl=%s prune_radius=%s prune_every=%.1fs",
         interval_sec,
         caption_per_object,
+        prune_ttl_sec,
+        prune_radius_m,
+        prune_interval_sec,
     )
     tick_idx = 0
+    prune_enabled = prune_ttl_sec is not None or prune_max_records is not None
+    last_prune = time.monotonic()
     try:
         while True:
             tick_start = time.perf_counter()
@@ -95,6 +114,25 @@ async def run_scene_perception(
                     n_skipped=0,
                     error=str(e),
                 )
+
+            if prune_enabled and (time.monotonic() - last_prune) >= prune_interval_sec:
+                try:
+                    n_pruned = await asyncio.to_thread(
+                        _run_prune,
+                        store,
+                        ttl_sec=prune_ttl_sec,
+                        max_records=prune_max_records,
+                        radius_m=prune_radius_m,
+                        pose_provider=pose_provider,
+                    )
+                    if n_pruned:
+                        report = replace(report, n_pruned=n_pruned)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 — pruning must never kill the loop
+                    _log.exception("scene prune failed; continuing loop")
+                finally:
+                    last_prune = time.monotonic()
 
             _emit_log(report)
             if on_tick is not None:
@@ -181,6 +219,35 @@ async def _run_one_tick(
     )
 
 
+def _run_prune(
+    store: SceneStore,
+    *,
+    ttl_sec: Optional[float],
+    max_records: Optional[int],
+    radius_m: Optional[float],
+    pose_provider: Optional[Callable[[], Optional[tuple[float, float, float]]]],
+) -> int:
+    """Resolve the spatial gate, then run one :meth:`SceneStore.prune`.
+
+    When a ``radius_m`` gate is requested but the robot's pose is currently
+    unknown, the TTL sweep is *skipped* this cycle rather than run globally —
+    a global TTL prune would wrongly evict objects the robot saw elsewhere.
+    A ``max_records`` cap still applies (it's position-independent).
+    """
+    within = None
+    ttl = ttl_sec
+    if ttl is not None and radius_m is not None:
+        pose = pose_provider() if pose_provider is not None else None
+        if pose is None:
+            _log.debug("scene.prune: no pose for spatial gate; skipping TTL this cycle")
+            ttl = None
+        else:
+            within = (pose, radius_m)
+    if ttl is None and max_records is None:
+        return 0
+    return store.prune(ttl_sec=ttl, max_records=max_records, within=within)
+
+
 def _emit_log(report: TickReport) -> None:
     if report.error is not None:
         _log.error(
@@ -190,11 +257,12 @@ def _emit_log(report: TickReport) -> None:
         )
         return
     _log.info(
-        "tick ts=%.3f n_det=%d ins=%d upd=%d skip=%d latency_ms=%s",
+        "tick ts=%.3f n_det=%d ins=%d upd=%d skip=%d prune=%d latency_ms=%s",
         report.ts,
         report.n_detections,
         report.n_inserts,
         report.n_updates,
         report.n_skipped,
+        report.n_pruned,
         {k: round(v, 1) for k, v in report.latency_ms.items()},
     )

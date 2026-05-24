@@ -47,6 +47,10 @@ class ScenePerceptionService(threading.Thread):
         min_confidence: float = 0.0,
         caption_per_object: bool = False,
         archive_source_frame: bool = True,
+        prune_ttl_sec: Optional[float] = None,
+        prune_interval_sec: float = 30.0,
+        prune_radius_m: Optional[float] = None,
+        prune_max_records: Optional[int] = None,
     ) -> None:
         super().__init__(daemon=True, name="ScenePerceptionService")
         self.walkieAI = walkieAI
@@ -61,9 +65,29 @@ class ScenePerceptionService(threading.Thread):
         self.min_confidence = min_confidence
         self.caption_per_object = caption_per_object
         self.archive_source_frame = archive_source_frame
+        self.prune_ttl_sec = prune_ttl_sec
+        self.prune_interval_sec = prune_interval_sec
+        self.prune_radius_m = prune_radius_m
+        self.prune_max_records = prune_max_records
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._task: Optional[asyncio.Task] = None
         self._ready = threading.Event()
+
+    def _current_pose(self) -> Optional[tuple[float, float, float]]:
+        """Robot's current planar map pose, for the prune spatial gate.
+
+        Mirrors :class:`perception.lifters.RobotPoseLifter`: only ``x``/``y``
+        are used (odometry is planar). Returns ``None`` when no pose is
+        available yet, which tells the loop to skip the gated TTL sweep this
+        cycle rather than evict objects on stale coordinates.
+        """
+        try:
+            pose = self.walkie.status.get_position()
+        except Exception:  # noqa: BLE001 — telemetry hiccup shouldn't crash prune
+            return None
+        if not pose:
+            return None
+        return (float(pose.get("x", 0.0)), float(pose.get("y", 0.0)), 0.0)
 
     def run(self) -> None:
         loop = asyncio.new_event_loop()
@@ -82,6 +106,11 @@ class ScenePerceptionService(threading.Thread):
                 min_confidence=self.min_confidence,
                 caption_per_object=self.caption_per_object,
                 archive_source_frame=self.archive_source_frame,
+                prune_ttl_sec=self.prune_ttl_sec,
+                prune_interval_sec=self.prune_interval_sec,
+                prune_radius_m=self.prune_radius_m,
+                prune_max_records=self.prune_max_records,
+                pose_provider=self._current_pose,
             )
         )
         # Signal that _loop/_task are set, so a fast stop_and_join can find them.

@@ -76,6 +76,7 @@ class SceneStore:
         persist_dir: str | Path | None = "chroma_db_scene",
         embedder: Optional[Embedder] = None,
         frames_dir: str | Path | None = None,
+        refresh_frame_on_update: bool = True,
     ) -> None:
         if persist_dir is None:
             self._client = chromadb.EphemeralClient(
@@ -93,6 +94,7 @@ class SceneStore:
         )
         self._embedder = embedder
         self._frames_dir = Path(frames_dir) if frames_dir else None
+        self._refresh_frame_on_update = refresh_frame_on_update
         if self._frames_dir:
             self._frames_dir.mkdir(parents=True, exist_ok=True)
 
@@ -135,7 +137,9 @@ class SceneStore:
 
         if decision.action == "update":
             assert decision.target_id is not None
-            self._apply_update(decision.target_id, detection)
+            self._apply_update(
+                decision.target_id, detection, source_frame=source_frame
+            )
             _log.info(
                 "scene.dedup action=UPDATE id=%s class=%s matched_id=%s "
                 "dist=%.3f sim=%.3f reason=%s",
@@ -150,7 +154,7 @@ class SceneStore:
 
         # INSERT
         new_id = self._make_id(detection)
-        frame_ref = self._maybe_archive(detection, source_frame, new_id)
+        frame_ref = self._archive_frame(detection, source_frame, new_id)
         self._collection.add(
             ids=[new_id],
             documents=[self._format_document(detection.class_name, detection.caption)],
@@ -169,7 +173,13 @@ class SceneStore:
         )
         return new_id, decision
 
-    def _apply_update(self, target_id: str, detection: Detection) -> None:
+    def _apply_update(
+        self,
+        target_id: str,
+        detection: Detection,
+        *,
+        source_frame: Optional[Image.Image] = None,
+    ) -> None:
         existing = self._collection.get(
             ids=[target_id], include=["metadatas", "embeddings"]
         )
@@ -212,7 +222,17 @@ class SceneStore:
                 "bbox_last": json.dumps(list(detection.bbox_xyxy)),
             }
         )
-        # Keep frame_ref if a new one wasn't supplied (updates don't archive).
+        # Refresh the archived thumbnail so the viewer shows the latest
+        # sighting rather than the first-ever frame (the recurring "old
+        # picture" complaint). Overwrites in place at the entry's stable
+        # path, so repeated updates never accumulate JPEGs.
+        if self._refresh_frame_on_update and source_frame is not None:
+            old_ref = meta.get("frame_ref") or None
+            new_ref = self._archive_frame(detection, source_frame, target_id)
+            if new_ref:
+                meta["frame_ref"] = new_ref
+                if old_ref and old_ref != new_ref:
+                    self._delete_frame_file(old_ref)
         # Keep embedding unchanged on update (see design doc rationale).
 
         # Pass embeddings through explicitly. If we supply `documents` to
@@ -437,8 +457,19 @@ class SceneStore:
         ttl_sec: Optional[float] = None,
         max_records: Optional[int] = None,
         now: Optional[float] = None,
+        within: Optional[tuple[tuple[float, float, float], float]] = None,
     ) -> int:
-        """Remove stale or excess records. Returns count pruned."""
+        """Remove stale or excess records. Returns count pruned.
+
+        ``ttl_sec`` evicts records whose ``last_seen_ts`` is older than
+        ``now - ttl_sec``. When ``within=(center, radius)`` is supplied the
+        TTL sweep is *spatially gated*: only records within ``radius`` of
+        ``center`` are eligible. That's what lets a roaming robot age out
+        objects it's currently looking at without wrongly deleting objects in
+        rooms it simply hasn't revisited. ``max_records`` is always a global
+        capacity cap (newest ``last_seen_ts`` survive), independent of
+        ``within``.
+        """
         now = now if now is not None else time.time()
         removed: set[str] = set()
         result = self._collection.get(include=["metadatas"])
@@ -446,10 +477,20 @@ class SceneStore:
 
         if ttl_sec is not None:
             cutoff = now - ttl_sec
-            removed.update(
-                cid for cid, meta in rows
-                if float(meta.get("last_seen_ts", 0)) < cutoff
-            )
+            center = within[0] if within is not None else None
+            radius = within[1] if within is not None else None
+            for cid, meta in rows:
+                if float(meta.get("last_seen_ts", 0)) >= cutoff:
+                    continue
+                if center is not None:
+                    pos = (
+                        float(meta.get("x", 0.0)),
+                        float(meta.get("y", 0.0)),
+                        float(meta.get("z", 0.0)),
+                    )
+                    if l2_distance(pos, center) > radius:
+                        continue
+                removed.add(cid)
 
         if max_records is not None:
             surviving = [(cid, meta) for cid, meta in rows if cid not in removed]
@@ -529,27 +570,45 @@ class SceneStore:
             "embedding_dim": dim,
         }
 
-    def _maybe_archive(
+    def _frame_path(self, entry_id: str, class_name: str) -> Path:
+        """Stable per-entry archive path so an update overwrites in place.
+
+        Deriving the filename from the (immutable) entry id means every
+        sighting of the same object writes to the same JPEG — the thumbnail
+        tracks the latest frame without leaving a trail of stale files.
+        """
+        short = entry_id.split(":")[-1] or "frame"
+        safe_class = "".join(
+            c if c.isalnum() else "_" for c in (class_name or "obj")
+        )
+        return self._frames_dir / f"{safe_class}_{short}.jpg"  # type: ignore[union-attr]
+
+    def _archive_frame(
         self,
         detection: Detection,
         source_frame: Optional[Image.Image],
-        new_id: str,
+        entry_id: str,
     ) -> Optional[str]:
         if self._frames_dir is None or source_frame is None:
             return detection.frame_ref
-        # Filename: {ts}_{class}_{id8}.jpg
-        ts_compact = time.strftime(
-            "%Y%m%dT%H%M%SZ", time.gmtime(detection.ts)
-        )
-        short = new_id.split(":")[-1]
-        fname = f"{ts_compact}_{detection.class_name}_{short}.jpg"
-        path = self._frames_dir / fname
+        path = self._frame_path(entry_id, detection.class_name)
         try:
             source_frame.save(path, format="JPEG", quality=85)
             return str(path)
         except OSError as e:
             _log.warning("frame archive failed: %s", e)
             return detection.frame_ref
+
+    def _delete_frame_file(self, ref: str) -> None:
+        """Best-effort removal of a superseded frame we own (under frames_dir)."""
+        if self._frames_dir is None:
+            return
+        try:
+            p = Path(ref)
+            if p.is_file() and p.resolve().parent == self._frames_dir.resolve():
+                p.unlink()
+        except OSError as e:
+            _log.debug("frame cleanup skipped for %s: %s", ref, e)
 
     @staticmethod
     def _row_to_entry(

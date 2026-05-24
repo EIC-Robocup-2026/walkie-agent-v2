@@ -10,11 +10,21 @@ from __future__ import annotations
 
 import math
 from dataclasses import replace
+from io import BytesIO
+from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from perception import Detection, SceneStore
 from perception.mocks import FakeEmbedder, make_tiny_image
+
+
+def _jpeg_bytes(img: Image.Image) -> bytes:
+    """Encode ``img`` exactly as :meth:`SceneStore._archive_frame` does."""
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=85)
+    return buf.getvalue()
 
 
 # Two text queries we pin to specific override vectors so we can predict
@@ -271,3 +281,82 @@ def test_12_upsert_after_prune_is_clean(seeded_store):
     assert decision.action == "insert"
     assert store.count == 4
     assert store.get_by_id(cid).class_name == "bottle"
+
+
+def test_13_prune_ttl_respects_spatial_gate(seeded_store):
+    """TTL prune with ``within`` only evicts stale records inside the radius.
+
+    Same cutoff as test_10 (6 records older than base_ts+200), but a 1.5m
+    gate around the origin spares the one stale record sitting outside it
+    (chair@(2,0,0)) — exactly the roaming case: don't delete objects the
+    robot isn't currently near.
+    """
+    store, base_ts = seeded_store
+    removed = store.prune(
+        ttl_sec=800.0,
+        now=base_ts + 1000,
+        within=((0.0, 0.0, 0.0), 1.5),
+    )
+    assert removed == 5
+    assert store.count == 5
+    # The stale-but-far chair survives.
+    survivors = {(e.class_name, e.position) for e in store.recency_query(since_ts=0.0)}
+    assert ("chair", (2.0, 0.0, 0.0)) in survivors
+
+
+def test_14_update_refreshes_archived_frame(tmp_path, embedder):
+    """A re-sighting overwrites the entry's thumbnail in place (no orphans)."""
+    frames_dir = tmp_path / "frames"
+    store = SceneStore(
+        persist_dir=tmp_path / "chroma",
+        embedder=embedder,
+        frames_dir=frames_dir,
+    )
+    emb = tuple(_unit_vec(16, 0))
+    common = dict(
+        class_name="bottle",
+        class_id=1,
+        confidence=0.9,
+        bbox_xyxy=(0, 0, 50, 50),
+        position=(0.0, 0.0, 0.0),
+        embedding=emb,
+        caption="a bottle",
+    )
+    img1, img2 = make_tiny_image(seed=11), make_tiny_image(seed=22)
+
+    cid, d1 = store.upsert(Detection(**common, ts=1000.0), source_frame=img1)
+    assert d1.action == "insert"
+    ref1 = store.get_by_id(cid).frame_ref
+    assert ref1 and Path(ref1).is_file()
+
+    _, d2 = store.upsert(Detection(**common, ts=2000.0), source_frame=img2)
+    assert d2.action == "update"
+    ref2 = store.get_by_id(cid).frame_ref
+
+    # Stable path (overwrite in place) and the bytes are the new frame's.
+    assert ref2 == ref1
+    assert Path(ref2).read_bytes() == _jpeg_bytes(img2)
+    # No accumulation: exactly one archived frame for the one object.
+    assert len(list(frames_dir.glob("*.jpg"))) == 1
+
+
+def test_15_frame_refresh_can_be_disabled(tmp_path, embedder):
+    """With ``refresh_frame_on_update=False`` the original frame is kept."""
+    store = SceneStore(
+        persist_dir=tmp_path / "chroma",
+        embedder=embedder,
+        frames_dir=tmp_path / "frames",
+        refresh_frame_on_update=False,
+    )
+    emb = tuple(_unit_vec(16, 0))
+    common = dict(
+        class_name="bottle", class_id=1, confidence=0.9,
+        bbox_xyxy=(0, 0, 50, 50), position=(0.0, 0.0, 0.0),
+        embedding=emb, caption="a bottle",
+    )
+    img1, img2 = make_tiny_image(seed=11), make_tiny_image(seed=22)
+    cid, _ = store.upsert(Detection(**common, ts=1000.0), source_frame=img1)
+    ref1 = store.get_by_id(cid).frame_ref
+    store.upsert(Detection(**common, ts=2000.0), source_frame=img2)
+    assert Path(store.get_by_id(cid).frame_ref).read_bytes() == _jpeg_bytes(img1)
+    assert ref1 == store.get_by_id(cid).frame_ref
