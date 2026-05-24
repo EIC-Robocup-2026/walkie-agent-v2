@@ -21,11 +21,35 @@ This repo orchestrates a LangChain/LangGraph **multi-agent system** over a real 
 
 ---
 
+## TL;DR — the commands you'll actually run
+
+```bash
+uv sync                                  # one-time: install deps (incl. walkie-sdk)
+cp .env.example .env                      # one-time: then set OPENROUTER_API_KEY + WALKIE_AI_BASE_URL
+```
+
+Day to day it's three commands (often three terminals): **collect → inspect → command.**
+
+```bash
+# 1. Build/refresh the scene catalogue: wipes it, then drive the robot to fill it.
+uv run python -m tools.scene_explore -y      # press Enter when you're done driving
+
+# 2. Inspect what got stored — read-only web UI at http://localhost:8500
+uv run python -m tools.chroma_viewer
+
+# 3. Command the robot (press Enter once to skip the legacy explore prompt).
+DISABLE_LISTENING=1 uv run python main.py    # type instructions; drop the prefix to use the mic
+```
+
+Steps 1–2 need **`walkie-ai-server`** (with its `/image-embed` route) up at `WALKIE_AI_BASE_URL`. Each command is explained in full below.
+
+---
+
 ## How it works (30-second tour)
 
 `main.py` runs the robot through two stages tracked on a process-wide `RobotContext`:
 
-1. **`explore`** — drives around detecting objects, lifts them to 3D map coordinates, and stores confident multi-sighting objects into a vector DB (ChromaDB at `CHROMA_DIR`). *(Currently commented out in `main.py` — re-enable to rebuild the world catalogue.)*
+1. **`explore`** — drives around detecting objects, lifts them to 3D map coordinates, and stores confident multi-sighting objects into the legacy vector DB (ChromaDB at `CHROMA_DIR`). `main.py` runs this **first** — press Enter to finish it. To build the newer CLIP scene memory instead, use [`tools/scene_explore`](#building--rebuilding-it-toolsscene_explore).
 2. **`ready`** — the default. A background service writes a perception snapshot to `perception.json`; the agent listens to the mic (STT), runs the **Walkie agent** on each utterance, and speaks replies back (TTS).
 
 The agent stack is three agents built from one factory:
@@ -117,17 +141,23 @@ You'll get an `Enter your instruction:` prompt — type and press Enter to drive
 
 ---
 
-## Re-running the explore stage (rebuild object memory)
+## The legacy explore stage (object memory in `chroma_db`)
 
-The `ready` stage's `find_object_from_memory` is only useful once the vector DB is populated. To (re)build it, edit `main.py` and **uncomment the Stage 1 block**:
+`main.py` currently runs the legacy explore stage **first** — driving the detection loop into the older `WalkieVectorDB` (`chroma_db/`). On startup you'll see:
+
+```
+[Explore] Drive the robot around. Press Enter when done.
+```
+
+Drive around to populate it, or just **press Enter** to skip straight to the ready (commanding) stage. To stop running it at all, comment out the Stage 1 block in `main.py`:
 
 ```python
 # ── Stage 1: Explore ──
-ctx.stage = "explore"
-run_explore_stage(walkieAI, walkie, db)
+# ctx.stage = "explore"
+# run_explore_stage(walkieAI, walkie, db)
 ```
 
-Then `uv run python main.py`, drive the robot around, and **press Enter** when done. It prints how many confident objects were stored. Re-comment the block afterward to go back to the ready stage.
+> For semantic "where is the X?" lookups, prefer the **CLIP scene memory** below (built with `tools/scene_explore`) — it's what `find_object_from_memory` uses whenever `/image-embed` is available.
 
 ---
 
@@ -149,7 +179,24 @@ Once it's populated, `find_object_from_memory` answers "where is the X?" via CLI
 
 To turn the CLIP route on, the server team uncomments `app.register_blueprint(image_embed.bp)` in `walkie-ai-server` and redeploys. No changes are needed on this side.
 
-Tuning knobs (all optional, see `.env.example`): `SCENE_PERCEPTION_ENABLED`, `SCENE_CHROMA_DIR`, `SCENE_FRAMES_DIR`, `SCENE_PERCEPTION_INTERVAL_SEC`, `SCENE_MIN_CONF`, `SCENE_CAPTION_PER_OBJECT`.
+Tuning knobs (all optional, see `.env.example`): `SCENE_PERCEPTION_ENABLED`, `SCENE_CHROMA_DIR`, `SCENE_FRAMES_DIR`, `SCENE_PERCEPTION_INTERVAL_SEC`, `SCENE_MIN_CONF`, `SCENE_CAPTION_PER_OBJECT`, `SCENE_FRAME_REFRESH_ON_UPDATE`.
+
+### Building / rebuilding it: `tools/scene_explore`
+
+The ready stage fills the scene memory passively while you talk to the robot. To build it **deliberately** — wipe it clean and drive around just to collect — use the standalone helper:
+
+```bash
+uv run python -m tools.scene_explore         # asks before wiping, then collects
+uv run python -m tools.scene_explore -y      # skip the wipe confirmation (fast iteration)
+uv run python -m tools.scene_explore --keep   # don't wipe; add to what's already there
+uv run python -m tools.scene_explore --reset-only  # just wipe and exit
+```
+
+It deletes `SCENE_CHROMA_DIR` + `SCENE_FRAMES_DIR`, runs the same detect → lift → embed → store loop (no agent, no mic), and stops when you **press Enter**. Pruning stays off here — an explore run keeps everything it sees. Needs `/image-embed` up, same as the ready-stage loop. Its logs are at INFO so you can watch records land (`main.py` keeps them quiet — see [Logs / verbosity](#logs--verbosity)).
+
+### Eviction (keeping it fresh)
+
+In the **ready** stage the loop periodically prunes objects it no longer sees, so things you physically move away stop lingering in the store (and the viewer). It's spatially gated to the robot's current vicinity, so objects in rooms it hasn't revisited aren't wrongly deleted while it roams; thumbnails also refresh on each re-sighting. Tune with `SCENE_PRUNE_TTL_SEC`, `SCENE_PRUNE_RADIUS_M`, `SCENE_PRUNE_INTERVAL_SEC`, `SCENE_PRUNE_MAX_RECORDS` (see `.env.example`).
 
 ---
 
@@ -217,14 +264,29 @@ interfaces/
   walkie_interface.py    Composes hardware sub-clients (nav/arm/status/tools + camera/mic/speaker).
   devices/               Local camera, microphone, speaker wrappers.
 services/
-  explore.py             Explore-stage background service.
+  explore.py             Explore-stage background service (legacy object memory).
   perception.py          Ready-stage snapshot writer.
-perception/              Scene store, dedup, async loop, embedders, pipeline.
+  scene_perception.py    Ready-stage CLIP scene-perception loop (thread adapter).
+perception/              Scene store, dedup, prune, async loop, embedders, pipeline.
 db/walkie_db.py          WalkieVectorDB (ChromaDB wrapper) for object memory.
 tools/chroma_viewer.py   Read-only web UI to inspect the ChromaDB stores.
+tools/scene_explore.py   Reset + collect into the CLIP scene store (no agent/mic).
 docs/                    Scene perception design docs (EN + TH).
 tests/                   pytest suite (perception).
 ```
+
+---
+
+## Logs / verbosity
+
+Perception emits a line per tick plus a `scene.dedup` line per detection — handy when watching collection, but they bury your prompt when commanding the robot. So the default differs per entrypoint:
+
+| Command | Perception logs | Why |
+|---|---|---|
+| `main.py` | **WARNING** (quiet) | you're typing or speaking commands |
+| `tools.scene_explore` | **INFO** (verbose) | you're watching it collect |
+
+Override with `WALKIE_LOG_LEVEL` — uncomment it in `.env` to force one level everywhere, or set it inline for a single run: `WALKIE_LOG_LEVEL=INFO uv run python main.py`.
 
 ---
 
@@ -233,10 +295,11 @@ tests/                   pytest suite (perception).
 | Symptom | Likely cause / fix |
 |---|---|
 | `WARNING: OPENROUTER_API_KEY not set` and agent errors | Fill `OPENROUTER_API_KEY` in `.env`. |
+| Perception logs flooding the prompt | Expected at INFO. `main.py` defaults to WARNING; if it's noisy, comment out / unset `WALKIE_LOG_LEVEL` in `.env` (see [Logs / verbosity](#logs--verbosity)). |
 | Connection errors to vision/STT/TTS | `walkie-ai-server` not running or wrong `WALKIE_AI_BASE_URL`. |
 | `PortAudio`/`pyaudio` build or device errors | Install PortAudio (`sudo apt install portaudio19-dev`), or run with `DISABLE_LISTENING=1`. |
 | Robot/Zenoh connection fails | Check the robot is up and `ROBOT_IP`/`ZENOH_PORT` in `main.py` are correct. |
-| `find_object_from_memory` returns nothing | The vector DB is empty — run the explore stage first. |
+| `find_object_from_memory` returns nothing | The DB is empty — build it first with `uv run python -m tools.scene_explore` (CLIP memory) or the legacy explore stage. |
 | Walkie "responds" but says nothing aloud | Expected unless the agent calls `speak` — the no-plain-text contract. |
 
 ---
