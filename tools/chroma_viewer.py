@@ -141,12 +141,22 @@ class Store:
     when the robot is stopped).
     """
 
-    def __init__(self, directory: str, *, snapshot: bool = True) -> None:
+    def __init__(
+        self,
+        directory: str,
+        *,
+        snapshot: bool = True,
+        client: "Optional[chromadb.api.ClientAPI]" = None,
+    ) -> None:
         self.directory = directory
         self.path = Path(directory).resolve()  # original, shown in the UI
-        self.snapshot = snapshot
+        # An injected client is the robot's own live one (in-process). Never
+        # snapshot it — that's the whole point: read the live index directly.
+        self.snapshot = snapshot and client is None
         self.error: Optional[str] = None
-        self._client: Optional[chromadb.api.ClientAPI] = None
+        self._client: Optional[chromadb.api.ClientAPI] = client
+        if client is not None:
+            return
         if not self.path.exists():
             self.error = "directory does not exist"
             return
@@ -198,6 +208,23 @@ FRAME_ROOTS: list[Path] = []
 def _build_stores(dirs: list[str], *, snapshot: bool = True) -> None:
     STORES.clear()
     STORES.extend(Store(d, snapshot=snapshot) for d in dirs)
+
+
+def build_stores_inprocess(specs: list[tuple[str, Any]]) -> None:
+    """Populate STORES from chromadb clients the host process already has open.
+
+    ``specs`` is a list of ``(directory_label, client)``. Used by ``main.py`` to
+    run this viewer in the robot's own process: reusing the live clients (one
+    HNSW index per dir) means browsing is fully live and can't corrupt the store
+    the way a second process opening the same dir would. Pass ``client=None`` for
+    a dir to fall back to a read-only snapshot copy of it.
+    """
+    STORES.clear()
+    for directory, client in specs:
+        STORES.append(
+            Store(directory, client=client) if client is not None
+            else Store(directory, snapshot=True)
+        )
 
 
 def _build_frame_roots(dirs: list[str], frames_dir: str) -> None:

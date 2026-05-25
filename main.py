@@ -26,6 +26,8 @@ from services import ExploreService, PerceptionService, ScenePerceptionService
 ZENOH_PORT = 7447
 ROBOT_IP = "127.0.0.1"
 
+_log = logging.getLogger("main")
+
 
 def get_robot() -> WalkieRobot:
     # ROS services go over rosbridge, camera over zenoh (the SDK's own default
@@ -139,6 +141,56 @@ def build_scene_store(walkieAI):
     return store, embedder
 
 
+def maybe_start_viewer(stores: list[tuple[str, object]]):
+    """Start the read-only Chroma web viewer in a daemon thread, in-process.
+
+    Running it inside *this* process — and reusing the robot's own chromadb
+    clients (``stores`` is ``(directory, client)`` pairs) — is what makes it both
+    live and safe. A second OS process opening the same dir would spin up its own
+    HNSW index and corrupt the store under the robot's concurrent writes (that's
+    why the standalone ``tools.chroma_viewer`` defaults to a frozen snapshot
+    copy). Sharing the one live client means there's a single index, so browsing
+    reflects writes instantly and can't desync.
+
+    Returns the started thread, or ``None`` when disabled / unstartable. Call it
+    after the stores are built so their clients exist.
+    """
+    if not _flag("CHROMA_VIEWER_AUTOSTART", "1"):
+        return None
+    try:
+        import threading
+
+        from tools import chroma_viewer as cv
+    except Exception as e:  # noqa: BLE001 — never let the viewer block the robot
+        print(f"[viewer] not started ({e!r})", file=sys.stderr)
+        return None
+
+    host = os.getenv("CHROMA_VIEWER_HOST", "0.0.0.0")
+    port = int(os.getenv("CHROMA_VIEWER_PORT", "8500"))
+    cv.build_stores_inprocess(stores)
+    cv._build_frame_roots(
+        [d for d, _ in stores], os.getenv("SCENE_FRAMES_DIR", "frames")
+    )
+    # Werkzeug logs a line per request at INFO; keep the command prompt clean.
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
+    def _serve() -> None:
+        try:
+            cv.app.run(
+                host=host, port=port, debug=False, use_reloader=False, threaded=True
+            )
+        except Exception:  # noqa: BLE001 — a viewer crash must not take down the robot
+            _log.exception("chroma viewer thread crashed")
+
+    t = threading.Thread(target=_serve, daemon=True, name="ChromaViewer")
+    t.start()
+    print(
+        f"[viewer] live DB viewer on http://{host}:{port} "
+        f"(in-process — safe to browse while the robot writes)"
+    )
+    return t
+
+
 def run_explore_stage(walkieAI, walkie, db) -> None:
     explore = ExploreService(
         walkieAI,
@@ -213,6 +265,17 @@ def run_ready_stage(walkieAI, walkie, db, model) -> None:
             prune_max_records=prune_max,
         )
         scene_service.start()
+
+    # Bring up the live DB viewer in-process (see maybe_start_viewer), reusing the
+    # clients these stores already hold so it reads the live indexes safely.
+    viewer_stores: list[tuple[str, object]] = [
+        (os.getenv("CHROMA_DIR", "chroma_db"), db.client)
+    ]
+    if scene_store is not None:
+        viewer_stores.append(
+            (os.getenv("SCENE_CHROMA_DIR", "chroma_db_scene"), scene_store.client)
+        )
+    maybe_start_viewer(viewer_stores)
 
     actuator = create_actuator_agent(model, walkieAI, walkie)
     vision = create_vision_agent(

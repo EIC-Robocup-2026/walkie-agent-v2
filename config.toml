@@ -109,6 +109,12 @@ SCENE_PRUNE_MAX_RECORDS = ""
 
 [viewer]
 # Read-only ChromaDB web UI (tools.chroma_viewer).
+# Auto-start the viewer in-process alongside `python main.py` (1 = on). Because
+# it runs in the SAME process as the robot, both share one ChromaDB backend, so
+# browsing is fully LIVE and safe — no snapshot, no DB corruption. Set 0 to run
+# the robot without it (then start it separately with `python -m tools.chroma_viewer`).
+CHROMA_VIEWER_AUTOSTART = "1"
+CHROMA_VIEWER_HOST = "0.0.0.0"
 CHROMA_VIEWER_DIRS = "chroma_db,chroma_db_scene"
 CHROMA_VIEWER_PORT = "8500"
 # Initial browser auto-refresh (s); 0 = off. Header dropdown overrides per-browser.

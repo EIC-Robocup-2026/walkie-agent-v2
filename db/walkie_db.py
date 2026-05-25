@@ -47,6 +47,11 @@ class WalkieVectorDB:
         if self._frames_dir:
             self._frames_dir.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def client(self):
+        """The underlying chromadb client (for in-process readers like the viewer)."""
+        return self._client
+
     def add_object(
         self,
         class_name: str,

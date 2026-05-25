@@ -118,6 +118,16 @@ class SceneStore:
         if self._frames_dir:
             self._frames_dir.mkdir(parents=True, exist_ok=True)
 
+    @property
+    def client(self):
+        """The underlying chromadb client (for in-process readers like the viewer).
+
+        Reusing this client rather than opening a second ``PersistentClient`` on
+        the same dir is what lets the viewer read the *live* store safely: one
+        client = one HNSW index, so no cross-process desync (see CLAUDE.md).
+        """
+        return self._client
+
     # ------------------------------------------------------------------ writes
 
     def upsert(

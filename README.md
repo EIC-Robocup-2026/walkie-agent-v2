@@ -30,20 +30,18 @@ cp .env.example .env                      # one-time: then set OPENROUTER_API_KE
 
 `.env` holds only secrets/endpoints; all tuning lives in **`config.toml`** (no edit needed to start). See [Configure your environment](#2-configure-your-environment).
 
-Then it's three things, usually in their own terminals:
+Then, usually two things:
 
 ```bash
-# 1. Run the robot + agent (press Enter once to skip the legacy explore prompt).
+# 1. Run the robot + agent. This also auto-starts the live DB viewer at :8500.
 uv run python main.py                        # add DISABLE_LISTENING=1 to type instead of speaking
+#    → open http://<ip-of-this-box>:8500 to watch the database fill in real time
 
 # 2. Collect the scene: wipe the catalogue, then drive the robot to fill it.
 uv run python -m tools.scene_explore -y      # press Enter when you're done driving
-
-# 3. Open the DB viewer so anyone on the LAN can browse it.
-uv run python -m tools.chroma_viewer         # then open http://<ip-of-this-box>:8500
 ```
 
-The viewer binds `0.0.0.0`, so teammates just open `http://<ip-of-the-box-running-it>:8500` in their own browser — run it on the box that holds `chroma_db_scene/`. `main.py` and `scene_explore` need **`walkie-ai-server`** up at `WALKIE_AI_BASE_URL` (collection also uses its `/image-embed` route); the viewer is standalone read-only and only calls the server for *semantic* search — plain browsing works without it. Each command is explained in full below.
+`main.py` now brings the **DB viewer up in its own process**, so you don't run a second script — open `http://<ip-of-this-box>:8500` (it binds `0.0.0.0`, so teammates on the LAN can open it too). Because it shares the robot's live ChromaDB client, browsing is fully live *and* can't corrupt the store. Disable it with `CHROMA_VIEWER_AUTOSTART=0`; run it standalone (robot stopped) with `uv run python -m tools.chroma_viewer`. `main.py` and `scene_explore` need **`walkie-ai-server`** up at `WALKIE_AI_BASE_URL` (collection also uses its `/image-embed` route). Each command is explained in full below.
 
 > Need a clean slate? `uv run python -m tools.reset_db --all` wipes both vector DBs.
 
@@ -216,14 +214,20 @@ In the **ready** stage the loop periodically prunes objects it no longer sees, s
 
 ## Inspecting the vector DBs (Chroma viewer)
 
-A **read-only** web UI to browse everything the robot has stored — the explore-stage `objects` (and older `people` / `scenes`) collections in `chroma_db/`, plus the CLIP `scene_entries` memory in `chroma_db_scene/`:
+A **read-only** web UI to browse everything the robot has stored — the explore-stage `objects` (and older `people` / `scenes`) collections in `chroma_db/`, plus the CLIP `scene_entries` memory in `chroma_db_scene/`.
+
+**The usual way: it starts itself.** `python main.py` launches the viewer in-process (a daemon thread reusing the robot's own ChromaDB clients) and prints its URL. No second script, and — crucially — no risk to the store: it reads the *same* live index the robot writes, so there's only one HNSW index (a separate process opening the same dir would spin up a rival index and corrupt it). Turn it off with `CHROMA_VIEWER_AUTOSTART=0`; change where it binds with `CHROMA_VIEWER_HOST` / `CHROMA_VIEWER_PORT`.
+
+**Running it standalone** (a separate process — only when the robot is **not** running):
 
 ```bash
 uv run python -m tools.chroma_viewer            # http://localhost:8500
 uv run python -m tools.chroma_viewer --dirs chroma_db,chroma_db_scene --port 8500
 ```
 
-**Sharing it on the LAN:** the viewer binds `0.0.0.0` by default, so once it's running, anyone on the same network opens `http://<ip-of-the-box-running-it>:8500` — no flags needed. Run it on the machine that holds the Chroma dirs (the one running `main.py` / `scene_explore`), since it reads those files locally. To pin a different port use `--port` (or `CHROMA_VIEWER_PORT`).
+A standalone process can't share the robot's index, so it defaults to opening a **read-only snapshot copy** of each dir (taken once at startup) — safe to run anytime, but its data is **frozen at launch**; restart it to pick up new writes. `--live` (or `CHROMA_VIEWER_LIVE=1`) reads the real dirs in place instead, which is live but **only safe with the robot stopped** (concurrent writes from two processes corrupt the DB). For watching the DB grow during a run, use the in-process auto-start above.
+
+**Sharing it on the LAN:** the viewer binds `0.0.0.0` by default, so anyone on the same network opens `http://<ip-of-the-box-running-it>:8500` — it runs on the machine holding the Chroma dirs (the one running `main.py`). To pin a different port use `--port` (or `CHROMA_VIEWER_PORT`).
 
 It enumerates every collection in each directory and renders rows from whatever metadata they carry (so it works for any collection, not just the ones above). The UI gives you:
 
@@ -233,9 +237,9 @@ It enumerates every collection in each directory and renders rows from whatever 
 - **Frame thumbnails** with click-to-zoom **lightbox**; per record, the full metadata, document, archived JPEG, and an **embedding sparkline** + stats (dim / L2 norm). Frames are **downscaled server-side** (cached, keyed by `?w=`) so full-resolution camera captures render as small thumbnails in tables/galleries instead of failing to load — the lightbox still shows a crisp larger version.
 - **Search**: substring by default; switch the dropdown to **semantic** for a CLIP/vector query (best-effort — falls back to substring with a warning if `walkie-ai-server` is down).
 
-**Live updates:** the header has an **auto-refresh** dropdown (off / 2s / 5s / 10s / 30s with a countdown, remembered per-browser; initial value is `CHROMA_VIEWER_REFRESH_SEC`, default 5s). It refreshes by swapping just the content area — so your scroll position, theme, and search focus are preserved (no jarring full reload) — and pauses while you're typing. Browse tables, counts, and substring search reflect the robot's latest writes, so you can watch the DB fill in real time. One caveat: **semantic (vector) search** results are loaded into the viewer's memory at startup and only refresh when you **restart** the viewer; browse and substring search are always live.
+**Live updates:** the header has an **auto-refresh** dropdown (off / 2s / 5s / 10s / 30s with a countdown, remembered per-browser; initial value is `CHROMA_VIEWER_REFRESH_SEC`, default 5s). It refreshes by swapping just the content area — so your scroll position, theme, and search focus are preserved (no jarring full reload) — and pauses while you're typing. **When auto-started by `main.py`** (in-process), browse tables, counts, and substring search reflect the robot's latest writes, so you can watch the DB fill in real time; only **semantic (vector) search** lags — it's loaded into memory at startup and refreshes on viewer restart. **In standalone snapshot mode**, the auto-refresh re-renders but the underlying data is frozen at launch, so restart to see new rows.
 
-It only ever reads, so it's safe to run while the robot is writing. Config (in `config.toml`, `[viewer]`): `CHROMA_VIEWER_DIRS`, `CHROMA_VIEWER_PORT`, `CHROMA_VIEWER_REFRESH_SEC`, `CHROMA_VIEWER_THUMB_CACHE`, plus `SCENE_FRAMES_DIR`.
+Config (in `config.toml`, `[viewer]`): `CHROMA_VIEWER_AUTOSTART`, `CHROMA_VIEWER_HOST`, `CHROMA_VIEWER_DIRS`, `CHROMA_VIEWER_PORT`, `CHROMA_VIEWER_REFRESH_SEC`, `CHROMA_VIEWER_THUMB_CACHE`, plus `SCENE_FRAMES_DIR`.
 
 ---
 
