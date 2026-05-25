@@ -28,6 +28,8 @@ uv sync                                  # one-time: install deps (incl. walkie-
 cp .env.example .env                      # one-time: then set OPENROUTER_API_KEY + WALKIE_AI_BASE_URL
 ```
 
+`.env` holds only secrets/endpoints; all tuning lives in **`config.toml`** (no edit needed to start). See [Configure your environment](#2-configure-your-environment).
+
 Then it's three things, usually in their own terminals:
 
 ```bash
@@ -42,6 +44,8 @@ uv run python -m tools.chroma_viewer         # then open http://<ip-of-this-box>
 ```
 
 The viewer binds `0.0.0.0`, so teammates just open `http://<ip-of-the-box-running-it>:8500` in their own browser — run it on the box that holds `chroma_db_scene/`. `main.py` and `scene_explore` need **`walkie-ai-server`** up at `WALKIE_AI_BASE_URL` (collection also uses its `/image-embed` route); the viewer is standalone read-only and only calls the server for *semantic* search — plain browsing works without it. Each command is explained in full below.
+
+> Need a clean slate? `uv run python -m tools.reset_db --all` wipes both vector DBs.
 
 ---
 
