@@ -2181,6 +2181,25 @@ def _sparkline(vals: list[float], width: float = 480.0, height: float = 60.0) ->
 # --------------------------------------------------------------------------- #
 
 
+def _lan_ip() -> Optional[str]:
+    """Best-effort primary LAN IPv4 of this machine.
+
+    Opens a UDP socket toward a public address and reads back the local end the
+    OS picked — no packet is actually sent, it just forces interface selection.
+    Returns ``None`` (e.g. fully offline) so callers can fall back gracefully.
+    """
+    import socket
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Read-only ChromaDB web viewer")
     ap.add_argument(
@@ -2212,6 +2231,17 @@ def main() -> None:
         status = s.error or f"{len(s.collections())} collection(s)"
         print(f"[chroma-viewer]   {s.directory}: {status}")
     print(f"[chroma-viewer] open http://{args.host}:{args.port}")
+    # A wildcard bind (0.0.0.0/::) is reachable across the LAN but prints an
+    # unusable host — resolve and log the real address so teammates know the URL.
+    if args.host in ("0.0.0.0", "::", ""):
+        lan_ip = _lan_ip()
+        if lan_ip:
+            print(
+                f"[chroma-viewer] LAN: open http://{lan_ip}:{args.port} "
+                "from another machine"
+            )
+        else:
+            print("[chroma-viewer] LAN IP unavailable (offline?) — use this host's IP")
     app.run(host=args.host, port=args.port, debug=False)
 
 

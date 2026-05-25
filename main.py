@@ -141,6 +141,25 @@ def build_scene_store(walkieAI):
     return store, embedder
 
 
+def _lan_ip() -> str | None:
+    """Best-effort primary LAN IPv4 of this machine.
+
+    Opens a UDP socket toward a public address and reads back the local end the
+    OS picked — no packet is actually sent, it just forces interface selection.
+    Returns ``None`` (e.g. fully offline) so callers can fall back gracefully.
+    """
+    import socket
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
 def maybe_start_viewer(stores: list[tuple[str, object]]):
     """Start the read-only Chroma web viewer in a daemon thread, in-process.
 
@@ -188,6 +207,14 @@ def maybe_start_viewer(stores: list[tuple[str, object]]):
         f"[viewer] live DB viewer on http://{host}:{port} "
         f"(in-process — safe to browse while the robot writes)"
     )
+    # A wildcard bind (0.0.0.0/::) is reachable across the LAN but prints an
+    # unusable host — resolve and log the real address so teammates know the URL.
+    if host in ("0.0.0.0", "::", ""):
+        lan_ip = _lan_ip()
+        if lan_ip:
+            print(f"[viewer] LAN: open http://{lan_ip}:{port} from another machine")
+        else:
+            print("[viewer] LAN IP unavailable (offline?) — use this host's IP")
     return t
 
 
