@@ -134,6 +134,13 @@ def main() -> None:
         min_confidence=float(os.getenv("SCENE_MIN_CONF", "0.0")),
         caption_per_object=os.getenv("SCENE_CAPTION_PER_OBJECT", "0").lower()
         in ("1", "true", "yes"),
+        # Keep moving classes (people) out of the catalogue — same as main.py's
+        # ready stage. Read from env so config.toml's SCENE_EXCLUDE_CLASSES wins.
+        exclude_classes=[
+            c.strip()
+            for c in os.getenv("SCENE_EXCLUDE_CLASSES", "person").split(",")
+            if c.strip()
+        ],
     )
     service.start()
     try:

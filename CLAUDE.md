@@ -34,6 +34,9 @@ uv run python -m manual_tests.test_pose_estimation
 uv run python -m tools.reset_db --object   # legacy object DB (chroma_db) + object_frames
 uv run python -m tools.reset_db --scene    # CLIP scene memory (chroma_db_scene) + frames
 uv run python -m tools.reset_db --all -y   # both, no confirmation
+
+# Diagnose a corrupt / desynced store, read-only (snapshot copy, never the live files):
+uv run python -m tools.db_doctor --scene   # dangling vectors + caption↔entries desync
 ```
 
 To run without the microphone (typing prompts at a TTY), set `DISABLE_LISTENING=1`.
@@ -111,6 +114,9 @@ Tuning knobs live in **`config.toml`** (version-controlled), secrets/endpoints/t
 
 - **Two collections, one id space.** `scene_entries` holds the CLIP *image* embedding (used for dedup + `visual_query`/`semantic_query`). `scene_captions` holds the CLIP *text* embedding of each caption; `text_query` searches it (text→text) so "where is the mug?" matches the caption words. `find_object_from_memory` / the Database agent query captions first, then fall back to image search. The caption index is written on insert and on caption-changing updates only; `reindex_captions()` (gated by `SCENE_REINDEX_CAPTIONS=1`) backfills pre-existing data. `prune`/`clear` keep both collections in lock-step.
 - **Position fallback.** `process_frame(..., fallback_position=)` (fed the robot pose via the loop's `pose_provider`) stamps detections whose 3D depth-lift returns `None` — small/distant objects, or the whole batch on timeout — with the robot's own pose instead of dropping them. Without a fallback the old drop-on-`None` behavior holds.
+- **Dedup candidate sourcing.** `upsert` decides insert-vs-update by feeding `classify` (`perception/dedup.py`) a candidate set of same-class records. That set is **spatial** (`find_nearby`, within `SCENE_DEDUP_RADIUS_M`) plus, when `SCENE_DEDUP_VISUAL_K > 0`, the top-K **visual** neighbours by image embedding *regardless of position* (`_visual_candidates`). The visual path exists because the spatial radius is tight, so a confident re-sighting whose 3D position drifted (lift jitter, or the robot-pose fallback) would otherwise duplicate. Watch the band: `SCENE_DEDUP_RADIUS_M`/`TIGHT_M` must stay **above** lift jitter (~5–15 cm) or even stationary objects re-insert. Visual dedup defaults **off in code** (`os.getenv(...,"0")` — what the unit tests assert) and **on via config.toml** — the standard code-default-plus-config split. Tradeoff: distance-independent visual merge can fuse two genuinely-distinct identical-looking objects; raise `SCENE_EMB_SIM_HIGH` to be stricter.
+- **Moving classes don't belong in a spatial catalogue.** `SCENE_EXCLUDE_CLASSES` (default `person`) is filtered in `process_frame` *before* lift/caption/embed, so excluded classes cost nothing and never reach the store — people move every tick and can't be position-deduped, so they'd duplicate endlessly.
+- **Single-process only.** ChromaDB's `PersistentClient` is not safe for concurrent multi-process access. During the `ready` stage `ScenePerceptionService` writes `chroma_db_scene` continuously (insert/update + prune), so opening the *same* directory from a second process corrupts the HNSW index — surfacing as `InternalError: Error finding id` and vector queries whose results don't match the stored records. Therefore: `tools/chroma_viewer` opens a **snapshot copy** of each dir by default (`--live` / `CHROMA_VIEWER_LIVE=1` opts back into the live files, only safe with the robot stopped); `tools/db_doctor` does the same; and `text_query`'s id-join (`SceneStore._safe_get_by_ids`) degrades to a per-id fetch so one dangling id can't crash or skew the whole lookup. To diagnose an already-corrupt store use `tools/db_doctor`; to recover, `reindex_captions` fixes caption desync in place, but dangling vectors require a rebuild (`reset_db --scene` + re-explore).
 
 ## Conventions worth knowing
 

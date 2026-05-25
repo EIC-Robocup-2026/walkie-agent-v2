@@ -192,6 +192,43 @@ def test_10_threshold_env_override(monkeypatch, store):
     assert store.count == 2
 
 
+def test_12_visual_merge_off_by_default_far_apart_inserts(store):
+    # Mirrors test_03 but is explicit that the *code default* is spatial-only:
+    # identical embeddings > radius apart stay separate without visual dedup.
+    a = _detection(position=(0.0, 0.0, 0.0), embedding=(1.0, 0.0, 0.0, 0.0))
+    b = _detection(position=(3.0, 3.0, 0.0), embedding=(1.0, 0.0, 0.0, 0.0))
+    store.upsert(a)
+    _, decision = store.upsert(b)
+    assert decision.action == "insert"
+    assert store.count == 2
+
+
+def test_13_visual_merge_on_merges_far_apart_resighting(monkeypatch, store):
+    # The duplicate fix: a confident visual re-sighting whose position drifted
+    # far beyond the spatial radius (e.g. robot-pose fallback) merges instead of
+    # duplicating, because the visual KNN surfaces it for the sim≥HIGH gate.
+    monkeypatch.setenv("SCENE_DEDUP_VISUAL_K", "5")
+    a = _detection(position=(0.0, 0.0, 0.0), embedding=(1.0, 0.0, 0.0, 0.0))
+    b = _detection(position=(3.0, 3.0, 0.0), embedding=(1.0, 0.0, 0.0, 0.0))
+    id_a, _ = store.upsert(a)
+    id_b, decision = store.upsert(b)
+    assert decision.action == "update"
+    assert id_b == id_a
+    assert store.count == 1
+
+
+def test_14_visual_merge_on_keeps_dissimilar_far_apart(monkeypatch, store):
+    # Visual dedup must not over-merge: a far-apart same-class object with an
+    # orthogonal embedding (cosine 0.0) still inserts even with the KNN on.
+    monkeypatch.setenv("SCENE_DEDUP_VISUAL_K", "5")
+    a = _detection(position=(0.0, 0.0, 0.0), embedding=(1.0, 0.0, 0.0, 0.0))
+    b = _detection(position=(3.0, 3.0, 0.0), embedding=(0.0, 1.0, 0.0, 0.0))
+    store.upsert(a)
+    _, decision = store.upsert(b)
+    assert decision.action == "insert"
+    assert store.count == 2
+
+
 def test_11_classify_rejects_cross_class_candidates():
     # Pure-function test of the precondition guard in classify().
     from perception.types import SceneEntry

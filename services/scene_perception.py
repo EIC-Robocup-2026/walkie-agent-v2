@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from typing import Optional
+from typing import Optional, Sequence
 
 from interfaces.walkie_interface import WalkieInterface
 from perception import SceneStore, run_scene_perception
@@ -47,6 +47,7 @@ class ScenePerceptionService(threading.Thread):
         min_confidence: float = 0.0,
         caption_per_object: bool = False,
         archive_source_frame: bool = True,
+        exclude_classes: Optional[Sequence[str]] = None,
         prune_ttl_sec: Optional[float] = None,
         prune_interval_sec: float = 30.0,
         prune_radius_m: Optional[float] = None,
@@ -65,6 +66,7 @@ class ScenePerceptionService(threading.Thread):
         self.min_confidence = min_confidence
         self.caption_per_object = caption_per_object
         self.archive_source_frame = archive_source_frame
+        self.exclude_classes = exclude_classes
         self.prune_ttl_sec = prune_ttl_sec
         self.prune_interval_sec = prune_interval_sec
         self.prune_radius_m = prune_radius_m
@@ -106,6 +108,7 @@ class ScenePerceptionService(threading.Thread):
                 min_confidence=self.min_confidence,
                 caption_per_object=self.caption_per_object,
                 archive_source_frame=self.archive_source_frame,
+                exclude_classes=self.exclude_classes,
                 prune_ttl_sec=self.prune_ttl_sec,
                 prune_interval_sec=self.prune_interval_sec,
                 prune_radius_m=self.prune_radius_m,

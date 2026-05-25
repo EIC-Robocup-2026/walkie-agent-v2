@@ -202,6 +202,11 @@ def run_ready_stage(walkieAI, walkie, db, model) -> None:
             interval=float(os.getenv("SCENE_PERCEPTION_INTERVAL_SEC", "2.0")),
             min_confidence=float(os.getenv("SCENE_MIN_CONF", "0.0")),
             caption_per_object=_flag("SCENE_CAPTION_PER_OBJECT", "0"),
+            exclude_classes=[
+                c.strip()
+                for c in os.getenv("SCENE_EXCLUDE_CLASSES", "person").split(",")
+                if c.strip()
+            ],
             prune_ttl_sec=prune_ttl,
             prune_interval_sec=float(os.getenv("SCENE_PRUNE_INTERVAL_SEC", "10")),
             prune_radius_m=prune_radius,

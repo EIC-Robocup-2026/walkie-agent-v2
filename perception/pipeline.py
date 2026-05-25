@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
+from typing import Iterable, Optional
 
 from PIL import Image
 
@@ -62,6 +62,7 @@ def process_frame(
     min_confidence: float = 0.0,
     caption_per_object: bool = False,
     fallback_position: Optional[tuple[float, float, float]] = None,
+    exclude_classes: Optional[Iterable[str]] = None,
 ) -> tuple[list[Detection], dict[str, float]]:
     """Run one frame through the perception stack.
 
@@ -90,6 +91,16 @@ def process_frame(
     t0 = time.perf_counter()
     raw_detections = list(detector.detect(frame))
     latency["detect"] = (time.perf_counter() - t0) * 1000
+
+    # Drop excluded classes (e.g. people) before lift/caption/embed so they
+    # cost nothing and never reach the store. Matched case-insensitively.
+    if exclude_classes:
+        excluded = {c.strip().lower() for c in exclude_classes if c and c.strip()}
+        if excluded:
+            raw_detections = [
+                d for d in raw_detections
+                if (d.class_name or "").lower() not in excluded
+            ]
 
     if not raw_detections:
         latency["lift"] = 0.0

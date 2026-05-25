@@ -137,6 +137,21 @@ class SceneStore:
             position=detection.position,
             radius=radius,
         )
+        # Augment with same-class visual neighbours regardless of position. The
+        # spatial net above is deliberately tight, so a confident re-sighting
+        # whose 3D position drifted — or fell back to the robot pose — would
+        # never be a candidate and would duplicate. This lets classify's sim≥HIGH
+        # gate merge it by appearance. SCENE_DEDUP_VISUAL_K=0 disables.
+        # Code default 0 (spatial dedup only — the historical behavior tests
+        # assert); config.toml turns it on for production. See CLAUDE.md on the
+        # "code default + config.toml entry" convention.
+        visual_k = int(os.getenv("SCENE_DEDUP_VISUAL_K", "0"))
+        if visual_k > 0:
+            seen = {c.id for c in candidates}
+            candidates = list(candidates) + [
+                e for e in self._visual_candidates(detection, k=visual_k)
+                if e.id not in seen
+            ]
         decision = classify(detection, candidates)
 
         # Pre-compute audit fields (closest candidate's dist + similarity)
@@ -396,10 +411,7 @@ class SceneStore:
         if not ids:
             return []
         # Join back to the full records in scene_entries (keep caption-rank order).
-        full = self._collection.get(
-            ids=list(ids),
-            include=["metadatas", "documents", "embeddings"],
-        )
+        full = self._safe_get_by_ids(list(ids))
         embs = _embeddings_or_blanks(full, len(full["ids"]))
         by_id: dict[str, tuple] = {
             cid: (meta, doc, emb)
@@ -696,6 +708,60 @@ class SceneStore:
         )
 
     # ----------------------------------------------------------------- internals
+
+    def _visual_candidates(self, detection: Detection, *, k: int) -> list[SceneEntry]:
+        """Top-``k`` same-class neighbours by image embedding, any position.
+
+        Used to widen :meth:`upsert`'s dedup candidate set beyond the spatial
+        ``find_nearby`` radius so a confident visual match can merge regardless
+        of where its 3D position landed. Best-effort: a query failure (empty or
+        corrupt index) returns ``[]`` — dedup must never crash an upsert.
+        """
+        if self.count == 0:
+            return []
+        try:
+            result = self._collection.query(
+                query_embeddings=[list(detection.embedding)],
+                n_results=min(k, max(1, self.count)),
+                where={"class_name": detection.class_name},
+                include=["metadatas", "documents", "embeddings", "distances"],
+            )
+        except Exception as e:  # noqa: BLE001 — never let dedup crash the write
+            _log.warning("visual dedup candidate query failed: %s", e)
+            return []
+        return self._unpack_query(result)
+
+    def _safe_get_by_ids(self, ids: list[str]) -> dict:
+        """Batch ``get`` over ``scene_entries`` that tolerates a corrupt id.
+
+        ChromaDB 1.x raises ``InternalError("Error finding id")`` for the whole
+        batch if even one id's vector is missing/desynced from the HNSW index
+        (e.g. after concurrent multi-process access corrupted the store). A
+        crash here would either kill :meth:`text_query` or silently skew the
+        agent's answer. So fall back to fetching ids one at a time, dropping the
+        unreadable ones — the agent still gets the records that *are* intact.
+        """
+        inc = ["metadatas", "documents", "embeddings"]
+        try:
+            return self._collection.get(ids=ids, include=inc)
+        except Exception as e:  # noqa: BLE001 — degrade to per-id fetch
+            _log.warning(
+                "batch get of %d id(s) failed (%s); retrying one at a time", len(ids), e
+            )
+        merged: dict[str, list] = {"ids": [], "metadatas": [], "documents": [], "embeddings": []}
+        for cid in ids:
+            try:
+                one = self._collection.get(ids=[cid], include=inc)
+            except Exception:  # noqa: BLE001 — dangling vector for this id
+                _log.warning("dropping unreadable scene id %s", cid)
+                continue
+            if not one["ids"]:
+                continue
+            merged["ids"].append(one["ids"][0])
+            merged["metadatas"].append(one["metadatas"][0])
+            merged["documents"].append(one["documents"][0])
+            merged["embeddings"].append(_embeddings_or_blanks(one, 1)[0])
+        return merged
 
     @staticmethod
     def _format_document(class_name: str, caption: str) -> str:

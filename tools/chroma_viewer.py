@@ -36,11 +36,14 @@ Environment overrides (CLI flags win):
 from __future__ import annotations
 
 import argparse
+import atexit
 import hashlib
 import html
 import logging
 import math
 import os
+import shutil
+import tempfile
 import time
 import traceback
 from collections import Counter
@@ -116,20 +119,52 @@ app = Flask(__name__)
 # --------------------------------------------------------------------------- #
 
 
-class Store:
-    """One Chroma persistent directory and the collections inside it."""
+# Temp snapshot copies to remove on exit (see Store(snapshot=True)).
+_SNAPSHOT_TMPDIRS: list[str] = []
 
-    def __init__(self, directory: str) -> None:
+
+@atexit.register
+def _cleanup_snapshots() -> None:
+    for d in _SNAPSHOT_TMPDIRS:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+class Store:
+    """One Chroma persistent directory and the collections inside it.
+
+    ChromaDB's ``PersistentClient`` is single-process: opening a directory that
+    the robot (``main.py``'s ScenePerceptionService) is concurrently writing
+    corrupts the HNSW index — the "Error finding id" / wrong-query-results
+    failure mode. So by default the viewer opens a **snapshot copy** of each
+    directory (made once at startup); the live store keeps sole ownership of the
+    real files. Pass ``snapshot=False`` to read the live dir in place (only safe
+    when the robot is stopped).
+    """
+
+    def __init__(self, directory: str, *, snapshot: bool = True) -> None:
         self.directory = directory
-        self.path = Path(directory).resolve()
+        self.path = Path(directory).resolve()  # original, shown in the UI
+        self.snapshot = snapshot
         self.error: Optional[str] = None
         self._client: Optional[chromadb.api.ClientAPI] = None
         if not self.path.exists():
             self.error = "directory does not exist"
             return
+        open_path = self.path
+        if snapshot:
+            try:
+                tmp = tempfile.mkdtemp(prefix="chroma_view_")
+                _SNAPSHOT_TMPDIRS.append(tmp)
+                open_path = Path(tmp) / self.path.name
+                shutil.copytree(self.path, open_path)
+            except Exception as e:  # noqa: BLE001 — fall back to live, but warn
+                logging.getLogger("chroma-viewer").warning(
+                    "snapshot copy of %s failed (%r); opening live in place", directory, e
+                )
+                open_path = self.path
         try:
             self._client = chromadb.PersistentClient(
-                path=str(self.path),
+                path=str(open_path),
                 settings=Settings(anonymized_telemetry=False),
             )
         except Exception as e:  # noqa: BLE001 — surface, don't crash the page
@@ -160,9 +195,9 @@ STORES: list[Store] = []
 FRAME_ROOTS: list[Path] = []
 
 
-def _build_stores(dirs: list[str]) -> None:
+def _build_stores(dirs: list[str], *, snapshot: bool = True) -> None:
     STORES.clear()
-    STORES.extend(Store(d) for d in dirs)
+    STORES.extend(Store(d, snapshot=snapshot) for d in dirs)
 
 
 def _build_frame_roots(dirs: list[str], frames_dir: str) -> None:
@@ -1680,8 +1715,23 @@ def record(di: int, coll: str, rid: str) -> str:
         abort(404)
     store = STORES[di]
     collection = store.collection(coll)
-    res = collection.get(ids=[rid], include=["metadatas", "documents", "embeddings"])
-    rows = _rows(res, with_emb=True)
+    # ChromaDB 1.x can raise InternalError("Error finding id") when an id lives
+    # in the metadata segment but its vector is missing/desynced from the HNSW
+    # index — only include=["embeddings"] trips it. Fall back to a metadata-only
+    # fetch so the record still renders (just without the embedding section).
+    emb_error: Optional[str] = None
+    try:
+        res = collection.get(
+            ids=[rid], include=["metadatas", "documents", "embeddings"]
+        )
+        rows = _rows(res, with_emb=True)
+    except Exception as ex:  # noqa: BLE001 — degrade gracefully, never 500
+        emb_error = str(ex)
+        try:
+            res = collection.get(ids=[rid], include=["metadatas", "documents"])
+        except Exception:  # noqa: BLE001 — id is genuinely unreadable
+            abort(404)
+        rows = _rows(res, with_emb=False)
     if not rows:
         abort(404)
     r = rows[0]
@@ -1711,10 +1761,17 @@ def record(di: int, coll: str, rid: str) -> str:
     parts.append("</dl></div>")
 
     stats = None
-    emb_html = (
-        "<div class='card' style='padding:14px'><span class='muted'>"
-        "no embedding stored</span></div>"
-    )
+    if emb_error:
+        emb_html = (
+            "<div class='card' style='padding:14px'><span class='muted small'>"
+            f"embedding could not be loaded for this id (dangling vector?): "
+            f"{e(emb_error)}</span></div>"
+        )
+    else:
+        emb_html = (
+            "<div class='card' style='padding:14px'><span class='muted'>"
+            "no embedding stored</span></div>"
+        )
     try:
         stats = _emb_stats(r["emb"])
         if stats:
@@ -2108,13 +2165,22 @@ def main() -> None:
         "--port", type=int, default=int(os.getenv("CHROMA_VIEWER_PORT", "8500"))
     )
     ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument(
+        "--live",
+        action="store_true",
+        default=os.getenv("CHROMA_VIEWER_LIVE", "0").lower() in ("1", "true", "yes"),
+        help="open the live Chroma dirs in place instead of a snapshot copy. "
+        "Only safe when the robot is stopped — concurrent access corrupts the DB.",
+    )
     args = ap.parse_args()
 
     dirs = [d.strip() for d in args.dirs.split(",") if d.strip()]
-    _build_stores(dirs)
+    snapshot = not args.live
+    _build_stores(dirs, snapshot=snapshot)
     _build_frame_roots(dirs, os.getenv("SCENE_FRAMES_DIR", "frames"))
 
-    print(f"[chroma-viewer] dirs={dirs}")
+    mode = "LIVE (no snapshot — robot must be stopped)" if args.live else "snapshot copy"
+    print(f"[chroma-viewer] dirs={dirs} mode={mode}")
     for s in STORES:
         status = s.error or f"{len(s.collections())} collection(s)"
         print(f"[chroma-viewer]   {s.directory}: {status}")

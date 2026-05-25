@@ -21,7 +21,7 @@ import asyncio
 import logging
 import time
 from dataclasses import replace
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional, Sequence
 
 from PIL import Image
 
@@ -53,6 +53,7 @@ async def run_scene_perception(
     min_confidence: float = 0.0,
     caption_per_object: bool = False,
     archive_source_frame: bool = True,
+    exclude_classes: Optional[Sequence[str]] = None,
     prune_ttl_sec: Optional[float] = None,
     prune_interval_sec: float = 30.0,
     prune_radius_m: Optional[float] = None,
@@ -101,6 +102,7 @@ async def run_scene_perception(
                     min_confidence=min_confidence,
                     caption_per_object=caption_per_object,
                     archive_source_frame=archive_source_frame,
+                    exclude_classes=exclude_classes,
                     pose_provider=pose_provider,
                 )
             except asyncio.CancelledError:
@@ -170,6 +172,7 @@ async def _run_one_tick(
     min_confidence: float,
     caption_per_object: bool,
     archive_source_frame: bool,
+    exclude_classes: Optional[Sequence[str]] = None,
     pose_provider: Optional[Callable[[], Optional[tuple[float, float, float]]]] = None,
 ) -> TickReport:
     t0 = time.perf_counter()
@@ -196,6 +199,7 @@ async def _run_one_tick(
         min_confidence=min_confidence,
         caption_per_object=caption_per_object,
         fallback_position=fallback_position,
+        exclude_classes=exclude_classes,
     )
 
     t0 = time.perf_counter()

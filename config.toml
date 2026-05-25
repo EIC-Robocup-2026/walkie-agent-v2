@@ -58,6 +58,11 @@ SCENE_FRAMES_DIR = "frames"
 # (one tick already catalogues every visible object). Lower for faster updates.
 SCENE_PERCEPTION_INTERVAL_SEC = "8.0"
 SCENE_MIN_CONF = "0.0"
+# Comma-separated classes to KEEP OUT of long-term memory. Moving objects
+# (people) can't be position-deduped — they spawn a new record every tick — so
+# they don't belong in a spatial catalogue. Filtered before lift/caption/embed,
+# so excluded classes cost nothing. Empty = store everything.
+SCENE_EXCLUDE_CLASSES = "person"
 # Per-object captions describe each object separately (~6s each) but make the
 # caption text search much sharper. 0 = one cheap whole-frame caption.
 SCENE_CAPTION_PER_OBJECT = "1"
@@ -70,13 +75,21 @@ SCENE_REINDEX_CAPTIONS = "0"
 [scene.dedup]
 # Merge gates (perception/dedup.py). RADIUS/TIGHT must stay ABOVE per-object
 # position jitter from get_3d_poses (~5-15cm) or the SAME object re-inserts as
-# duplicates. If one object splits into many records, raise these.
-SCENE_DEDUP_RADIUS_M = "0.1"
-SCENE_DEDUP_TIGHT_M = "0.08"
-# Embedding cosine merge gates. HIGH merges on visual similarity within RADIUS
-# regardless of distance; raise toward 1.0 to merge less aggressively.
+# duplicates. If one object splits into many records, raise these. (These were
+# 0.1/0.08 — below the jitter band — which is exactly what caused the duplicate
+# spam; 0.4/0.2 keeps re-sightings inside the candidate net.)
+SCENE_DEDUP_RADIUS_M = "0.4"
+SCENE_DEDUP_TIGHT_M = "0.2"
+# Embedding cosine merge gates. HIGH merges on visual similarity; raise toward
+# 1.0 to merge less aggressively.
 SCENE_EMB_SIM_HIGH = "0.85"
 SCENE_EMB_SIM_LOW = "0.65"
+# Visual dedup: also pull the top-K same-class nearest neighbours by image
+# embedding into the candidate set on upsert, *regardless of position*. Without
+# this the sim≥HIGH gate is capped by RADIUS, so a confident re-sighting whose
+# 3D position drifted (or fell back to the robot pose) duplicates. 0 = spatial
+# dedup only (one extra vector query per detection when > 0).
+SCENE_DEDUP_VISUAL_K = "5"
 
 [scene.position]
 # lift  = SDK depth+TF per-object 3D position (distinct objects → distinct
