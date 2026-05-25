@@ -20,14 +20,20 @@ cp .env.example .env                   # then fill OPENROUTER_API_KEY
 # Run the robot
 uv run python main.py                  # full pipeline (Ready stage by default)
 
-# Standalone client tests (need walkie-ai-server running + local webcam)
-uv run python test_object_detection.py
-uv run python test_captioning.py
-uv run python test_pose_estimation.py
+# Standalone client demos (need walkie-ai-server running + local webcam).
+# Run as modules so repo root is on sys.path for `from client import ...`.
+uv run python -m manual_tests.test_object_detection
+uv run python -m manual_tests.test_captioning
+uv run python -m manual_tests.test_pose_estimation
 
-# pyproject declares pytest under tool.pytest.ini_options testpaths=["tests"],
-# but no tests/ directory exists yet. The test_*.py files at the repo root are
-# manual demo scripts, NOT a pytest suite.
+# The real pytest suite is under tests/ (pyproject testpaths=["tests"]).
+# The interactive demo scripts live in manual_tests/ (webcam/robot/live server,
+# guarded by __main__) — deliberately OUTSIDE testpaths so pytest never collects them.
+
+# Wipe a vector DB for a clean slate (run with robot/viewer stopped):
+uv run python -m tools.reset_db --object   # legacy object DB (chroma_db) + object_frames
+uv run python -m tools.reset_db --scene    # CLIP scene memory (chroma_db_scene) + frames
+uv run python -m tools.reset_db --all -y   # both, no confirmation
 ```
 
 To run without the microphone (typing prompts at a TTY), set `DISABLE_LISTENING=1`.
@@ -43,13 +49,16 @@ To run without the microphone (typing prompts at a TTY), set `DISABLE_LISTENING=
 
 Stage 1 is currently commented out in `main.py:122-125` — re-enable when you want to rebuild the world catalogue. Stage 2 expects a populated `chroma_db/` from a prior explore run for `find_object_from_memory` to be useful.
 
-### Three-agent topology
+### Four-agent topology
 
-All three agents are built by the same factory: `agents/core/agent.py::create_walkie_agent`, which wraps `langchain.agents.create_agent` with a fixed middleware stack.
+All four agents are built by the same factory: `agents/core/agent.py::create_walkie_agent`, which wraps `langchain.agents.create_agent` with a fixed middleware stack.
 
-- **Walkie main** (`agents/walkie_agent/`) — user-facing orchestrator. Owns the conversation thread (`thread_id="main"`). Delegates with `delegate_to_actuator` / `delegate_to_vision` (sequential tools that invoke the sub-agent graphs synchronously), plus a fast-path `find_object_from_memory` and `speak`.
+- **Walkie main** (`agents/walkie_agent/`) — user-facing orchestrator. Owns the conversation thread (`thread_id="main"`). Delegates with `delegate_to_actuator` / `delegate_to_vision` / `delegate_to_database` (sequential tools that invoke the sub-agent graphs synchronously), plus a fast-path `find_object_from_memory` and `speak`.
 - **Actuator** (`agents/actuator_agent/`) — `move_absolute`, `move_relative`, `get_current_pose`, `command_arm`, `speak`. `move_relative` does the local→global frame conversion in-process before calling `walkie.nav.go_to`.
-- **Vision** (`agents/vision_agent/`) — `detect_objects_from_view`, `image_caption`, `detect_people_poses`, `find_object_from_memory`, `get_camera_view_description`, `speak`.
+- **Vision** (`agents/vision_agent/`) — **live camera only**: `detect_objects_from_view`, `image_caption`, `detect_people_poses`, `get_camera_view_description`, `speak`. (Long-term memory lookups were moved out to the Database agent.)
+- **Database** (`agents/database_agent/`) — long-term spatial-memory specialist over the `SceneStore` (legacy `WalkieVectorDB` fallback): `find_object` (caption-first), `objects_near`, `recently_seen`, `list_known_objects`, `speak`. Use for "where have I seen X / what's near here / what did I just see".
+
+Division of labour: "what's in front of me now" → Vision; "where have I seen it / what's stored" → Database.
 
 Sub-agents are invoked as plain tools — there's no streaming or interleaving; the parent blocks until the sub-agent returns its last AIMessage content.
 
@@ -93,6 +102,15 @@ The two are passed side-by-side everywhere (typically as `walkie, walkieAI`).
 ### LLM
 
 `build_model()` in `main.py` uses `ChatOpenAI` pointed at OpenRouter (`OPENROUTER_BASE_URL`, defaults to `anthropic/claude-sonnet-4.5`). Switching providers means swapping the `ChatOpenAI` construction; the agent code is provider-agnostic as long as the model supports tool calls.
+
+### Configuration: `config.toml` + `.env`
+
+Tuning knobs live in **`config.toml`** (version-controlled), secrets/endpoints/transport in **`.env`** (gitignored). `walkie_config.py::load_config()` reads `config.toml` and `os.environ.setdefault`s every leaf — so the code still reads everything via `os.getenv(NAME, default)` unchanged, and precedence is **shell env > `.env` > `config.toml` > code default**. Every entrypoint calls `load_dotenv()` then `load_config()` (main.py, tools/chroma_viewer.py, tools/scene_explore.py, tools/reset_db.py). The TOML keys *are* the exact env-var names; tables are just for grouping. When you add a new tunable, give it a sensible `os.getenv` default in code AND an entry in `config.toml` — don't put it back in `.env`.
+
+### Scene memory specifics (`perception/store.py`)
+
+- **Two collections, one id space.** `scene_entries` holds the CLIP *image* embedding (used for dedup + `visual_query`/`semantic_query`). `scene_captions` holds the CLIP *text* embedding of each caption; `text_query` searches it (text→text) so "where is the mug?" matches the caption words. `find_object_from_memory` / the Database agent query captions first, then fall back to image search. The caption index is written on insert and on caption-changing updates only; `reindex_captions()` (gated by `SCENE_REINDEX_CAPTIONS=1`) backfills pre-existing data. `prune`/`clear` keep both collections in lock-step.
+- **Position fallback.** `process_frame(..., fallback_position=)` (fed the robot pose via the loop's `pose_provider`) stamps detections whose 3D depth-lift returns `None` — small/distant objects, or the whole batch on timeout — with the robot's own pose instead of dropping them. Without a fallback the old drop-on-`None` behavior holds.
 
 ## Conventions worth knowing
 

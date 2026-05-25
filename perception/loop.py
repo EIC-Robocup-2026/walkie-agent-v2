@@ -101,6 +101,7 @@ async def run_scene_perception(
                     min_confidence=min_confidence,
                     caption_per_object=caption_per_object,
                     archive_source_frame=archive_source_frame,
+                    pose_provider=pose_provider,
                 )
             except asyncio.CancelledError:
                 raise
@@ -169,10 +170,18 @@ async def _run_one_tick(
     min_confidence: float,
     caption_per_object: bool,
     archive_source_frame: bool,
+    pose_provider: Optional[Callable[[], Optional[tuple[float, float, float]]]] = None,
 ) -> TickReport:
     t0 = time.perf_counter()
     frame: Image.Image = await asyncio.to_thread(camera.capture_pil)
     capture_ms = (time.perf_counter() - t0) * 1000
+
+    # Robot pose for the position fallback (small/far objects whose depth lift
+    # fails). Read off-thread since it may touch telemetry I/O; a failure here
+    # just means "no fallback this tick", never a crash.
+    fallback_position: Optional[tuple[float, float, float]] = None
+    if pose_provider is not None:
+        fallback_position = await asyncio.to_thread(_safe_pose, pose_provider)
 
     # process_frame is sync but calls into HTTP under the hood — keep it
     # off the event loop. Returned latency dict excludes capture+store.
@@ -186,6 +195,7 @@ async def _run_one_tick(
         position_timeout=position_timeout,
         min_confidence=min_confidence,
         caption_per_object=caption_per_object,
+        fallback_position=fallback_position,
     )
 
     t0 = time.perf_counter()
@@ -217,6 +227,18 @@ async def _run_one_tick(
         n_skipped=n_skipped,
         latency_ms=latency_ms,
     )
+
+
+def _safe_pose(
+    pose_provider: Callable[[], Optional[tuple[float, float, float]]],
+) -> Optional[tuple[float, float, float]]:
+    """Call ``pose_provider`` defensively — a telemetry hiccup must not break
+    a perception tick; it just means no fallback position this cycle."""
+    try:
+        return pose_provider()
+    except Exception:  # noqa: BLE001
+        _log.debug("pose_provider raised; no fallback position this tick")
+        return None
 
 
 def _run_prune(

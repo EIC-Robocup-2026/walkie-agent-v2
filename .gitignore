@@ -20,12 +20,17 @@ wheels/
 # Env
 .env
 
-# Scene perception artifacts (generated at runtime)
+# Vector DBs + perception artifacts (all generated at runtime — never commit)
+chroma_db/
 chroma_db_scene/
 frames/
 object_frames/
+perception.json
 
 # Throwaway mock data for the Chroma viewer (tools/seed_mock_chroma.py)
 chroma_db_mock/
 chroma_db_scene_mock/
 frames_mock/
+
+# Chroma viewer downscaled-thumbnail cache (regenerated on demand)
+.thumb_cache/

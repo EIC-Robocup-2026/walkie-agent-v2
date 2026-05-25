@@ -9,8 +9,11 @@ from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 from walkie_sdk import WalkieRobot
 
+from walkie_config import load_config
+
 from agents.actuator_agent import create_actuator_agent
 from agents.core.robot_context import RobotContext
+from agents.database_agent import create_database_agent
 from agents.vision_agent import create_vision_agent
 from agents.walkie_agent import create_walkie_main_agent
 from client import WalkieAIClient
@@ -124,6 +127,15 @@ def build_scene_store(walkieAI):
     print(
         f"[scene] CLIP scene memory ON (dim={dim}, {store.count} existing record(s))"
     )
+    # The caption text index (powers caption-first find_object) is written on
+    # every new sighting, but data collected before it existed has none. Set
+    # SCENE_REINDEX_CAPTIONS=1 once to backfill it for the existing records.
+    if _flag("SCENE_REINDEX_CAPTIONS", "0") and store.count:
+        try:
+            n = store.reindex_captions()
+            print(f"[scene] reindexed {n} caption(s) for text search")
+        except Exception as e:  # noqa: BLE001 — never block startup on a backfill
+            print(f"[scene] caption reindex failed: {e!r}", file=sys.stderr)
     return store, embedder
 
 
@@ -201,8 +213,11 @@ def run_ready_stage(walkieAI, walkie, db, model) -> None:
     vision = create_vision_agent(
         model, walkieAI, walkie, db, scene_store=scene_store
     )
+    database = create_database_agent(
+        model, walkieAI, walkie, db, scene_store=scene_store
+    )
     walkie_agent = create_walkie_main_agent(
-        model, walkieAI, walkie, db, actuator, vision, scene_store=scene_store
+        model, walkieAI, walkie, db, actuator, vision, database, scene_store=scene_store
     )
 
     print("[Ready] Listening — speak to Walkie. Ctrl+C to exit.")
@@ -231,6 +246,10 @@ def run_ready_stage(walkieAI, walkie, db, model) -> None:
 
 def main() -> None:
     load_dotenv()
+    # Tuning knobs (perception/scene/explore/viewer) live in config.toml; .env
+    # holds only secrets/endpoints/transport. setdefault means .env + real env
+    # still win over config.toml.
+    load_config()
     # Keep third-party libs quiet. Perception emits INFO logs — per-tick summaries
     # plus the `scene.dedup action=INSERT/UPDATE ...` lines — but default them to
     # WARNING here so they don't bury the prompt while you're commanding the robot.

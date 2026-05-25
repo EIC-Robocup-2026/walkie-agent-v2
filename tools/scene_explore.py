@@ -40,6 +40,7 @@ from client import WalkieAIClient
 from interfaces.walkie_interface import WalkieInterface
 from perception import RobotPoseLifter
 from services import ScenePerceptionService
+from walkie_config import load_config
 
 
 def _reset(scene_dir: str, frames_dir: str, *, assume_yes: bool) -> None:
@@ -64,6 +65,7 @@ def _reset(scene_dir: str, frames_dir: str, *, assume_yes: bool) -> None:
 
 def main() -> None:
     load_dotenv()
+    load_config()  # config.toml tuning defaults (scene interval, dedup, …)
     ap = argparse.ArgumentParser(
         description="Reset the CLIP scene store, then run an explore/collection loop."
     )

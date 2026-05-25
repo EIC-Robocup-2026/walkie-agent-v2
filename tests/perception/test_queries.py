@@ -146,6 +146,68 @@ def test_03_semantic_query_with_recency_filter(seeded_store):
 # ---------------------------------------------------------------------------
 
 
+def test_03b_text_query_matches_on_caption(tmp_path):
+    """text_query embeds the query and ranks against stored caption text.
+
+    Captions are embedded with the CLIP *text* tower at insert time, so a
+    query string matches the words in the caption (text→text), independent of
+    the image embedding used for dedup.
+    """
+    # Pin the caption documents ("<class>. <caption>") and the query strings
+    # to known unit vectors so ranking is deterministic.
+    emb = FakeEmbedder(
+        dim=16,
+        override_text={
+            "mug. a white coffee mug": _unit_vec(16, 0),
+            "chair. a wooden chair": _unit_vec(16, 1),
+            "coffee mug": _unit_vec(16, 0),
+        },
+    )
+    store = SceneStore(persist_dir=tmp_path / "chroma", embedder=emb)
+    store.upsert(Detection(
+        class_name="mug", class_id=0, confidence=0.9, bbox_xyxy=(0, 0, 9, 9),
+        position=(0.0, 0.0, 0.5), embedding=tuple(_unit_vec(16, 0)),
+        caption="a white coffee mug", ts=1000.0,
+    ))
+    store.upsert(Detection(
+        class_name="chair", class_id=1, confidence=0.9, bbox_xyxy=(0, 0, 9, 9),
+        position=(3.0, 0.0, 0.0), embedding=tuple(_unit_vec(16, 1)),
+        caption="a wooden chair", ts=1000.0,
+    ))
+    assert store.caption_count == 2
+    hits = store.text_query("coffee mug", n_results=2)
+    assert hits and hits[0].class_name == "mug"
+    assert hits[0].distance is not None
+    # class filter narrows to the requested class
+    assert [h.class_name for h in store.text_query("coffee mug", class_name="chair")] == ["chair"]
+
+
+def test_03c_reindex_captions_backfills_old_data(tmp_path):
+    """Data whose caption index is missing (pre-feature) is rebuilt by reindex."""
+    emb = FakeEmbedder(
+        dim=16,
+        override_text={
+            "mug. a white coffee mug": _unit_vec(16, 0),
+            "coffee mug": _unit_vec(16, 0),
+        },
+    )
+    store = SceneStore(persist_dir=tmp_path / "chroma", embedder=emb)
+    det = Detection(
+        class_name="mug", class_id=0, confidence=0.9, bbox_xyxy=(0, 0, 9, 9),
+        position=(0.0, 0.0, 0.5), embedding=tuple(_unit_vec(16, 0)),
+        caption="a white coffee mug", ts=1000.0,
+    )
+    store.upsert(det)
+    # Simulate legacy data: wipe the caption index out from under the records.
+    store._caption_collection.delete(ids=store._collection.get()["ids"])  # noqa: SLF001
+    assert store.caption_count == 0
+    assert store.text_query("coffee mug") == []  # nothing to match → empty
+    # Backfill, then it works again.
+    assert store.reindex_captions() == 1
+    assert store.caption_count == 1
+    assert store.text_query("coffee mug")[0].class_name == "mug"
+
+
 def test_04_visual_query_returns_results(seeded_store):
     store, _ = seeded_store
     # Just exercise the path — the FakeEmbedder hashes image bytes so we

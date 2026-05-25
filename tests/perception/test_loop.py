@@ -520,6 +520,69 @@ def test_loop_long_patrol_db_size_matches_unique_objects(fake_world):
 
 
 # ---------------------------------------------------------------------------
+# Position fallback — small/many objects whose 3D lift fails are still stored
+# ---------------------------------------------------------------------------
+
+
+class _NeverLifts:
+    """A lifter that always fails (simulates depth missing / batch timeout)."""
+
+    def bboxes_to_positions(self, coords, timeout=5.0):
+        return None
+
+
+def test_loop_drops_unliftable_objects_without_a_pose_provider(fake_world):
+    detector = FakeDetector(
+        {i: [FakeDetectedObject("pen", 1, 0.6, (5, 5, 12, 12))] for i in range(6)}
+    )
+
+    async def factory(on_tick):
+        return await run_scene_perception(
+            camera=fake_world["camera"],
+            detector=detector,
+            captioner=fake_world["captioner"],
+            embedder=fake_world["embedder"],
+            lifter=_NeverLifts(),
+            store=fake_world["store"],
+            interval_sec=0.01,
+            archive_source_frame=False,
+            on_tick=on_tick,
+        )
+
+    asyncio.run(_run_for_n_ticks(factory, n=5, interval=0.01))
+    # No fallback → unliftable detections are dropped (old behavior).
+    assert fake_world["store"].count == 0
+
+
+def test_loop_falls_back_to_robot_pose_when_lift_fails(fake_world):
+    detector = FakeDetector(
+        {i: [FakeDetectedObject("pen", 1, 0.6, (5, 5, 12, 12))] for i in range(6)}
+    )
+
+    async def factory(on_tick):
+        return await run_scene_perception(
+            camera=fake_world["camera"],
+            detector=detector,
+            captioner=fake_world["captioner"],
+            embedder=fake_world["embedder"],
+            lifter=_NeverLifts(),
+            store=fake_world["store"],
+            interval_sec=0.01,
+            archive_source_frame=False,
+            pose_provider=lambda: (4.0, 2.0, 0.0),  # robot's map pose
+            on_tick=on_tick,
+        )
+
+    asyncio.run(_run_for_n_ticks(factory, n=5, interval=0.01))
+    store = fake_world["store"]
+    # With a fallback pose the object is catalogued at the robot's location.
+    assert store.count == 1
+    entry = store.recency_query(since_ts=0.0)[0]
+    assert entry.class_name == "pen"
+    assert (round(entry.position[0], 1), round(entry.position[1], 1)) == (4.0, 2.0)
+
+
+# ---------------------------------------------------------------------------
 # Eviction (periodic prune wired into the loop)
 # ---------------------------------------------------------------------------
 

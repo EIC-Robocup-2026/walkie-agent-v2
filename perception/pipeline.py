@@ -61,6 +61,7 @@ def process_frame(
     position_timeout: float = 2.0,
     min_confidence: float = 0.0,
     caption_per_object: bool = False,
+    fallback_position: Optional[tuple[float, float, float]] = None,
 ) -> tuple[list[Detection], dict[str, float]]:
     """Run one frame through the perception stack.
 
@@ -73,9 +74,14 @@ def process_frame(
       3. For each surviving detection: crop, embed image, caption
          (if ``caption_per_object``) or use one whole-frame caption
 
-    Detections with no 3D position (``None`` returned or all-zero coords
-    are *not* filtered — only ``None`` is dropped) and detections below
-    ``min_confidence`` are skipped.
+    Detections below ``min_confidence`` are skipped. Positioning is
+    *best-effort*: small/distant objects often have no reliable depth, so
+    the SDK lifter returns ``None`` for them (or times out for the whole
+    batch when there are many objects). When ``fallback_position`` is given
+    (the robot's own map pose), those detections are stamped with it rather
+    than dropped — so the object still enters the catalogue at roughly the
+    right area instead of vanishing. With no fallback the old behavior holds:
+    a ``None`` position drops the detection.
     """
     latency: dict[str, float] = {}
     frame_ts = frame_ts if frame_ts is not None else time.time()
@@ -98,13 +104,22 @@ def process_frame(
     latency["lift"] = (time.perf_counter() - t0) * 1000
 
     if positions is None:
-        _log.info(
-            "pipeline.lift_failed n_dets=%d (lifter returned None — likely timeout)",
-            len(raw_detections),
-        )
-        latency["caption"] = 0.0
-        latency["embed"] = 0.0
-        return [], latency
+        if fallback_position is not None:
+            _log.info(
+                "pipeline.lift_failed n_dets=%d — stamping robot pose %s as fallback",
+                len(raw_detections),
+                tuple(round(c, 2) for c in fallback_position),
+            )
+            positions = [list(fallback_position) for _ in raw_detections]
+        else:
+            _log.info(
+                "pipeline.lift_failed n_dets=%d (lifter returned None — likely "
+                "timeout; no fallback pose, dropping frame)",
+                len(raw_detections),
+            )
+            latency["caption"] = 0.0
+            latency["embed"] = 0.0
+            return [], latency
 
     # --- Stage 3: caption + embed for each survivor ---
     t_cap = 0.0
@@ -126,7 +141,12 @@ def process_frame(
         if conf < min_confidence:
             continue
         if pos is None or len(pos) < 3:
-            continue
+            # Per-object depth lift failed (common for small/far objects).
+            # Fall back to the robot pose when we have one, else drop.
+            if fallback_position is not None:
+                pos = list(fallback_position)
+            else:
+                continue
         bbox = tuple(int(v) for v in det.bbox)  # type: ignore[assignment]
         if len(bbox) != 4:  # safety net
             continue

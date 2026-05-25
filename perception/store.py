@@ -66,9 +66,23 @@ class SceneStore:
 
     Pass ``persist_dir=None`` to get an ephemeral in-memory client — useful
     for tests. Otherwise the directory is created on first use.
+
+    Two collections are maintained, keyed by the **same** record id:
+
+      * ``scene_entries``  — one record per object. Its embedding is the CLIP
+        *image* embedding of the object crop; that's what dedup and
+        :meth:`visual_query` / :meth:`semantic_query` compare against.
+      * ``scene_captions`` — a parallel index whose embedding is the CLIP
+        *text* embedding of the record's caption (``"<class>. <caption>"``).
+        :meth:`text_query` searches this so "where is the X?" matches the
+        words a human would use, which is far more reliable than comparing a
+        text query against image vectors. Written only when an ``embedder``
+        is supplied; rebuild for pre-existing data with
+        :meth:`reindex_captions`.
     """
 
     COLLECTION = "scene_entries"
+    CAPTION_COLLECTION = "scene_captions"
 
     def __init__(
         self,
@@ -90,6 +104,12 @@ class SceneStore:
             )
         self._collection = self._client.get_or_create_collection(
             name=self.COLLECTION,
+            metadata={"hnsw:space": "cosine"},
+        )
+        # Parallel caption-text index (see class docstring). Same id space as
+        # scene_entries; query it via text_query, rebuild via reindex_captions.
+        self._caption_collection = self._client.get_or_create_collection(
+            name=self.CAPTION_COLLECTION,
             metadata={"hnsw:space": "cosine"},
         )
         self._embedder = embedder
@@ -161,6 +181,7 @@ class SceneStore:
             embeddings=[list(detection.embedding)],
             metadatas=[self._metadata_for_insert(detection, frame_ref)],
         )
+        self._index_caption(new_id, detection)
         _log.info(
             "scene.dedup action=INSERT id=%s class=%s matched_id=%s "
             "dist=%.3f sim=%.3f reason=%s",
@@ -197,6 +218,7 @@ class SceneStore:
             return
 
         meta = dict(existing["metadatas"][0])
+        prev_caption = meta.get("caption", "")
         existing_embs = _embeddings_or_blanks(existing, 1)
         existing_emb = existing_embs[0]
         n = int(meta.get("sightings", 1))
@@ -247,6 +269,16 @@ class SceneStore:
         if existing_emb is not None:
             update_kwargs["embeddings"] = [list(existing_emb)]
         self._collection.update(**update_kwargs)
+        # Only re-index the caption when its text actually changed. Re-sightings
+        # of the same object usually carry an identical caption, so skipping the
+        # redundant embed+upsert keeps the per-tick cost down (recency for
+        # text_query comes from the fresh scene_entries row, not the index).
+        old_doc = self._format_document(
+            str(meta.get("class_name", "")), str(prev_caption)
+        )
+        new_doc = self._format_document(detection.class_name, detection.caption)
+        if new_doc != old_doc:
+            self._index_caption(target_id, detection)
 
     # ------------------------------------------------------------------ reads
 
@@ -308,6 +340,82 @@ class SceneStore:
             include=["metadatas", "documents", "embeddings", "distances"],
         )
         entries = self._unpack_query(result)
+        if within_radius_of is not None and max_distance_m is not None:
+            entries = [
+                e for e in entries
+                if l2_distance(e.position, within_radius_of) <= max_distance_m
+            ]
+        return entries[:n_results]
+
+    def text_query(
+        self,
+        text: str,
+        *,
+        n_results: int = 5,
+        min_last_seen_ts: Optional[float] = None,
+        within_radius_of: Optional[tuple[float, float, float]] = None,
+        max_distance_m: Optional[float] = None,
+        class_name: Optional[str] = None,
+    ) -> list[SceneEntry]:
+        """KNN over the **caption text** index (text→text).
+
+        Embeds ``text`` with the CLIP text tower and compares it against the
+        stored caption embeddings in ``scene_captions`` — so "coffee mug"
+        matches a record captioned "a white ceramic coffee mug" far more
+        reliably than comparing the query against image vectors
+        (:meth:`semantic_query`). Returns full :class:`SceneEntry` records
+        (joined back from ``scene_entries`` by id), each carrying the cosine
+        ``distance`` to the query.
+
+        Returns ``[]`` when the caption index is empty — e.g. for data
+        collected before this index existed; run :meth:`reindex_captions`
+        once to backfill it.
+        """
+        if self._embedder is None:
+            raise RuntimeError(
+                "SceneStore was constructed without an embedder; text_query "
+                "requires one."
+            )
+        cap_count = self._caption_collection.count()
+        if cap_count == 0:
+            return []
+        query_vec = self._embedder.embed_text(text)
+        # The caption index only carries the (immutable) class_name, so filter
+        # on that here; recency lives on the fresh scene_entries row and is
+        # applied after the join below. Over-fetch to leave room for filtering.
+        where = {"class_name": class_name} if class_name else None
+        fetch = max(n_results * 4, n_results)
+        result = self._caption_collection.query(
+            query_embeddings=[query_vec],
+            n_results=min(fetch, max(1, cap_count)),
+            where=where,
+            include=["distances"],
+        )
+        ids = result["ids"][0]
+        dists = (result.get("distances") or [[None] * len(ids)])[0]
+        if not ids:
+            return []
+        # Join back to the full records in scene_entries (keep caption-rank order).
+        full = self._collection.get(
+            ids=list(ids),
+            include=["metadatas", "documents", "embeddings"],
+        )
+        embs = _embeddings_or_blanks(full, len(full["ids"]))
+        by_id: dict[str, tuple] = {
+            cid: (meta, doc, emb)
+            for cid, meta, doc, emb in zip(
+                full["ids"], full["metadatas"], full["documents"], embs
+            )
+        }
+        entries: list[SceneEntry] = []
+        for cid, dist in zip(ids, dists):
+            joined = by_id.get(cid)
+            if joined is None:
+                continue  # caption orphan (entry pruned out from under us)
+            meta, doc, emb = joined
+            entries.append(self._row_to_entry(cid, meta, doc, emb, dist))
+        if min_last_seen_ts is not None:
+            entries = [e for e in entries if e.last_seen_ts > min_last_seen_ts]
         if within_radius_of is not None and max_distance_m is not None:
             entries = [
                 e for e in entries
@@ -504,20 +612,73 @@ class SceneStore:
 
         if removed:
             self._collection.delete(ids=list(removed))
+            # Keep the caption index in lock-step so text_query never returns
+            # stale ids pointing at evicted records.
+            try:
+                self._caption_collection.delete(ids=list(removed))
+            except Exception as e:  # noqa: BLE001 — caption index is best-effort
+                _log.debug("caption prune skipped: %s", e)
             _log.info("scene.prune removed=%d", len(removed))
         return len(removed)
 
     def clear(self) -> None:
-        """Drop and recreate the collection (test/maintenance helper)."""
+        """Drop and recreate both collections (test/maintenance helper)."""
         self._client.delete_collection(self.COLLECTION)
         self._collection = self._client.get_or_create_collection(
             name=self.COLLECTION,
             metadata={"hnsw:space": "cosine"},
         )
+        try:
+            self._client.delete_collection(self.CAPTION_COLLECTION)
+        except Exception:  # noqa: BLE001 — may not exist yet
+            pass
+        self._caption_collection = self._client.get_or_create_collection(
+            name=self.CAPTION_COLLECTION,
+            metadata={"hnsw:space": "cosine"},
+        )
+
+    def reindex_captions(self) -> int:
+        """Rebuild ``scene_captions`` from the current ``scene_entries``.
+
+        One CLIP text-embed per record. Use this once to backfill the caption
+        index for data collected before it existed (otherwise
+        :meth:`text_query` returns nothing for that data). Idempotent — safe
+        to re-run; it upserts by id.
+        """
+        if self._embedder is None:
+            return 0
+        result = self._collection.get(include=["metadatas", "documents"])
+        count = 0
+        for cid, meta, doc in zip(
+            result["ids"], result["metadatas"], result["documents"]
+        ):
+            meta = meta or {}
+            text = doc or self._format_document(
+                str(meta.get("class_name", "")), str(meta.get("caption", ""))
+            )
+            try:
+                vec = self._embedder.embed_text(text)
+            except Exception as e:  # noqa: BLE001
+                _log.warning("reindex caption embed failed for %s: %s", cid, e)
+                continue
+            self._caption_collection.upsert(
+                ids=[cid],
+                embeddings=[list(vec)],
+                documents=[text],
+                metadatas=[{"class_name": str(meta.get("class_name", ""))}],
+            )
+            count += 1
+        _log.info("scene.reindex_captions indexed=%d", count)
+        return count
 
     @property
     def count(self) -> int:
         return self._collection.count()
+
+    @property
+    def caption_count(self) -> int:
+        """Number of records in the caption text index (``scene_captions``)."""
+        return self._caption_collection.count()
 
     def get_by_id(self, entry_id: str) -> Optional[SceneEntry]:
         result = self._collection.get(
@@ -540,6 +701,36 @@ class SceneStore:
     def _format_document(class_name: str, caption: str) -> str:
         caption = (caption or "").strip()
         return f"{class_name}. {caption}".rstrip(". ").strip()
+
+    def _index_caption(self, entry_id: str, detection: Detection) -> None:
+        """Upsert ``entry_id`` into the caption-text index (no-op if no embedder).
+
+        Uses the CLIP *text* tower on the same ``"<class>. <caption>"`` string
+        that scene_entries stores as its document, keyed by the same id so
+        :meth:`text_query` can join back to the full record. Failures are
+        swallowed — the caption index is an accelerator, never a correctness
+        dependency for the primary scene_entries write.
+        """
+        if self._embedder is None:
+            return
+        text = self._format_document(detection.class_name, detection.caption)
+        try:
+            vec = self._embedder.embed_text(text)
+        except Exception as e:  # noqa: BLE001
+            _log.warning("caption index embed failed for %s: %s", entry_id, e)
+            return
+        try:
+            self._caption_collection.upsert(
+                ids=[entry_id],
+                embeddings=[list(vec)],
+                documents=[text],
+                # Only the immutable class_name lives here (for an optional
+                # class filter). Recency/position come from the joined
+                # scene_entries row, so nothing here goes stale on re-sighting.
+                metadatas=[{"class_name": detection.class_name}],
+            )
+        except Exception as e:  # noqa: BLE001
+            _log.warning("caption index upsert failed for %s: %s", entry_id, e)
 
     def _make_id(self, detection: Detection) -> str:
         radius = get_dedup_radius_m()

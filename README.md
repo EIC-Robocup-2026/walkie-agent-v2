@@ -52,11 +52,12 @@ The viewer binds `0.0.0.0`, so teammates just open `http://<ip-of-the-box-runnin
 1. **`explore`** — drives around detecting objects, lifts them to 3D map coordinates, and stores confident multi-sighting objects into the legacy vector DB (ChromaDB at `CHROMA_DIR`). `main.py` runs this **first** — press Enter to finish it. To build the newer CLIP scene memory instead, use [`tools/scene_explore`](#building--rebuilding-it-toolsscene_explore).
 2. **`ready`** — the default. A background service writes a perception snapshot to `perception.json`; the agent listens to the mic (STT), runs the **Walkie agent** on each utterance, and speaks replies back (TTS).
 
-The agent stack is three agents built from one factory:
+The agent stack is four agents built from one factory:
 
-- **Walkie main** — user-facing orchestrator; delegates to the two sub-agents.
+- **Walkie main** — user-facing orchestrator; delegates to the sub-agents.
 - **Actuator** — movement + arm (`move_absolute`, `move_relative`, `command_arm`, …).
-- **Vision** — `detect_objects_from_view`, `image_caption`, `detect_people_poses`, `find_object_from_memory`, …
+- **Vision** — *live camera only*: `detect_objects_from_view`, `image_caption`, `detect_people_poses`, …
+- **Database** — long-term spatial memory: `find_object` (caption-first), `objects_near`, `recently_seen`, `list_known_objects`. "Where have I seen X / what's near here?" → Database; "what's in front of me now?" → Vision.
 
 > **Note:** the agent only "talks" by calling the `speak` tool. A plain-text model reply with no tool call ends the turn silently — by design.
 
@@ -86,6 +87,13 @@ uv sync          # creates .venv and resolves all deps, including walkie-sdk fro
 
 ### 2. Configure your environment
 
+Config is split in two:
+
+- **`.env`** (gitignored) — secrets, endpoints, per-machine/runtime toggles only.
+- **`config.toml`** (version-controlled) — all tuning knobs (perception/scene/explore/viewer/model). Edit here for behavior changes.
+
+Precedence: a shell env var **>** `.env` **>** `config.toml` **>** the code default — so you can still override any tunable from `.env` or the shell for a one-off run.
+
 ```bash
 cp .env.example .env
 ```
@@ -96,19 +104,17 @@ Open `.env` and at minimum set your LLM key:
 OPENROUTER_API_KEY=sk-or-...
 ```
 
-Key variables (full list in `.env.example`):
+`.env` variables (the full set):
 
 | Variable | Default | What it does |
 |---|---|---|
 | `OPENROUTER_API_KEY` | *(empty)* | **Required.** Agent calls fail without it. |
-| `WALKIE_MODEL` | `anthropic/claude-sonnet-4.5` | LLM used by every agent. |
+| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | LLM endpoint. |
 | `WALKIE_AI_BASE_URL` | `http://localhost:5000` | Where `walkie-ai-server` lives. |
-| `CHROMA_DIR` | `chroma_db` | Vector DB location (object memory). |
-| `PERCEPTION_PATH` | `perception.json` | Where the ready-stage snapshot is written. |
-| `PERCEPTION_INTERVAL_SEC` | `10.0` | How often the perception snapshot refreshes. |
-| `SCENE_PERCEPTION_ENABLED` | `1` | CLIP scene memory (see below). Set `0` to disable. |
-| `SCENE_CHROMA_DIR` | `chroma_db_scene` | Where the CLIP scene memory is persisted. |
-| `DISABLE_LISTENING` | *(unset)* | Set `1` to type prompts instead of using the mic. |
+| `WALKIE_ROS_PROTOCOL` / `WALKIE_ROS_PORT` | `rosbridge` / `9090` | Robot transport. |
+| `DISABLE_LISTENING` | `0` | Set `1` to type prompts instead of using the mic. |
+
+Tuning lives in **`config.toml`** — e.g. `[llm] WALKIE_MODEL`, `[scene] SCENE_PERCEPTION_INTERVAL_SEC`, `[scene.dedup] SCENE_DEDUP_RADIUS_M`, `[viewer] CHROMA_VIEWER_PORT`. Each key is the exact env-var name the code reads, grouped into tables for readability.
 
 ### 3. Start the dependencies
 
@@ -170,7 +176,11 @@ camera → object_detection → bboxes_to_positions (3D) → image_caption + CLI
                                                                           (image_embed on walkie-ai-server)
 ```
 
-Once it's populated, `find_object_from_memory` answers "where is the X?" via CLIP semantic search (`SceneStore.semantic_query`) and returns map-frame `(x, y, z)` coordinates the actuator can navigate to. It runs **alongside** the `perception.json` live snapshot — they serve different purposes (long-term catalogue vs. current view).
+Once it's populated, `find_object_from_memory` (and the **Database agent**) answer "where is the X?" by searching the stored **captions** first (`SceneStore.text_query`, text→text — "coffee mug" matches a record captioned "a white ceramic coffee mug"), falling back to CLIP image search (`semantic_query`) if the caption index has no hit. Either way it returns map-frame `(x, y, z)` coordinates the actuator can navigate to. It runs **alongside** the `perception.json` live snapshot — they serve different purposes (long-term catalogue vs. current view).
+
+Internally the store keeps two ChromaDB collections under one id space: `scene_entries` (CLIP image embeddings, used for dedup) and `scene_captions` (CLIP text embeddings of the captions, used by `text_query`). The caption index is written automatically on new sightings; for data collected with an older build, set `SCENE_REINDEX_CAPTIONS=1` once (in `.env` or `config.toml`) to backfill it.
+
+Objects whose 3D depth-lift fails — small/distant ones, or a whole crowded frame on timeout — are no longer dropped: they're stamped with the robot's own pose so they still enter the catalogue at roughly the right spot (`SCENE_POSITION_SOURCE`).
 
 **This depends on the server's `/image-embed` route.** On startup the app probes it once:
 
@@ -179,7 +189,7 @@ Once it's populated, `find_object_from_memory` answers "where is the X?" via CLI
 
 To turn the CLIP route on, the server team uncomments `app.register_blueprint(image_embed.bp)` in `walkie-ai-server` and redeploys. No changes are needed on this side.
 
-Tuning knobs (all optional, see `.env.example`): `SCENE_PERCEPTION_ENABLED`, `SCENE_CHROMA_DIR`, `SCENE_FRAMES_DIR`, `SCENE_PERCEPTION_INTERVAL_SEC`, `SCENE_MIN_CONF`, `SCENE_CAPTION_PER_OBJECT`, `SCENE_FRAME_REFRESH_ON_UPDATE`.
+Tuning knobs (in `config.toml`, `[scene]` / `[scene.dedup]` / `[scene.position]`): `SCENE_PERCEPTION_ENABLED`, `SCENE_CHROMA_DIR`, `SCENE_FRAMES_DIR`, `SCENE_PERCEPTION_INTERVAL_SEC`, `SCENE_MIN_CONF`, `SCENE_CAPTION_PER_OBJECT`, `SCENE_FRAME_REFRESH_ON_UPDATE`, `SCENE_REINDEX_CAPTIONS`, `SCENE_DEDUP_RADIUS_M`, `SCENE_POSITION_SOURCE`.
 
 ### Building / rebuilding it: `tools/scene_explore`
 
@@ -196,7 +206,7 @@ It deletes `SCENE_CHROMA_DIR` + `SCENE_FRAMES_DIR`, runs the same detect → lif
 
 ### Eviction (keeping it fresh)
 
-In the **ready** stage the loop periodically prunes objects it no longer sees, so things you physically move away stop lingering in the store (and the viewer). It's spatially gated to the robot's current vicinity, so objects in rooms it hasn't revisited aren't wrongly deleted while it roams; thumbnails also refresh on each re-sighting. Tune with `SCENE_PRUNE_TTL_SEC`, `SCENE_PRUNE_RADIUS_M`, `SCENE_PRUNE_INTERVAL_SEC`, `SCENE_PRUNE_MAX_RECORDS` (see `.env.example`).
+In the **ready** stage the loop periodically prunes objects it no longer sees, so things you physically move away stop lingering in the store (and the viewer). It's spatially gated to the robot's current vicinity, so objects in rooms it hasn't revisited aren't wrongly deleted while it roams; thumbnails also refresh on each re-sighting. Tune with `SCENE_PRUNE_TTL_SEC`, `SCENE_PRUNE_RADIUS_M`, `SCENE_PRUNE_INTERVAL_SEC`, `SCENE_PRUNE_MAX_RECORDS` (in `config.toml`, `[scene.prune]`).
 
 ---
 
@@ -216,23 +226,23 @@ It enumerates every collection in each directory and renders rows from whatever 
 - A persistent **sidebar** of stores → collections (with live count badges) and a **light/dark theme** toggle.
 - **Sortable columns**, **class-filter chips**, **colored class badges**, and inline **confidence/distance bars**.
 - A top-down **position map** (SVG scatter of each record's `x`/`y` in the map frame, colored by class, with the robot origin marked) — click a point to open that record.
-- **Frame thumbnails** with click-to-zoom **lightbox**; per record, the full metadata, document, archived JPEG, and an **embedding sparkline** + stats (dim / L2 norm).
+- **Frame thumbnails** with click-to-zoom **lightbox**; per record, the full metadata, document, archived JPEG, and an **embedding sparkline** + stats (dim / L2 norm). Frames are **downscaled server-side** (cached, keyed by `?w=`) so full-resolution camera captures render as small thumbnails in tables/galleries instead of failing to load — the lightbox still shows a crisp larger version.
 - **Search**: substring by default; switch the dropdown to **semantic** for a CLIP/vector query (best-effort — falls back to substring with a warning if `walkie-ai-server` is down).
 
 **Live updates:** the header has an **auto-refresh** dropdown (off / 2s / 5s / 10s / 30s with a countdown, remembered per-browser; initial value is `CHROMA_VIEWER_REFRESH_SEC`, default 5s). It refreshes by swapping just the content area — so your scroll position, theme, and search focus are preserved (no jarring full reload) — and pauses while you're typing. Browse tables, counts, and substring search reflect the robot's latest writes, so you can watch the DB fill in real time. One caveat: **semantic (vector) search** results are loaded into the viewer's memory at startup and only refresh when you **restart** the viewer; browse and substring search are always live.
 
-It only ever reads, so it's safe to run while the robot is writing. Config: `CHROMA_VIEWER_DIRS`, `CHROMA_VIEWER_PORT`, `CHROMA_VIEWER_REFRESH_SEC`, `SCENE_FRAMES_DIR` (see `.env.example`).
+It only ever reads, so it's safe to run while the robot is writing. Config (in `config.toml`, `[viewer]`): `CHROMA_VIEWER_DIRS`, `CHROMA_VIEWER_PORT`, `CHROMA_VIEWER_REFRESH_SEC`, `CHROMA_VIEWER_THUMB_CACHE`, plus `SCENE_FRAMES_DIR`.
 
 ---
 
 ## Standalone client tests (manual demos)
 
-These open a **local webcam** and require `walkie-ai-server` running. They are visual smoke tests, not pytest tests:
+These open a **local webcam** and require `walkie-ai-server` running. They are visual smoke tests, not pytest tests. They live in `manual_tests/` — run them as modules so `from client import …` resolves:
 
 ```bash
-uv run python test_object_detection.py   # boxes + labels live from webcam
-uv run python test_captioning.py         # image captioning
-uv run python test_pose_estimation.py    # human pose keypoints
+uv run python -m manual_tests.test_object_detection   # boxes + labels live from webcam
+uv run python -m manual_tests.test_captioning         # image captioning
+uv run python -m manual_tests.test_pose_estimation    # human pose keypoints
 ```
 
 Press `q` in the OpenCV window to quit.
@@ -248,7 +258,17 @@ uv run pytest                 # all tests
 uv run pytest tests/perception -v
 ```
 
-> The `test_*.py` files at the repo **root** are the manual webcam demos above — not part of the pytest run (`testpaths` is `["tests"]`).
+> The webcam demos live in `manual_tests/` (not `tests/`), so they're never collected by the pytest run (`testpaths` is `["tests"]`).
+
+### Wiping a vector DB
+
+The DBs are generated at runtime (and gitignored). To start fresh — run with the robot/viewer stopped:
+
+```bash
+uv run python -m tools.reset_db --object   # legacy object DB (chroma_db) + object_frames
+uv run python -m tools.reset_db --scene    # CLIP scene memory (chroma_db_scene) + frames
+uv run python -m tools.reset_db --all -y   # both, skip the confirmation
+```
 
 ---
 
@@ -260,8 +280,10 @@ agents/
   core/                  Shared agent factory, middleware stack, RobotContext, tool decorators.
   walkie_agent/          Main orchestrator agent (thread_id="main").
   actuator_agent/        Movement + arm tools.
-  vision_agent/          Detection / captioning / pose / memory-lookup tools.
+  vision_agent/          Live-camera tools: detection / captioning / pose.
+  database_agent/        Long-term spatial-memory tools (find_object, objects_near, …).
 client/                  HTTP client to walkie-ai-server (stt, tts, detection, pose, caption, embed).
+config.toml              Tuning knobs (perception/scene/explore/viewer/model); loaded by walkie_config.py.
 interfaces/
   walkie_interface.py    Composes hardware sub-clients (nav/arm/status/tools + camera/mic/speaker).
   devices/               Local camera, microphone, speaker wrappers.
@@ -273,8 +295,10 @@ perception/              Scene store, dedup, prune, async loop, embedders, pipel
 db/walkie_db.py          WalkieVectorDB (ChromaDB wrapper) for object memory.
 tools/chroma_viewer.py   Read-only web UI to inspect the ChromaDB stores.
 tools/scene_explore.py   Reset + collect into the CLIP scene store (no agent/mic).
+tools/reset_db.py        Wipe the object and/or CLIP scene DBs for a clean slate.
 docs/                    Scene perception design docs (EN + TH).
 tests/                   pytest suite (perception).
+manual_tests/            Interactive webcam/robot demos (run via `python -m manual_tests.*`).
 ```
 
 ---

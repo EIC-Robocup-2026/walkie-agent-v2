@@ -38,9 +38,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import html
+import logging
 import math
 import os
 import time
+import traceback
 from collections import Counter
 from pathlib import Path
 from typing import Any, Optional
@@ -50,15 +52,37 @@ import chromadb
 from chromadb.config import Settings
 from dotenv import load_dotenv
 from flask import Flask, Response, abort, render_template_string, request, send_file
+from PIL import Image
 
-# Pick up .env (CHROMA_VIEWER_*, SCENE_FRAMES_DIR, WALKIE_AI_BASE_URL) at import
-# time, before the module-level getenv reads below, mirroring main.py.
+from walkie_config import load_config
+
+# Pick up .env (endpoints/secrets) then config.toml (CHROMA_VIEWER_*,
+# SCENE_FRAMES_DIR, …) at import time, before the module-level getenv reads
+# below — mirroring main.py's startup order.
 load_dotenv()
+load_config()
+
+_log = logging.getLogger("chroma_viewer")
 
 PAGE_SIZE = 50
 SEARCH_SCAN_CAP = 5000  # max rows scanned for a substring search
 BROWSE_FETCH_CAP = 3000  # max rows pulled for sort/filter/map before paginating
 DEFAULT_REFRESH_SEC = os.getenv("CHROMA_VIEWER_REFRESH_SEC", "5")
+
+# Server-side thumbnailing for the /frame route. Scene frames are full camera
+# captures (often multi-MB) and a table/gallery loads dozens at once — at full
+# resolution the browser chokes and images silently fail to render. We instead
+# serve a downscaled JPEG keyed by ?w=<width>, cached on disk.
+# Resolve to an absolute path: Flask's send_file treats a *relative* path as
+# relative to app.root_path (the tools/ dir), not the cwd, so a relative cache
+# dir would write here but be looked up there.
+THUMB_CACHE_DIR = Path(os.getenv("CHROMA_VIEWER_THUMB_CACHE", ".thumb_cache")).resolve()
+THUMB_MAX_W = 2048  # clamp requested widths so ?w= can't ask for an upscale bomb
+THUMB_W_TABLE = 160  # 56px cells @ retina
+THUMB_W_FEED = 96  # changes-feed rows
+THUMB_W_SIMILAR = 120  # record-page "similar" strip
+THUMB_W_GALLERY = 480  # gallery cards
+THUMB_W_FULL = 1280  # record detail + lightbox zoom
 
 # Metadata keys promoted to table columns, in display order, when present.
 # ``id`` / ``frame`` / ``document`` / ``position`` / ``distance`` are handled
@@ -194,11 +218,29 @@ def _position(meta: dict) -> Optional[tuple[float, float, float]]:
     return None
 
 
-def _frame_url(meta: dict) -> Optional[str]:
+def _frame_url(meta: dict, w: Optional[int] = None) -> Optional[str]:
     ref = meta.get("frame_ref")
     if not ref:
         return None
-    return "/frame?ref=" + quote(str(ref))
+    url = "/frame?ref=" + quote(str(ref))
+    if w:
+        url += f"&w={int(w)}"
+    return url
+
+
+def _img_tag(
+    meta: dict, *, cls: str, w: int, extra: str = ""
+) -> Optional[str]:
+    """An ``<img>`` for a record's frame: small ``src`` thumbnail, larger
+    ``data-full`` so the lightbox zoom stays crisp. Returns None if no frame."""
+    small = _frame_url(meta, w)
+    if not small:
+        return None
+    full = _frame_url(meta, THUMB_W_FULL)
+    return (
+        f"<img class='{cls}' data-zoom data-full='{full}' src='{small}' "
+        f"loading='lazy'{(' ' + extra) if extra else ''}>"
+    )
 
 
 def _emb_stats(vec) -> Optional[dict[str, Any]]:
@@ -435,12 +477,8 @@ def _cell(di: int, coll: str, key: str, r: dict) -> str:
             f"<button class='copy' data-copy='{e(rid)}' title='Copy id'>⧉</button></td>"
         )
     if key == "frame":
-        furl = _frame_url(meta)
-        return (
-            f"<td><img class='thumb' data-zoom src='{furl}' loading='lazy'></td>"
-            if furl
-            else "<td></td>"
-        )
+        img = _img_tag(meta, cls="thumb", w=THUMB_W_TABLE)
+        return f"<td>{img}</td>" if img else "<td></td>"
     if key == "document":
         return f"<td class='c-doc' title='{e(r['doc'])}'>{e(r['doc'])}</td>"
     if key == "class_name":
@@ -923,11 +961,9 @@ def _render_similar(di: int, coll: str, neighbors: list[dict]) -> str:
     rows = []
     for r in neighbors:
         m = r["meta"]
-        furl = _frame_url(m)
         thumb = (
-            f"<img class='thumb' data-zoom src='{furl}'>"
-            if furl
-            else "<span class='nothumb'></span>"
+            _img_tag(m, cls="thumb", w=THUMB_W_SIMILAR)
+            or "<span class='nothumb'></span>"
         )
         badge = _class_badge(m["class_name"]) if m.get("class_name") else ""
         pos = _position(m)
@@ -1348,7 +1384,8 @@ document.documentElement.setAttribute('data-theme',t==='auto'?(d?'dark':'light')
     if(measureMode){var mc=ev.target.closest&&ev.target.closest('.map-pt');
       if(mc){ev.preventDefault();addMeasurePoint(mc);return;}}
     var z=ev.target.closest&&ev.target.closest('[data-zoom]');
-    if(z){ev.preventDefault();lbi.src=z.getAttribute('src');lb.hidden=false;return;}
+    if(z){ev.preventDefault();
+      lbi.src=z.getAttribute('data-full')||z.getAttribute('src');lb.hidden=false;return;}
     var c=ev.target.closest&&ev.target.closest('[data-copy]');
     if(c){navigator.clipboard&&navigator.clipboard.writeText(c.getAttribute('data-copy'));
       c.textContent='✓';setTimeout(function(){c.textContent='⧉';},900);return;}
@@ -1662,12 +1699,9 @@ def record(di: int, coll: str, rid: str) -> str:
         parts.append(f"<div class='muted'>{e(r['doc'])}</div>")
     parts.append("</div>")
 
-    frame = _frame_url(meta)
-    if frame:
-        parts.append(
-            f"<div class='card' style='padding:14px'>"
-            f"<img class='full' data-zoom src='{frame}'></div>"
-        )
+    full_img = _img_tag(meta, cls="full", w=THUMB_W_FULL)
+    if full_img:
+        parts.append(f"<div class='card' style='padding:14px'>{full_img}</div>")
 
     parts.append(
         "<div class='section-h'>metadata</div><div class='card'><dl class='meta'>"
@@ -1676,23 +1710,25 @@ def record(di: int, coll: str, rid: str) -> str:
         parts.append(f"<dt>{e(k)}</dt><dd>{_meta_value(k, meta[k])}</dd>")
     parts.append("</dl></div>")
 
-    stats = _emb_stats(r["emb"])
-    if stats:
-        head = ", ".join(f"{v:.4f}" for v in stats["head"])
-        parts.append(
-            "<div class='section-h'>embedding</div><div class='card'>"
-            f"{_sparkline(stats['vals'])}<dl class='meta'>"
-            f"<dt>dim</dt><dd>{stats['dim']}</dd>"
-            f"<dt>L2 norm</dt><dd>{stats['norm']:.4f}</dd>"
-            f"<dt>min / max</dt><dd>{stats['min']:.4f} / {stats['max']:.4f}</dd>"
-            f"<dt>head[0:8]</dt><dd><code>{e(head)}</code></dd></dl></div>"
-        )
-    else:
-        parts.append(
-            "<div class='section-h'>embedding</div>"
-            "<div class='card' style='padding:14px'><span class='muted'>"
-            "no embedding stored</span></div>"
-        )
+    stats = None
+    emb_html = (
+        "<div class='card' style='padding:14px'><span class='muted'>"
+        "no embedding stored</span></div>"
+    )
+    try:
+        stats = _emb_stats(r["emb"])
+        if stats:
+            head = ", ".join(f"{v:.4f}" for v in stats["head"])
+            emb_html = (
+                f"<div class='card'>{_sparkline(stats['vals'])}<dl class='meta'>"
+                f"<dt>dim</dt><dd>{stats['dim']}</dd>"
+                f"<dt>L2 norm</dt><dd>{stats['norm']:.4f}</dd>"
+                f"<dt>min / max</dt><dd>{stats['min']:.4f} / {stats['max']:.4f}</dd>"
+                f"<dt>head[0:8]</dt><dd><code>{e(head)}</code></dd></dl></div>"
+            )
+    except Exception as ex:  # noqa: BLE001 — never let a bad vector blank the page
+        emb_html = f"<div class='muted small'>embedding unreadable: {e(ex)}</div>"
+    parts.append("<div class='section-h'>embedding</div>" + emb_html)
 
     if stats:  # nearest neighbours by this record's own embedding
         try:
@@ -1728,11 +1764,9 @@ def gallery(di: int, coll: str) -> str:
     cards = []
     for r in rows[:300]:
         m = r["meta"]
-        furl = _frame_url(m)
         img = (
-            f"<img class='gimg' data-zoom src='{furl}'>"
-            if furl
-            else "<div class='gimg noimg'>no image</div>"
+            _img_tag(m, cls="gimg", w=THUMB_W_GALLERY)
+            or "<div class='gimg noimg'>no image</div>"
         )
         badge = _class_badge(m["class_name"]) if m.get("class_name") else ""
         ts = _ts_html(m.get("last_seen_ts")) if m.get("last_seen_ts") else ""
@@ -1881,8 +1915,7 @@ def changes(di: int, coll: str) -> str:
         out = []
         for r in items[:100]:
             m = r["meta"]
-            furl = _frame_url(m)
-            th = f"<img class='thumb' data-zoom src='{furl}'>" if furl else ""
+            th = _img_tag(m, cls="thumb", w=THUMB_W_FEED) or ""
             badge = _class_badge(m["class_name"]) if m.get("class_name") else ""
             out.append(
                 f"<a class='feedrow' href='{_record_url(di, coll, r['id'])}'>{th}{badge}"
@@ -1948,7 +1981,74 @@ def frame() -> Response:
         abort(403)
     if not p.is_file() or p.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp"):
         abort(404)
+    w = request.args.get("w", type=int)
+    if w and w > 0:
+        thumb = _thumbnail(p, min(w, THUMB_MAX_W))
+        if thumb is not None:
+            try:
+                return send_file(thumb, mimetype="image/jpeg")
+            except Exception as e:  # noqa: BLE001 — never 500 over a thumbnail
+                _log.warning("serving thumbnail %s failed: %s", thumb, e)
+        # Thumbnailing/serving failed (corrupt/odd image) — fall through to
+        # the original so the picture still shows rather than 500-ing.
     return send_file(p)
+
+
+def _thumbnail(src: Path, width: int) -> Optional[Path]:
+    """Return a cached downscaled JPEG of ``src`` at ``width`` px, or None.
+
+    Keyed by source path + mtime + width so it auto-invalidates when the robot
+    overwrites a frame in place. Never raises — a failure returns None and the
+    caller serves the full-resolution original instead.
+    """
+    try:
+        st = src.stat()
+        key = hashlib.md5(
+            f"{src}|{int(st.st_mtime)}|{st.st_size}|{width}".encode()
+        ).hexdigest()
+        THUMB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        out = THUMB_CACHE_DIR / f"{key}.jpg"
+        if out.is_file():
+            return out
+        with Image.open(src) as im:
+            im = im.convert("RGB")
+            # Only ever downscale; never enlarge a small frame.
+            if im.width > width:
+                im.thumbnail((width, width * 10), Image.LANCZOS)
+            im.save(out, format="JPEG", quality=82)
+        return out
+    except Exception as e:  # noqa: BLE001 — best-effort; caller falls back
+        _log.warning("thumbnail failed for %s: %s", src, e)
+        return None
+
+
+@app.errorhandler(Exception)
+def _on_unhandled(exc: Exception):
+    """Last-resort guard: render the traceback in-page instead of a blank 500.
+
+    HTTP errors (404/403/…) pass through unchanged. For anything else this
+    keeps the viewer usable — you can read what broke on the record/detail
+    page and report it, rather than getting an opaque 'internal server error'.
+    """
+    from werkzeug.exceptions import HTTPException
+
+    if isinstance(exc, HTTPException):
+        return exc
+    tb = traceback.format_exc()
+    _log.error("unhandled viewer error:\n%s", tb)
+    body = (
+        "<div class='page-head'><h1>Something broke rendering this page</h1>"
+        "<div class='muted'>The viewer caught an error so you don't get a "
+        "blank 500. Details below — this is read-only, your data is safe.</div>"
+        "</div>"
+        f"<div class='warn'>{e(exc)}</div>"
+        f"<div class='card' style='padding:14px'><pre style='white-space:pre-wrap;"
+        f"margin:0;font-size:12px'>{e(tb)}</pre></div>"
+    )
+    try:
+        return render_page("error", body), 500
+    except Exception:  # noqa: BLE001 — even the shell failed; plain text
+        return f"viewer error:\n{tb}", 500
 
 
 def _meta_value(key: str, val: Any) -> str:

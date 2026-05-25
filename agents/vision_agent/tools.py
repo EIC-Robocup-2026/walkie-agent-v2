@@ -6,7 +6,6 @@ from langchain_core.tools import tool
 
 from agents.core.tool_decorators import parallelable_tool, sequential_tool
 from agents.core.robot_context import RobotContext
-from agents.core.object_memory import lookup_object_in_memory
 from db.walkie_db import WalkieVectorDB
 from interfaces.walkie_interface import WalkieInterface
 
@@ -39,12 +38,12 @@ def make_vision_tools(
 ):
     """Build the vision sub-agent's tool list.
 
-    Detection / caption / pose / memory tools are parallelable.
-    speak is sequential.
+    Detection / caption / pose tools are parallelable; speak is sequential.
 
-    ``scene_store``: when supplied (a :class:`perception.SceneStore`),
-    ``find_object_from_memory`` queries the CLIP-backed scene memory;
-    otherwise it falls back to the legacy ``db``.
+    Vision is about the **live camera** only. Long-term "where have I seen X?"
+    lookups belong to the Walkie Database sub-agent, so they are not exposed
+    here. ``db`` / ``scene_store`` are accepted for signature stability but
+    not used by these tools.
     """
 
     def _capture():
@@ -104,25 +103,6 @@ def make_vision_tools(
         return "People detected:\n" + "\n".join(lines)
 
     @parallelable_tool
-    @tool(parse_docstring=True)
-    def find_object_from_memory(object_name: str) -> str:
-        """Search the long-term object database for a previously-seen object.
-
-        Use when the user asks "where is the X?" — this queries the scene
-        memory (CLIP) built by the always-on perception loop, or the legacy
-        explore-stage catalogue, and returns map-frame coordinates.
-
-        Args:
-            object_name: Name or description of the object (e.g. "coffee mug").
-
-        Returns:
-            Known location(s) with coordinates, or a message if not found.
-        """
-        return lookup_object_in_memory(
-            object_name, scene_store=scene_store, db=db, n_results=5
-        )
-
-    @parallelable_tool
     @tool
     def get_camera_view_description() -> str:
         """Combined snapshot: detected objects + caption + people poses, in one call.
@@ -179,7 +159,6 @@ def make_vision_tools(
         detect_objects_from_view,
         image_caption,
         detect_people_poses,
-        find_object_from_memory,
         get_camera_view_description,
         speak,
     ]
