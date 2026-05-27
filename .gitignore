@@ -5,9 +5,13 @@ build/
 dist/
 wheels/
 *.egg-info
+.pytest_cache/
 
 # Virtual environments
 .venv
+
+# Per-user tool state (Claude Code scheduled-task lock, etc.)
+.claude/
 
 # Models
 *.pth
@@ -19,3 +23,19 @@ wheels/
 
 # Env
 .env
+
+# Vector DBs + perception artifacts (all generated at runtime — never commit)
+chroma_db/
+chroma_db_scene/
+frames/
+object_frames/
+perception.json
+perception.json.tmp
+
+# Throwaway mock data for the Chroma viewer (tools/seed_mock_chroma.py)
+chroma_db_mock/
+chroma_db_scene_mock/
+frames_mock/
+
+# Chroma viewer downscaled-thumbnail cache (regenerated on demand)
+.thumb_cache/

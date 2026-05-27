@@ -111,10 +111,10 @@ class PerceptionService(threading.Thread):
         self.caption_filter = caption_filter
         self.position_timeout = position_timeout
         self.verbose = verbose
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
 
     def stop_and_join(self, timeout: float | None = None) -> None:
-        self._stop.set()
+        self._stop_event.set()
         self.join(timeout)
 
     def _log(self, msg: str) -> None:
@@ -123,13 +123,13 @@ class PerceptionService(threading.Thread):
 
     def run(self) -> None:
         self._log(f"started (interval={self.interval}s, output={self.output_path})")
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             try:
                 snap = self._snapshot()
                 self._write_atomic(snap)
             except Exception as e:  # noqa: BLE001
                 self._log(f"tick error: {e}")
-            self._stop.wait(self.interval)
+            self._stop_event.wait(self.interval)
         self._log("stopped.")
 
     def _snapshot(self) -> dict:

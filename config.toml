@@ -1,0 +1,124 @@
+# walkie-agent-v2 tuning config.
+#
+# This file holds the *tuning knobs* that used to clutter .env — they're not
+# secrets and rarely change per-machine, so they live in version-controllable
+# config instead. Secrets / endpoints / per-robot transport stay in .env.
+#
+# Precedence (highest wins):
+#   1. a real shell environment variable
+#   2. a value in .env
+#   3. a value here in config.toml
+#   4. the hardcoded default in code
+#
+# So you can still override any of these from .env or the shell for a one-off
+# run without editing this file. Values are written as the same strings the
+# code's os.getenv() calls expect (e.g. "1"/"0" for flags, "" to disable).
+
+[llm]
+WALKIE_MODEL = "anthropic/claude-sonnet-4.5"
+WALKIE_TEMPERATURE = "0"
+
+[agent]
+# History summarization (agents/core/agent.py middleware).
+WALKIE_SUMMARIZE_AT_TOKENS = "6000"
+WALKIE_SUMMARIZE_KEEP_MSGS = "12"
+
+[robot]
+# 1 = pause after each movement / arm action (debugging).
+PAUSE_AFTER_WALK = "0"
+
+[storage]
+# Legacy explore-stage WalkieVectorDB and its object-crop frames.
+CHROMA_DIR = "chroma_db"
+OBJECT_FRAMES_DIR = "object_frames"
+PERCEPTION_PATH = "perception.json"
+
+[explore]
+# Legacy explore stage thresholds (WalkieVectorDB → chroma_db).
+EXPLORE_INTERVAL_SEC = "1.0"
+EXPLORE_MIN_SIGHTINGS = "5"
+EXPLORE_DEDUP_RADIUS_M = "1.0"
+EXPLORE_MIN_CONF = "0.6"
+
+[perception]
+# Ready-stage live snapshot written to perception.json.
+PERCEPTION_INTERVAL_SEC = "5.0"
+PERCEPTION_STALE_SEC = "10"
+PERCEPTION_CAPTION_OBJECTS = "0"
+# Comma-separated class names to caption (empty = all).
+PERCEPTION_CAPTION_FILTER = ""
+
+[scene]
+# CLIP long-term semantic memory (ready stage). Embeds detections via
+# walkie-ai-server's /image-embed into chroma_db_scene; powers find_object.
+SCENE_PERCEPTION_ENABLED = "1"
+SCENE_CHROMA_DIR = "chroma_db_scene"
+SCENE_FRAMES_DIR = "frames"
+# Capture cadence. Raised from 5s → 8s so the store isn't churned so often
+# (one tick already catalogues every visible object). Lower for faster updates.
+SCENE_PERCEPTION_INTERVAL_SEC = "8.0"
+SCENE_MIN_CONF = "0.0"
+# Comma-separated classes to KEEP OUT of long-term memory. Moving objects
+# (people) can't be position-deduped — they spawn a new record every tick — so
+# they don't belong in a spatial catalogue. Filtered before lift/caption/embed,
+# so excluded classes cost nothing. Empty = store everything.
+SCENE_EXCLUDE_CLASSES = "person"
+# Per-object captions describe each object separately (~6s each) but make the
+# caption text search much sharper. 0 = one cheap whole-frame caption.
+SCENE_CAPTION_PER_OBJECT = "1"
+# Refresh the archived thumbnail on every re-sighting (overwrite in place).
+SCENE_FRAME_REFRESH_ON_UPDATE = "1"
+# Rebuild the caption text index for pre-existing records on startup. Set "1"
+# once after upgrading (or after collecting data with an older build), then "0".
+SCENE_REINDEX_CAPTIONS = "0"
+
+[scene.dedup]
+# Merge gates (perception/dedup.py). RADIUS/TIGHT must stay ABOVE per-object
+# position jitter from get_3d_poses (~5-15cm) or the SAME object re-inserts as
+# duplicates. If one object splits into many records, raise these. (These were
+# 0.1/0.08 — below the jitter band — which is exactly what caused the duplicate
+# spam; 0.4/0.2 keeps re-sightings inside the candidate net.)
+SCENE_DEDUP_RADIUS_M = "0.4"
+SCENE_DEDUP_TIGHT_M = "0.2"
+# Embedding cosine merge gates. HIGH merges on visual similarity; raise toward
+# 1.0 to merge less aggressively.
+SCENE_EMB_SIM_HIGH = "0.85"
+SCENE_EMB_SIM_LOW = "0.65"
+# Visual dedup: also pull the top-K same-class nearest neighbours by image
+# embedding into the candidate set on upsert, *regardless of position*. Without
+# this the sim≥HIGH gate is capped by RADIUS, so a confident re-sighting whose
+# 3D position drifted (or fell back to the robot pose) duplicates. 0 = spatial
+# dedup only (one extra vector query per detection when > 0).
+SCENE_DEDUP_VISUAL_K = "5"
+
+[scene.position]
+# lift  = SDK depth+TF per-object 3D position (distinct objects → distinct
+#         positions). Needs rosbridge + get_3d_poses. Small/far objects whose
+#         depth fails now fall back to the robot pose instead of being dropped.
+# robot = robot's own odom pose for every object (coarse but robust).
+SCENE_POSITION_SOURCE = "lift"
+
+[scene.prune]
+# Eviction so removed objects leave the store. TTL evicts records not re-seen
+# for N seconds; RADIUS gates the sweep to the robot's vicinity (roaming-safe;
+# 0/empty = global). 0/empty TTL disables. MAX_RECORDS is an optional global cap.
+SCENE_PRUNE_TTL_SEC = "60"
+SCENE_PRUNE_RADIUS_M = "2.5"
+SCENE_PRUNE_INTERVAL_SEC = "10"
+SCENE_PRUNE_MAX_RECORDS = ""
+
+[viewer]
+# Read-only ChromaDB web UI (tools.chroma_viewer).
+# Auto-start the viewer in-process alongside `python main.py` (1 = on). Because
+# it runs in the SAME process as the robot, both share one ChromaDB backend, so
+# browsing is fully LIVE and safe — no snapshot, no DB corruption. Set 0 to run
+# the robot without it (then start it separately with `python -m tools.chroma_viewer`).
+CHROMA_VIEWER_AUTOSTART = "1"
+CHROMA_VIEWER_HOST = "0.0.0.0"
+CHROMA_VIEWER_DIRS = "chroma_db,chroma_db_scene"
+CHROMA_VIEWER_PORT = "8500"
+# Initial browser auto-refresh (s); 0 = off. Header dropdown overrides per-browser.
+CHROMA_VIEWER_REFRESH_SEC = "5"
+# Downscaled-thumbnail cache for the /frame route (large source frames render
+# as small JPEGs in tables/galleries instead of failing to load).
+CHROMA_VIEWER_THUMB_CACHE = ".thumb_cache"

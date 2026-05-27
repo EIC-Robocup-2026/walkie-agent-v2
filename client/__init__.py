@@ -15,6 +15,7 @@ Quick start::
 
 from .base import WalkieAPIError
 from .image_caption import ImageCaptionClient
+from .image_embed import ImageEmbedClient
 from .object_detection import ObjectDetectionClient
 from .pose_estimation import PoseEstimationClient
 from .stt import STTClient
@@ -29,4 +30,5 @@ __all__ = [
     "ObjectDetectionClient",
     "PoseEstimationClient",
     "ImageCaptionClient",
+    "ImageEmbedClient",
 ]

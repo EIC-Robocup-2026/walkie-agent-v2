@@ -29,6 +29,7 @@ class _Track:
     count: int = 1
     promoted_id: str | None = None
     last_caption: str = ""
+    last_bbox: tuple[int, int, int, int] | None = None
     last_seen_ts: float = field(default_factory=time.time)
 
     def update(self, position: Position, confidence: float) -> None:
@@ -83,11 +84,11 @@ class ExploreService(threading.Thread):
         self.min_conf = min_conf
         self.position_timeout = position_timeout
         self.verbose = verbose
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self._tracks: dict[tuple[str, tuple[int, int, int]], _Track] = {}
 
     def stop_and_join(self, timeout: float | None = None) -> None:
-        self._stop.set()
+        self._stop_event.set()
         self.join(timeout)
 
     def _bucket(self, pos: Position) -> tuple[int, int, int]:
@@ -103,12 +104,12 @@ class ExploreService(threading.Thread):
             f"started (interval={self.interval}s, min_sightings={self.min_sightings}, "
             f"dedup_radius={self.dedup_radius}m, min_conf={self.min_conf})"
         )
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             try:
                 self._tick()
             except Exception as e:  # noqa: BLE001
                 self._log(f"tick error: {e}")
-            self._stop.wait(self.interval)
+            self._stop_event.wait(self.interval)
         self._log("stopped.")
 
     def _tick(self) -> None:
@@ -131,6 +132,7 @@ class ExploreService(threading.Thread):
                 obj.class_name or "unknown",
                 tuple(pos[:3]),
                 float(obj.confidence or 0.0),
+                tuple(obj.bbox),
                 img,
             )
 
@@ -139,6 +141,7 @@ class ExploreService(threading.Thread):
         class_name: str,
         position: Position,
         confidence: float,
+        bbox: tuple[int, int, int, int],
         img,
     ) -> None:
         key = (class_name, self._bucket(position))
@@ -149,10 +152,12 @@ class ExploreService(threading.Thread):
                 mean_position=position,
                 mean_confidence=confidence,
                 count=1,
+                last_bbox=bbox,
             )
             self._tracks[key] = track
         else:
             track.update(position, confidence)
+            track.last_bbox = bbox
 
         if (
             track.count >= self.min_sightings
@@ -171,6 +176,8 @@ class ExploreService(threading.Thread):
                 position=track.mean_position,
                 confidence=max(track.mean_confidence, float(best.get("confidence", 0.0))),
                 sightings=int(best.get("sightings", 1)) + 1,
+                source_image=img,
+                bbox=track.last_bbox,
             )
             track.promoted_id = best["id"]
             self._log(
@@ -185,6 +192,8 @@ class ExploreService(threading.Thread):
                 position=track.mean_position,
                 confidence=track.mean_confidence,
                 sightings=track.count,
+                source_image=img,
+                bbox=track.last_bbox,
             )
             return
         # New entry — caption once on promotion.
@@ -202,6 +211,8 @@ class ExploreService(threading.Thread):
             confidence=track.mean_confidence,
             caption=caption,
             sightings=track.count,
+            source_image=img,
+            bbox=track.last_bbox,
         )
         track.promoted_id = obj_id
         self._log(

@@ -34,11 +34,16 @@ def make_vision_tools(
     db: WalkieVectorDB,
     *,
     agent_name: str = "vision",
+    scene_store=None,
 ):
     """Build the vision sub-agent's tool list.
 
-    Detection / caption / pose / memory tools are parallelable.
-    speak is sequential.
+    Detection / caption / pose tools are parallelable; speak is sequential.
+
+    Vision is about the **live camera** only. Long-term "where have I seen X?"
+    lookups belong to the Walkie Database sub-agent, so they are not exposed
+    here. ``db`` / ``scene_store`` are accepted for signature stability but
+    not used by these tools.
     """
 
     def _capture():
@@ -98,33 +103,6 @@ def make_vision_tools(
         return "People detected:\n" + "\n".join(lines)
 
     @parallelable_tool
-    @tool(parse_docstring=True)
-    def find_object_from_memory(object_name: str) -> str:
-        """Search the long-term object database for a previously-seen object.
-
-        Use when the user asks "where is the X?" — this queries the catalogue
-        built during the explore stage and returns map-frame coordinates.
-
-        Args:
-            object_name: Name or description of the object (e.g. "coffee mug").
-
-        Returns:
-            Known location(s) with coordinates, or a message if not found.
-        """
-        hits = db.query_objects(object_name, n_results=5)
-        if not hits:
-            return f"No record of '{object_name}' in memory."
-        lines = [f"Top matches for '{object_name}':"]
-        for h in hits:
-            x, y, z = h["position"]
-            lines.append(
-                f"- {h.get('class_name', '?')} @ ({x:+.2f}, {y:+.2f}, {z:+.2f}) "
-                f"conf={h.get('confidence', 0):.2f} sightings={h.get('sightings', '?')} "
-                f"caption={h.get('caption', '')!r}"
-            )
-        return "\n".join(lines)
-
-    @parallelable_tool
     @tool
     def get_camera_view_description() -> str:
         """Combined snapshot: detected objects + caption + people poses, in one call.
@@ -181,7 +159,6 @@ def make_vision_tools(
         detect_objects_from_view,
         image_caption,
         detect_people_poses,
-        find_object_from_memory,
         get_camera_view_description,
         speak,
     ]

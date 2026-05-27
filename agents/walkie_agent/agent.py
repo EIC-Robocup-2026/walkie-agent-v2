@@ -15,10 +15,20 @@ def create_walkie_main_agent(
     db: WalkieVectorDB,
     actuator_agent,
     vision_agent,
+    database_agent,
+    *,
+    scene_store=None,
 ):
-    """Build the main Walkie agent (orchestrator over actuator + vision)."""
+    """Build the main Walkie agent (orchestrator over actuator + vision + database)."""
     tools = make_walkie_main_tools(
-        walkie, walkieAI, db, actuator_agent, vision_agent, agent_name="walkie"
+        walkie,
+        walkieAI,
+        db,
+        actuator_agent,
+        vision_agent,
+        database_agent,
+        agent_name="walkie",
+        scene_store=scene_store,
     )
     return create_walkie_agent(
         name="walkie_agent",
