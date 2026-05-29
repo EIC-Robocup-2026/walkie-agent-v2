@@ -103,7 +103,7 @@ def make_actuator_tools(walkie: WalkieInterface, walkieAI, *, agent_name: str = 
         """Command the robotic arm to perform an action.
 
         Use for gestures (e.g. wave, point) or manipulation (e.g. pick up, place).
-        Be specific: "wave hello", "point left", "pick up the cup".
+        Be specific: "wave hello", "point left", "pick up the bottle".
 
         Args:
             action: Natural-language description of the desired arm action.
@@ -113,17 +113,16 @@ def make_actuator_tools(walkie: WalkieInterface, walkieAI, *, agent_name: str = 
         """
         print(f"[actuator] command_arm action={action!r}")
         # The walkie-sdk arm module exposes high-level actions; fall back gracefully.
-        try:
-            if hasattr(walkie.arm, "do"):
-                walkie.arm.do(action)
-            elif hasattr(walkie.arm, "execute"):
-                walkie.arm.execute(action)
-            elif hasattr(walkie.arm, "command"):
-                walkie.arm.command(action)
-        except Exception as e:  # noqa: BLE001
-            return f"Arm command failed: {e}"
-        if _pause_after_walk():
-            input("[actuator] Press Enter to continue...")
+        # try:
+        #     if hasattr(walkie.arm, "do"):
+        #         walkie.arm.do(action)
+        #     elif hasattr(walkie.arm, "execute"):
+        #         walkie.arm.execute(action)
+        #     elif hasattr(walkie.arm, "command"):
+        #         walkie.arm.command(action)
+        # except Exception as e:  # noqa: BLE001
+        #     return f"Arm command failed: {e}"
+        input("[actuator] Press Enter to continue...")
         return f"Arm command completed: {action}"
 
     @sequential_tool
