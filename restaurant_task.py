@@ -305,7 +305,7 @@ def run_restaurant_task_stage(walkieAI, walkie: WalkieRobot, db, model) -> None:
     print("[Ready] Listening — speak to Walkie. Ctrl+C to exit.")
     try:
         walkie.arm.go_to_home(blocking=True)
-        walkie.arm.control_gripper("left_gripper", -15.71, blocking=True)
+        walkie.arm.control_gripper("left_gripper", 0, blocking=True)
         walkie.nav.go_to(-5.5, 0, -1.57)  # pre-position for the task so the first prompt works
 
         input("Press to continue...")
@@ -315,17 +315,18 @@ def run_restaurant_task_stage(walkieAI, walkie: WalkieRobot, db, model) -> None:
         input("Press to continue...")
         invoke_agent("Please say `I'll grab some drinks for you. Just a moment please.` Then move to x=-0.15, y=-0.6, heading=-90")
         input("Press to continue...")
-        walkie.arm.control_gripper("left_gripper", 0.7, blocking=True)
+        walkie.arm.control_gripper("left_gripper", 0.04, blocking=True)
         walkie.arm.go_to_pose_relative(group_name="left_arm", x=0.1, y=0, z=0.1, roll=0, pitch=-1.57, yaw=0, blocking=True)
         input("Press to continue...")
-        walkie.arm.control_gripper("left_gripper", -15.71, blocking=True)
+        walkie.arm.control_gripper("left_gripper", 0, blocking=True)
         walkie.arm.go_to_pose_relative(group_name="left_arm", x=-0.1, y=0, z=0.1, roll=0, pitch=0, yaw=0, blocking=True)
         invoke_agent("A staff has put a bottle on your tray. Please bring it to the table (move to x=-0.15, y=-0.6, heading=-90) Don't say anything")
         input("Press to continue...")
         walkie.arm.go_to_pose_relative(group_name="left_arm", x=0.1, y=0, z=-0.1, roll=0, pitch=0, yaw=0, blocking=True)
-        walkie.arm.control_gripper("left_gripper", 0.7, blocking=True)
+        walkie.arm.control_gripper("left_gripper", 0.04, blocking=True)
         invoke_agent("Please say `Please enjoy your drink. Let me know if you need anything else!`")
         input("Press to continue...")
+        walkie.arm.control_gripper("left_gripper", 0, blocking=True)
         walkie.arm.go_to_home(blocking=True)
         input("Press to continue...")
     except KeyboardInterrupt:
