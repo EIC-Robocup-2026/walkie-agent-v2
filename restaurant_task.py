@@ -304,7 +304,7 @@ def run_restaurant_task_stage(walkieAI, walkie: WalkieRobot, db, model) -> None:
 
     print("[Ready] Listening — speak to Walkie. Ctrl+C to exit.")
     try:
-        walkie.arm.go_to_home(blocking=True)
+        walkie.arm.go_to_home(group_name="left_arm")
         walkie.arm.control_gripper("left_gripper", 0, blocking=True)
         walkie.nav.go_to(-5.5, 0, -1.57)  # pre-position for the task so the first prompt works
 
