@@ -320,7 +320,7 @@ def run_restaurant_task_stage(walkieAI, walkie: WalkieRobot, db, model) -> None:
         input("Press to continue...")
         walkie.arm.control_gripper("left_gripper", 0, blocking=True)
         walkie.arm.go_to_pose_relative(group_name="left_arm", x=-0.1, y=0, z=0.1, roll=0, pitch=0, yaw=0, blocking=True)
-        invoke_agent("A staff has put a bottle on your tray. Please bring it to the table (move to x=-0.15, y=-0.6, heading=-90) Don't say anything")
+        invoke_agent("A staff has put a bottle on your tray. Please bring it to the table (move to x=3, y=-1.5, heading=40) Don't say anything")
         input("Press to continue...")
         walkie.arm.go_to_pose_relative(group_name="left_arm", x=0.1, y=0, z=-0.1, roll=0, pitch=0, yaw=0, blocking=True)
         walkie.arm.control_gripper("left_gripper", 0.04, blocking=True)
