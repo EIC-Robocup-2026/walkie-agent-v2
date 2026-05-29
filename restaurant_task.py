@@ -327,7 +327,7 @@ def run_restaurant_task_stage(walkieAI, walkie: WalkieRobot, db, model) -> None:
         invoke_agent("Please say `Please enjoy your drink. Let me know if you need anything else!`")
         input("Press to continue...")
         walkie.arm.control_gripper("left_gripper", 0, blocking=True)
-        walkie.arm.go_to_home(blocking=True)
+        walkie.arm.go_to_home(group_name="left_arm")
         input("Press to continue...")
     except KeyboardInterrupt:
         print("\n[main] interrupt — shutting down.")
