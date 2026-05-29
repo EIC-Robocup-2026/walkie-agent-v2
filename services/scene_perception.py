@@ -52,6 +52,7 @@ class ScenePerceptionService(threading.Thread):
         prune_interval_sec: float = 30.0,
         prune_radius_m: Optional[float] = None,
         prune_max_records: Optional[int] = None,
+        max_lift_distance_m: Optional[float] = None,
     ) -> None:
         super().__init__(daemon=True, name="ScenePerceptionService")
         self.walkieAI = walkieAI
@@ -71,6 +72,7 @@ class ScenePerceptionService(threading.Thread):
         self.prune_interval_sec = prune_interval_sec
         self.prune_radius_m = prune_radius_m
         self.prune_max_records = prune_max_records
+        self.max_lift_distance_m = max_lift_distance_m
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._task: Optional[asyncio.Task] = None
         self._ready = threading.Event()
@@ -114,6 +116,7 @@ class ScenePerceptionService(threading.Thread):
                 prune_radius_m=self.prune_radius_m,
                 prune_max_records=self.prune_max_records,
                 pose_provider=self._current_pose,
+                max_lift_distance_m=self.max_lift_distance_m,
             )
         )
         # Signal that _loop/_task are set, so a fast stop_and_join can find them.

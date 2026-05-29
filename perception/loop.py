@@ -59,6 +59,7 @@ async def run_scene_perception(
     prune_radius_m: Optional[float] = None,
     prune_max_records: Optional[int] = None,
     pose_provider: Optional[Callable[[], Optional[tuple[float, float, float]]]] = None,
+    max_lift_distance_m: Optional[float] = None,
     on_tick: Optional[Callable[[TickReport], None]] = None,
 ) -> None:
     """Run the perception loop until the surrounding task is cancelled.
@@ -104,6 +105,7 @@ async def run_scene_perception(
                     archive_source_frame=archive_source_frame,
                     exclude_classes=exclude_classes,
                     pose_provider=pose_provider,
+                    max_lift_distance_m=max_lift_distance_m,
                 )
             except asyncio.CancelledError:
                 raise
@@ -174,6 +176,7 @@ async def _run_one_tick(
     archive_source_frame: bool,
     exclude_classes: Optional[Sequence[str]] = None,
     pose_provider: Optional[Callable[[], Optional[tuple[float, float, float]]]] = None,
+    max_lift_distance_m: Optional[float] = None,
 ) -> TickReport:
     t0 = time.perf_counter()
     frame: Image.Image = await asyncio.to_thread(camera.capture_pil)
@@ -200,6 +203,7 @@ async def _run_one_tick(
         caption_per_object=caption_per_object,
         fallback_position=fallback_position,
         exclude_classes=exclude_classes,
+        max_lift_distance_m=max_lift_distance_m,
     )
 
     t0 = time.perf_counter()

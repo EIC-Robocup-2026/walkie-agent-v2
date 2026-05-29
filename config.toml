@@ -97,6 +97,12 @@ SCENE_DEDUP_VISUAL_K = "5"
 #         depth fails now fall back to the robot pose instead of being dropped.
 # robot = robot's own odom pose for every object (coarse but robust).
 SCENE_POSITION_SOURCE = "lift"
+# Sanity gate on lifted positions: if depth-lift reports an object farther than
+# this from the robot, treat it as a sensor outlier (bbox center sampled a far
+# wall behind the object, shiny/transparent surface, etc.) and stamp the robot
+# pose instead. Tune to your camera's reliable depth range (ZED2 mini: ~3-5m,
+# ZED2/2i: ~7-10m). Empty/0 = no gate (lifted value always trusted).
+SCENE_MAX_LIFT_DISTANCE_M = ""
 
 [scene.prune]
 # Eviction so removed objects leave the store. TTL evicts records not re-seen

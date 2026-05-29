@@ -63,6 +63,7 @@ def process_frame(
     caption_per_object: bool = False,
     fallback_position: Optional[tuple[float, float, float]] = None,
     exclude_classes: Optional[Iterable[str]] = None,
+    max_lift_distance_m: Optional[float] = None,
 ) -> tuple[list[Detection], dict[str, float]]:
     """Run one frame through the perception stack.
 
@@ -158,6 +159,31 @@ def process_frame(
                 pos = list(fallback_position)
             else:
                 continue
+        # Sanity gate: depth-sensor outliers (bbox center sampling a far wall
+        # behind the object, shiny/transparent surfaces returning max-range)
+        # produce positions that are wildly farther from the robot than they
+        # should be. Treat anything outside max_lift_distance_m as a failed
+        # lift — replace with fallback_position if we have one, else drop.
+        if max_lift_distance_m is not None and fallback_position is not None:
+            dx = float(pos[0]) - float(fallback_position[0])
+            dy = float(pos[1]) - float(fallback_position[1])
+            d = (dx * dx + dy * dy) ** 0.5
+            if d > max_lift_distance_m:
+                # WARNING level so it stays visible when WALKIE_LOG_LEVEL is at
+                # its quiet default — outliers are anomalies worth noticing
+                # without having to crank the whole perception namespace up to INFO.
+                # _log.warning(
+                #     "pipeline.lift_outlier class=%s d=%.2fm > max=%.2fm "
+                #     "lift=%.2f,%.2f robot=%.2f,%.2f — stamping robot pose",
+                #     det.class_name,
+                #     d,
+                #     max_lift_distance_m,
+                #     pos[0],
+                #     pos[1],
+                #     fallback_position[0],
+                #     fallback_position[1],
+                # )
+                pos = list(fallback_position)
         bbox = tuple(int(v) for v in det.bbox)  # type: ignore[assignment]
         if len(bbox) != 4:  # safety net
             continue

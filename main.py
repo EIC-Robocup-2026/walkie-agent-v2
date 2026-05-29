@@ -24,7 +24,6 @@ from services import ExploreService, PerceptionService, ScenePerceptionService
 
 
 ZENOH_PORT = 7447
-ROBOT_IP = "127.0.0.1"
 
 _log = logging.getLogger("main")
 
@@ -41,8 +40,11 @@ def get_robot() -> WalkieRobot:
     # WALKIE_ROS_PROTOCOL=zenoh.
     ros_protocol = os.getenv("WALKIE_ROS_PROTOCOL", "rosbridge")
     ros_port = int(os.getenv("WALKIE_ROS_PORT", str(ZENOH_PORT if ros_protocol == "zenoh" else 9090)))
+    # 127.0.0.1 is correct when running on the robot itself (SSH'd in); set
+    # WALKIE_ROBOT_IP to walkie's LAN address when running from a developer PC.
+    robot_ip = os.getenv("WALKIE_ROBOT_IP", "127.0.0.1")
     return WalkieRobot(
-        ip=ROBOT_IP,
+        ip=robot_ip,
         ros_protocol=ros_protocol,
         ros_port=ros_port,
         camera_protocol="zenoh",
@@ -160,6 +162,29 @@ def _lan_ip() -> str | None:
         s.close()
 
 
+_viewer_thread = None  # set on first maybe_start_viewer; guards re-starts.
+
+
+def _register_viewer_stores(stores: list[tuple[str, object]]) -> None:
+    """Swap the viewer's STORES list without restarting the Flask thread.
+
+    Routes consult ``cv.STORES`` per-request, so rebuilding it is enough for the
+    sidebar / overview to pick up a newly-added directory (e.g. ``chroma_db_scene``
+    after run_ready_stage creates the SceneStore). No-op when CHROMA_VIEWER_AUTOSTART
+    is off or the viewer module isn't importable.
+    """
+    if not _flag("CHROMA_VIEWER_AUTOSTART", "1"):
+        return
+    try:
+        from tools import chroma_viewer as cv
+    except Exception:  # noqa: BLE001 — viewer optional
+        return
+    cv.build_stores_inprocess(stores)
+    cv._build_frame_roots(
+        [d for d, _ in stores], os.getenv("SCENE_FRAMES_DIR", "frames")
+    )
+
+
 def maybe_start_viewer(stores: list[tuple[str, object]]):
     """Start the read-only Chroma web viewer in a daemon thread, in-process.
 
@@ -171,11 +196,18 @@ def maybe_start_viewer(stores: list[tuple[str, object]]):
     copy). Sharing the one live client means there's a single index, so browsing
     reflects writes instantly and can't desync.
 
+    Idempotent: calling again only swaps the STORES list (so the scene store
+    can be added once run_ready_stage builds it) — the Flask thread keeps running.
+
     Returns the started thread, or ``None`` when disabled / unstartable. Call it
     after the stores are built so their clients exist.
     """
+    global _viewer_thread
     if not _flag("CHROMA_VIEWER_AUTOSTART", "1"):
         return None
+    if _viewer_thread is not None:
+        _register_viewer_stores(stores)
+        return _viewer_thread
     try:
         import threading
 
@@ -203,6 +235,7 @@ def maybe_start_viewer(stores: list[tuple[str, object]]):
 
     t = threading.Thread(target=_serve, daemon=True, name="ChromaViewer")
     t.start()
+    _viewer_thread = t
     print(
         f"[viewer] live DB viewer on http://{host}:{port} "
         f"(in-process — safe to browse while the robot writes)"
@@ -272,6 +305,14 @@ def run_ready_stage(walkieAI, walkie, db, model) -> None:
                 f"[scene] prune: ttl={prune_ttl}s radius={prune_radius}m "
                 f"max_records={prune_max}"
             )
+        # Sanity gate on the SDK depth lift: if a lifted position is farther
+        # than this from the robot, treat it as a sensor outlier (bbox center
+        # sampling a far wall behind the object, shiny/transparent surface, etc.)
+        # and stamp the robot's pose instead. Set to '' to disable. Tune to the
+        # camera's reliable depth range (ZED2 mini: ~3-5m, ZED2/2i: ~7-10m).
+        max_lift = _opt_float("SCENE_MAX_LIFT_DISTANCE_M", "")
+        if max_lift is not None:
+            print(f"[scene] max lift distance: {max_lift}m (outliers → robot pose)")
         scene_service = ScenePerceptionService(
             walkieAI,
             walkie,
@@ -290,6 +331,7 @@ def run_ready_stage(walkieAI, walkie, db, model) -> None:
             prune_interval_sec=float(os.getenv("SCENE_PRUNE_INTERVAL_SEC", "10")),
             prune_radius_m=prune_radius,
             prune_max_records=prune_max,
+            max_lift_distance_m=max_lift,
         )
         scene_service.start()
 
@@ -360,7 +402,7 @@ def main() -> None:
     )
     robot = get_robot()
     walkieAI = WalkieAIClient(
-        base_url=os.getenv("WALKIE_AI_BASE_URL", "http://localhost:5000"),
+        base_url=os.getenv("WALKIE_AI_BASE_URL", "http://10.0.0.213:5000"),
     )
     walkie = WalkieInterface(robot)
     db = WalkieVectorDB(
@@ -371,6 +413,12 @@ def main() -> None:
         perception_path=os.getenv("PERCEPTION_PATH", "perception.json"),
     )
     model = build_model()
+
+    # Start the in-process Chroma viewer NOW with just the legacy object store —
+    # otherwise it'd be gated behind run_explore_stage's input() prompt, leaving
+    # users staring at "Drive the robot around..." with no viewer running yet.
+    # run_ready_stage re-registers the SceneStore client later (idempotent).
+    maybe_start_viewer([(os.getenv("CHROMA_DIR", "chroma_db"), db.client)])
 
     # ── Stage 1: Explore ──
     ctx.stage = "explore"
