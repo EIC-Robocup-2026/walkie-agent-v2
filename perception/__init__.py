@@ -12,7 +12,7 @@ Public surface:
 See ``docs/scene_perception_design.md`` for the schema and dedup strategy.
 """
 
-from .embedders import RemoteCLIPEmbedder
+from .embedders import LocalCLIPEmbedder, RemoteCLIPEmbedder
 from .lifters import RobotPoseLifter
 from .types import (
     CameraSource,
@@ -37,6 +37,7 @@ __all__ = [
     "Detection",
     "Detector",
     "Embedder",
+    "LocalCLIPEmbedder",
     "PositionLifter",
     "RemoteCLIPEmbedder",
     "RobotPoseLifter",

@@ -60,8 +60,10 @@ def robot_xy(walkie) -> "Optional[tuple[float, float, float]]":
     return (float(pose.get("x", 0.0)), float(pose.get("y", 0.0)), 0.0)
 
 
-def _fmt_scene_entries(object_name: str, entries: "list[SceneEntry]") -> str:
-    lines = [f"Top matches for '{object_name}':"]
+def _fmt_scene_entries(
+    object_name: str, entries: "list[SceneEntry]", *, header: Optional[str] = None
+) -> str:
+    lines = [header or f"Top matches for '{object_name}':"]
     for e in entries:
         x, y, z = e.position
         lines.append(
@@ -95,24 +97,38 @@ def lookup_object_in_memory(
     the scene backend only — the legacy ``db`` path ignores them.
     """
     if scene_store is not None:
+        # Over-fetch so the confidence post-filter still has candidates to
+        # return after pruning weak ones.
+        fetch = max(n_results * 3, n_results)
+        common = dict(
+            n_results=fetch,
+            within_radius_of=within_radius_of,
+            max_distance_m=max_distance_m,
+            min_last_seen_ts=min_last_seen_ts,
+        )
+        entries: list = []
+        embed_down = False
         try:
-            # Over-fetch so the confidence post-filter still has candidates to
-            # return after pruning weak ones.
-            fetch = max(n_results * 3, n_results)
-            common = dict(
-                n_results=fetch,
-                within_radius_of=within_radius_of,
-                max_distance_m=max_distance_m,
-                min_last_seen_ts=min_last_seen_ts,
-            )
-            # Caption-first: text→text against the stored descriptions.
+            # Caption-first: text→text against the stored descriptions (CLIP
+            # text tower on the embedding server).
             entries = scene_store.text_query(object_name, **common)
             if not entries:
-                # Caption index empty or no caption hit — fall back to the
-                # CLIP image-embedding search so we still answer.
+                # Caption index empty / no caption hit — fall back to CLIP
+                # image-embedding search so we still answer.
                 entries = scene_store.semantic_query(object_name, **common)
-        except Exception as e:  # noqa: BLE001 — surface, don't crash the agent
-            return f"Scene memory lookup failed: {e}"
+        except Exception:  # noqa: BLE001 — embed server down/flaky, not fatal
+            embed_down = True
+
+        # If the embedding server failed (or just found nothing), degrade to a
+        # local word-overlap search over the stored captions — no network, so
+        # "find X" keeps working even when /image-embed is down.
+        via_keyword = False
+        if not entries:
+            try:
+                entries = scene_store.keyword_query(object_name, **common)
+                via_keyword = bool(entries)
+            except Exception as e:  # noqa: BLE001
+                return f"Scene memory lookup failed: {e}"
 
         n_before = len(entries)
         if min_position_conf > 0.0:
@@ -127,7 +143,12 @@ def lookup_object_in_memory(
                     f"{min_position_conf:.2f} confidence floor)"
                 )
             return f"No confident record of '{object_name}' in scene memory.{extra}"
-        return _fmt_scene_entries(object_name, entries)
+
+        header = f"Top matches for '{object_name}':"
+        if via_keyword:
+            why = "semantic search unavailable" if embed_down else "keyword match"
+            header = f"Top matches for '{object_name}' ({why}):"
+        return _fmt_scene_entries(object_name, entries, header=header)
 
     if db is not None:
         hits = db.query_objects(object_name, n_results=n_results)

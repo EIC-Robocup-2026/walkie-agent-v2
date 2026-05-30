@@ -19,7 +19,12 @@ from agents.walkie_agent import create_walkie_main_agent
 from client import WalkieAIClient
 from db.walkie_db import WalkieVectorDB
 from interfaces.walkie_interface import WalkieInterface
-from perception import RemoteCLIPEmbedder, RobotPoseLifter, SceneStore
+from perception import (
+    LocalCLIPEmbedder,
+    RemoteCLIPEmbedder,
+    RobotPoseLifter,
+    SceneStore,
+)
 from services import PerceptionService, ScenePerceptionService
 
 
@@ -108,16 +113,41 @@ def build_scene_store(walkieAI):
         print("[scene] disabled via SCENE_PERCEPTION_ENABLED=0")
         return None, None
 
-    embedder = RemoteCLIPEmbedder(walkieAI.image_embed)
-    try:
-        dim = embedder.dim  # one probe call to /image-embed/embed-image
-    except Exception as e:  # noqa: BLE001 — server route may be disabled
-        print(
-            f"[scene] image-embed unavailable ({e!r}); CLIP scene perception OFF.\n"
-            "[scene] Enable the /image-embed blueprint on walkie-ai-server to turn it on.",
-            file=sys.stderr,
+    # Embedding backend: "local" runs CLIP in-process (no walkie-ai-server
+    # dependency, crash-proof, GPU-accelerated) — needs `uv sync --extra clip`.
+    # "remote" calls the server's /image-embed route (the original behavior).
+    backend = os.getenv("SCENE_EMBED_BACKEND", "remote").lower()
+    if backend == "local":
+        fp16_env = os.getenv("SCENE_CLIP_FP16", "auto").strip().lower()
+        fp16 = None if fp16_env in ("", "auto") else fp16_env in ("1", "true", "yes")
+        embedder = LocalCLIPEmbedder(
+            model_name=os.getenv("SCENE_CLIP_MODEL", "openai/clip-vit-base-patch16"),
+            device=os.getenv("SCENE_CLIP_DEVICE") or None,
+            fp16=fp16,
         )
-        return None, None
+        try:
+            dim = embedder.dim  # loads the model (downloads on first run)
+        except Exception as e:  # noqa: BLE001 — torch/transformers missing or load failed
+            print(
+                f"[scene] local CLIP unavailable ({e!r}); CLIP scene perception OFF.\n"
+                "[scene] Install the extra with `uv sync --extra clip`, or set "
+                "SCENE_EMBED_BACKEND=remote.",
+                file=sys.stderr,
+            )
+            return None, None
+        print(f"[scene] embedding backend: local (model={embedder.model_name})")
+    else:
+        embedder = RemoteCLIPEmbedder(walkieAI.image_embed)
+        try:
+            dim = embedder.dim  # one probe call to /image-embed/embed-image
+        except Exception as e:  # noqa: BLE001 — server route may be disabled
+            print(
+                f"[scene] image-embed unavailable ({e!r}); CLIP scene perception OFF.\n"
+                "[scene] Enable the /image-embed blueprint on walkie-ai-server, or set "
+                "SCENE_EMBED_BACKEND=local (`uv sync --extra clip`).",
+                file=sys.stderr,
+            )
+            return None, None
 
     store = SceneStore(
         persist_dir=os.getenv("SCENE_CHROMA_DIR", "chroma_db_scene"),
@@ -127,6 +157,9 @@ def build_scene_store(walkieAI):
         # shows the latest frame, not the first-ever one. Set to 0 to keep the
         # original insert frame for an entry's whole life.
         refresh_frame_on_update=_flag("SCENE_FRAME_REFRESH_ON_UPDATE", "1"),
+        # Archive the object crop (bbox region) not the whole camera frame, so
+        # the viewer shows the object itself. Set 0 to keep full frames.
+        crop_frames_to_bbox=_flag("SCENE_FRAME_CROP", "1"),
     )
     print(
         f"[scene] CLIP scene memory ON (dim={dim}, {store.count} existing record(s))"
@@ -326,14 +359,17 @@ def run_ready_stage(walkieAI, walkie, db, model) -> None:
         scene_service.start()
 
     # Bring up the live DB viewer in-process (see maybe_start_viewer), reusing the
-    # clients these stores already hold so it reads the live indexes safely.
-    viewer_stores: list[tuple[str, object]] = [
-        (os.getenv("CHROMA_DIR", "chroma_db"), db.client)
-    ]
+    # clients these stores already hold so it reads the live indexes safely. The
+    # scene store is the primary catalogue (listed first); the legacy object
+    # store is only surfaced when it actually holds something — with the explore
+    # stage gone it's normally empty, and an empty collection just clutters the UI.
+    viewer_stores: list[tuple[str, object]] = []
     if scene_store is not None:
         viewer_stores.append(
             (os.getenv("SCENE_CHROMA_DIR", "chroma_db_scene"), scene_store.client)
         )
+    if db.count > 0:
+        viewer_stores.append((os.getenv("CHROMA_DIR", "chroma_db"), db.client))
     maybe_start_viewer(viewer_stores)
 
     actuator = create_actuator_agent(model, walkieAI, walkie)
@@ -404,10 +440,14 @@ def main() -> None:
     )
     model = build_model()
 
-    # Start the in-process Chroma viewer NOW with just the legacy object store;
-    # run_ready_stage re-registers the SceneStore client a moment later once it's
-    # built (idempotent), so the viewer is up from the very first second.
-    maybe_start_viewer([(os.getenv("CHROMA_DIR", "chroma_db"), db.client)])
+    # Start the in-process Chroma viewer NOW so it's up from the first second;
+    # run_ready_stage re-registers it with the SceneStore client a moment later
+    # (idempotent). Only surface the legacy object store if it's non-empty — with
+    # the explore stage gone it's normally empty and would just be a dead tab.
+    early_stores: list[tuple[str, object]] = []
+    if db.count > 0:
+        early_stores.append((os.getenv("CHROMA_DIR", "chroma_db"), db.client))
+    maybe_start_viewer(early_stores)
 
     # No explore stage: the robot is ready immediately. The scene DB builds
     # itself in the background (ScenePerceptionService inside run_ready_stage)

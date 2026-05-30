@@ -49,9 +49,19 @@ PERCEPTION_CAPTION_OBJECTS = "0"
 PERCEPTION_CAPTION_FILTER = ""
 
 [scene]
-# CLIP long-term semantic memory (ready stage). Embeds detections via
-# walkie-ai-server's /image-embed into chroma_db_scene; powers find_object.
+# CLIP long-term semantic memory (ready stage). Embeds detections into
+# chroma_db_scene; powers find_object.
 SCENE_PERCEPTION_ENABLED = "1"
+# Embedding backend:
+#   local  = run CLIP in-process (no walkie-ai-server dependency, crash-proof,
+#            GPU-accelerated). Needs `uv sync --extra clip`.
+#   remote = call walkie-ai-server's /image-embed route.
+SCENE_EMBED_BACKEND = "local"
+# Local-backend model (must match what built any existing data) + device/dtype.
+# Device empty = auto (CUDA if present). FP16 "auto" = half precision on CUDA.
+SCENE_CLIP_MODEL = "openai/clip-vit-base-patch16"
+SCENE_CLIP_DEVICE = ""
+SCENE_CLIP_FP16 = "auto"
 SCENE_CHROMA_DIR = "chroma_db_scene"
 SCENE_FRAMES_DIR = "frames"
 # Capture cadence. Raised from 5s → 8s so the store isn't churned so often
@@ -68,6 +78,11 @@ SCENE_EXCLUDE_CLASSES = "person"
 SCENE_CAPTION_PER_OBJECT = "1"
 # Refresh the archived thumbnail on every re-sighting (overwrite in place).
 SCENE_FRAME_REFRESH_ON_UPDATE = "1"
+# Archive the object crop (bbox region) instead of the whole camera frame, so
+# the viewer thumbnail shows the object itself. 0 = keep full frames.
+SCENE_FRAME_CROP = "1"
+# Padding around the bbox when cropping (fraction of bbox size; 0.12 = 12%).
+SCENE_FRAME_CROP_MARGIN = "0.12"
 # Rebuild the caption text index for pre-existing records on startup. Set "1"
 # once after upgrading (or after collecting data with an older build), then "0".
 SCENE_REINDEX_CAPTIONS = "0"

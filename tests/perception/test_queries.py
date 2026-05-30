@@ -158,8 +158,10 @@ def test_03b_text_query_matches_on_caption(tmp_path):
     emb = FakeEmbedder(
         dim=16,
         override_text={
-            "mug. a white coffee mug": _unit_vec(16, 0),
-            "chair. a wooden chair": _unit_vec(16, 1),
+            # Documents are caption-led now (no "<class>. " prefix), so the
+            # caption text is what gets embedded into the caption index.
+            "a white coffee mug": _unit_vec(16, 0),
+            "a wooden chair": _unit_vec(16, 1),
             "coffee mug": _unit_vec(16, 0),
         },
     )
@@ -187,7 +189,7 @@ def test_03c_reindex_captions_backfills_old_data(tmp_path):
     emb = FakeEmbedder(
         dim=16,
         override_text={
-            "mug. a white coffee mug": _unit_vec(16, 0),
+            "a white coffee mug": _unit_vec(16, 0),
             "coffee mug": _unit_vec(16, 0),
         },
     )
@@ -206,6 +208,20 @@ def test_03c_reindex_captions_backfills_old_data(tmp_path):
     assert store.reindex_captions() == 1
     assert store.caption_count == 1
     assert store.text_query("coffee mug")[0].class_name == "mug"
+
+
+def test_03d_keyword_query_matches_words_without_embedder(seeded_store):
+    """keyword_query is a network-free fallback: pure word overlap on captions."""
+    store, _ = seeded_store
+    hits = store.keyword_query("mug", n_results=5)
+    assert hits
+    # Only records whose caption/class mention "mug" come back.
+    assert all(
+        "mug" in (h.caption + " " + h.class_name).lower() for h in hits
+    )
+    # A class filter still applies.
+    chairs = store.keyword_query("chair", class_name="chair")
+    assert chairs and all(h.class_name == "chair" for h in chairs)
 
 
 def test_04_visual_query_returns_results(seeded_store):
@@ -422,3 +438,45 @@ def test_15_frame_refresh_can_be_disabled(tmp_path, embedder):
     store.upsert(Detection(**common, ts=2000.0), source_frame=img2)
     assert Path(store.get_by_id(cid).frame_ref).read_bytes() == _jpeg_bytes(img1)
     assert ref1 == store.get_by_id(cid).frame_ref
+
+
+def test_16_archives_object_crop_not_full_frame(tmp_path, embedder):
+    """The thumbnail is the object crop (bbox + margin), not the whole frame."""
+    store = SceneStore(
+        persist_dir=tmp_path / "chroma",
+        embedder=embedder,
+        frames_dir=tmp_path / "frames",
+    )
+    big = Image.new("RGB", (200, 200), (10, 20, 30))
+    cid, _ = store.upsert(
+        Detection(
+            class_name="mug", class_id=0, confidence=0.9,
+            bbox_xyxy=(50, 50, 100, 100), position=(0.0, 0.0, 0.0),
+            embedding=tuple(_unit_vec(16, 0)), caption="a mug", ts=1000.0,
+        ),
+        source_frame=big,
+    )
+    saved = Image.open(store.get_by_id(cid).frame_ref)
+    # 50px bbox + ~12% margin each side → ~62px, far smaller than the 200px frame.
+    assert saved.size[0] < 200 and saved.size[1] < 200
+    assert 50 <= saved.size[0] <= 90
+
+
+def test_17_object_crop_can_be_disabled(tmp_path, embedder):
+    """crop_frames_to_bbox=False keeps the full camera frame."""
+    store = SceneStore(
+        persist_dir=tmp_path / "chroma",
+        embedder=embedder,
+        frames_dir=tmp_path / "frames",
+        crop_frames_to_bbox=False,
+    )
+    big = Image.new("RGB", (200, 200), (10, 20, 30))
+    cid, _ = store.upsert(
+        Detection(
+            class_name="mug", class_id=0, confidence=0.9,
+            bbox_xyxy=(50, 50, 100, 100), position=(0.0, 0.0, 0.0),
+            embedding=tuple(_unit_vec(16, 0)), caption="a mug", ts=1000.0,
+        ),
+        source_frame=big,
+    )
+    assert Image.open(store.get_by_id(cid).frame_ref).size == (200, 200)

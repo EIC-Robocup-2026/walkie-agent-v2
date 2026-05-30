@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -91,6 +92,7 @@ class SceneStore:
         embedder: Optional[Embedder] = None,
         frames_dir: str | Path | None = None,
         refresh_frame_on_update: bool = True,
+        crop_frames_to_bbox: bool = True,
     ) -> None:
         if persist_dir is None:
             self._client = chromadb.EphemeralClient(
@@ -115,6 +117,14 @@ class SceneStore:
         self._embedder = embedder
         self._frames_dir = Path(frames_dir) if frames_dir else None
         self._refresh_frame_on_update = refresh_frame_on_update
+        # Archive the object crop (bbox region) rather than the whole camera
+        # frame, so the viewer thumbnail shows the object itself. A margin of
+        # padding keeps a little surrounding context.
+        self._crop_frames_to_bbox = crop_frames_to_bbox
+        try:
+            self._crop_margin = float(os.getenv("SCENE_FRAME_CROP_MARGIN", "0.12"))
+        except ValueError:
+            self._crop_margin = 0.12
         if self._frames_dir:
             self._frames_dir.mkdir(parents=True, exist_ok=True)
 
@@ -467,6 +477,55 @@ class SceneStore:
             ]
         return entries[:n_results]
 
+    def keyword_query(
+        self,
+        text: str,
+        *,
+        n_results: int = 5,
+        min_last_seen_ts: Optional[float] = None,
+        within_radius_of: Optional[tuple[float, float, float]] = None,
+        max_distance_m: Optional[float] = None,
+        class_name: Optional[str] = None,
+    ) -> list[SceneEntry]:
+        """Local word-overlap search over stored captions — **no embedder**.
+
+        A resilient fallback for when the embedding server is down or flaky:
+        scores each record by how many of the query's words appear in its
+        caption (and class name) and returns the best matches. Coarser than the
+        CLIP text search (:meth:`text_query`) — it can't match synonyms — but it
+        never touches the network, so "find the bottle" still works offline.
+
+        Same recency / spatial / class filters as the other queries.
+        """
+        q_tokens = set(re.findall(r"\w+", text.lower()))
+        if not q_tokens:
+            return []
+        where = {"class_name": class_name} if class_name else None
+        result = self._collection.get(
+            where=where,
+            include=["metadatas", "documents", "embeddings"],
+        )
+        scored: list[tuple[int, float, SceneEntry]] = []
+        for cid, meta, doc, emb in zip(
+            result["ids"],
+            result["metadatas"],
+            result["documents"],
+            _embeddings_or_blanks(result, len(result["ids"])),
+        ):
+            entry = self._row_to_entry(cid, meta, doc, emb)
+            if min_last_seen_ts is not None and entry.last_seen_ts <= min_last_seen_ts:
+                continue
+            if within_radius_of is not None and max_distance_m is not None:
+                if l2_distance(entry.position, within_radius_of) > max_distance_m:
+                    continue
+            hay = f"{entry.caption} {entry.class_name}".lower()
+            score = len(q_tokens & set(re.findall(r"\w+", hay)))
+            if score:
+                scored.append((score, entry.last_seen_ts, entry))
+        # Best word-overlap first, then most-recently seen as a tiebreak.
+        scored.sort(key=lambda s: (s[0], s[1]), reverse=True)
+        return [e for _, _, e in scored[:n_results]]
+
     def visual_query(
         self,
         image: Image.Image,
@@ -797,8 +856,18 @@ class SceneStore:
 
     @staticmethod
     def _format_document(class_name: str, caption: str) -> str:
+        """Searchable text for a record — **caption-led**.
+
+        The image captioner describes an object far more reliably than the
+        detector's class label, which is frequently wrong (it may call a water
+        bottle a "mug"). We therefore key the text index and the displayed
+        document off the caption, and only fall back to the class name when
+        there's no caption — so a wrong class no longer pollutes "find X"
+        matching. The (possibly-wrong) class still lives in metadata for
+        dedup/filtering; it just isn't part of the search text anymore.
+        """
         caption = (caption or "").strip()
-        return f"{class_name}. {caption}".rstrip(". ").strip()
+        return caption or (class_name or "").strip()
 
     def _index_caption(self, entry_id: str, detection: Detection) -> None:
         """Upsert ``entry_id`` into the caption-text index (no-op if no embedder).
@@ -881,12 +950,36 @@ class SceneStore:
         if self._frames_dir is None or source_frame is None:
             return detection.frame_ref
         path = self._frame_path(entry_id, detection.class_name)
+        img = source_frame
+        if self._crop_frames_to_bbox:
+            img = self._crop_to_bbox(source_frame, detection.bbox_xyxy)
         try:
-            source_frame.save(path, format="JPEG", quality=85)
+            img.save(path, format="JPEG", quality=85)
             return str(path)
         except OSError as e:
             _log.warning("frame archive failed: %s", e)
             return detection.frame_ref
+
+    def _crop_to_bbox(
+        self, frame: Image.Image, bbox: tuple[int, int, int, int]
+    ) -> Image.Image:
+        """Crop ``frame`` to the object's bbox plus a margin of context.
+
+        Returns the full frame unchanged if the bbox is missing/degenerate, so
+        a bad box never loses the thumbnail entirely.
+        """
+        try:
+            x1, y1, x2, y2 = (int(v) for v in bbox)
+        except (TypeError, ValueError):
+            return frame
+        w, h = frame.size
+        mx = (x2 - x1) * self._crop_margin
+        my = (y2 - y1) * self._crop_margin
+        cx1, cy1 = max(0, int(x1 - mx)), max(0, int(y1 - my))
+        cx2, cy2 = min(w, int(x2 + mx)), min(h, int(y2 + my))
+        if cx2 <= cx1 or cy2 <= cy1:
+            return frame
+        return frame.crop((cx1, cy1, cx2, cy2))
 
     def _delete_frame_file(self, ref: str) -> None:
         """Best-effort removal of a superseded frame we own (under frames_dir)."""

@@ -36,8 +36,9 @@ def _store(tmp_path):
     emb = FakeEmbedder(
         dim=16,
         override_text={
-            "mug. a white mug": _unit(16, 0),
-            "mug. a blurry mug": _unit(16, 0),
+            # Documents are caption-led (no class prefix).
+            "a white mug": _unit(16, 0),
+            "a blurry mug": _unit(16, 0),
             "coffee mug": _unit(16, 0),
         },
     )
@@ -81,3 +82,19 @@ def test_lookup_all_filtered_reports_confidence_reason(tmp_path):
     # "no record" (which would wrongly imply the object was never seen).
     msg = lookup_object_in_memory("coffee mug", scene_store=store, min_position_conf=0.99)
     assert "confidence floor" in msg
+
+
+def test_lookup_falls_back_to_keyword_when_embed_down(tmp_path, monkeypatch):
+    store = _store(tmp_path)
+
+    # Simulate the embedding server being down: every text embed raises.
+    def boom(_text):
+        raise RuntimeError("image-embed 503")
+
+    monkeypatch.setattr(store._embedder, "embed_text", boom)
+
+    msg = lookup_object_in_memory("white mug", scene_store=store)
+    # The local keyword fallback still finds the white mug by word overlap, and
+    # flags that the semantic path was unavailable.
+    assert "a white mug" in msg
+    assert "semantic search unavailable" in msg

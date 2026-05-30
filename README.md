@@ -167,7 +167,7 @@ During the **ready** stage the app also runs an always-on **scene-perception loo
 
 ```
 camera → object_detection → bboxes_to_positions (3D) → image_caption + CLIP embed → ChromaDB (chroma_db_scene/)
-                                                                          (image_embed on walkie-ai-server)
+                                                          (CLIP runs in-process by default; see Embedding backend)
 ```
 
 Once it's populated, `find_object_from_memory` (and the **Database agent**) answer "where is the X?" by searching the stored **captions** first (`SceneStore.text_query`, text→text — "coffee mug" matches a record captioned "a white ceramic coffee mug"), falling back to CLIP image search (`semantic_query`) if the caption index has no hit. Either way it returns map-frame `(x, y, z)` coordinates the actuator can navigate to. It runs **alongside** the `perception.json` live snapshot — they serve different purposes (long-term catalogue vs. current view).
@@ -176,16 +176,20 @@ Internally the store keeps two ChromaDB collections under one id space: `scene_e
 
 Objects whose 3D depth-lift fails — small/distant ones, or a whole crowded frame on timeout — are **dropped** by default, so only objects with a real per-object position enter the catalogue (stamping the robot's own pose instead would store *where the robot stood*, not where the object is, and navigating back there finds nothing). Set `SCENE_POSITION_FALLBACK_POSE=1` to re-enable the old robot-pose fallback once `get_3d_poses` is trustworthy. A separate sanity gate, `SCENE_MAX_LIFT_DISTANCE_M`, rejects lifted positions farther than N metres from the robot as sensor outliers. On a confident re-sighting that merges across a large distance (visual dedup), the position is **not** averaged into the empty space between the two observations — the higher-confidence one is kept.
 
-**This depends on the server's `/image-embed` route.** On startup the app probes it once:
+### Embedding backend: local (default) or remote
 
-- Route available → `[scene] CLIP scene memory ON (dim=…, N existing record(s))`, loop starts.
-- Route unavailable (it's commented out on walkie-ai-server by default) → `[scene] image-embed unavailable …; CLIP scene perception OFF`, the loop is skipped and `find_object_from_memory` falls back to the legacy `chroma_db/`. **The rest of the app runs normally either way.**
+CLIP embeddings can be produced **in-process** (`SCENE_EMBED_BACKEND=local`, the default) or by the **server** (`remote`):
 
-To turn the CLIP route on, the server team uncomments `app.register_blueprint(image_embed.bp)` in `walkie-ai-server` and redeploys. No changes are needed on this side.
+- **local** — loads the same checkpoint (`openai/clip-vit-base-patch16`) in this process via `transformers`, GPU-accelerated (CUDA + fp16 auto). No dependency on walkie-ai-server's `/image-embed`, so a server hiccup can't break perception or lookups. Needs the optional extra: `uv sync --extra clip`. On an **RTX 5090** (Blackwell/sm_120) install a CUDA 12.8 torch build, e.g. `uv pip install torch --index-url https://download.pytorch.org/whl/cu128`. First run downloads the model (~600 MB) and caches it.
+  - Startup → `[scene] embedding backend: local (model=clip-vit-base-patch16)` then `[scene] CLIP scene memory ON (dim=…, N record(s))`.
+  - Missing extra / load failure → `[scene] local CLIP unavailable …; CLIP scene perception OFF` and the app continues on the legacy fallback.
+- **remote** — calls the server's `/image-embed` route (must be enabled there: uncomment `app.register_blueprint(image_embed.bp)` in `walkie-ai-server`). Unavailable → `[scene] image-embed unavailable …; CLIP scene perception OFF`.
 
-Tuning knobs (in `config.toml`, `[scene]` / `[scene.dedup]` / `[scene.position]` / `[scene.query]`): `SCENE_PERCEPTION_ENABLED`, `SCENE_CHROMA_DIR`, `SCENE_FRAMES_DIR`, `SCENE_PERCEPTION_INTERVAL_SEC`, `SCENE_MIN_CONF`, `SCENE_CAPTION_PER_OBJECT`, `SCENE_FRAME_REFRESH_ON_UPDATE`, `SCENE_REINDEX_CAPTIONS`, `SCENE_DEDUP_RADIUS_M`, `SCENE_DEDUP_VISUAL_K`, `SCENE_POSITION_SOURCE`, `SCENE_POSITION_FALLBACK_POSE`, `SCENE_MAX_LIFT_DISTANCE_M`, `SCENE_QUERY_MIN_CONF`.
+Either backend records the same `model_name`, so they're interchangeable over one store. Even so, if the embed path is unavailable mid-run, "where is X?" lookups still degrade to a local keyword search (see below).
 
-For "where is X?" the Database agent and `find_object_from_memory` accept `near_me=True` to restrict the search to the robot's current vicinity, and drop matches below `SCENE_QUERY_MIN_CONF` so a returned coordinate is always one the robot can actually be sent to.
+Tuning knobs (in `config.toml`, `[scene]` / `[scene.dedup]` / `[scene.position]` / `[scene.query]`): `SCENE_PERCEPTION_ENABLED`, `SCENE_EMBED_BACKEND`, `SCENE_CLIP_MODEL`, `SCENE_CLIP_DEVICE`, `SCENE_CLIP_FP16`, `SCENE_CHROMA_DIR`, `SCENE_FRAMES_DIR`, `SCENE_PERCEPTION_INTERVAL_SEC`, `SCENE_MIN_CONF`, `SCENE_CAPTION_PER_OBJECT`, `SCENE_FRAME_REFRESH_ON_UPDATE`, `SCENE_FRAME_CROP`, `SCENE_FRAME_CROP_MARGIN`, `SCENE_REINDEX_CAPTIONS`, `SCENE_DEDUP_RADIUS_M`, `SCENE_DEDUP_VISUAL_K`, `SCENE_POSITION_SOURCE`, `SCENE_POSITION_FALLBACK_POSE`, `SCENE_MAX_LIFT_DISTANCE_M`, `SCENE_QUERY_MIN_CONF`.
+
+The stored document is **caption-led** (the detector class is often wrong, so it's kept out of the search text and only used as a fallback when there's no caption), and archived thumbnails are the **object crop** (bbox + `SCENE_FRAME_CROP_MARGIN` padding), not the whole frame. For "where is X?" the Database agent and `find_object_from_memory` accept `near_me=True` to restrict the search to the robot's current vicinity, and drop matches below `SCENE_QUERY_MIN_CONF` so a returned coordinate is always one the robot can actually be sent to. If the `/image-embed` server is down, lookups **fall back to a local keyword (word-overlap) search** over the stored captions so "find X" keeps working offline.
 
 ### Building / rebuilding it: `tools/scene_explore`
 

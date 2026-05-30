@@ -29,6 +29,14 @@ dev = [
     "pytest>=8.0.0",
     "requests>=2.32.0",
 ]
+# In-process CLIP for SCENE_EMBED_BACKEND=local (no walkie-ai-server dependency
+# for embeddings). Install with `uv sync --extra clip`. NOTE: on an RTX 5090
+# (Blackwell / sm_120) you need a CUDA 12.8 torch build — install torch from the
+# cu128 index, e.g. `uv pip install torch --index-url https://download.pytorch.org/whl/cu128`.
+clip = [
+    "torch>=2.7",
+    "transformers>=4.45",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
