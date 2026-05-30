@@ -2,10 +2,10 @@
 
 The on-robot brain for **Walkie** — a 4th-gen omnidirectional robot from Chulalongkorn University's EIC team.
 
-This repo orchestrates a LangChain/LangGraph **multi-agent system** over a real robot body (movement, arm, camera, mic, speaker). It is a thin local process: it does **not** run AI models itself. Instead it talks to two things:
+This repo orchestrates a LangChain/LangGraph **multi-agent system** over a real robot body (movement, arm, camera, mic, speaker). It's a mostly-thin local process — the heavy perception/speech models live in `walkie-ai-server` — though by default it runs the **CLIP embedder in-process** so long-term memory has no network dependency. It talks to:
 
 - **`walkie-sdk`** (git dependency) → hardware: navigation, arm, camera over Zenoh.
-- **`walkie-ai-server`** (separate HTTP service at `WALKIE_AI_BASE_URL`) → heavy model inference (STT, TTS, object detection, image captioning, pose estimation).
+- **`walkie-ai-server`** (separate HTTP service at `WALKIE_AI_BASE_URL`) → heavy model inference (STT, TTS, object detection, image captioning, pose estimation). CLIP embeddings can come from here too (`SCENE_EMBED_BACKEND=remote`) but default to in-process.
 
 ```
 ┌──────────────────┐      Zenoh        ┌──────────────┐
@@ -24,9 +24,11 @@ This repo orchestrates a LangChain/LangGraph **multi-agent system** over a real 
 ## TL;DR — the three commands you'll actually run
 
 ```bash
-uv sync                                  # one-time: install deps (incl. walkie-sdk)
+uv sync --extra clip                      # one-time: deps + in-process CLIP (the default backend)
 cp .env.example .env                      # one-time: then set OPENROUTER_API_KEY + WALKIE_AI_BASE_URL
 ```
+
+> The default embedding backend is **local** (CLIP runs in this process), so it needs the `clip` extra (torch + transformers). On an **RTX 5090** also install a CUDA 12.8 torch build: `uv pip install torch --index-url https://download.pytorch.org/whl/cu128`. Don't want the local model? `uv sync` (no extra) + set `SCENE_EMBED_BACKEND=remote` in `config.toml`. See [Embedding backend](#embedding-backend-local-default-or-remote).
 
 `.env` holds only secrets/endpoints; all tuning lives in **`config.toml`** (no edit needed to start). See [Configure your environment](#2-configure-your-environment).
 
@@ -42,7 +44,7 @@ uv run python main.py                        # add DISABLE_LISTENING=1 to type i
 uv run python -m tools.scene_explore -y      # press Enter when you're done driving
 ```
 
-`main.py` now brings the **DB viewer up in its own process**, so you don't run a second script — open `http://<ip-of-this-box>:8500` (it binds `0.0.0.0`, so teammates on the LAN can open it too). Because it shares the robot's live ChromaDB client, browsing is fully live *and* can't corrupt the store. Disable it with `CHROMA_VIEWER_AUTOSTART=0`; run it standalone (robot stopped) with `uv run python -m tools.chroma_viewer`. `main.py` and `scene_explore` need **`walkie-ai-server`** up at `WALKIE_AI_BASE_URL` (collection also uses its `/image-embed` route). Each command is explained in full below.
+`main.py` now brings the **DB viewer up in its own process**, so you don't run a second script — open `http://<ip-of-this-box>:8500` (it binds `0.0.0.0`, so teammates on the LAN can open it too). Because it shares the robot's live ChromaDB client, browsing is fully live *and* can't corrupt the store. Disable it with `CHROMA_VIEWER_AUTOSTART=0`; run it standalone (robot stopped) with `uv run python -m tools.chroma_viewer`. `main.py` and `scene_explore` need **`walkie-ai-server`** up at `WALKIE_AI_BASE_URL` for detection/caption/STT/TTS (CLIP embeddings run in-process by default — see [Embedding backend](#embedding-backend-local-default-or-remote)). Each command is explained in full below.
 
 > Need a clean slate? `uv run python -m tools.reset_db --all` wipes both vector DBs.
 
@@ -77,7 +79,8 @@ The agent stack is four agents built from one factory:
 | **[uv](https://docs.astral.sh/uv/)** | Package/venv manager used by this repo. |
 | **Git access to `EIC-Robocup-2026/walkie-sdk`** | Resolved automatically by `uv sync`. |
 | **OpenRouter API key** | The LLM brain. Get one at [openrouter.ai](https://openrouter.ai). |
-| **`walkie-ai-server` running** | Needed for STT/TTS/vision. Default `http://localhost:5000`. |
+| **`walkie-ai-server` running** | Needed for STT/TTS/detection/caption/pose. Default `http://localhost:5000`. (CLIP embeddings run in-process by default.) |
+| **`clip` extra (torch + transformers)** | For the default local embedding backend: `uv sync --extra clip`. GPU strongly recommended; RTX 5090 needs a CUDA 12.8 torch build. Skip it only if you set `SCENE_EMBED_BACKEND=remote`. |
 | **A robot (or local webcam)** | Full nav/arm needs the robot; the camera can fall back to `device=0`. |
 | **PortAudio + a mic/speaker** | For `pyaudio`/`sounddevice`. On Debian/Ubuntu: `sudo apt install portaudio19-dev`. |
 
@@ -88,8 +91,16 @@ The agent stack is four agents built from one factory:
 ### 1. Install dependencies
 
 ```bash
-uv sync          # creates .venv and resolves all deps, including walkie-sdk from git
+uv sync --extra clip    # .venv + all deps (incl. walkie-sdk) + in-process CLIP (default backend)
 ```
+
+The `clip` extra pulls **torch + transformers** for the local embedding backend (the default). On an **RTX 5090** (Blackwell / sm_120) install a CUDA 12.8 torch build into the venv:
+
+```bash
+uv pip install torch --index-url https://download.pytorch.org/whl/cu128
+```
+
+First run downloads the CLIP checkpoint (~600 MB) and caches it. If you'd rather use the server's `/image-embed`, plain `uv sync` is enough — set `SCENE_EMBED_BACKEND=remote` in `config.toml`.
 
 ### 2. Configure your environment
 
