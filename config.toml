@@ -109,6 +109,12 @@ SCENE_POSITION_FALLBACK_POSE = "0"
 # ZED2/2i: ~7-10m). Empty/0 = no gate (lifted value always trusted).
 SCENE_MAX_LIFT_DISTANCE_M = ""
 
+[scene.query]
+# Agent lookups (find_object / find_object_from_memory) drop matches whose
+# stored position_conf is below this floor, so "where is X?" only returns
+# places the robot can actually be sent. 0 = no filter (return every match).
+SCENE_QUERY_MIN_CONF = "0.25"
+
 [scene.prune]
 # Eviction so removed objects leave the store. TTL evicts records not re-seen
 # for N seconds; RADIUS gates the sweep to the robot's vicinity (roaming-safe;

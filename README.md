@@ -33,11 +33,12 @@ cp .env.example .env                      # one-time: then set OPENROUTER_API_KE
 Then, usually two things:
 
 ```bash
-# 1. Run the robot + agent. This also auto-starts the live DB viewer at :8500.
+# Run the robot + agent — ready for commands immediately; the scene DB fills
+# itself in the background. This also auto-starts the live DB viewer at :8500.
 uv run python main.py                        # add DISABLE_LISTENING=1 to type instead of speaking
 #    → open http://<ip-of-this-box>:8500 to watch the database fill in real time
 
-# 2. Collect the scene: wipe the catalogue, then drive the robot to fill it.
+# Optional: deliberately rebuild the catalogue offline (wipe, then just drive).
 uv run python -m tools.scene_explore -y      # press Enter when you're done driving
 ```
 
@@ -49,10 +50,13 @@ uv run python -m tools.scene_explore -y      # press Enter when you're done driv
 
 ## How it works (30-second tour)
 
-`main.py` runs the robot through two stages tracked on a process-wide `RobotContext`:
+`main.py` brings the robot up **ready to take commands immediately** — there's no explore stage and nothing to press Enter for. From the first second:
 
-1. **`explore`** — drives around detecting objects, lifts them to 3D map coordinates, and stores confident multi-sighting objects into the legacy vector DB (ChromaDB at `CHROMA_DIR`). `main.py` runs this **first** — press Enter to finish it. To build the newer CLIP scene memory instead, use [`tools/scene_explore`](#building--rebuilding-it-toolsscene_explore).
-2. **`ready`** — the default. A background service writes a perception snapshot to `perception.json`; the agent listens to the mic (STT), runs the **Walkie agent** on each utterance, and speaks replies back (TTS).
+- A background **scene-perception loop** continuously builds and updates the CLIP scene memory (`chroma_db_scene`) from whatever the camera sees — see, remember, and re-see without any "drive around first" phase.
+- A background service writes a live perception snapshot to `perception.json`.
+- The agent listens to the mic (STT), runs the **Walkie agent** on each utterance, and speaks replies back (TTS) — so you can look at, update, and command the robot all at once.
+
+(To *deliberately* rebuild the catalogue offline — wipe and just drive to collect — use the standalone [`tools/scene_explore`](#building--rebuilding-it-toolsscene_explore); it's optional now that the ready stage fills the DB on its own.)
 
 The agent stack is four agents built from one factory:
 
@@ -149,23 +153,11 @@ You'll get an `Enter your instruction:` prompt — type and press Enter to drive
 
 ---
 
-## The legacy explore stage (object memory in `chroma_db`)
+## The legacy object memory (`chroma_db`)
 
-`main.py` currently runs the legacy explore stage **first** — driving the detection loop into the older `WalkieVectorDB` (`chroma_db/`). On startup you'll see:
+`main.py` **no longer runs an explore stage** — the robot is ready to take commands the instant it starts, and the CLIP scene memory (below) fills itself in the background. The older `WalkieVectorDB` (`chroma_db/`) is kept only as a *fallback* that `find_object_from_memory` reads when the CLIP `/image-embed` route is unavailable; nothing populates it automatically anymore.
 
-```
-[Explore] Drive the robot around. Press Enter when done.
-```
-
-Drive around to populate it, or just **press Enter** to skip straight to the ready (commanding) stage. To stop running it at all, comment out the Stage 1 block in `main.py`:
-
-```python
-# ── Stage 1: Explore ──
-# ctx.stage = "explore"
-# run_explore_stage(walkieAI, walkie, db)
-```
-
-> For semantic "where is the X?" lookups, prefer the **CLIP scene memory** below (built with `tools/scene_explore`) — it's what `find_object_from_memory` uses whenever `/image-embed` is available.
+To collect into it deliberately you can still drive the legacy `ExploreService` yourself (it lives in `services/explore.py`), but for "where is the X?" lookups prefer the **CLIP scene memory** below — it's what `find_object_from_memory` uses whenever `/image-embed` is available.
 
 ---
 
@@ -182,16 +174,18 @@ Once it's populated, `find_object_from_memory` (and the **Database agent**) answ
 
 Internally the store keeps two ChromaDB collections under one id space: `scene_entries` (CLIP image embeddings, used for dedup) and `scene_captions` (CLIP text embeddings of the captions, used by `text_query`). The caption index is written automatically on new sightings; for data collected with an older build, set `SCENE_REINDEX_CAPTIONS=1` once (in `.env` or `config.toml`) to backfill it.
 
-Objects whose 3D depth-lift fails — small/distant ones, or a whole crowded frame on timeout — are no longer dropped: they're stamped with the robot's own pose so they still enter the catalogue at roughly the right spot (`SCENE_POSITION_SOURCE`).
+Objects whose 3D depth-lift fails — small/distant ones, or a whole crowded frame on timeout — are **dropped** by default, so only objects with a real per-object position enter the catalogue (stamping the robot's own pose instead would store *where the robot stood*, not where the object is, and navigating back there finds nothing). Set `SCENE_POSITION_FALLBACK_POSE=1` to re-enable the old robot-pose fallback once `get_3d_poses` is trustworthy. A separate sanity gate, `SCENE_MAX_LIFT_DISTANCE_M`, rejects lifted positions farther than N metres from the robot as sensor outliers. On a confident re-sighting that merges across a large distance (visual dedup), the position is **not** averaged into the empty space between the two observations — the higher-confidence one is kept.
 
 **This depends on the server's `/image-embed` route.** On startup the app probes it once:
 
 - Route available → `[scene] CLIP scene memory ON (dim=…, N existing record(s))`, loop starts.
-- Route unavailable (it's commented out on walkie-ai-server by default) → `[scene] image-embed unavailable …; CLIP scene perception OFF`, the loop is skipped and `find_object_from_memory` falls back to the legacy `chroma_db/` from the explore stage. **The rest of the app runs normally either way.**
+- Route unavailable (it's commented out on walkie-ai-server by default) → `[scene] image-embed unavailable …; CLIP scene perception OFF`, the loop is skipped and `find_object_from_memory` falls back to the legacy `chroma_db/`. **The rest of the app runs normally either way.**
 
 To turn the CLIP route on, the server team uncomments `app.register_blueprint(image_embed.bp)` in `walkie-ai-server` and redeploys. No changes are needed on this side.
 
-Tuning knobs (in `config.toml`, `[scene]` / `[scene.dedup]` / `[scene.position]`): `SCENE_PERCEPTION_ENABLED`, `SCENE_CHROMA_DIR`, `SCENE_FRAMES_DIR`, `SCENE_PERCEPTION_INTERVAL_SEC`, `SCENE_MIN_CONF`, `SCENE_CAPTION_PER_OBJECT`, `SCENE_FRAME_REFRESH_ON_UPDATE`, `SCENE_REINDEX_CAPTIONS`, `SCENE_DEDUP_RADIUS_M`, `SCENE_POSITION_SOURCE`.
+Tuning knobs (in `config.toml`, `[scene]` / `[scene.dedup]` / `[scene.position]` / `[scene.query]`): `SCENE_PERCEPTION_ENABLED`, `SCENE_CHROMA_DIR`, `SCENE_FRAMES_DIR`, `SCENE_PERCEPTION_INTERVAL_SEC`, `SCENE_MIN_CONF`, `SCENE_CAPTION_PER_OBJECT`, `SCENE_FRAME_REFRESH_ON_UPDATE`, `SCENE_REINDEX_CAPTIONS`, `SCENE_DEDUP_RADIUS_M`, `SCENE_DEDUP_VISUAL_K`, `SCENE_POSITION_SOURCE`, `SCENE_POSITION_FALLBACK_POSE`, `SCENE_MAX_LIFT_DISTANCE_M`, `SCENE_QUERY_MIN_CONF`.
+
+For "where is X?" the Database agent and `find_object_from_memory` accept `near_me=True` to restrict the search to the robot's current vicinity, and drop matches below `SCENE_QUERY_MIN_CONF` so a returned coordinate is always one the robot can actually be sent to.
 
 ### Building / rebuilding it: `tools/scene_explore`
 
@@ -214,7 +208,7 @@ In the **ready** stage the loop periodically prunes objects it no longer sees, s
 
 ## Inspecting the vector DBs (Chroma viewer)
 
-A **read-only** web UI to browse everything the robot has stored — the explore-stage `objects` (and older `people` / `scenes`) collections in `chroma_db/`, plus the CLIP `scene_entries` memory in `chroma_db_scene/`.
+A **read-only** web UI to browse everything the robot has stored — the legacy `objects` (and older `people` / `scenes`) collections in `chroma_db/`, plus the CLIP `scene_entries` memory in `chroma_db_scene/`.
 
 **The usual way: it starts itself.** `python main.py` launches the viewer in-process (a daemon thread reusing the robot's own ChromaDB clients) and prints its URL. No second script, and — crucially — no risk to the store: it reads the *same* live index the robot writes, so there's only one HNSW index (a separate process opening the same dir would spin up a rival index and corrupt it). Turn it off with `CHROMA_VIEWER_AUTOSTART=0`; change where it binds with `CHROMA_VIEWER_HOST` / `CHROMA_VIEWER_PORT`.
 
@@ -283,7 +277,7 @@ uv run python -m tools.reset_db --all -y   # both, skip the confirmation
 ## Project layout
 
 ```
-main.py                  Entry point: builds clients, picks the stage, runs the loop.
+main.py                  Entry point: builds clients, runs the ready loop (no explore stage).
 agents/
   core/                  Shared agent factory, middleware stack, RobotContext, tool decorators.
   walkie_agent/          Main orchestrator agent (thread_id="main").
@@ -296,7 +290,7 @@ interfaces/
   walkie_interface.py    Composes hardware sub-clients (nav/arm/status/tools + camera/mic/speaker).
   devices/               Local camera, microphone, speaker wrappers.
 services/
-  explore.py             Explore-stage background service (legacy object memory).
+  explore.py             Legacy explore background service (no longer run by main.py; manual use only).
   perception.py          Ready-stage snapshot writer.
   scene_perception.py    Ready-stage CLIP scene-perception loop (thread adapter).
 perception/              Scene store, dedup, prune, async loop, embedders, pipeline.
@@ -333,7 +327,7 @@ Override with `WALKIE_LOG_LEVEL` — uncomment it in `.env` to force one level e
 | Connection errors to vision/STT/TTS | `walkie-ai-server` not running or wrong `WALKIE_AI_BASE_URL`. |
 | `PortAudio`/`pyaudio` build or device errors | Install PortAudio (`sudo apt install portaudio19-dev`), or run with `DISABLE_LISTENING=1`. |
 | Robot/Zenoh connection fails | Check the robot is up and `ROBOT_IP`/`ZENOH_PORT` in `main.py` are correct. |
-| `find_object_from_memory` returns nothing | The DB is empty — build it first with `uv run python -m tools.scene_explore` (CLIP memory) or the legacy explore stage. |
+| `find_object_from_memory` returns nothing | The DB hasn't filled yet — let the robot look around (the ready-stage loop builds it in the background), or collect deliberately with `uv run python -m tools.scene_explore`. Also check matches aren't all being dropped by `SCENE_QUERY_MIN_CONF`. |
 | Walkie "responds" but says nothing aloud | Expected unless the agent calls `speak` — the no-plain-text contract. |
 
 ---

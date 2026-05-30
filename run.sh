@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # Unified launcher for walkie-agent-v2.
 #
+# 'start' brings the robot up ready to take commands immediately — there is no
+# explore stage and nothing to press Enter for. The CLIP scene memory builds and
+# updates itself in the background while you talk to the robot, so it can see,
+# remember, and act from the first second.
+#
 # Usage:
 #   ./run.sh                # start the agent (viewer auto-starts in-process)
 #   ./run.sh start          # same as above
 #   ./run.sh reset          # wipe both vector DBs (object + scene), no prompt
 #   ./run.sh reset-scene    # wipe only CLIP scene memory (chroma_db_scene)
-#   ./run.sh reset-object   # wipe only the legacy explore DB (chroma_db)
+#   ./run.sh reset-object   # wipe only the legacy object DB (chroma_db)
 #   ./run.sh fresh          # reset both, then start the agent
 #   ./run.sh viewer         # standalone viewer (snapshot copy — safe while agent runs)
 #   ./run.sh doctor         # diagnose a corrupt/desynced store (read-only)

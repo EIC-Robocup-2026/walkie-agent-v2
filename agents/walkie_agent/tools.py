@@ -7,7 +7,7 @@ from langchain_core.tools import tool
 
 from agents.core.tool_decorators import parallelable_tool, sequential_tool
 from agents.core.robot_context import RobotContext
-from agents.core.object_memory import lookup_object_in_memory
+from agents.core.object_memory import lookup_object_in_memory, query_min_conf, robot_xy
 from db.walkie_db import WalkieVectorDB
 from interfaces.walkie_interface import WalkieInterface
 
@@ -104,20 +104,40 @@ def make_walkie_main_tools(
 
     @parallelable_tool
     @tool(parse_docstring=True)
-    def find_object_from_memory(object_name: str) -> str:
+    def find_object_from_memory(
+        object_name: str, near_me: bool = False, radius_m: float = 2.0
+    ) -> str:
         """Look up where the robot has previously seen an object (long-term DB).
 
         Fast path: searches stored captions first (text-to-text), then visual
         similarity. Faster than delegating for a simple "where did I see X?".
+        Low-confidence positions are filtered out so the result is navigable.
+
+        Set ``near_me=True`` to restrict to the robot's current vicinity (for
+        "the X near me / in this room").
 
         Args:
             object_name: Object name or description to search.
+            near_me: Only return matches within ``radius_m`` of the robot now.
+            radius_m: Vicinity radius in metres when ``near_me`` is set.
 
         Returns:
             Top match(es) with map-frame coordinates.
         """
+        within = max_dist = None
+        if near_me:
+            within = robot_xy(walkie)
+            if within is None:
+                return "Can't search 'near me' — the robot's position is unknown."
+            max_dist = float(radius_m)
         return lookup_object_in_memory(
-            object_name, scene_store=scene_store, db=db, n_results=5
+            object_name,
+            scene_store=scene_store,
+            db=db,
+            n_results=5,
+            within_radius_of=within,
+            max_distance_m=max_dist,
+            min_position_conf=query_min_conf(),
         )
 
     @sequential_tool

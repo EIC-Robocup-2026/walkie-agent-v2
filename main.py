@@ -20,7 +20,7 @@ from client import WalkieAIClient
 from db.walkie_db import WalkieVectorDB
 from interfaces.walkie_interface import WalkieInterface
 from perception import RemoteCLIPEmbedder, RobotPoseLifter, SceneStore
-from services import ExploreService, PerceptionService, ScenePerceptionService
+from services import PerceptionService, ScenePerceptionService
 
 
 ZENOH_PORT = 7447
@@ -251,25 +251,6 @@ def maybe_start_viewer(stores: list[tuple[str, object]]):
     return t
 
 
-def run_explore_stage(walkieAI, walkie, db) -> None:
-    explore = ExploreService(
-        walkieAI,
-        walkie,
-        db,
-        interval=float(os.getenv("EXPLORE_INTERVAL_SEC", "1.0")),
-        min_sightings=int(os.getenv("EXPLORE_MIN_SIGHTINGS", "5")),
-        dedup_radius=float(os.getenv("EXPLORE_DEDUP_RADIUS_M", "1.0")),
-        min_conf=float(os.getenv("EXPLORE_MIN_CONF", "0.6")),
-    )
-    explore.start()
-    try:
-        print("[Explore] Drive the robot around. Press Enter when done.")
-        input()
-    finally:
-        explore.stop_and_join(timeout=5)
-    print(f"[Explore] DB now contains {db.count} confident object(s).")
-
-
 def run_ready_stage(walkieAI, walkie, db, model) -> None:
     perception = PerceptionService(
         walkieAI,
@@ -423,17 +404,15 @@ def main() -> None:
     )
     model = build_model()
 
-    # Start the in-process Chroma viewer NOW with just the legacy object store —
-    # otherwise it'd be gated behind run_explore_stage's input() prompt, leaving
-    # users staring at "Drive the robot around..." with no viewer running yet.
-    # run_ready_stage re-registers the SceneStore client later (idempotent).
+    # Start the in-process Chroma viewer NOW with just the legacy object store;
+    # run_ready_stage re-registers the SceneStore client a moment later once it's
+    # built (idempotent), so the viewer is up from the very first second.
     maybe_start_viewer([(os.getenv("CHROMA_DIR", "chroma_db"), db.client)])
 
-    # ── Stage 1: Explore ──
-    ctx.stage = "explore"
-    run_explore_stage(walkieAI, walkie, db)
-
-    # ── Stage 2: Ready ──
+    # No explore stage: the robot is ready immediately. The scene DB builds
+    # itself in the background (ScenePerceptionService inside run_ready_stage)
+    # while the agent already takes commands — see, update, and act without any
+    # "drive around then press Enter" gate.
     ctx.stage = "ready"
     run_ready_stage(walkieAI, walkie, db, model)
 

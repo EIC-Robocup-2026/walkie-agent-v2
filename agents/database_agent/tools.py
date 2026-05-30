@@ -17,7 +17,7 @@ from typing import Optional
 
 from langchain_core.tools import tool
 
-from agents.core.object_memory import lookup_object_in_memory
+from agents.core.object_memory import lookup_object_in_memory, query_min_conf, robot_xy
 from agents.core.robot_context import RobotContext
 from agents.core.tool_decorators import parallelable_tool, sequential_tool
 from db.walkie_db import WalkieVectorDB
@@ -54,21 +54,40 @@ def make_database_tools(
 
     @parallelable_tool
     @tool(parse_docstring=True)
-    def find_object(query: str) -> str:
+    def find_object(query: str, near_me: bool = False, radius_m: float = 2.0) -> str:
         """Find where the robot has previously seen an object, by description.
 
         Searches stored captions first (text-to-text, so "coffee mug" matches
         "a white ceramic coffee mug"), then visual similarity. This is the
-        primary "where is X?" lookup.
+        primary "where is X?" lookup. Low-confidence positions are filtered out
+        so the answer is something the robot can actually navigate to.
+
+        Set ``near_me=True`` to restrict matches to the robot's current vicinity
+        (use for "the cup near me / in this room"); otherwise the whole map is
+        searched.
 
         Args:
             query: Name or description of the object (e.g. "red backpack").
+            near_me: Only return matches within ``radius_m`` of the robot now.
+            radius_m: Vicinity radius in metres when ``near_me`` is set.
 
         Returns:
             Top match(es) with map-frame coordinates, or a not-found message.
         """
+        within = max_dist = None
+        if near_me:
+            within = robot_xy(walkie)
+            if within is None:
+                return "Can't search 'near me' — the robot's position is unknown."
+            max_dist = float(radius_m)
         return lookup_object_in_memory(
-            query, scene_store=scene_store, db=db, n_results=5
+            query,
+            scene_store=scene_store,
+            db=db,
+            n_results=5,
+            within_radius_of=within,
+            max_distance_m=max_dist,
+            min_position_conf=query_min_conf(),
         )
 
     @parallelable_tool
