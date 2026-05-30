@@ -542,7 +542,12 @@ def _cell(di: int, coll: str, key: str, r: dict) -> str:
         img = _img_tag(meta, cls="thumb", w=THUMB_W_TABLE)
         return f"<td>{img}</td>" if img else "<td></td>"
     if key == "document":
-        return f"<td class='c-doc' title='{e(r['doc'])}'>{e(r['doc'])}</td>"
+        # Prefer the robot's actual caption (stored in metadata) over the raw
+        # Chroma document, which is the "<class>. <caption>" string used for the
+        # text index — it duplicates the class column and reads oddly. Fall back
+        # to the document for collections that carry no caption.
+        text = str(meta.get("caption") or r["doc"])
+        return f"<td class='c-doc' title='{e(text)}'>{e(text)}</td>"
     if key == "class_name":
         return (
             f"<td>{_class_badge(meta.get('class_name', ''))}</td>"
@@ -607,7 +612,7 @@ def _header(base: str, key: str, cur_sort: str, cur_dir: str) -> str:
     label = {
         "id": "id",
         "frame": "frame",
-        "document": "document",
+        "document": "caption",
         "class_name": "class",
         "position": "position (x, y, z)",
         "confidence": "confidence",
@@ -1192,7 +1197,7 @@ document.documentElement.setAttribute('data-theme',t==='auto'?(d?'dark':'light')
   tbody tr:last-child td{border-bottom:none}
   tbody tr:hover{background:var(--hover)}
   .c-id a{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:12px}
-  .c-doc{max-width:360px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .c-doc{max-width:420px;white-space:normal;word-break:break-word}
   .c-pos code{color:var(--muted)}
   .copy{margin-left:6px;border:none;background:transparent;color:var(--muted);cursor:pointer;
      opacity:0;font-size:12px} tr:hover .copy{opacity:1} .copy:hover{color:var(--accent)}
@@ -1772,8 +1777,9 @@ def record(di: int, coll: str, rid: str) -> str:
     if meta.get("class_name"):
         parts.append(_class_badge(meta["class_name"]))
     parts.append("</div>")
-    if r["doc"]:
-        parts.append(f"<div class='muted'>{e(r['doc'])}</div>")
+    subtitle = str(meta.get("caption") or r["doc"])
+    if subtitle:
+        parts.append(f"<div class='muted'>{e(subtitle)}</div>")
     parts.append("</div>")
 
     full_img = _img_tag(meta, cls="full", w=THUMB_W_FULL)

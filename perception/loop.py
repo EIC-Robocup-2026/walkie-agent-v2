@@ -59,6 +59,7 @@ async def run_scene_perception(
     prune_radius_m: Optional[float] = None,
     prune_max_records: Optional[int] = None,
     pose_provider: Optional[Callable[[], Optional[tuple[float, float, float]]]] = None,
+    position_fallback_to_pose: bool = True,
     max_lift_distance_m: Optional[float] = None,
     on_tick: Optional[Callable[[TickReport], None]] = None,
 ) -> None:
@@ -68,6 +69,15 @@ async def run_scene_perception(
     keep it cheap. For prometheus/file logging, prefer subscribing to the
     ``perception.loop`` logger; the loop emits one structured INFO line
     per tick on its own.
+
+    ``position_fallback_to_pose`` controls what happens when the 3D lift fails
+    for a detection. When ``True`` (and a ``pose_provider`` is set) the
+    detection is stamped with the robot's own pose so the object still enters
+    the catalogue at roughly the right area. When ``False`` the detection is
+    dropped instead — preferred when the lift is unreliable, because a robot-
+    pose stamp is *where the robot stood*, not where the object is, and sending
+    the robot back there navigates to nothing. ``pose_provider`` is still used
+    for the prune spatial gate regardless of this flag.
 
     Eviction: when ``prune_ttl_sec`` (and/or ``prune_max_records``) is set,
     every ``prune_interval_sec`` the loop calls :meth:`SceneStore.prune` so
@@ -105,6 +115,7 @@ async def run_scene_perception(
                     archive_source_frame=archive_source_frame,
                     exclude_classes=exclude_classes,
                     pose_provider=pose_provider,
+                    position_fallback_to_pose=position_fallback_to_pose,
                     max_lift_distance_m=max_lift_distance_m,
                 )
             except asyncio.CancelledError:
@@ -176,6 +187,7 @@ async def _run_one_tick(
     archive_source_frame: bool,
     exclude_classes: Optional[Sequence[str]] = None,
     pose_provider: Optional[Callable[[], Optional[tuple[float, float, float]]]] = None,
+    position_fallback_to_pose: bool = True,
     max_lift_distance_m: Optional[float] = None,
 ) -> TickReport:
     t0 = time.perf_counter()
@@ -184,9 +196,12 @@ async def _run_one_tick(
 
     # Robot pose for the position fallback (small/far objects whose depth lift
     # fails). Read off-thread since it may touch telemetry I/O; a failure here
-    # just means "no fallback this tick", never a crash.
+    # just means "no fallback this tick", never a crash. Gated by
+    # position_fallback_to_pose: when off, a failed lift drops the detection
+    # rather than stamping the robot's own pose (pose_provider still drives the
+    # prune spatial gate below).
     fallback_position: Optional[tuple[float, float, float]] = None
-    if pose_provider is not None:
+    if position_fallback_to_pose and pose_provider is not None:
         fallback_position = await asyncio.to_thread(_safe_pose, pose_provider)
 
     # process_frame is sync but calls into HTTP under the hood — keep it

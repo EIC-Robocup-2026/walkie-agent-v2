@@ -582,6 +582,33 @@ def test_loop_falls_back_to_robot_pose_when_lift_fails(fake_world):
     assert (round(entry.position[0], 1), round(entry.position[1], 1)) == (4.0, 2.0)
 
 
+def test_loop_drops_unliftable_when_pose_fallback_disabled(fake_world):
+    detector = FakeDetector(
+        {i: [FakeDetectedObject("pen", 1, 0.6, (5, 5, 12, 12))] for i in range(6)}
+    )
+
+    async def factory(on_tick):
+        return await run_scene_perception(
+            camera=fake_world["camera"],
+            detector=detector,
+            captioner=fake_world["captioner"],
+            embedder=fake_world["embedder"],
+            lifter=_NeverLifts(),
+            store=fake_world["store"],
+            interval_sec=0.01,
+            archive_source_frame=False,
+            pose_provider=lambda: (4.0, 2.0, 0.0),  # available, but for prune only
+            position_fallback_to_pose=False,
+            on_tick=on_tick,
+        )
+
+    asyncio.run(_run_for_n_ticks(factory, n=5, interval=0.01))
+    # The pose provider is present (the prune gate needs it) but the position
+    # fallback is off → an unliftable detection is dropped, NOT stamped with the
+    # robot's pose. This is the production setting: only real 3D lifts persist.
+    assert fake_world["store"].count == 0
+
+
 # ---------------------------------------------------------------------------
 # Eviction (periodic prune wired into the loop)
 # ---------------------------------------------------------------------------

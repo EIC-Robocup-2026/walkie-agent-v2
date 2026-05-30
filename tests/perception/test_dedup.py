@@ -229,6 +229,36 @@ def test_14_visual_merge_on_keeps_dissimilar_far_apart(monkeypatch, store):
     assert store.count == 2
 
 
+def test_15_visual_far_merge_keeps_best_position_not_average(monkeypatch, store):
+    # With visual dedup on, a same-appearance re-sighting far beyond the spatial
+    # radius merges (test_13) — but its position must NOT be averaged into the
+    # empty space between the two observations (that's what sent the robot to
+    # nowhere). The record keeps the higher-confidence single position.
+    monkeypatch.setenv("SCENE_DEDUP_VISUAL_K", "5")
+    a = _detection(position=(0.0, 0.0, 0.0), embedding=(1.0, 0.0, 0.0, 0.0), confidence=0.9)
+    b = _detection(position=(3.0, 3.0, 0.0), embedding=(1.0, 0.0, 0.0, 0.0), confidence=0.5)
+    id_a, _ = store.upsert(a)
+    id_b, decision = store.upsert(b)
+    assert decision.action == "update"
+    assert id_b == id_a
+    entry = store.get_by_id(id_a)
+    # a was more confident → keep a's position; do not drag it toward b.
+    assert entry.position == (0.0, 0.0, 0.0)
+    assert entry.sightings == 2
+
+
+def test_16_visual_far_merge_adopts_more_confident_new_position(monkeypatch, store):
+    # Symmetric to test_15: when the *new* far sighting is more confident, its
+    # position wins (still no averaging).
+    monkeypatch.setenv("SCENE_DEDUP_VISUAL_K", "5")
+    a = _detection(position=(0.0, 0.0, 0.0), embedding=(1.0, 0.0, 0.0, 0.0), confidence=0.5)
+    b = _detection(position=(3.0, 3.0, 0.0), embedding=(1.0, 0.0, 0.0, 0.0), confidence=0.9)
+    id_a, _ = store.upsert(a)
+    store.upsert(b)
+    entry = store.get_by_id(id_a)
+    assert entry.position == (3.0, 3.0, 0.0)
+
+
 def test_11_classify_rejects_cross_class_candidates():
     # Pure-function test of the precondition guard in classify().
     from perception.types import SceneEntry

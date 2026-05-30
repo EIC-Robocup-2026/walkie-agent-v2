@@ -93,14 +93,19 @@ SCENE_DEDUP_VISUAL_K = "5"
 
 [scene.position]
 # lift  = SDK depth+TF per-object 3D position (distinct objects → distinct
-#         positions). Needs rosbridge + get_3d_poses. Small/far objects whose
-#         depth fails now fall back to the robot pose instead of being dropped.
+#         positions). Needs rosbridge + get_3d_poses.
 # robot = robot's own odom pose for every object (coarse but robust).
 SCENE_POSITION_SOURCE = "lift"
+# When a per-object lift fails, stamping the robot's own pose stores "where the
+# robot stood", not where the object is — navigating back there goes to nothing.
+# 0 (default) drops the detection so only real 3D lifts enter the catalogue;
+# 1 re-enables the robot-pose fallback (only sane once get_3d_poses is solid).
+SCENE_POSITION_FALLBACK_POSE = "0"
 # Sanity gate on lifted positions: if depth-lift reports an object farther than
 # this from the robot, treat it as a sensor outlier (bbox center sampled a far
-# wall behind the object, shiny/transparent surface, etc.) and stamp the robot
-# pose instead. Tune to your camera's reliable depth range (ZED2 mini: ~3-5m,
+# wall behind the object, shiny/transparent surface, etc.). With the robot-pose
+# fallback on it's stamped with the robot pose; with the fallback off (default)
+# it's dropped. Tune to your camera's reliable depth range (ZED2 mini: ~3-5m,
 # ZED2/2i: ~7-10m). Empty/0 = no gate (lifted value always trusted).
 SCENE_MAX_LIFT_DISTANCE_M = ""
 

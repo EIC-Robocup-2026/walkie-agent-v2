@@ -252,10 +252,32 @@ class SceneStore:
             float(meta.get("y", 0.0)),
             float(meta.get("z", 0.0)),
         )
-        new_pos = merged_position(old_pos, n, detection.position)
-        new_conf = merged_confidence(
-            float(meta.get("position_conf", 0.0)), n, detection.confidence
-        )
+        old_conf = float(meta.get("position_conf", 0.0))
+        # The running mean assumes every sighting observes the *same* true
+        # position with noise. That holds for a genuine co-located re-sighting
+        # (within the dedup radius), but NOT for a far / visual-only merge:
+        # SCENE_DEDUP_VISUAL_K surfaces same-appearance neighbours at any
+        # distance, so two sightings metres apart can merge. Averaging those
+        # lands the record in empty space *between* them — the robot then
+        # navigates to a point where nothing is. So beyond the radius we keep
+        # the higher-confidence single observation instead of blending.
+        radius = get_dedup_radius_m()
+        merge_dist = l2_distance(old_pos, detection.position)
+        if merge_dist > radius:
+            if detection.confidence > old_conf:
+                new_pos, new_conf = detection.position, detection.confidence
+                kept = "new"
+            else:
+                new_pos, new_conf = old_pos, old_conf
+                kept = "old"
+            _log.info(
+                "scene.merge far id=%s dist=%.2f>radius=%.2f kept=%s "
+                "pos=(%.2f,%.2f,%.2f) — not averaging",
+                target_id, merge_dist, radius, kept, *new_pos,
+            )
+        else:
+            new_pos = merged_position(old_pos, n, detection.position)
+            new_conf = merged_confidence(old_conf, n, detection.confidence)
 
         meta.update(
             {

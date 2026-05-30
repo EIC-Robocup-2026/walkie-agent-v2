@@ -292,7 +292,15 @@ def run_ready_stage(walkieAI, walkie, db, model) -> None:
         # depth+TF lifter (walkie.tools) for true per-object positions.
         pos_source = os.getenv("SCENE_POSITION_SOURCE", "lift").lower()
         scene_lifter = RobotPoseLifter(walkie.status) if pos_source == "robot" else None
-        print(f"[scene] position source: {pos_source}")
+        # When the depth lift fails for a detection, stamping the robot's own
+        # pose stores "where the robot stood", not where the object is — sending
+        # the robot back there navigates to nothing. Default off: drop the
+        # detection so only objects with a real 3D lift enter the catalogue.
+        pos_fallback = _flag("SCENE_POSITION_FALLBACK_POSE", "0")
+        print(
+            f"[scene] position source: {pos_source} "
+            f"(lift-fail fallback to robot pose: {'on' if pos_fallback else 'off — drop'})"
+        )
         # Eviction: without this, removed objects linger in the scene store
         # forever. TTL ages out objects not re-seen for SCENE_PRUNE_TTL_SEC;
         # the radius gates the sweep to the robot's vicinity so objects in
@@ -327,6 +335,7 @@ def run_ready_stage(walkieAI, walkie, db, model) -> None:
                 for c in os.getenv("SCENE_EXCLUDE_CLASSES", "person").split(",")
                 if c.strip()
             ],
+            position_fallback_to_pose=pos_fallback,
             prune_ttl_sec=prune_ttl,
             prune_interval_sec=float(os.getenv("SCENE_PRUNE_INTERVAL_SEC", "10")),
             prune_radius_m=prune_radius,
