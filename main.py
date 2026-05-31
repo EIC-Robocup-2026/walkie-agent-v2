@@ -291,7 +291,14 @@ def run_ready_stage(walkieAI, walkie, db, model) -> None:
         RobotContext.get().perception_path,
         interval=float(os.getenv("PERCEPTION_INTERVAL_SEC", "2.0")),
         caption_objects=os.getenv("PERCEPTION_CAPTION_OBJECTS", "0").lower() in ("1", "true", "yes"),
-        caption_filter=os.getenv("PERCEPTION_CAPTION_FILTER", "").split(","),
+        # Empty = caption every object; a non-empty comma list restricts to those
+        # classes. Strip blanks so the default "" parses to [] (caption all), not
+        # [""] (which matched nothing — captions came out empty).
+        caption_filter=[
+            c.strip()
+            for c in os.getenv("PERCEPTION_CAPTION_FILTER", "").split(",")
+            if c.strip()
+        ],
     )
     perception.start()
 
@@ -384,21 +391,40 @@ def run_ready_stage(walkieAI, walkie, db, model) -> None:
     )
 
     print("[Ready] Listening — speak to Walkie. Ctrl+C to exit.")
+    listening_disabled = os.getenv("DISABLE_LISTENING", "0").lower() in ("1", "true", "yes")
     try:
         while True:
-            if not os.getenv("DISABLE_LISTENING", "0").lower() in ("1", "true", "yes"):
-                audio = walkie.microphone.record_until_silence()
-                text = walkieAI.stt.transcribe(audio)
-            else:
-                text = input("Enter your instruction: ")
-            text = (text or "").strip()
-            if not text:
-                continue
-            print(f"[user] {text}")
-            walkie_agent.invoke(
-                {"messages": [HumanMessage(content=text)]},
-                config={"configurable": {"thread_id": "main"}},
-            )
+            # One bad turn (STT hiccup, OpenRouter timeout, TTS outage, a sub-agent
+            # raising) must NOT take the robot down — log it, say a short apology if
+            # we still can, and keep listening. Ctrl+C still propagates out to the
+            # outer handler below since it's a BaseException, not Exception.
+            try:
+                if not listening_disabled:
+                    audio = walkie.microphone.record_until_silence()
+                    text = walkieAI.stt.transcribe(audio)
+                else:
+                    text = input("Enter your instruction: ")
+                text = (text or "").strip()
+                if not text:
+                    continue
+                print(f"[user] {text}")
+                walkie_agent.invoke(
+                    {"messages": [HumanMessage(content=text)]},
+                    config={"configurable": {"thread_id": "main"}},
+                )
+            except EOFError:
+                # Ctrl+D at the typed-input prompt — treat as a clean exit.
+                print("\n[main] EOF — shutting down.")
+                break
+            except Exception:  # noqa: BLE001 — keep serving across transient failures
+                _log.exception("command turn failed; staying up")
+                try:
+                    stream = walkieAI.tts.synthesize_stream(
+                        "Sorry, I ran into a problem with that. Please try again."
+                    )
+                    walkie.speaker.play_stream(stream, blocking=True)
+                except Exception:  # noqa: BLE001 — TTS itself may be the thing that's down
+                    pass
     except KeyboardInterrupt:
         print("\n[main] interrupt — shutting down.")
     finally:

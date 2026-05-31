@@ -162,17 +162,23 @@ class PerceptionService(threading.Thread):
         # Caption objects
         captions_by_index: dict[int, str] = {}
         if self.caption_objects:
+            # Empty filter = caption every object; a non-empty filter restricts
+            # captioning to the listed classes. Matched case-insensitively so it
+            # doesn't depend on whatever casing the detector emits ("Person" vs
+            # "person").
+            allow = {c.strip().lower() for c in self.caption_filter if c.strip()}
             imgs = []
             prompts = []
             caption_indices: list[int] = []
             for i, o in enumerate(objects):
-                if o.class_name not in self.caption_filter:
+                cls = o.class_name or ""
+                if allow and cls.lower() not in allow:
                     continue
                 cropped_img = _crop_image(img, o.bbox)
-                if o.class_name == "Person":
+                if cls.lower() == "person":
                     prompt = "Describe the person actions and clothes."
                 else:
-                    prompt = f"Describe the {o.class_name}."
+                    prompt = f"Describe the {cls}."
                 imgs.append(cropped_img)
                 prompts.append(prompt)
                 caption_indices.append(i)
