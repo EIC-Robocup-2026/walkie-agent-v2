@@ -8,14 +8,12 @@ from langchain_core.tools import tool
 from agents.core.tool_decorators import parallelable_tool, sequential_tool
 from agents.core.robot_context import RobotContext
 from agents.core.object_memory import lookup_object_in_memory, query_min_conf, robot_xy
-from db.walkie_db import WalkieVectorDB
 from interfaces.walkie_interface import WalkieInterface
 
 
 def make_walkie_main_tools(
     walkie: WalkieInterface,
     walkieAI,
-    db: WalkieVectorDB,
     actuator_agent,
     vision_agent,
     database_agent,
@@ -28,10 +26,9 @@ def make_walkie_main_tools(
     Sub-agents are wrapped as sequential tools (delegate_to_*). Object lookup
     is parallelable. Speak is sequential.
 
-    ``scene_store``: when supplied (a :class:`perception.SceneStore`),
-    ``find_object_from_memory`` queries the CLIP-backed scene memory;
-    otherwise it falls back to the legacy ``db``. The same store powers the
-    Walkie Database sub-agent reached via ``delegate_to_database``.
+    ``scene_store`` (a :class:`perception.SceneStore`) powers
+    ``find_object_from_memory`` and the Walkie Database sub-agent reached via
+    ``delegate_to_database``.
     """
 
     def _invoke_subagent(graph, task: str, prefix: str) -> str:
@@ -133,7 +130,6 @@ def make_walkie_main_tools(
         return lookup_object_in_memory(
             object_name,
             scene_store=scene_store,
-            db=db,
             n_results=5,
             within_radius_of=within,
             max_distance_m=max_dist,

@@ -1,9 +1,8 @@
 """Tools for the Walkie Database sub-agent.
 
-A focused surface over the long-term spatial memory. The CLIP-backed
-:class:`perception.SceneStore` is the primary backend (caption text search +
-spatial / recency queries); the legacy :class:`db.walkie_db.WalkieVectorDB`
-is used as a fallback for whatever it can answer (object lookup, listing).
+A focused surface over the long-term spatial memory, backed by the CLIP
+:class:`perception.SceneStore` (caption text search + spatial / recency
+queries).
 
 All lookups are read-only → ``@parallelable_tool``. ``speak`` moves audio →
 ``@sequential_tool``.
@@ -13,14 +12,12 @@ from __future__ import annotations
 
 import time
 from collections import Counter
-from typing import Optional
 
 from langchain_core.tools import tool
 
 from agents.core.object_memory import lookup_object_in_memory, query_min_conf, robot_xy
 from agents.core.robot_context import RobotContext
 from agents.core.tool_decorators import parallelable_tool, sequential_tool
-from db.walkie_db import WalkieVectorDB
 from interfaces.walkie_interface import WalkieInterface
 
 
@@ -40,16 +37,15 @@ def _fmt_entries(entries) -> str:
 def make_database_tools(
     walkie: WalkieInterface,
     walkieAI,
-    db: WalkieVectorDB,
     *,
     agent_name: str = "database",
     scene_store=None,
 ):
     """Build the database sub-agent's tool list.
 
-    ``scene_store``: when supplied (a :class:`perception.SceneStore`), the
-    spatial / recency / caption tools use it; otherwise they degrade to what
-    the legacy ``db`` can answer (object lookup only).
+    ``scene_store`` (a :class:`perception.SceneStore`) powers the spatial /
+    recency / caption tools. When it's unavailable the spatial/recency tools
+    report that scene memory is off.
     """
 
     @parallelable_tool
@@ -83,7 +79,6 @@ def make_database_tools(
         return lookup_object_in_memory(
             query,
             scene_store=scene_store,
-            db=db,
             n_results=5,
             within_radius_of=within,
             max_distance_m=max_dist,
@@ -148,24 +143,15 @@ def make_database_tools(
 
         Use for "what do you know about?" / "how many chairs?" questions.
         """
-        if scene_store is not None:
-            entries = scene_store.recency_query(since_ts=0.0)
-            total = len(entries)
-            if total == 0:
-                return "The scene database is empty."
-            by_class = Counter(e.class_name for e in entries).most_common()
-            breakdown = ", ".join(f"{cls}×{n}" for cls, n in by_class)
-            return f"Scene database holds {total} object(s): {breakdown}."
-        # Legacy fallback.
-        try:
-            rows = db.list_all()
-        except Exception as e:  # noqa: BLE001
-            return f"Could not read the object database: {e}"
-        if not rows:
-            return "The object database is empty."
-        by_class = Counter(r.get("class_name", "?") for r in rows).most_common()
+        if scene_store is None:
+            return "The scene database is off."
+        entries = scene_store.recency_query(since_ts=0.0)
+        total = len(entries)
+        if total == 0:
+            return "The scene database is empty."
+        by_class = Counter(e.class_name for e in entries).most_common()
         breakdown = ", ".join(f"{cls}×{n}" for cls, n in by_class)
-        return f"Object database holds {len(rows)} object(s): {breakdown}."
+        return f"Scene database holds {total} object(s): {breakdown}."
 
     @sequential_tool
     @tool(parse_docstring=True)

@@ -43,14 +43,13 @@ To run without the microphone (typing prompts at a TTY), set `DISABLE_LISTENING=
 
 ## Architecture
 
-### Two-stage lifecycle
+### Lifecycle: ready-immediately
 
-`main.py` drives the robot through two stages tracked on the `RobotContext` singleton:
+`main.py` sets `RobotContext.stage = "ready"` and runs `run_ready_stage` directly — there is no separate explore/catalogue-building stage and no operator "drive around then press Enter" gate.
 
-1. **`explore`** — `ExploreService` (background thread) detects objects, lifts bboxes to 3D map-frame coordinates via `walkie.tools.bboxes_to_positions`, tracks them across frames, and promotes confident multi-sighting tracks into the `WalkieVectorDB` (ChromaDB, persisted at `CHROMA_DIR`). The operator drives the robot around and presses Enter to end.
-2. **`ready`** — `PerceptionService` (background thread) writes the latest scene snapshot to `perception.json` every `PERCEPTION_INTERVAL_SEC`. The agent stack listens to mic input via STT, runs the Walkie agent on each utterance, and speaks back via TTS.
+In the **`ready`** stage two background threads run alongside the agent: `PerceptionService` writes the latest live scene snapshot to `perception.json` every `PERCEPTION_INTERVAL_SEC`, and `ScenePerceptionService` builds the long-term CLIP scene catalogue (`chroma_db_scene`) continuously — detect, lift, caption, embed, dedup, prune. The agent stack listens to mic input via STT, runs the Walkie agent on each utterance, and speaks back via TTS. So the scene DB fills itself in the background while the robot already takes commands.
 
-Stage 1 is currently commented out in `main.py:122-125` — re-enable when you want to rebuild the world catalogue. Stage 2 expects a populated `chroma_db/` from a prior explore run for `find_object_from_memory` to be useful.
+The legacy explore stage (`ExploreService`) and its object store (`WalkieVectorDB`/`chroma_db`) were removed; the `SceneStore` is the only long-term memory backend. `tools/reset_db --object` / `db_doctor --object` still operate on a leftover `chroma_db/` dir by path for cleanup, but nothing writes it anymore.
 
 ### Four-agent topology
 
@@ -59,7 +58,7 @@ All four agents are built by the same factory: `agents/core/agent.py::create_wal
 - **Walkie main** (`agents/walkie_agent/`) — user-facing orchestrator. Owns the conversation thread (`thread_id="main"`). Delegates with `delegate_to_actuator` / `delegate_to_vision` / `delegate_to_database` (sequential tools that invoke the sub-agent graphs synchronously), plus a fast-path `find_object_from_memory` and `speak`.
 - **Actuator** (`agents/actuator_agent/`) — `move_absolute`, `move_relative`, `get_current_pose`, `command_arm`, `speak`. `move_relative` does the local→global frame conversion in-process before calling `walkie.nav.go_to`.
 - **Vision** (`agents/vision_agent/`) — **live camera only**: `detect_objects_from_view`, `image_caption`, `detect_people_poses`, `get_camera_view_description`, `speak`. (Long-term memory lookups were moved out to the Database agent.)
-- **Database** (`agents/database_agent/`) — long-term spatial-memory specialist over the `SceneStore` (legacy `WalkieVectorDB` fallback): `find_object` (caption-first), `objects_near`, `recently_seen`, `list_known_objects`, `speak`. Use for "where have I seen X / what's near here / what did I just see".
+- **Database** (`agents/database_agent/`) — long-term spatial-memory specialist over the `SceneStore`: `find_object` (caption-first), `objects_near`, `recently_seen`, `list_known_objects`, `speak`. Use for "where have I seen X / what's near here / what did I just see".
 
 Division of labour: "what's in front of me now" → Vision; "where have I seen it / what's stored" → Database.
 
@@ -90,7 +89,7 @@ Convention: read-only inspection / DB lookup → parallelable. Anything that mov
 `agents/core/robot_context.py` is a thread-safe process-wide singleton (`RobotContext.init(...)` in `main.py`, then `RobotContext.get()` everywhere else). It holds:
 
 - `perception_path` — where `PerceptionService` writes.
-- `stage` — `"explore"` or `"ready"`; toggled in `main.py`.
+- `stage` — currently always `"ready"` (set in `main.py`); the field is kept because perception middleware gates on it.
 - `speech_log` — bounded deque of `(agent_name, text, ts)` appended whenever any agent's `speak` tool fires. Read by `RobotContextMiddleware` to inject into prompts.
 
 There's no other shared state mechanism — graph checkpointing is `InMemorySaver` per-agent (lost on restart). If you need durable conversation state, that's where to extend.
@@ -120,11 +119,11 @@ Tuning knobs live in **`config.toml`** (version-controlled), secrets/endpoints/t
 - **Position fallback.** `process_frame(..., fallback_position=)` (fed the robot pose via the loop's `pose_provider`) stamps detections whose 3D depth-lift returns `None` — small/distant objects, or the whole batch on timeout — with the robot's own pose instead of dropping them. Without a fallback the old drop-on-`None` behavior holds.
 - **Dedup candidate sourcing.** `upsert` decides insert-vs-update by feeding `classify` (`perception/dedup.py`) a candidate set of same-class records. That set is **spatial** (`find_nearby`, within `SCENE_DEDUP_RADIUS_M`) plus, when `SCENE_DEDUP_VISUAL_K > 0`, the top-K **visual** neighbours by image embedding *regardless of position* (`_visual_candidates`). The visual path exists because the spatial radius is tight, so a confident re-sighting whose 3D position drifted (lift jitter, or the robot-pose fallback) would otherwise duplicate. Watch the band: `SCENE_DEDUP_RADIUS_M`/`TIGHT_M` must stay **above** lift jitter (~5–15 cm) or even stationary objects re-insert. Visual dedup defaults **off in code** (`os.getenv(...,"0")` — what the unit tests assert) and **on via config.toml** — the standard code-default-plus-config split. Tradeoff: distance-independent visual merge can fuse two genuinely-distinct identical-looking objects; raise `SCENE_EMB_SIM_HIGH` to be stricter.
 - **Moving classes don't belong in a spatial catalogue.** `SCENE_EXCLUDE_CLASSES` (default `person`) is filtered in `process_frame` *before* lift/caption/embed, so excluded classes cost nothing and never reach the store — people move every tick and can't be position-deduped, so they'd duplicate endlessly.
-- **Single-process only.** ChromaDB's `PersistentClient` is not safe for concurrent multi-process access. During the `ready` stage `ScenePerceptionService` writes `chroma_db_scene` continuously (insert/update + prune), so opening the *same* directory from a second process corrupts the HNSW index — surfacing as `InternalError: Error finding id` and vector queries whose results don't match the stored records. Therefore: `tools/chroma_viewer` opens a **snapshot copy** of each dir by default (`--live` / `CHROMA_VIEWER_LIVE=1` opts back into the live files, only safe with the robot stopped); `tools/db_doctor` does the same; and `text_query`'s id-join (`SceneStore._safe_get_by_ids`) degrades to a per-id fetch so one dangling id can't crash or skew the whole lookup. To diagnose an already-corrupt store use `tools/db_doctor`; to recover, `reindex_captions` fixes caption desync in place, but dangling vectors require a rebuild (`reset_db --scene` + re-explore).
+- **Single-process only.** ChromaDB's `PersistentClient` is not safe for concurrent multi-process access. During the `ready` stage `ScenePerceptionService` writes `chroma_db_scene` continuously (insert/update + prune), so opening the *same* directory from a second process corrupts the HNSW index — surfacing as `InternalError: Error finding id` and vector queries whose results don't match the stored records. Therefore: `tools/chroma_viewer` opens a **snapshot copy** of each dir by default (`--live` / `CHROMA_VIEWER_LIVE=1` opts back into the live files, only safe with the robot stopped); `tools/db_doctor` does the same; and `text_query`'s id-join (`SceneStore._safe_get_by_ids`) degrades to a per-id fetch so one dangling id can't crash or skew the whole lookup. To diagnose an already-corrupt store use `tools/db_doctor`; to recover, `reindex_captions` fixes caption desync in place, but dangling vectors require a rebuild (`reset_db --scene`, then let the `ready` stage repopulate it).
 
 ## Conventions worth knowing
 
 - **Adding a tool to an agent**: write it in that agent's `tools.py`, decorate with `@parallelable_tool` or `@sequential_tool` *outside* the `@tool` decorator (the wrapper sets the `_walkie_parallelable` attribute on the `BaseTool` instance), and document via Google-style docstring with `parse_docstring=True` if the tool takes args.
 - **Adding a new sub-agent**: copy the shape of `agents/vision_agent/` (a `__init__.py` exporting a `create_*_agent` factory, a `prompts.py`, a `tools.py`). Wire it into `main.py:run_ready_stage` and add a `delegate_to_*` tool in `agents/walkie_agent/tools.py`.
 - **Atomic perception writes**: `PerceptionService._write_atomic` writes `perception.json.tmp` then `os.replace` — readers in `PerceptionContextMiddleware` are tolerant of read-during-write but never read a half-written file. Preserve this if you add new on-disk shared state.
-- **Bbox conventions**: `walkie-ai-server` returns object bboxes in `xyxy` (used directly in JSON), but `walkie.tools.bboxes_to_positions` expects `cxcywh`. Conversion lives in `_xyxy_to_cxcywh` (duplicated in `services/explore.py` and `services/perception.py`).
+- **Bbox conventions**: `walkie-ai-server` returns object bboxes in `xyxy` (used directly in JSON), but `walkie.tools.bboxes_to_positions` expects `cxcywh`. Conversion lives in `_xyxy_to_cxcywh` (in `services/perception.py`; the scene path converts in `perception/pipeline.py`).

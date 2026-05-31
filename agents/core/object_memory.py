@@ -3,18 +3,16 @@
 The main Walkie agent and the Walkie Database sub-agent share this helper so
 the lookup logic and the text format stay identical across agents.
 
-Backend preference:
-  1. The CLIP-backed :class:`perception.SceneStore`. We query the **caption
-     text** index first (``text_query``) — "where is the mug?" matching a
-     record captioned "a white coffee mug" is far more reliable than
-     comparing the query against image vectors. If the caption index is empty
-     (e.g. data collected before it existed, not yet reindexed) we fall back
-     to the CLIP image search (``semantic_query``).
-  2. The legacy :class:`db.walkie_db.WalkieVectorDB` (``query_objects``) —
-     fallback for runs built by the older explore stage.
+Backend: the CLIP-backed :class:`perception.SceneStore`. We query the
+**caption text** index first (``text_query``) — "where is the mug?" matching
+a record captioned "a white coffee mug" is far more reliable than comparing
+the query against image vectors. If the caption index is empty (e.g. data
+collected before it existed, not yet reindexed) we fall back to the CLIP
+image search (``semantic_query``), and if the embedder is unavailable to a
+local word-overlap ``keyword_query``.
 
-Either way the result is a human-readable string listing map-frame
-coordinates the actuator can navigate to, plus the stored caption.
+The result is a human-readable string listing map-frame coordinates the
+actuator can navigate to, plus the stored caption.
 
 Quality filters (scene backend only): callers can restrict matches to a
 spatial ball (``within_radius_of`` + ``max_distance_m``), to recent sightings
@@ -29,7 +27,6 @@ import os
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:  # avoid importing heavy deps at agent-build time
-    from db.walkie_db import WalkieVectorDB
     from perception import SceneEntry, SceneStore
 
 
@@ -78,7 +75,6 @@ def lookup_object_in_memory(
     object_name: str,
     *,
     scene_store: "Optional[SceneStore]" = None,
-    db: "Optional[WalkieVectorDB]" = None,
     n_results: int = 5,
     within_radius_of: "Optional[tuple[float, float, float]]" = None,
     max_distance_m: Optional[float] = None,
@@ -87,14 +83,12 @@ def lookup_object_in_memory(
 ) -> str:
     """Search long-term memory for ``object_name`` and format the matches.
 
-    Prefers ``scene_store`` (caption text search, then CLIP image search)
-    when supplied, otherwise falls back to ``db``. Returns a ready-to-speak
-    summary string.
+    Queries ``scene_store`` (caption text search, then CLIP image search, then
+    local keyword fallback) and returns a ready-to-speak summary string.
 
     ``within_radius_of`` + ``max_distance_m`` restrict to a map-frame ball
     (e.g. "near me"); ``min_last_seen_ts`` drops sightings older than a cutoff;
-    ``min_position_conf`` drops low-confidence positions. All filters apply to
-    the scene backend only — the legacy ``db`` path ignores them.
+    ``min_position_conf`` drops low-confidence positions.
     """
     if scene_store is not None:
         # Over-fetch so the confidence post-filter still has candidates to
@@ -149,20 +143,5 @@ def lookup_object_in_memory(
             why = "semantic search unavailable" if embed_down else "keyword match"
             header = f"Top matches for '{object_name}' ({why}):"
         return _fmt_scene_entries(object_name, entries, header=header)
-
-    if db is not None:
-        hits = db.query_objects(object_name, n_results=n_results)
-        if not hits:
-            return f"No record of '{object_name}' in memory."
-        lines = [f"Top matches for '{object_name}':"]
-        for h in hits:
-            x, y, z = h["position"]
-            lines.append(
-                f"- {h.get('class_name', '?')} @ ({x:+.2f}, {y:+.2f}, {z:+.2f}) "
-                f"conf={h.get('confidence', 0):.2f} "
-                f"sightings={h.get('sightings', '?')} "
-                f"caption={h.get('caption', '')!r}"
-            )
-        return "\n".join(lines)
 
     return f"No memory backend available to look up '{object_name}'."

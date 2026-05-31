@@ -3,8 +3,7 @@
 ``main.py`` is synchronous and the rest of ``services/`` is built on
 ``threading.Thread``; the CLIP perception loop in ``perception.loop`` is an
 ``asyncio`` coroutine. This wraps it so it presents the same
-``start()`` / ``stop_and_join()`` surface as ``PerceptionService`` and
-``ExploreService``.
+``start()`` / ``stop_and_join()`` surface as ``PerceptionService``.
 
 The coroutine runs on a private event loop owned by this thread. Stopping
 cancels the task from the caller's thread via ``call_soon_threadsafe`` and

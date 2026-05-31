@@ -17,7 +17,6 @@ from agents.database_agent import create_database_agent
 from agents.vision_agent import create_vision_agent
 from agents.walkie_agent import create_walkie_main_agent
 from client import WalkieAIClient
-from db.walkie_db import WalkieVectorDB
 from interfaces.walkie_interface import WalkieInterface
 from perception import (
     LocalCLIPEmbedder,
@@ -106,8 +105,9 @@ def build_scene_store(walkieAI):
     """Construct the CLIP embedder + SceneStore, probing walkie-ai-server first.
 
     Returns ``(store, embedder)`` when scene perception is enabled and the
-    server's ``/image-embed`` route answers; otherwise ``(None, None)`` so
-    the caller falls back to the legacy WalkieVectorDB and skips the loop.
+    embedder loads (local CLIP) or the server's ``/image-embed`` route answers;
+    otherwise ``(None, None)`` so the caller skips the scene loop and the
+    memory tools report that scene memory is off.
     """
     if not _flag("SCENE_PERCEPTION_ENABLED", "1"):
         print("[scene] disabled via SCENE_PERCEPTION_ENABLED=0")
@@ -284,7 +284,7 @@ def maybe_start_viewer(stores: list[tuple[str, object]]):
     return t
 
 
-def run_ready_stage(walkieAI, walkie, db, model) -> None:
+def run_ready_stage(walkieAI, walkie, model) -> None:
     perception = PerceptionService(
         walkieAI,
         walkie,
@@ -366,28 +366,21 @@ def run_ready_stage(walkieAI, walkie, db, model) -> None:
         scene_service.start()
 
     # Bring up the live DB viewer in-process (see maybe_start_viewer), reusing the
-    # clients these stores already hold so it reads the live indexes safely. The
-    # scene store is the primary catalogue (listed first); the legacy object
-    # store is only surfaced when it actually holds something — with the explore
-    # stage gone it's normally empty, and an empty collection just clutters the UI.
+    # client the scene store already holds so it reads the live index safely.
     viewer_stores: list[tuple[str, object]] = []
     if scene_store is not None:
         viewer_stores.append(
             (os.getenv("SCENE_CHROMA_DIR", "chroma_db_scene"), scene_store.client)
         )
-    if db.count > 0:
-        viewer_stores.append((os.getenv("CHROMA_DIR", "chroma_db"), db.client))
     maybe_start_viewer(viewer_stores)
 
     actuator = create_actuator_agent(model, walkieAI, walkie)
-    vision = create_vision_agent(
-        model, walkieAI, walkie, db, scene_store=scene_store
-    )
+    vision = create_vision_agent(model, walkieAI, walkie, scene_store=scene_store)
     database = create_database_agent(
-        model, walkieAI, walkie, db, scene_store=scene_store
+        model, walkieAI, walkie, scene_store=scene_store
     )
     walkie_agent = create_walkie_main_agent(
-        model, walkieAI, walkie, db, actuator, vision, database, scene_store=scene_store
+        model, walkieAI, walkie, actuator, vision, database, scene_store=scene_store
     )
 
     print("[Ready] Listening — speak to Walkie. Ctrl+C to exit.")
@@ -457,10 +450,6 @@ def main() -> None:
         base_url=os.getenv("WALKIE_AI_BASE_URL", "http://10.0.0.213:5000"),
     )
     walkie = WalkieInterface(robot)
-    db = WalkieVectorDB(
-        persist_dir=os.getenv("CHROMA_DIR", "chroma_db"),
-        frames_dir=os.getenv("OBJECT_FRAMES_DIR", "object_frames"),
-    )
     ctx = RobotContext.init(
         perception_path=os.getenv("PERCEPTION_PATH", "perception.json"),
     )
@@ -468,19 +457,15 @@ def main() -> None:
 
     # Start the in-process Chroma viewer NOW so it's up from the first second;
     # run_ready_stage re-registers it with the SceneStore client a moment later
-    # (idempotent). Only surface the legacy object store if it's non-empty — with
-    # the explore stage gone it's normally empty and would just be a dead tab.
-    early_stores: list[tuple[str, object]] = []
-    if db.count > 0:
-        early_stores.append((os.getenv("CHROMA_DIR", "chroma_db"), db.client))
-    maybe_start_viewer(early_stores)
+    # (idempotent).
+    maybe_start_viewer([])
 
     # No explore stage: the robot is ready immediately. The scene DB builds
     # itself in the background (ScenePerceptionService inside run_ready_stage)
     # while the agent already takes commands — see, update, and act without any
     # "drive around then press Enter" gate.
     ctx.stage = "ready"
-    run_ready_stage(walkieAI, walkie, db, model)
+    run_ready_stage(walkieAI, walkie, model)
 
 
 if __name__ == "__main__":

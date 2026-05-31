@@ -6,7 +6,6 @@ from langchain_core.tools import tool
 
 from agents.core.tool_decorators import parallelable_tool, sequential_tool
 from agents.core.robot_context import RobotContext
-from db.walkie_db import WalkieVectorDB
 from interfaces.walkie_interface import WalkieInterface
 
 
@@ -31,7 +30,6 @@ def _summarize_pose(pose) -> str:
 def make_vision_tools(
     walkie: WalkieInterface,
     walkieAI,
-    db: WalkieVectorDB,
     *,
     agent_name: str = "vision",
     scene_store=None,
@@ -42,8 +40,8 @@ def make_vision_tools(
 
     Vision is about the **live camera** only. Long-term "where have I seen X?"
     lookups belong to the Walkie Database sub-agent, so they are not exposed
-    here. ``db`` / ``scene_store`` are accepted for signature stability but
-    not used by these tools.
+    here. ``scene_store`` is accepted for signature stability but not used by
+    these tools.
     """
 
     def _capture():

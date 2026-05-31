@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from agents.core.agent import create_walkie_agent
-from db.walkie_db import WalkieVectorDB
 from interfaces.walkie_interface import WalkieInterface
 
 from .prompts import WALKIE_AGENT_SYSTEM_PROMPT
@@ -12,7 +11,6 @@ def create_walkie_main_agent(
     model,
     walkieAI,
     walkie: WalkieInterface,
-    db: WalkieVectorDB,
     actuator_agent,
     vision_agent,
     database_agent,
@@ -23,7 +21,6 @@ def create_walkie_main_agent(
     tools = make_walkie_main_tools(
         walkie,
         walkieAI,
-        db,
         actuator_agent,
         vision_agent,
         database_agent,
