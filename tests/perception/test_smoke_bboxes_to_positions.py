@@ -7,11 +7,11 @@ aligned with the input bbox order.
 Inputs:  ``coords: List[List[float]]`` — each ``[cx, cy, w, h]`` (image pixels).
 Output:  ``Optional[List[List[float]]]`` — list of ``[x, y, z]`` or ``None`` on timeout.
 
-Under the hood (see walkie_sdk/modules/tools.py) this is a publish/subscribe
-request-reply:
+Under the hood (see walkie_sdk/modules/tools.py) this is a ROS2 **service
+call** — the SDK migrated off the old publish/subscribe request-reply:
 
-    publish    /yolo/detections_2d   (vision_msgs/Detection2DArray)
-    subscribe  /ob_detection/poses   (geometry_msgs/PoseArray)
+    call_service  OB_POSE_SERVICE  request={"detections": Detection2DArray}
+                                   -> {"success": bool, "poses": PoseArray}
 
 The 3D output frame is whatever the upstream YOLO 3D fusion node publishes —
 typically ``map`` for a Nav2-aware deployment. The perception loop should NOT
@@ -65,37 +65,48 @@ def test_converters_extract_xyz_from_pose_array():
 
 
 def test_bboxes_to_positions_timeout_returns_none():
-    """If no /ob_detection/poses response arrives within timeout, returns None."""
+    """A timed-out service call surfaces as None (not an exception)."""
     from walkie_sdk.modules.tools import Tools
 
     class _FakeTransport:
         is_connected = True
-        def subscribe(self, topic, msg_type, callback, **_):
-            return object()
-        def unsubscribe(self, _sub): pass
-        def publish(self, *a, **kw): pass
+        def call_service(self, *a, **kw):
+            raise TimeoutError("no perception service responded")
 
     tools = Tools(_FakeTransport())
     out = tools.bboxes_to_positions([[10, 10, 20, 20]], timeout=0.05)
     assert out is None
 
 
-def test_bboxes_to_positions_returns_xyz_on_response():
-    """When the subscribe callback fires with a PoseArray, we get [[x,y,z], ...]."""
+def test_bboxes_to_positions_failure_returns_none():
+    """A service reply with success=False yields None, not garbage positions."""
     from walkie_sdk.modules.tools import Tools
-
-    captured_callback = {}
 
     class _FakeTransport:
         is_connected = True
-        def subscribe(self, topic, msg_type, callback, **_):
-            captured_callback["cb"] = callback
-            return object()
-        def unsubscribe(self, _sub): pass
-        def publish(self, *a, **kw):
-            captured_callback["cb"]({
-                "poses": [{"position": {"x": 1.0, "y": 2.0, "z": 0.5}, "orientation": {}}]
-            })
+        def call_service(self, *a, **kw):
+            return {"success": False}
+
+    tools = Tools(_FakeTransport())
+    out = tools.bboxes_to_positions([[10, 10, 20, 20]], timeout=1.0)
+    assert out is None
+
+
+def test_bboxes_to_positions_returns_xyz_on_response():
+    """A successful service reply maps poses to [[x, y, z], ...] in order."""
+    from walkie_sdk.modules.tools import Tools
+
+    class _FakeTransport:
+        is_connected = True
+        def call_service(self, *a, **kw):
+            return {
+                "success": True,
+                "poses": {
+                    "poses": [
+                        {"position": {"x": 1.0, "y": 2.0, "z": 0.5}, "orientation": {}}
+                    ]
+                },
+            }
 
     tools = Tools(_FakeTransport())
     out = tools.bboxes_to_positions([[10, 10, 20, 20]], timeout=1.0)
