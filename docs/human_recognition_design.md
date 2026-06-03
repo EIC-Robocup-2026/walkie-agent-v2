@@ -63,7 +63,7 @@ Re-ID alone swings **±400+**. Description and gaze are smaller but cheap to add
 | # | Capability | Used for | New work |
 |---|---|---|---|
 | C1 | **Person detection + count** | meet at door, find seated guests | thin — reuse `pose_estimation` bboxes |
-| C2 | **Face enroll** (face → embedding, bind name + drink) | remember each guest | server `/face-embed` + `people_store` |
+| C2 | **Face enroll** (face → embedding, bind name + drink) | remember each guest | server `/face-recognition/embed` + `people_store` |
 | C3 | **Face recognize** (embedding → known person) | introduce / point out who is who, survive seat-swaps | `people_store` knn |
 | C4 | **Attribute description** (clothing, hair, glasses, posture) | "tell a visual attribute of guest 1" | `image_caption` w/ steering prompt ✅ shipped |
 | C5 | **Empty-seat finding** | "offer a free seat" | scene store (chairs/sofas) ∩ person occupancy |
@@ -76,26 +76,29 @@ routes (C4 is shipped). C5/C6 reuse existing detection/pose but need new glue.
 ## 3. Cross-repo split
 
 ```
-walkie-ai-server   (GPU box)        walkie-agent-v2  (this repo)
-──────────────────────────────      ────────────────────────────────────────────
-/face-embed   POST image            client/face_recognition.py   (thin HTTP client)
-  → [{bbox, embedding[512], score}] perception/people_store.py    (face-keyed memory)
-                                     agents/human_agent/           (HRI sub-agent)
-(face detect + ArcFace/InsightFace)  agents/walkie_agent: delegate_to_human
+walkie-ai-server   (GPU box)                walkie-agent-v2  (this repo)
+──────────────────────────────────────      ────────────────────────────────────────────
+POST /face-recognition/embed  (image)       client/face_recognition.py   (thin HTTP client)
+  → [{bbox_xyxy, embedding[512], det_score}] perception/people_store.py   (face-keyed memory)
+GET  /face-recognition/info  → {model,dim}  agents/human_agent/           (HRI sub-agent)
+(face detect + ArcFace/InsightFace)         agents/walkie_agent: delegate_to_human
 ```
 
-Server contract proposal for `/face-embed` (same `{"success", "data"}` envelope the
-other routes use, so `client/base.py` unwraps it unchanged):
+The full server-side contract (request/response, edge cases, a reference
+InsightFace implementation, acceptance tests) is a self-contained handoff doc:
+**`docs/walkie_ai_server_face_service.md`** — give that file to whoever builds the
+server side. Response shape (unwrapped from the standard `{"success","data"}` envelope
+by `client/base.py`):
 
 ```jsonc
-// request: multipart image (same as /object-detection)
-// response data:
+// POST /face-recognition/embed — request: multipart image (same as /object-detection)
+// data:
 [ { "bbox_xyxy": [x1,y1,x2,y2], "embedding": [..512 floats, L2-normed..], "det_score": 0.99 } ]
 ```
 
-If standing up a new model on the server is too much for now, **C4 (attributes) can
-ship first** using the existing `image_caption` route with a steering prompt — no
-server change — and C2/C3 land when `/face-embed` is ready.
+If standing up the model on the server is too much for now, **C4 (attributes) already
+shipped** using the existing `image_caption` route with a steering prompt — no server
+change — and C2/C3 land when `/face-recognition/embed` is ready.
 
 ## 4. New code in this repo
 
@@ -177,8 +180,8 @@ HUMAN_DESCRIBE_PROMPT   "Describe this person: clothing colors, hair, glasses, p
 
 ## 8. Open questions
 
-- Server: is InsightFace/ArcFace acceptable for `/face-embed`, or reuse an existing
-  model already loaded there?
+- Server: is InsightFace/ArcFace acceptable for `/face-recognition/embed`, or reuse an
+  existing model already loaded there? (see `docs/walkie_ai_server_face_service.md`)
 - Re-ID robustness across lighting/pose at a party — may need >1 enrollment frame.
 - Empty-seat detection: pure geometry (chair bbox vs person bbox overlap) or ask the
   VLM ("which chairs are empty")?
