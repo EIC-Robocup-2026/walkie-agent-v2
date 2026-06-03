@@ -168,6 +168,11 @@ class LocalCLIPEmbedder:
         return self._normalize(feats)
 
     def _normalize(self, feats) -> list[float]:
+        # transformers >=5 returns a BaseModelOutputWithPooling from
+        # get_image_features/get_text_features, with the projected embedding in
+        # .pooler_output; older versions returned the tensor directly. Unwrap so
+        # this works across both.
+        feats = getattr(feats, "pooler_output", feats)
         feats = feats / feats.norm(p=2, dim=-1, keepdim=True)
         # float() so a half-precision tensor serializes to clean Python floats.
         return feats[0].float().detach().cpu().tolist()

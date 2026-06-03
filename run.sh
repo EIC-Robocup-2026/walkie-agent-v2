@@ -27,8 +27,32 @@ cd "$(dirname "$(readlink -f "$0")")"
 
 cmd="${1:-start}"
 
+# Free the in-process DB viewer port before launching. A previous run whose
+# shutdown hung (interrupt during a blocking robot/threading call) can leave
+# main.py alive holding the port, so the next start dies with
+# "Port 8500 is in use by another program". Kill whatever still holds it so the
+# launch is reliable. Honours CHROMA_VIEWER_PORT; default 8500.
+free_viewer_port() {
+    local port="${CHROMA_VIEWER_PORT:-8500}"
+    local pids
+    pids="$(lsof -ti:"$port" 2>/dev/null || true)"
+    if [ -n "$pids" ]; then
+        echo "[run] port $port held by stale process(es): $pids — terminating"
+        # shellcheck disable=SC2086
+        kill $pids 2>/dev/null || true
+        sleep 1
+        pids="$(lsof -ti:"$port" 2>/dev/null || true)"
+        if [ -n "$pids" ]; then
+            # shellcheck disable=SC2086
+            kill -9 $pids 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+}
+
 case "$cmd" in
     start)
+        free_viewer_port
         exec uv run python main.py
         ;;
 
@@ -46,6 +70,7 @@ case "$cmd" in
 
     fresh)
         uv run python -m tools.reset_db --all -y
+        free_viewer_port
         exec uv run python main.py
         ;;
 

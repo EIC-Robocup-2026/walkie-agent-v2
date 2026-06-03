@@ -299,6 +299,10 @@ def run_ready_stage(walkieAI, walkie, model) -> None:
             for c in os.getenv("PERCEPTION_CAPTION_FILTER", "").split(",")
             if c.strip()
         ],
+        # Depth-lift (walkie.tools.bboxes_to_positions) timeout. The SDK logs
+        # "[Tools] Service call timed out after Ns" when the ROS-3D node is
+        # slower than this; 2s was too tight, so default to 5s.
+        position_timeout=float(os.getenv("PERCEPTION_POSITION_TIMEOUT_SEC", "5.0")),
     )
     perception.start()
 
@@ -357,6 +361,10 @@ def run_ready_stage(walkieAI, walkie, model) -> None:
                 if c.strip()
             ],
             position_fallback_to_pose=pos_fallback,
+            # Depth-lift timeout for the scene catalogue (see note above on the
+            # live-snapshot service). Raised from 2s → 5s so a slow ROS-3D node
+            # doesn't time out and drop the whole frame each tick.
+            position_timeout=float(os.getenv("SCENE_POSITION_TIMEOUT_SEC", "5.0")),
             prune_ttl_sec=prune_ttl,
             prune_interval_sec=float(os.getenv("SCENE_PRUNE_INTERVAL_SEC", "10")),
             prune_radius_m=prune_radius,
@@ -421,9 +429,16 @@ def run_ready_stage(walkieAI, walkie, model) -> None:
     except KeyboardInterrupt:
         print("\n[main] interrupt — shutting down.")
     finally:
+        # Stop the background services, then tear down the robot connection.
+        # The SDK's rosbridge/zenoh threads are non-daemon: leaving them running
+        # hangs the interpreter at exit (threading._shutdown), so the process
+        # never dies and the next launch finds port 8500 still held. close()
+        # disconnects the robot, which stops those threads.
         perception.stop_and_join(timeout=5)
         if scene_service is not None:
             scene_service.stop_and_join(timeout=5)
+        walkie.close()
+        print("[main] shutdown complete.")
 
 
 def main() -> None:
