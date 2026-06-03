@@ -14,6 +14,7 @@ from walkie_config import load_config
 from agents.actuator_agent import create_actuator_agent
 from agents.core.robot_context import RobotContext
 from agents.database_agent import create_database_agent
+from agents.human_agent import create_human_agent
 from agents.vision_agent import create_vision_agent
 from agents.walkie_agent import create_walkie_main_agent
 from client import WalkieAIClient
@@ -387,8 +388,9 @@ def run_ready_stage(walkieAI, walkie, model) -> None:
     database = create_database_agent(
         model, walkieAI, walkie, scene_store=scene_store
     )
+    human = create_human_agent(model, walkieAI, walkie)
     walkie_agent = create_walkie_main_agent(
-        model, walkieAI, walkie, actuator, vision, database, scene_store=scene_store
+        model, walkieAI, walkie, actuator, vision, database, human, scene_store=scene_store
     )
 
     print("[Ready] Listening — speak to Walkie. Ctrl+C to exit.")

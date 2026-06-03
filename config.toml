@@ -172,3 +172,10 @@ CHROMA_VIEWER_REFRESH_SEC = "5"
 # Downscaled-thumbnail cache for the /frame route (large source frames render
 # as small JPEGs in tables/galleries instead of failing to load).
 CHROMA_VIEWER_THUMB_CACHE = ".thumb_cache"
+
+[human]
+# Human (HRI) sub-agent — RoboCup @Home Receptionist-style people understanding.
+# This first slice (describe_person / count_people) reuses the existing caption
+# and pose-estimation routes, so it needs no new walkie-ai-server service.
+# Steering prompt for `describe_person` (the spoken-introduction description).
+HUMAN_DESCRIBE_PROMPT = "Describe the person in this image for a verbal introduction: their approximate clothing colors and type, hair, glasses or hat, and whether they are sitting or standing. Be concise and factual; one or two sentences."
