@@ -21,6 +21,7 @@ from client import WalkieAIClient
 from interfaces.walkie_interface import WalkieInterface
 from perception import (
     LocalCLIPEmbedder,
+    PeopleStore,
     RemoteCLIPEmbedder,
     RobotPoseLifter,
     SceneStore,
@@ -175,6 +176,36 @@ def build_scene_store(walkieAI):
         except Exception as e:  # noqa: BLE001 — never block startup on a backfill
             print(f"[scene] caption reindex failed: {e!r}", file=sys.stderr)
     return store, embedder
+
+
+def build_people_store(walkieAI):
+    """Construct the face-keyed PeopleStore for the HRI / Receptionist tools.
+
+    The store itself (ChromaDB) has no server dependency, so it's built whenever
+    ``HUMAN_PERCEPTION_ENABLED`` is on; the enroll/recognize tools surface a
+    clear message if the ``/face-recognition`` route is unreachable at call time.
+    We probe ``/face-recognition/info`` once for embedding provenance, but a
+    failure there is non-fatal. Returns the store, or ``None`` when disabled.
+    """
+    if not _flag("HUMAN_PERCEPTION_ENABLED", "1"):
+        print("[human] disabled via HUMAN_PERCEPTION_ENABLED=0")
+        return None
+    model_name = ""
+    try:
+        model_name = walkieAI.face_recognition.get_model_name()
+        print(f"[human] face recognition backend: {model_name}")
+    except Exception as e:  # noqa: BLE001 — route may be down; tools report at call time
+        print(
+            f"[human] face service probe failed ({e!r}); people memory is built "
+            "but enroll/recognize need the face service live.",
+            file=sys.stderr,
+        )
+    store = PeopleStore(
+        persist_dir=os.getenv("PEOPLE_CHROMA_DIR", "chroma_db_people"),
+        embedding_model=model_name,
+    )
+    print(f"[human] people memory ON ({store.count()} remembered)")
+    return store
 
 
 def _lan_ip() -> str | None:
@@ -374,12 +405,20 @@ def run_ready_stage(walkieAI, walkie, model) -> None:
         )
         scene_service.start()
 
+    # Face-keyed people memory (HRI / Receptionist) — built independently of the
+    # scene store; only needs the /face-recognition route live at tool-call time.
+    people_store = build_people_store(walkieAI)
+
     # Bring up the live DB viewer in-process (see maybe_start_viewer), reusing the
-    # client the scene store already holds so it reads the live index safely.
+    # client each store already holds so it reads the live index safely.
     viewer_stores: list[tuple[str, object]] = []
     if scene_store is not None:
         viewer_stores.append(
             (os.getenv("SCENE_CHROMA_DIR", "chroma_db_scene"), scene_store.client)
+        )
+    if people_store is not None:
+        viewer_stores.append(
+            (os.getenv("PEOPLE_CHROMA_DIR", "chroma_db_people"), people_store.client)
         )
     maybe_start_viewer(viewer_stores)
 
@@ -388,7 +427,7 @@ def run_ready_stage(walkieAI, walkie, model) -> None:
     database = create_database_agent(
         model, walkieAI, walkie, scene_store=scene_store
     )
-    human = create_human_agent(model, walkieAI, walkie)
+    human = create_human_agent(model, walkieAI, walkie, people_store=people_store)
     walkie_agent = create_walkie_main_agent(
         model, walkieAI, walkie, actuator, vision, database, human, scene_store=scene_store
     )

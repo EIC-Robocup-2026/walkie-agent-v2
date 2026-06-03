@@ -124,14 +124,15 @@ the spatial machinery (dedup radius, prune-by-location, position lift).
 
 ### Tool surface (`agents/human_agent/tools.py`)
 
-| Tool | Decorator | Does | Backed by |
-|---|---|---|---|
-| `enroll_person(name, drink)` | sequential | capture frame, embed largest face, store name+drink+attrs | C2 |
-| `recognize_person()` | parallelable | embed faces in view, knn vs store, return names | C3 |
-| `describe_person()` | parallelable | steered caption of the person in view | C4 |
-| `count_people()` | parallelable | how many people + seated/standing split | C1 |
-| `find_empty_seat()` | parallelable | chairs/sofas (scene store) minus occupied | C5 |
-| `speak(text)` | sequential | TTS (same as every agent) | — |
+| Tool | Decorator | Does | Backed by | Status |
+|---|---|---|---|---|
+| `describe_person(focus)` | parallelable | steered caption of the person in view | C4 | ✅ shipped |
+| `count_people()` | parallelable | how many people + arm-raised + seated/standing | C1 | ✅ shipped |
+| `enroll_person(name, drink)` | sequential | capture frame, embed largest face, store name+drink | C2 | ✅ shipped |
+| `recognize_person()` | parallelable | embed faces in view, knn vs store, return names | C3 | ✅ shipped |
+| `list_known_people()` | parallelable | recall all remembered guests + drinks (for introductions) | C3 | ✅ shipped |
+| `find_empty_seat()` | parallelable | chairs/sofas (scene store) minus occupied | C5 | ⏳ deferred |
+| `speak(text)` | sequential | TTS (same as every agent) | — | ✅ shipped |
 
 `enroll_person` is **sequential** (it's a stateful write + we want it to block);
 read-only lookups are **parallelable**, per the convention in CLAUDE.md.

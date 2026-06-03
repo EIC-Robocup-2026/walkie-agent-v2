@@ -96,4 +96,11 @@ def test_summarize_person_combines_flags():
 
 def test_make_human_tools_exposes_expected_surface():
     tools = make_human_tools(NS(camera=None), NS(), agent_name="human")
-    assert [t.name for t in tools] == ["describe_person", "count_people", "speak"]
+    assert [t.name for t in tools] == [
+        "describe_person",
+        "count_people",
+        "enroll_person",
+        "recognize_person",
+        "list_known_people",
+        "speak",
+    ]

@@ -45,6 +45,21 @@ _DEFAULT_DESCRIBE_PROMPT = (
 )
 
 
+def _min_det_score() -> float:
+    try:
+        return float(os.getenv("FACE_MIN_DET_SCORE", "0.5"))
+    except ValueError:
+        return 0.5
+
+
+def _match_threshold() -> float:
+    """Max cosine distance for a face to count as a known person."""
+    try:
+        return float(os.getenv("FACE_MATCH_THRESHOLD", "0.4"))
+    except ValueError:
+        return 0.4
+
+
 def _kp_map(pose):
     """index -> keypoint, for the keypoints this pose actually carries."""
     return {kp.index: kp for kp in pose.keypoints}
@@ -158,6 +173,90 @@ def make_human_tools(
 
     @sequential_tool
     @tool(parse_docstring=True)
+    def enroll_person(name: str, drink: str) -> str:
+        """Remember a guest's face together with their name and favorite drink.
+
+        Use right after greeting a new guest, while they are looking at the
+        robot. Stores the face so the guest can be re-identified later (even if
+        they move or switch seats). Re-enrolling the same name refreshes it.
+
+        Args:
+            name: The guest's name, as they gave it.
+            drink: The guest's favorite drink, as spoken (free text).
+
+        Returns:
+            Confirmation, or a message if no clear face was visible.
+        """
+        if people_store is None:
+            return "Face memory is off — I can't remember people right now."
+        img = _capture()
+        try:
+            faces = walkieAI.face_recognition.embed(img)
+        except Exception as e:  # noqa: BLE001 — a server hiccup must not crash the turn
+            return f"I couldn't read a face (face service error): {e}"
+        faces = [f for f in faces if f.det_score >= _min_det_score()]
+        if not faces:
+            return "I don't see a clear face — ask the guest to look at me, then try again."
+        face = max(faces, key=lambda f: f.area())  # the person up front
+        rec = people_store.enroll(name, drink, face.embedding)
+        again = "" if rec.enrollments <= 1 else f" (refreshed, seen {rec.enrollments}×)"
+        return f"Remembered {rec.name}, favorite drink {rec.drink!r}{again}."
+
+    @parallelable_tool
+    @tool
+    def recognize_person() -> str:
+        """Identify the people in view against the remembered guests.
+
+        Returns each visible face as a known guest (name + favorite drink) or as
+        unknown. Use to greet a returning guest, or to see who is sitting where
+        before an introduction. Reports on the live camera only.
+        """
+        if people_store is None:
+            return "Face memory is off — I can't recognize people right now."
+        if people_store.count() == 0:
+            return "I haven't remembered anyone yet."
+        img = _capture()
+        try:
+            faces = walkieAI.face_recognition.embed(img)
+        except Exception as e:  # noqa: BLE001
+            return f"I couldn't read faces (face service error): {e}"
+        faces = [f for f in faces if f.det_score >= _min_det_score()]
+        if not faces:
+            return "No clear face in view."
+        threshold = _match_threshold()
+        faces.sort(key=lambda f: f.area(), reverse=True)  # nearest first
+        lines = []
+        for i, f in enumerate(faces):
+            rec = people_store.recognize(f.embedding, max_distance=threshold)
+            if rec is None:
+                lines.append(f"- person {i+1}: unknown (not a remembered guest)")
+            else:
+                lines.append(
+                    f"- person {i+1}: {rec.name}, favorite drink {rec.drink!r} "
+                    f"(match {rec.similarity:.2f})"
+                )
+        return "People in view:\n" + "\n".join(lines)
+
+    @parallelable_tool
+    @tool
+    def list_known_people() -> str:
+        """List every guest remembered so far, with their favorite drink.
+
+        Use to recall both guests' details when introducing them to each other.
+        """
+        if people_store is None:
+            return "Face memory is off."
+        people = people_store.list_people()
+        if not people:
+            return "No guests remembered yet."
+        lines = []
+        for p in people:
+            extra = f"; {p.attributes}" if p.attributes else ""
+            lines.append(f"- {p.name}: favorite drink {p.drink!r}{extra}")
+        return f"{len(people)} remembered guest(s):\n" + "\n".join(lines)
+
+    @sequential_tool
+    @tool(parse_docstring=True)
     def speak(text: str) -> str:
         """Speak text aloud through the robot's speaker.
 
@@ -177,4 +276,11 @@ def make_human_tools(
             pass
         return f"Spoke: {text!r}"
 
-    return [describe_person, count_people, speak]
+    return [
+        describe_person,
+        count_people,
+        enroll_person,
+        recognize_person,
+        list_known_people,
+        speak,
+    ]
