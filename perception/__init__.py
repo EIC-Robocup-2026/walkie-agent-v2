@@ -27,6 +27,7 @@ from .types import (
     TickReport,
 )
 from .store import SceneStore
+from .people_store import PeopleStore, PersonRecord
 from .loop import run_scene_perception
 from .pipeline import process_frame
 
@@ -38,6 +39,8 @@ __all__ = [
     "Detector",
     "Embedder",
     "LocalCLIPEmbedder",
+    "PeopleStore",
+    "PersonRecord",
     "PositionLifter",
     "RemoteCLIPEmbedder",
     "RobotPoseLifter",

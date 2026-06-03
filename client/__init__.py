@@ -14,6 +14,7 @@ Quick start::
 """
 
 from .base import WalkieAPIError
+from .face_recognition import FaceEmbedding, FaceRecognitionClient
 from .image_caption import ImageCaptionClient
 from .image_embed import ImageEmbedClient
 from .object_detection import ObjectDetectionClient
@@ -31,4 +32,6 @@ __all__ = [
     "PoseEstimationClient",
     "ImageCaptionClient",
     "ImageEmbedClient",
+    "FaceRecognitionClient",
+    "FaceEmbedding",
 ]
