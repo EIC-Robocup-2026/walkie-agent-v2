@@ -24,6 +24,9 @@ wheels/
 # Env
 .env
 
+# Stray local docs (not source)
+master.pdf
+
 # Vector DBs + perception artifacts (all generated at runtime — never commit)
 chroma_db/
 chroma_db_scene/
