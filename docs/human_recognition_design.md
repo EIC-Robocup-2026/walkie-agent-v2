@@ -131,8 +131,16 @@ the spatial machinery (dedup radius, prune-by-location, position lift).
 | `enroll_person(name, drink)` | sequential | capture frame, embed largest face, store name+drink | C2 | ✅ shipped |
 | `recognize_person()` | parallelable | embed faces in view, knn vs store, return names | C3 | ✅ shipped |
 | `list_known_people()` | parallelable | recall all remembered guests + drinks (for introductions) | C3 | ✅ shipped |
-| `find_empty_seat()` | parallelable | chairs/sofas (scene store) minus occupied | C5 | ⏳ deferred |
+| `find_empty_seat()` | parallelable | seats (live detect) minus person-occupied, with a direction | C5 | ✅ shipped |
+| `locate_person(name)` | parallelable | direction + approx turn to face a person (by face, or nearest) | C6 | ✅ shipped |
 | `speak(text)` | sequential | TTS (same as every agent) | — | ✅ shipped |
+
+C5 uses the **live view** (object detection ∩ pose people) rather than the scene
+store, so it doesn't depend on the unreliable 3D lift and works while seats fill.
+C6 returns an **aim target** (yaw via `CAMERA_HFOV_DEG`); the actual turning is the
+actuator's job — the human agent only says where to look. The face-keyed people
+records are archived with a face crop + a `Name — likes drink` document and render
+in the Chroma DB viewer (name / drink / enrollments columns + thumbnail).
 
 `enroll_person` is **sequential** (it's a stateful write + we want it to block);
 read-only lookups are **parallelable**, per the convention in CLAUDE.md.
@@ -166,10 +174,10 @@ HUMAN_DESCRIBE_PROMPT   "Describe this person: clothing colors, hair, glasses, p
 
 ## 7. Deferred (after Receptionist)
 
-- **C6 person tracking / gaze** — track one person across frames and emit a target
-  the head/base can aim at, for "look at the person talking / the correct guest"
-  (2×50 + 2×50 pts). Reuses `pose_estimation` bboxes; the open part is the
-  head/camera control surface (actuator side), not recognition.
+- **Continuous gaze-follow** — `locate_person` (C6) gives a one-shot aim target;
+  *continuously* tracking a pacing guest needs a loop on the actuator side that
+  re-aims each tick. The recognition half is shipped; the control loop is the
+  remaining actuator work.
 - **C7 gestures** (`perception/gestures.py`): wave / point-left-right / sit-stand-lie
   from pose keypoints → unlocks Restaurant (waving) and GPSR counting.
 - **People counting with filters** ("how many men", "how many pointing left") → GPSR.
