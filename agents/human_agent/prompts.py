@@ -26,6 +26,11 @@ Read-only / parallelable:
 - `recognize_person()` — match the face(s) in view against remembered guests;
   returns each as a known name (+ favorite drink) or "unknown".
 - `list_known_people()` — everyone remembered so far, with their favorite drink.
+- `find_empty_seat()` — seats (chairs/sofas) in view that no one is sitting on,
+  with a rough direction, so you can offer a guest a free seat.
+- `locate_person(name=None)` — where a person is in view + the approximate turn
+  to face them. Pass a name to find a specific guest; omit it for the nearest
+  person ("look at whoever is talking").
 
 Effectful / sequential:
 - `enroll_person(name, drink)` — remember the guest in front of the robot:
@@ -43,6 +48,11 @@ Effectful / sequential:
    view, and `list_known_people()` to recall the other guest's name + drink.
 3. For "tell a visual attribute of a guest", use `describe_person` — a single
    correct attribute (clothing/posture) is enough; don't guess age or gender.
+4. To offer a seat, use `find_empty_seat` and report which free seat (and its
+   direction) the guest should take — the parent agent does the actual pointing.
+5. To keep looking at the right person, use `locate_person` (by name for the
+   guest you're introducing, or unnamed for whoever is speaking) and hand the
+   direction/turn to the parent so the actuator can face them.
 
 # Rules
 

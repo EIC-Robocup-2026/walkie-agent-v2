@@ -25,6 +25,7 @@ from typing import Optional, Sequence
 
 import chromadb
 from chromadb.config import Settings
+from PIL import Image
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,8 @@ class PersonRecord:
     enrollments: int
     first_seen_ts: float
     last_seen_ts: float
+    frame_ref: Optional[str] = None
+    """Path to the archived face crop, if persisted (shown by the DB viewer)."""
     embedding: tuple[float, ...] = field(default_factory=tuple)
     distance: Optional[float] = None
     """Cosine distance to the query vector when returned from :meth:`recognize`
@@ -85,6 +88,8 @@ class PeopleStore:
         *,
         persist_dir: str | Path | None = "chroma_db_people",
         embedding_model: str = "",
+        frames_dir: str | Path | None = None,
+        crop_margin: float = 0.25,
     ) -> None:
         if persist_dir is None:
             self._client = chromadb.EphemeralClient(
@@ -101,6 +106,12 @@ class PeopleStore:
             metadata={"hnsw:space": "cosine"},
         )
         self._embedding_model = embedding_model
+        # When set, enroll archives the guest's face crop here so the DB viewer
+        # can show who is remembered. Margin pads the bbox for a bit of context.
+        self._frames_dir = Path(frames_dir) if frames_dir else None
+        self._crop_margin = crop_margin
+        if self._frames_dir:
+            self._frames_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def client(self):
@@ -118,13 +129,17 @@ class PeopleStore:
         embedding: Sequence[float],
         *,
         attributes: str = "",
+        frame: Optional[Image.Image] = None,
+        face_bbox_xyxy: Optional[Sequence[int]] = None,
         ts: Optional[float] = None,
     ) -> PersonRecord:
         """Remember a guest, or refresh an existing one with the same name.
 
         Re-enrolling a known name updates their drink/attributes and folds the
         new face vector into a running centroid (more robust recognition across
-        lighting/pose), bumping the enrollment count. Returns the stored record.
+        lighting/pose), bumping the enrollment count. When ``frame`` (and a
+        ``face_bbox_xyxy``) are given and a frames dir is configured, the guest's
+        face crop is archived for the DB viewer. Returns the stored record.
         """
         if not name or not name.strip():
             raise ValueError("name must be non-empty")
@@ -147,6 +162,9 @@ class PeopleStore:
                 "first_seen_ts": float(meta.get("first_seen_ts", now)),
                 "last_seen_ts": now,
             }
+            prev_ref = meta.get("frame_ref")
+            if prev_ref:
+                metadata["frame_ref"] = str(prev_ref)
         else:
             new_emb = emb
             metadata = {
@@ -158,8 +176,38 @@ class PeopleStore:
                 "first_seen_ts": now,
                 "last_seen_ts": now,
             }
-        self._collection.upsert(ids=[rid], embeddings=[new_emb], metadatas=[metadata])
+        # Archive / refresh the face crop for the viewer (latest sighting wins).
+        ref = self._archive_face(rid, frame, face_bbox_xyxy)
+        if ref is not None:
+            metadata["frame_ref"] = ref
+        document = f"{metadata['name']} — likes {metadata['drink']}".strip(" —")
+        self._collection.upsert(
+            ids=[rid], embeddings=[new_emb], metadatas=[metadata], documents=[document]
+        )
         return self._to_record(rid, new_emb, metadata)
+
+    def _archive_face(
+        self,
+        rid: str,
+        frame: Optional[Image.Image],
+        bbox_xyxy: Optional[Sequence[int]],
+    ) -> Optional[str]:
+        """Save a padded face crop to the frames dir; return its path (or None)."""
+        if self._frames_dir is None or frame is None or not bbox_xyxy:
+            return None
+        try:
+            w, h = frame.size
+            x1, y1, x2, y2 = (int(v) for v in bbox_xyxy)
+            bw, bh = max(1, x2 - x1), max(1, y2 - y1)
+            mx, my = int(bw * self._crop_margin), int(bh * self._crop_margin)
+            crop = frame.crop(
+                (max(0, x1 - mx), max(0, y1 - my), min(w, x2 + mx), min(h, y2 + my))
+            )
+            path = self._frames_dir / f"{rid}.jpg"
+            crop.convert("RGB").save(path, format="JPEG", quality=85)
+            return str(path)
+        except Exception:  # noqa: BLE001 — a thumbnail must never break enrollment
+            return None
 
     def clear(self) -> None:
         """Forget everyone (e.g. between Receptionist runs)."""
@@ -246,6 +294,7 @@ class PeopleStore:
         self, rid: str, embedding, meta: dict, *, distance: Optional[float] = None
     ) -> PersonRecord:
         emb = tuple(float(x) for x in embedding) if embedding is not None else tuple()
+        ref = meta.get("frame_ref")
         return PersonRecord(
             id=rid,
             name=str(meta.get("name", "")),
@@ -255,6 +304,7 @@ class PeopleStore:
             enrollments=int(meta.get("enrollments", 1)),
             first_seen_ts=float(meta.get("first_seen_ts", 0.0)),
             last_seen_ts=float(meta.get("last_seen_ts", 0.0)),
+            frame_ref=str(ref) if ref else None,
             embedding=emb,
             distance=distance,
         )

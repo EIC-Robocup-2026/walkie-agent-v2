@@ -203,6 +203,8 @@ def build_people_store(walkieAI):
     store = PeopleStore(
         persist_dir=os.getenv("PEOPLE_CHROMA_DIR", "chroma_db_people"),
         embedding_model=model_name,
+        # Archive each guest's face crop so the DB viewer shows who's remembered.
+        frames_dir=os.getenv("PEOPLE_FRAMES_DIR", "people_frames"),
     )
     print(f"[human] people memory ON ({store.count()} remembered)")
     return store

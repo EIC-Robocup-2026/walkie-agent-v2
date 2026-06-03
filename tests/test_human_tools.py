@@ -102,5 +102,7 @@ def test_make_human_tools_exposes_expected_surface():
         "enroll_person",
         "recognize_person",
         "list_known_people",
+        "find_empty_seat",
+        "locate_person",
         "speak",
     ]

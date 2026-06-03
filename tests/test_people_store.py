@@ -5,8 +5,10 @@ face re-ID slice depends on.
 """
 
 import math
+from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from perception import PeopleStore, PersonRecord
 
@@ -103,3 +105,20 @@ def test_enroll_validates_inputs(store):
         store.enroll("", "cola", ALICE)
     with pytest.raises(ValueError):
         store.enroll("Alice", "cola", [])
+
+
+def test_enroll_archives_face_crop_when_frames_dir_set(tmp_path):
+    store = PeopleStore(
+        persist_dir=tmp_path / "p", embedding_model="m", frames_dir=tmp_path / "pf"
+    )
+    img = Image.new("RGB", (200, 200), (10, 20, 30))
+    rec = store.enroll("Alice", "cola", ALICE, frame=img, face_bbox_xyxy=(50, 50, 150, 150))
+    assert rec.frame_ref is not None
+    assert Path(rec.frame_ref).exists()
+    # the crop survives a fresh read and a re-enrollment keeps a frame
+    assert store.get("Alice").frame_ref == rec.frame_ref
+
+
+def test_enroll_without_frames_dir_has_no_frame_ref(store):
+    rec = store.enroll("Bob", "milk", BOB, frame=Image.new("RGB", (10, 10)), face_bbox_xyxy=(0, 0, 5, 5))
+    assert rec.frame_ref is None

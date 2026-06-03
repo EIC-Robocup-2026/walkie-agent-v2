@@ -60,6 +60,52 @@ def _match_threshold() -> float:
         return 0.4
 
 
+def _camera_hfov() -> float:
+    """Camera horizontal field of view in degrees (for pixel-offset → yaw)."""
+    try:
+        return float(os.getenv("CAMERA_HFOV_DEG", "70"))
+    except ValueError:
+        return 70.0
+
+
+def _seat_classes() -> set[str]:
+    raw = os.getenv("SEAT_CLASSES", "chair,couch,sofa,bench")
+    return {c.strip().lower() for c in raw.split(",") if c.strip()}
+
+
+def _seat_occupancy_ratio() -> float:
+    """Min (person∩seat / seat) overlap fraction for a seat to count as taken."""
+    try:
+        return float(os.getenv("SEAT_OCCUPANCY_RATIO", "0.2"))
+    except ValueError:
+        return 0.2
+
+
+def _cxcywh_to_xyxy(bbox) -> tuple[int, int, int, int]:
+    """Pose person bbox ``(cx, cy, w, h)`` → ``(x1, y1, x2, y2)``."""
+    cx, cy, w, h = bbox
+    return (int(cx - w / 2), int(cy - h / 2), int(cx + w / 2), int(cy + h / 2))
+
+
+def _overlap_area(a, b) -> int:
+    """Pixel area of the intersection of two xyxy boxes."""
+    ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
+    ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
+    return max(0, ix2 - ix1) * max(0, iy2 - iy1)
+
+
+def _aim_phrase(center_x: float, img_w: int) -> str:
+    """Direction + approximate turn from a target's image-x to a spoken phrase."""
+    if img_w <= 0:
+        return "straight ahead"
+    yaw = (center_x / img_w - 0.5) * _camera_hfov()  # + = right of center
+    if yaw < -8:
+        return f"to your left (turn left ~{abs(yaw):.0f}° to face them)"
+    if yaw > 8:
+        return f"to your right (turn right ~{yaw:.0f}° to face them)"
+    return "roughly straight ahead"
+
+
 def _kp_map(pose):
     """index -> keypoint, for the keypoints this pose actually carries."""
     return {kp.index: kp for kp in pose.keypoints}
@@ -198,7 +244,9 @@ def make_human_tools(
         if not faces:
             return "I don't see a clear face — ask the guest to look at me, then try again."
         face = max(faces, key=lambda f: f.area())  # the person up front
-        rec = people_store.enroll(name, drink, face.embedding)
+        rec = people_store.enroll(
+            name, drink, face.embedding, frame=img, face_bbox_xyxy=face.bbox_xyxy
+        )
         again = "" if rec.enrollments <= 1 else f" (refreshed, seen {rec.enrollments}×)"
         return f"Remembered {rec.name}, favorite drink {rec.drink!r}{again}."
 
@@ -255,6 +303,87 @@ def make_human_tools(
             lines.append(f"- {p.name}: favorite drink {p.drink!r}{extra}")
         return f"{len(people)} remembered guest(s):\n" + "\n".join(lines)
 
+    @parallelable_tool
+    @tool
+    def find_empty_seat() -> str:
+        """Find seats in view (chairs/sofas) that no one is sitting on.
+
+        Use to "offer a free seat" to a guest. Detects seats and people in the
+        live view and reports which seats are unoccupied, with a rough direction
+        so the robot can point to one. Reports on the live camera only.
+        """
+        img = _capture()
+        try:
+            objects = walkieAI.object_detection.detect(img)
+            people = walkieAI.pose_estimation.estimate(img)
+        except Exception as e:  # noqa: BLE001
+            return f"I couldn't check the seats (vision error): {e}"
+        seat_classes = _seat_classes()
+        seats = [o for o in objects if (o.class_name or "").lower() in seat_classes]
+        if not seats:
+            return "I don't see any seats in view."
+        person_boxes = [_cxcywh_to_xyxy(p.bbox) for p in people]
+        min_ratio = _seat_occupancy_ratio()
+        w = img.size[0]
+        free = []
+        for o in seats:
+            box = tuple(int(v) for v in o.bbox)  # xyxy from the detector
+            seat_area = max(1, (box[2] - box[0]) * (box[3] - box[1]))
+            taken = any(
+                _overlap_area(box, pb) / seat_area >= min_ratio for pb in person_boxes
+            )
+            if not taken:
+                free.append((o.class_name, (box[0] + box[2]) / 2))
+        if not free:
+            return f"All {len(seats)} visible seat(s) look occupied."
+        lines = [f"- {cls} {_aim_phrase(cx, w)}" for cls, cx in free]
+        return f"{len(free)} free seat(s) of {len(seats)} visible:\n" + "\n".join(lines)
+
+    @parallelable_tool
+    @tool(parse_docstring=True)
+    def locate_person(name: Optional[str] = None) -> str:
+        """Find where a person is in view so the robot can turn to face them.
+
+        Returns a direction and approximate turn angle to aim at — pass this to
+        the actuator to keep gaze on the person. Give ``name`` to find a specific
+        remembered guest (matched by face); omit it to face the most prominent
+        (nearest) person, e.g. "look at whoever is talking".
+
+        Args:
+            name: Optional remembered guest to look for.
+
+        Returns:
+            The person's direction + approximate yaw, or a not-found message.
+        """
+        img = _capture()
+        w = img.size[0]
+        if name:
+            if people_store is None:
+                return (
+                    "Face memory is off — I can't pick out a named person. "
+                    "Omit the name to face the nearest person instead."
+                )
+            try:
+                faces = walkieAI.face_recognition.embed(img)
+            except Exception as e:  # noqa: BLE001
+                return f"I couldn't read faces (face service error): {e}"
+            faces = [f for f in faces if f.det_score >= _min_det_score()]
+            threshold = _match_threshold()
+            for f in faces:
+                rec = people_store.recognize(f.embedding, max_distance=threshold)
+                if rec is not None and rec.name.lower() == name.strip().lower():
+                    cx = (f.bbox_xyxy[0] + f.bbox_xyxy[2]) / 2
+                    return f"{rec.name} is {_aim_phrase(cx, w)}."
+            return f"I don't see {name} in view."
+        try:
+            people = walkieAI.pose_estimation.estimate(img)
+        except Exception as e:  # noqa: BLE001
+            return f"I couldn't detect people (vision error): {e}"
+        if not people:
+            return "No one is in view."
+        nearest = max(people, key=lambda p: p.bbox[2] * p.bbox[3])  # largest = nearest
+        return f"The nearest person is {_aim_phrase(nearest.bbox[0], w)}."
+
     @sequential_tool
     @tool(parse_docstring=True)
     def speak(text: str) -> str:
@@ -282,5 +411,7 @@ def make_human_tools(
         enroll_person,
         recognize_person,
         list_known_people,
+        find_empty_seat,
+        locate_person,
         speak,
     ]

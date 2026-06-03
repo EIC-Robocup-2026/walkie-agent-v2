@@ -93,6 +93,11 @@ THUMB_W_FULL = 1280  # record detail + lightbox zoom
 # ``embedding_model`` is intentionally omitted — it's always the same model,
 # so it only clutters the table. It still shows on the per-record detail page.
 TABLE_KEYS = [
+    # people store (chroma_db_people) — only present on those records
+    "name",
+    "drink",
+    "enrollments",
+    # scene / object stores
     "class_name",
     "confidence",
     "position_conf",
@@ -101,6 +106,9 @@ TABLE_KEYS = [
 ]
 SORTABLE = {
     "id",
+    "name",
+    "drink",
+    "enrollments",
     "class_name",
     "confidence",
     "position_conf",
@@ -613,6 +621,9 @@ def _header(base: str, key: str, cur_sort: str, cur_dir: str) -> str:
         "id": "id",
         "frame": "frame",
         "document": "caption",
+        "name": "name",
+        "drink": "favorite drink",
+        "enrollments": "enrollments",
         "class_name": "class",
         "position": "position (x, y, z)",
         "confidence": "confidence",

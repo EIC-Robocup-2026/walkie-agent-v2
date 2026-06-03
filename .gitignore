@@ -32,6 +32,7 @@ chroma_db/
 chroma_db_scene/
 chroma_db_people/
 frames/
+people_frames/
 object_frames/
 perception.json
 perception.json.tmp

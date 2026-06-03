@@ -183,6 +183,15 @@ HUMAN_PERCEPTION_ENABLED = "1"
 HUMAN_DESCRIBE_PROMPT = "Describe the person in this image for a verbal introduction: their approximate clothing colors and type, hair, glasses or hat, and whether they are sitting or standing. Be concise and factual; one or two sentences."
 # Where the face-keyed people memory persists (ChromaDB; gitignored at runtime).
 PEOPLE_CHROMA_DIR = "chroma_db_people"
+# Where each remembered guest's face crop is archived (shown in the DB viewer).
+PEOPLE_FRAMES_DIR = "people_frames"
+# Camera horizontal field of view (deg) — converts a person's pixel offset into
+# an approximate turn angle for locate_person / gaze. Set to your camera's HFOV.
+CAMERA_HFOV_DEG = "70"
+# Detector classes treated as seats for find_empty_seat.
+SEAT_CLASSES = "chair,couch,sofa,bench"
+# A seat counts as occupied when a person covers at least this fraction of it.
+SEAT_OCCUPANCY_RATIO = "0.2"
 # A face must score at least this (server det_score, [0,1]) to be enrolled/matched.
 FACE_MIN_DET_SCORE = "0.5"
 # Max cosine distance (1 - similarity) for a face to count as a known guest.
