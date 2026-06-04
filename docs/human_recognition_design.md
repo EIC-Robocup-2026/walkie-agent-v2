@@ -1,6 +1,10 @@
 # Human recognition — design (RoboCup @Home HRI, Receptionist first)
 
-Status: **proposal**. Scope: add a human-recognition capability to `walkie-agent-v2`,
+Status: **implemented (Receptionist scope)** — the agent-side capabilities C1–C6 are
+shipped on `feat/human-recognition` with offline tests green (122 passing). On-robot
+validation and the server `/face-recognition/embed` route (branch
+`feat/face-recognition-service`) are the remaining gates; see §7 for what is still
+deferred. Scope: add a human-recognition capability to `walkie-agent-v2`,
 targeting the **Receptionist** task first, via a new `human_agent` sub-agent and a
 face-keyed people memory. This mirrors the structure of `scene_perception_design.md`
 but for *people*, which are deliberately **not** stored in the scene catalogue.
