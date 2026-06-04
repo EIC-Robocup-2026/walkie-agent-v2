@@ -99,6 +99,7 @@ def test_make_human_tools_exposes_expected_surface():
     assert [t.name for t in tools] == [
         "describe_person",
         "count_people",
+        "detect_gestures",
         "enroll_person",
         "recognize_person",
         "list_known_people",

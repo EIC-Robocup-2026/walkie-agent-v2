@@ -23,6 +23,9 @@ Read-only / parallelable:
   left") when several people are visible.
 - `count_people()` — total visible people, an arm-raised (waving) count, and an
   approximate sitting/standing split.
+- `detect_gestures()` — per-person gestures from the live view: waving / hand
+  raised, pointing to your left or right, and sitting / standing / lying. Use for
+  "is anyone waving?", "who is pointing?", "find the person waving at me".
 - `recognize_person()` — match the face(s) in view against remembered guests;
   returns each as a known name (+ favorite drink) or "unknown".
 - `list_known_people()` — everyone remembered so far, with their favorite drink.

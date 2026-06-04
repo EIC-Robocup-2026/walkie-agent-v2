@@ -18,6 +18,7 @@ Needs walkie-ai-server up at WALKIE_AI_BASE_URL with the
 
 Keys (focus the OpenCV window):
     d  describe_person          c  count_people
+    t  detect_gestures (waving / pointing / posture)
     e  enroll_person (asks name/drink in the terminal)
     r  recognize_person         l  list_known_people
     s  find_empty_seat          g  locate_person (asks an optional name)
@@ -47,7 +48,7 @@ from client import WalkieAIClient  # noqa: E402
 from perception import PeopleStore  # noqa: E402
 
 HELP = (
-    "[d]escribe  [c]ount  [e]nroll  [r]ecognize  "
+    "[d]escribe  [c]ount  ges[t]ures  [e]nroll  [r]ecognize  "
     "[l]ist  find-[s]eat  [g]aze/locate  [q]uit"
 )
 
@@ -135,6 +136,8 @@ def main():
                 _run("describe_person", tools)
             elif k == ord("c"):
                 _run("count_people", tools)
+            elif k == ord("t"):
+                _run("detect_gestures", tools)
             elif k == ord("e"):
                 name = _ask("  guest name: ")
                 drink = _ask("  favorite drink: ")

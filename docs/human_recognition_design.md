@@ -72,7 +72,7 @@ Re-ID alone swings **±400+**. Description and gaze are smaller but cheap to add
 | C4 | **Attribute description** (clothing, hair, glasses, posture) | "tell a visual attribute of guest 1" | `image_caption` w/ steering prompt ✅ shipped |
 | C5 | **Empty-seat finding** | "offer a free seat" | scene store (chairs/sofas) ∩ person occupancy |
 | C6 | **Person tracking / gaze target** | "look at the person talking / the correct guest" | track a person across frames → a point to aim head/base at |
-| C7 | Gesture/posture (wave, point, sit/stand) | *not* Receptionist — GPSR/Restaurant | partial (`count_people`); see §7 |
+| C7 | Gesture/posture (wave, point, sit/stand/lie) | *not* Receptionist — GPSR/Restaurant | single-frame detection ✅ shipped (`detect_gestures`); temporal wave + filtered counts deferred, see §7 |
 
 C2/C3 are the only genuinely new heavy-model dependency. C1/C4 already reuse existing
 routes (C4 is shipped). C5/C6 reuse existing detection/pose but need new glue.
@@ -115,7 +115,9 @@ perception/
                              embedding. enroll(name, drink, emb, attrs) / recognize(emb)
                              / get(name) / list_people(). Cosine knn; threshold
                              FACE_MATCH_THRESHOLD. NO position dedup, NO spatial prune.
-  gestures.py                (deferred, C7) lift _summarize_pose out of vision tools
+  gestures.py                (C7 ✅) single-frame pose heuristics: waving/hand-raised,
+                             pointing left/right, sitting/standing/lying. Pure functions,
+                             offline-tested; re-exported by the human agent's tools.py.
 agents/human_agent/
   __init__.py                create_human_agent(...) factory (copy vision_agent shape)
   prompts.py                 system prompt — enforce the "speak-only" contract
@@ -132,6 +134,7 @@ the spatial machinery (dedup radius, prune-by-location, position lift).
 |---|---|---|---|---|
 | `describe_person(focus)` | parallelable | steered caption of the person in view | C4 | ✅ shipped |
 | `count_people()` | parallelable | how many people + arm-raised + seated/standing | C1 | ✅ shipped |
+| `detect_gestures()` | parallelable | per-person waving/hand-raised, pointing left/right, sitting/standing/lying | C7 | ✅ shipped |
 | `enroll_person(name, drink)` | sequential | capture frame, embed largest face, store name+drink | C2 | ✅ shipped |
 | `recognize_person()` | parallelable | embed faces in view, knn vs store, return names | C3 | ✅ shipped |
 | `list_known_people()` | parallelable | recall all remembered guests + drinks (for introductions) | C3 | ✅ shipped |
@@ -182,9 +185,14 @@ HUMAN_DESCRIBE_PROMPT   "Describe this person: clothing colors, hair, glasses, p
   *continuously* tracking a pacing guest needs a loop on the actuator side that
   re-aims each tick. The recognition half is shipped; the control loop is the
   remaining actuator work.
-- **C7 gestures** (`perception/gestures.py`): wave / point-left-right / sit-stand-lie
-  from pose keypoints → unlocks Restaurant (waving) and GPSR counting.
+- **C7 gestures — temporal half.** The single-frame detector (`perception/gestures.py`,
+  `detect_gestures`) ships waving/hand-raised, pointing left/right, and
+  sitting/standing/lying. What remains: a *true* wave (hand motion across frames, not
+  just "hand up") needs a short temporal buffer, and gestures are reported per-frame
+  with no tracking across frames.
 - **People counting with filters** ("how many men", "how many pointing left") → GPSR.
+  The per-person gesture/posture primitives are in place; the counting+filter glue
+  (and any attribute filters like gender) is the remaining work.
 - **Person following the host** — the HRI task's bag-drop phase ("Following the host
   to the bag drop area" = 200 pts) needs follow = person tracking + nav loop. Blocked
   on the unreliable 3D lift (`get_3d_poses`) — see the scene-position notes;

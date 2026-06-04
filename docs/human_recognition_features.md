@@ -15,6 +15,7 @@ The agent reaches these via the main Walkie agent's `delegate_to_human` tool.
 |---|---|---|---|---|
 | C4 | `describe_person(focus=None)` | One-line description of a person (clothing, hair, glasses, posture) for the spoken introduction. `focus` steers toward one of several people. | image-caption | shape only |
 | C1 | `count_people()` | Count visible people + how many have an arm raised (wave) + approx sitting/standing split. | pose-estimation | ✅ heuristics |
+| C7 | `detect_gestures()` | Per-person gestures from the live view: waving / hand raised, pointing to your left or right, sitting / standing / lying — each tagged with a direction. For "is anyone waving?", "who is pointing?", "find the person waving at me" (Restaurant / GPSR). | pose-estimation | ✅ heuristics |
 | C2 | `enroll_person(name, drink)` | Remember the guest up front: face → embedding, bound to name + favorite drink. Archives a face crop for the viewer. Re-enroll same name = refresh + centroid. | /face-recognition/embed | ✅ flow (fake) |
 | C3 | `recognize_person()` | Match face(s) in view to remembered guests → name + drink, or "unknown". | /face-recognition/embed | ✅ flow (fake) |
 | C3 | `list_known_people()` | Recall every remembered guest + their drink (for introductions). | – | ✅ |
@@ -24,6 +25,8 @@ The agent reaches these via the main Walkie agent's `delegate_to_human` tool.
 
 **Supporting infrastructure**
 - `client/face_recognition.py` — `FaceRecognitionClient.embed / info / providers`.
+- `perception/gestures.py` — pure single-frame pose heuristics (waving, pointing
+  left/right, sitting/standing/lying); re-exported by the human agent's tools.
 - `perception/people_store.py` — `PeopleStore`: face-keyed cosine memory
   (`enroll / recognize / get / list_people / count / clear`), face-crop archive.
 - `main.py::build_people_store` — builds the store, probes the face model, wires
@@ -63,6 +66,7 @@ agent. Watch the console for `[walkie] -> human:` and the viewer for new faces.
 
 | Step | Say / type | Expect |
 |---|---|---|
+| 0 | "Is anyone waving or pointing?" | per-person gesture line: waving/pointing/sitting/standing/lying + direction |
 | 1 | "How many people do you see?" | a count + arm-raised + posture line |
 | 2 | "Describe the person in front of you." | a short clothing/posture description |
 | 3 | "Remember this guest. Her name is Alice and she likes cola." | confirmation "Remembered Alice …"; a face row appears in the viewer's `people` collection |
@@ -100,7 +104,9 @@ people_frames` (or call `PeopleStore.clear()`), then restart.
 
 ## 5. Automated coverage (already green, offline)
 
-`uv run pytest` — 122 tests. Human-recognition ones:
+`uv run pytest` — 134 tests. Human-recognition ones:
+- `tests/test_gestures.py` — single-frame gesture heuristics: pointing left/right,
+  lying-down posture, waving, combined `describe_gestures` + phrasing.
 - `tests/test_face_recognition_client.py` — face client deserialization, errors, cache.
 - `tests/test_people_store.py` — enroll/recognize, centroid, threshold, frame archive.
 - `tests/test_human_tools.py` — pose heuristics (arm-raised, sitting/standing).

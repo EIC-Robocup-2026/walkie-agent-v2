@@ -27,16 +27,14 @@ from langchain_core.tools import tool
 from agents.core.robot_context import RobotContext
 from agents.core.tool_decorators import parallelable_tool, sequential_tool
 from interfaces.walkie_interface import WalkieInterface
-
-
-# COCO keypoint indices (pose_estimation returns 17 of these per person).
-_NOSE = 0
-_LEFT_SHOULDER, _RIGHT_SHOULDER = 5, 6
-_LEFT_WRIST, _RIGHT_WRIST = 9, 10
-_LEFT_HIP, _RIGHT_HIP = 11, 12
-_LEFT_KNEE, _RIGHT_KNEE = 13, 14
-
-_KP_CONF = 0.3  # minimum keypoint confidence to trust a coordinate
+from perception.gestures import (  # re-exported for the existing pose tests
+    arm_raised as _arm_raised,
+    describe_gestures as _describe_gestures,
+    gesture_phrase as _gesture_phrase,
+    kp_map as _kp_map,
+    posture as _posture,
+    summarize_person as _summarize_person,
+)
 
 _DEFAULT_DESCRIBE_PROMPT = (
     "Describe the person in this image for a verbal introduction: their "
@@ -106,50 +104,6 @@ def _aim_phrase(center_x: float, img_w: int) -> str:
     return "roughly straight ahead"
 
 
-def _kp_map(pose):
-    """index -> keypoint, for the keypoints this pose actually carries."""
-    return {kp.index: kp for kp in pose.keypoints}
-
-
-def _arm_raised(kpts) -> bool:
-    """True if either wrist is above (smaller image-y than) its shoulder."""
-    for shoulder_i, wrist_i in ((_LEFT_SHOULDER, _LEFT_WRIST), (_RIGHT_SHOULDER, _RIGHT_WRIST)):
-        s, w = kpts.get(shoulder_i), kpts.get(wrist_i)
-        if s and w and s.confidence > _KP_CONF and w.confidence > _KP_CONF and w.y < s.y:
-            return True
-    return False
-
-
-def _posture(kpts) -> str:
-    """Best-effort 'sitting' / 'standing' / 'unknown' from torso/leg geometry.
-
-    Heuristic only — pose keypoints are noisy and the lower body is often
-    occluded. We compare the hip->knee vertical drop to the shoulder->hip drop:
-    when the legs are folded (sitting) the knees sit close to hip height, so the
-    ratio collapses. Returns 'unknown' whenever the needed keypoints are missing.
-    """
-    def avg_y(a, b):
-        pa, pb = kpts.get(a), kpts.get(b)
-        ys = [p.y for p in (pa, pb) if p and p.confidence > _KP_CONF]
-        return sum(ys) / len(ys) if ys else None
-
-    shoulder_y = avg_y(_LEFT_SHOULDER, _RIGHT_SHOULDER)
-    hip_y = avg_y(_LEFT_HIP, _RIGHT_HIP)
-    knee_y = avg_y(_LEFT_KNEE, _RIGHT_KNEE)
-    if shoulder_y is None or hip_y is None or knee_y is None:
-        return "unknown"
-    torso = hip_y - shoulder_y
-    if torso <= 0:
-        return "unknown"
-    leg_drop = (knee_y - hip_y) / torso
-    return "sitting" if leg_drop < 0.5 else "standing"
-
-
-def _summarize_person(pose) -> dict:
-    kpts = _kp_map(pose)
-    return {"arm_raised": _arm_raised(kpts), "posture": _posture(kpts)}
-
-
 def make_human_tools(
     walkie: WalkieInterface,
     walkieAI,
@@ -216,6 +170,39 @@ def make_human_tools(
             posture += f", {unknown} unclear"
         parts.append(posture + ".")
         return " ".join(parts)
+
+    @parallelable_tool
+    @tool
+    def detect_gestures() -> str:
+        """Read each visible person's gesture and posture from the live camera.
+
+        For every person in view reports whether they are waving / raising a
+        hand, pointing to your left or right, and whether they are sitting,
+        standing or lying down. Use for "is anyone waving?", "who is pointing?",
+        or "find the person waving at me" (Restaurant / GPSR). Single-frame
+        heuristics from pose keypoints — a hint, not ground truth.
+        """
+        img = _capture()
+        try:
+            people = walkieAI.pose_estimation.estimate(img)
+        except Exception as e:  # noqa: BLE001 — a server hiccup must not crash the turn
+            return f"I couldn't read poses (vision error): {e}"
+        if not people:
+            return "No people visible."
+        w = img.size[0]
+        people.sort(key=lambda p: p.bbox[2] * p.bbox[3], reverse=True)  # nearest first
+        lines = []
+        waving = 0
+        for i, p in enumerate(people):
+            g = _describe_gestures(p)
+            waving += int(g["waving"])
+            lines.append(
+                f"- person {i+1} ({_aim_phrase(p.bbox[0], w)}): {_gesture_phrase(g)}"
+            )
+        head = f"{len(people)} person(s) in view"
+        if waving:
+            head += f", {waving} waving/hand-raised"
+        return head + ":\n" + "\n".join(lines)
 
     @sequential_tool
     @tool(parse_docstring=True)
@@ -408,6 +395,7 @@ def make_human_tools(
     return [
         describe_person,
         count_people,
+        detect_gestures,
         enroll_person,
         recognize_person,
         list_known_people,
