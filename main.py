@@ -58,16 +58,24 @@ def get_robot() -> WalkieRobot:
 
 def build_model():
     """OpenRouter via the OpenAI-compatible endpoint."""
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        print(
-            "[main] WARNING: OPENROUTER_API_KEY not set. Agent calls will fail.",
-            file=sys.stderr,
-        )
+    use_local = os.getenv("LLM_USE_LOCAL", "0").lower() in ("1", "true", "yes")
+    if use_local:
+        base_url = os.getenv("LOCAL_BASE_URL", "http://10.0.0.210:8000/v1")
+        api_key = os.getenv("MODEL_API_KEY", "your api key goes here")
+        model = os.getenv("LOCAL_MODEL", "qwen3.5-9b")
+    else:
+        base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            print(
+                "[main] WARNING: OPENROUTER_API_KEY not set. Agent calls will fail.",
+                file=sys.stderr,
+            )
+        model = os.getenv("WALKIE_MODEL", "anthropic/claude-sonnet-4.5")
     return ChatOpenAI(
-        base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        base_url=base_url,
         api_key=api_key,
-        model=os.getenv("WALKIE_MODEL", "anthropic/claude-sonnet-4.5"),
+        model=model,
         temperature=float(os.getenv("WALKIE_TEMPERATURE", "0")),
     )
 
