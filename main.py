@@ -18,13 +18,7 @@ from agents.vision_agent import create_vision_agent
 from agents.walkie_agent import create_walkie_main_agent
 from client import WalkieAIClient
 from interfaces.walkie_interface import WalkieInterface
-from perception import (
-    LocalCLIPEmbedder,
-    RemoteCLIPEmbedder,
-    RobotPoseLifter,
-    SceneStore,
-)
-from services import PerceptionService, ScenePerceptionService
+from services import PerceptionService
 
 
 ZENOH_PORT = 7447
@@ -107,81 +101,6 @@ def _opt_int(name: str, default: str = "") -> int | None:
         return int(raw)
     except ValueError:
         return None
-
-
-def build_scene_store(walkieAI):
-    """Construct the CLIP embedder + SceneStore, probing walkie-ai-server first.
-
-    Returns ``(store, embedder)`` when scene perception is enabled and the
-    embedder loads (local CLIP) or the server's ``/image-embed`` route answers;
-    otherwise ``(None, None)`` so the caller skips the scene loop and the
-    memory tools report that scene memory is off.
-    """
-    if not _flag("SCENE_PERCEPTION_ENABLED", "1"):
-        print("[scene] disabled via SCENE_PERCEPTION_ENABLED=0")
-        return None, None
-
-    # Embedding backend: "local" runs CLIP in-process (no walkie-ai-server
-    # dependency, crash-proof, GPU-accelerated) — needs `uv sync --extra clip`.
-    # "remote" calls the server's /image-embed route (the original behavior).
-    backend = os.getenv("SCENE_EMBED_BACKEND", "remote").lower()
-    if backend == "local":
-        fp16_env = os.getenv("SCENE_CLIP_FP16", "auto").strip().lower()
-        fp16 = None if fp16_env in ("", "auto") else fp16_env in ("1", "true", "yes")
-        embedder = LocalCLIPEmbedder(
-            model_name=os.getenv("SCENE_CLIP_MODEL", "openai/clip-vit-base-patch16"),
-            device=os.getenv("SCENE_CLIP_DEVICE") or None,
-            fp16=fp16,
-        )
-        try:
-            dim = embedder.dim  # loads the model (downloads on first run)
-        except Exception as e:  # noqa: BLE001 — torch/transformers missing or load failed
-            print(
-                f"[scene] local CLIP unavailable ({e!r}); CLIP scene perception OFF.\n"
-                "[scene] Install the extra with `uv sync --extra clip`, or set "
-                "SCENE_EMBED_BACKEND=remote.",
-                file=sys.stderr,
-            )
-            return None, None
-        print(f"[scene] embedding backend: local (model={embedder.model_name})")
-    else:
-        embedder = RemoteCLIPEmbedder(walkieAI.image_embed)
-        try:
-            dim = embedder.dim  # one probe call to /image-embed/embed-image
-        except Exception as e:  # noqa: BLE001 — server route may be disabled
-            print(
-                f"[scene] image-embed unavailable ({e!r}); CLIP scene perception OFF.\n"
-                "[scene] Enable the /image-embed blueprint on walkie-ai-server, or set "
-                "SCENE_EMBED_BACKEND=local (`uv sync --extra clip`).",
-                file=sys.stderr,
-            )
-            return None, None
-
-    store = SceneStore(
-        persist_dir=os.getenv("SCENE_CHROMA_DIR", "chroma_db_scene"),
-        embedder=embedder,
-        frames_dir=os.getenv("SCENE_FRAMES_DIR", "frames"),
-        # Refresh the archived thumbnail on every re-sighting so the viewer
-        # shows the latest frame, not the first-ever one. Set to 0 to keep the
-        # original insert frame for an entry's whole life.
-        refresh_frame_on_update=_flag("SCENE_FRAME_REFRESH_ON_UPDATE", "1"),
-        # Archive the object crop (bbox region) not the whole camera frame, so
-        # the viewer shows the object itself. Set 0 to keep full frames.
-        crop_frames_to_bbox=_flag("SCENE_FRAME_CROP", "1"),
-    )
-    print(
-        f"[scene] CLIP scene memory ON (dim={dim}, {store.count} existing record(s))"
-    )
-    # The caption text index (powers caption-first find_object) is written on
-    # every new sighting, but data collected before it existed has none. Set
-    # SCENE_REINDEX_CAPTIONS=1 once to backfill it for the existing records.
-    if _flag("SCENE_REINDEX_CAPTIONS", "0") and store.count:
-        try:
-            n = store.reindex_captions()
-            print(f"[scene] reindexed {n} caption(s) for text search")
-        except Exception as e:  # noqa: BLE001 — never block startup on a backfill
-            print(f"[scene] caption reindex failed: {e!r}", file=sys.stderr)
-    return store, embedder
 
 
 def _lan_ip() -> str | None:
@@ -314,89 +233,14 @@ def run_ready_stage(walkieAI, walkie, model) -> None:
     )
     perception.start()
 
-    # CLIP scene memory (long-term semantic catalogue) — wired to walkie-ai-server.
-    # Runs alongside the perception.json live snapshot above.
-    scene_store, scene_embedder = build_scene_store(walkieAI)
-    scene_service = None
-    if scene_store is not None and scene_embedder is not None:
-        # Position source for scene entries. "robot" (default) stamps each
-        # detection with the robot's own odom pose — coarse but robust when the
-        # SDK's get_3d_poses depth-lift is unavailable. "lift" uses the SDK
-        # depth+TF lifter (walkie.tools) for true per-object positions.
-        pos_source = os.getenv("SCENE_POSITION_SOURCE", "lift").lower()
-        scene_lifter = RobotPoseLifter(walkie.status) if pos_source == "robot" else None
-        # When the depth lift fails for a detection, stamping the robot's own
-        # pose stores "where the robot stood", not where the object is — sending
-        # the robot back there navigates to nothing. Default off: drop the
-        # detection so only objects with a real 3D lift enter the catalogue.
-        pos_fallback = _flag("SCENE_POSITION_FALLBACK_POSE", "0")
-        print(
-            f"[scene] position source: {pos_source} "
-            f"(lift-fail fallback to robot pose: {'on' if pos_fallback else 'off — drop'})"
-        )
-        # Eviction: without this, removed objects linger in the scene store
-        # forever. TTL ages out objects not re-seen for SCENE_PRUNE_TTL_SEC;
-        # the radius gates the sweep to the robot's vicinity so objects in
-        # rooms it hasn't revisited aren't wrongly deleted while it roams.
-        prune_ttl = _opt_float("SCENE_PRUNE_TTL_SEC", "60")
-        prune_radius = _opt_float("SCENE_PRUNE_RADIUS_M", "2.5")
-        prune_max = _opt_int("SCENE_PRUNE_MAX_RECORDS", "")
-        if prune_ttl is not None or prune_max is not None:
-            print(
-                f"[scene] prune: ttl={prune_ttl}s radius={prune_radius}m "
-                f"max_records={prune_max}"
-            )
-        # Sanity gate on the SDK depth lift: if a lifted position is farther
-        # than this from the robot, treat it as a sensor outlier (bbox center
-        # sampling a far wall behind the object, shiny/transparent surface, etc.)
-        # and stamp the robot's pose instead. Set to '' to disable. Tune to the
-        # camera's reliable depth range (ZED2 mini: ~3-5m, ZED2/2i: ~7-10m).
-        max_lift = _opt_float("SCENE_MAX_LIFT_DISTANCE_M", "")
-        if max_lift is not None:
-            print(f"[scene] max lift distance: {max_lift}m (outliers → robot pose)")
-        scene_service = ScenePerceptionService(
-            walkieAI,
-            walkie,
-            scene_store,
-            scene_embedder,
-            lifter=scene_lifter,
-            interval=float(os.getenv("SCENE_PERCEPTION_INTERVAL_SEC", "2.0")),
-            min_confidence=float(os.getenv("SCENE_MIN_CONF", "0.0")),
-            caption_per_object=_flag("SCENE_CAPTION_PER_OBJECT", "0"),
-            exclude_classes=[
-                c.strip()
-                for c in os.getenv("SCENE_EXCLUDE_CLASSES", "person").split(",")
-                if c.strip()
-            ],
-            position_fallback_to_pose=pos_fallback,
-            # Depth-lift timeout for the scene catalogue (see note above on the
-            # live-snapshot service). Raised from 2s → 5s so a slow ROS-3D node
-            # doesn't time out and drop the whole frame each tick.
-            position_timeout=float(os.getenv("SCENE_POSITION_TIMEOUT_SEC", "5.0")),
-            prune_ttl_sec=prune_ttl,
-            prune_interval_sec=float(os.getenv("SCENE_PRUNE_INTERVAL_SEC", "10")),
-            prune_radius_m=prune_radius,
-            prune_max_records=prune_max,
-            max_lift_distance_m=max_lift,
-        )
-        scene_service.start()
-
-    # Bring up the live DB viewer in-process (see maybe_start_viewer), reusing the
-    # client the scene store already holds so it reads the live index safely.
-    viewer_stores: list[tuple[str, object]] = []
-    if scene_store is not None:
-        viewer_stores.append(
-            (os.getenv("SCENE_CHROMA_DIR", "chroma_db_scene"), scene_store.client)
-        )
-    maybe_start_viewer(viewer_stores)
 
     actuator = create_actuator_agent(model, walkieAI, walkie)
-    vision = create_vision_agent(model, walkieAI, walkie, scene_store=scene_store)
+    vision = create_vision_agent(model, walkieAI, walkie)
     database = create_database_agent(
-        model, walkieAI, walkie, scene_store=scene_store
+        model, walkieAI, walkie
     )
     walkie_agent = create_walkie_main_agent(
-        model, walkieAI, walkie, actuator, vision, database, scene_store=scene_store
+        model, walkieAI, walkie, actuator, vision, database
     )
 
     print("[Ready] Listening — speak to Walkie. Ctrl+C to exit.")
