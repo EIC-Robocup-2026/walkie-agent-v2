@@ -6,6 +6,8 @@ def test_object_detection():
     print("Walkie Client initialized")
 
     cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
 
     # Check if the camera opened successfully
     if not cap.isOpened():
