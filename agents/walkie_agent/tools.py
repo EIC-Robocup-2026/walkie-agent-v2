@@ -59,7 +59,9 @@ def make_walkie_main_tools(
             The actuator's final report.
         """
         print(f"[walkie] -> actuator: {task!r}")
-        return _invoke_subagent(actuator_agent, task, "actuator")
+        result = _invoke_subagent(actuator_agent, task, "actuator")
+        print(f"[walkie] <- actuator: {result!r}")
+        return result
 
     @sequential_tool
     @tool(parse_docstring=True)
@@ -77,7 +79,9 @@ def make_walkie_main_tools(
             The vision agent's answer.
         """
         print(f"[walkie] -> vision: {task!r}")
-        return _invoke_subagent(vision_agent, task, "vision")
+        result = _invoke_subagent(vision_agent, task, "vision")
+        print(f"[walkie] <- vision: {result!r}")
+        return result
 
     @sequential_tool
     @tool(parse_docstring=True)
@@ -97,7 +101,9 @@ def make_walkie_main_tools(
             The database agent's answer (with coordinates when available).
         """
         print(f"[walkie] -> database: {task!r}")
-        return _invoke_subagent(database_agent, task, "database")
+        result = _invoke_subagent(database_agent, task, "database")
+        print(f"[walkie] <- database: {result!r}")
+        return result
 
     @parallelable_tool
     @tool(parse_docstring=True)
@@ -127,7 +133,8 @@ def make_walkie_main_tools(
             if within is None:
                 return "Can't search 'near me' — the robot's position is unknown."
             max_dist = float(radius_m)
-        return lookup_object_in_memory(
+        print(f"[walkie] searching memory for {object_name!r} (near_me={near_me}, radius_m={radius_m})")
+        result = lookup_object_in_memory(
             object_name,
             scene_store=scene_store,
             n_results=5,
@@ -135,6 +142,8 @@ def make_walkie_main_tools(
             max_distance_m=max_dist,
             min_position_conf=query_min_conf(),
         )
+        print(f"[walkie] <- memory: {result!r}")
+        return result
 
     @sequential_tool
     @tool(parse_docstring=True)
@@ -150,6 +159,7 @@ def make_walkie_main_tools(
         Returns:
             Confirmation that the text was spoken.
         """
+        print(f"[walkie] speaking: {text!r}")
         stream = walkieAI.tts.synthesize_stream(text)
         walkie.speaker.play_stream(stream, blocking=True)
         try:

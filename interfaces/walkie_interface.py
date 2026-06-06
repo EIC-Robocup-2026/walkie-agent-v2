@@ -17,6 +17,10 @@ class WalkieInterface:
         self._status = robot.status
         self._tools = robot.tools
         self._arm = robot.arm
+    
+    @property
+    def robot(self) -> WalkieRobot:
+        return self._robot
 
     @property
     def speaker(self) -> Speaker:
