@@ -192,6 +192,17 @@ WALKIE_GRAPHS_EXCLUDE_CLASSES = "person"
 WALKIE_GRAPHS_CAPTION_CLASSES = ""
 # Live 3D visualization backend: none | rerun. rerun needs `uv sync --extra graphs`.
 WALKIE_GRAPHS_VIZ = "none"
+# Rerun viewer reachability. 0 = spawn a native window ON THE ROBOT (needs a
+# display, local only). 1 = serve a browser viewer + gRPC data stream bound to
+# 0.0.0.0 so any computer on the LAN can watch (prints the URL on startup).
+WALKIE_GRAPHS_RERUN_SERVE = "0"
+WALKIE_GRAPHS_RERUN_WEB_PORT = "9090"
+WALKIE_GRAPHS_RERUN_GRPC_PORT = "9876"
+# Host/IP that REMOTE browsers use to reach the robot (blank = auto-detect LAN IP).
+WALKIE_GRAPHS_RERUN_HOST = ""
+# CORS origins allowed to reach the gRPC data server (the browser page is served on
+# a different port). "*" = allow any — fine on a trusted LAN.
+WALKIE_GRAPHS_RERUN_CORS = "*"
 
 [graphs.camera]
 # ZED 2i FOV: 110 H x 70 V. The SDK exposes no camera_info, so intrinsics default

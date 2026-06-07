@@ -12,6 +12,8 @@ Each :meth:`RerunViz.update` logs, in the ``world`` space:
 from __future__ import annotations
 
 import os
+import socket
+import urllib.parse
 
 import numpy as np
 
@@ -29,22 +31,60 @@ def _class_color(name: str) -> tuple[int, int, int]:
     return tuple(int(c) for c in rng.integers(64, 256, size=3))
 
 
+def _lan_ip() -> str:
+    """Best-effort primary LAN IP, so a remote viewer URL is actually reachable."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))  # selects the egress interface; sends nothing
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
 class RerunViz:
-    """Streams the graph to a Rerun viewer (spawned, or served for remote view)."""
+    """Streams the graph to a Rerun viewer.
+
+    Two modes (``WALKIE_GRAPHS_RERUN_SERVE``):
+
+    - ``0`` (default): ``rr.spawn()`` — a native viewer window on the robot. Needs a
+      display and is **only visible on the robot itself**.
+    - ``1``: serve a browser viewer over HTTP + a gRPC data stream, both bound to
+      ``0.0.0.0``, so **any computer on the LAN** can watch via a browser (no install)
+      or a native viewer. The printed URL uses the robot's LAN IP.
+    """
 
     def __init__(self) -> None:
         import rerun as rr  # lazy: only needed when viz is enabled
 
         self._rr = rr
-        rr.init("walkie_graphs", spawn=False)
-        if os.getenv("WALKIE_GRAPHS_RERUN_SERVE", "0").lower() in ("1", "true", "yes"):
-            # Headless/remote: serve a web viewer instead of spawning a window.
-            try:
-                rr.serve_web()
-            except Exception:
-                rr.spawn()
-        else:
-            rr.spawn()
+        rr.init("walkie_graphs")
+
+        if os.getenv("WALKIE_GRAPHS_RERUN_SERVE", "0").lower() not in ("1", "true", "yes"):
+            rr.spawn()  # local native window on the robot
+            return
+
+        grpc_port = int(os.getenv("WALKIE_GRAPHS_RERUN_GRPC_PORT", "9876"))
+        web_port = int(os.getenv("WALKIE_GRAPHS_RERUN_WEB_PORT", "9090"))
+        host = os.getenv("WALKIE_GRAPHS_RERUN_HOST", "").strip() or _lan_ip()
+        cors = [o.strip() for o in os.getenv("WALKIE_GRAPHS_RERUN_CORS", "*").split(",") if o.strip()]
+
+        # gRPC data sink + HTTP browser app (both already bind 0.0.0.0). serve_grpc
+        # advertises 127.0.0.1, but a REMOTE browser must reach the robot's LAN IP,
+        # so build the connect URI with `host`. CORS must allow the page's origin
+        # (the browser app at :web_port talks cross-port to the gRPC at :grpc_port).
+        rr.serve_grpc(grpc_port=grpc_port, cors_allow_origin=cors)
+        grpc_uri = f"rerun+http://{host}:{grpc_port}/proxy"
+        rr.serve_web_viewer(web_port=web_port, open_browser=False, connect_to=grpc_uri)
+
+        viewer_url = f"http://{host}:{web_port}/?url={urllib.parse.quote(grpc_uri, safe='')}"
+        print(
+            "[graphs] Rerun viewer live on the LAN — open from any computer:\n"
+            f"          browser: {viewer_url}\n"
+            f"          native : rerun {grpc_uri}\n"
+            f"          (ensure robot ports {web_port}/tcp and {grpc_port}/tcp are reachable)"
+        )
 
     def update(self, memory) -> None:
         rr = self._rr
