@@ -83,7 +83,10 @@ class RerunViz:
             "[graphs] Rerun viewer live on the LAN — open from any computer:\n"
             f"          browser: {viewer_url}\n"
             f"          native : rerun {grpc_uri}\n"
-            f"          (ensure robot ports {web_port}/tcp and {grpc_port}/tcp are reachable)"
+            "          Can't connect from another machine? The servers bind 0.0.0.0,\n"
+            "          so it's the robot's host firewall dropping the ports. Open BOTH\n"
+            f"          (web page + data stream): "
+            f"sudo ufw allow {web_port}/tcp && sudo ufw allow {grpc_port}/tcp"
         )
 
     def update(self, memory) -> None:

@@ -344,6 +344,7 @@ Override with `WALKIE_LOG_LEVEL` — uncomment it in `.env` to force one level e
 | Robot/Zenoh connection fails | Check the robot is up and `ROBOT_IP`/`ZENOH_PORT` in `main.py` are correct. |
 | `find_object_from_memory` returns nothing | The DB hasn't filled yet — let the robot look around (the ready-stage loop builds it in the background), or collect deliberately with `uv run python -m tools.scene_explore`. Also check matches aren't all being dropped by `SCENE_QUERY_MIN_CONF`. |
 | Walkie "responds" but says nothing aloud | Expected unless the agent calls `speak` — the no-plain-text contract. |
+| `walkie_graphs` Rerun viewer unreachable from another computer (connection **times out**) | The robot's **host firewall** is dropping the ports — the servers bind `0.0.0.0`, but `ufw`/iptables default-deny incoming (only SSH is allowed, which is why ping/SSH work but the viewer doesn't). Open **both** ports on the robot: `sudo ufw allow 9090/tcp && sudo ufw allow 9876/tcp` (use your actual `WALKIE_GRAPHS_RERUN_WEB_PORT` / `WALKIE_GRAPHS_RERUN_GRPC_PORT`). Both are required — the browser loads the page on the web port **and** streams data on the gRPC port. Also confirm you launched with `WALKIE_GRAPHS_VIZ=rerun WALKIE_GRAPHS_RERUN_SERVE=1` (without `RERUN_SERVE=1` it opens a local-only native window). A *connection refused* (instant, not a timeout) instead means it isn't serving — check that startup printed the "Rerun viewer live on the LAN" line. |
 
 ---
 

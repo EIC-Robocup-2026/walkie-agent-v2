@@ -9,6 +9,11 @@ A Rerun viewer shows the accumulating point clouds, per-object boxes, and relati
 edges; the console prints the text description each tick. Set
 WALKIE_GRAPHS_INTERESTED_CLASSES (e.g. "bottle,cup,chair") to scope what's mapped.
 Ctrl+C to stop. This is a manual test (no robot in CI) — guarded by __main__.
+
+To watch from ANOTHER computer on the LAN, add WALKIE_GRAPHS_RERUN_SERVE=1 (the
+startup log prints the URL). The servers bind 0.0.0.0, so if a remote machine can't
+connect it's the robot's host firewall — open BOTH ports on the robot, e.g.
+``sudo ufw allow 9090/tcp && sudo ufw allow 9876/tcp``.
 """
 
 import os
