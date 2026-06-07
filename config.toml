@@ -172,3 +172,79 @@ CHROMA_VIEWER_REFRESH_SEC = "5"
 # Downscaled-thumbnail cache for the /frame route (large source frames render
 # as small JPEGs in tables/galleries instead of failing to load).
 CHROMA_VIEWER_THUMB_CACHE = ".thumb_cache"
+
+[graphs]
+# walkie_graphs: open-vocabulary 3D scene-graph spatial memory. A background
+# thread (WalkieGraphsService) observes RGB-D frames, lifts masked detections to
+# 3D world points, fuses them into object nodes, and derives distance-based
+# relations. The database sub-agent queries this store. Self-contained: its own
+# Chroma dir, point-cloud sidecars, and edge file (NOT the legacy chroma_db).
+WALKIE_GRAPHS_ENABLED = "1"
+WALKIE_GRAPHS_INTERVAL_SEC = "3.0"
+# "Interested classes": one comma-separated list that drives the whole module —
+# passed as open-vocab prompts to the detection server, and the scope of what
+# enters the graph. Empty = detect/keep everything the detector emits.
+WALKIE_GRAPHS_INTERESTED_CLASSES = ""
+# Classes to always drop before lift/embed/store. Moving objects (people) can't
+# be position-deduped, so they'd spawn a node every tick — keep them out.
+WALKIE_GRAPHS_EXCLUDE_CLASSES = "person"
+# Classes to caption (server image-caption). Empty = same as interested classes.
+WALKIE_GRAPHS_CAPTION_CLASSES = ""
+# Live 3D visualization backend: none | rerun. rerun needs `uv sync --extra graphs`.
+WALKIE_GRAPHS_VIZ = "none"
+
+[graphs.camera]
+# ZED 2i FOV: 110 H x 70 V. The SDK exposes no camera_info, so intrinsics default
+# to fx=(W/2)/tan(HFOV/2), fy=fx (square pixels), cx=W/2, cy=H/2 from the live
+# frame size. Set FX/FY/CX/CY to real calibrated values to override (blank=derive).
+WALKIE_GRAPHS_HFOV_DEG = "110"
+WALKIE_GRAPHS_FX = ""
+WALKIE_GRAPHS_FY = ""
+WALKIE_GRAPHS_CX = ""
+WALKIE_GRAPHS_CY = ""
+# Camera mount offsets in the robot LOCAL frame (metres), x=forward,y=left,z=up.
+# LIFT_TO_HEAD: fixed lift-top -> head tilt pivot. PIVOT_TO_OPTIC: tilt pivot ->
+# optical center (rotates with head tilt). cam_pos = robot_xy0 + Rz(heading) @
+# [ (0,0,lift_m) + LIFT_TO_HEAD + Ry(tilt) @ PIVOT_TO_OPTIC ].
+WALKIE_GRAPHS_LIFT_TO_HEAD = "0.265,0.0,0.422"
+WALKIE_GRAPHS_PIVOT_TO_OPTIC = "0.065,0.0,0.0"
+
+[graphs.fusion]
+# Incremental dedup. A detection MERGES into an existing same-class node when its
+# CLIP image-emb cosine >= SIM_HIGH, or (>= SIM_LOW and centroid within TIGHT_M);
+# else it INSERTs. Candidates = same-class nodes within RADIUS_M plus the top
+# DEDUP_VISUAL_K nearest by image-emb regardless of position (drift-proof).
+# RADIUS/TIGHT must stay above per-object 3D jitter (~5-15cm) or objects re-insert.
+WALKIE_GRAPHS_DEDUP_RADIUS_M = "0.4"
+WALKIE_GRAPHS_DEDUP_TIGHT_M = "0.2"
+WALKIE_GRAPHS_SIM_HIGH = "0.85"
+WALKIE_GRAPHS_SIM_LOW = "0.65"
+WALKIE_GRAPHS_DEDUP_VISUAL_K = "5"
+# Point-cloud handling: voxel size for downsampling merged clouds (m), hard cap
+# on points per object, and the minimum valid depth points to accept a detection.
+WALKIE_GRAPHS_VOXEL_M = "0.02"
+WALKIE_GRAPHS_MAX_POINTS_PER_OBJ = "2000"
+WALKIE_GRAPHS_MIN_POINTS = "30"
+
+[graphs.relations]
+# Geometric (distance-based) edges, recomputed every RELATION_EVERY_N ticks over
+# pairs whose centroids are within RELATION_MAX_DIST. near: centroid <= NEAR_M.
+# on/above: XY-AABB-IoU >= XY_OVERLAP_MIN and a.zmin ~ b.zmax within Z_TOL (gap
+# <= ON_GAP => "on", else "above"). inside: 3D AABB containment within CONTAIN_TOL.
+WALKIE_GRAPHS_RELATION_MAX_DIST = "1.0"
+WALKIE_GRAPHS_NEAR_M = "0.6"
+WALKIE_GRAPHS_XY_OVERLAP_MIN = "0.15"
+WALKIE_GRAPHS_Z_TOL = "0.05"
+WALKIE_GRAPHS_ON_GAP = "0.08"
+WALKIE_GRAPHS_CONTAIN_TOL = "0.02"
+WALKIE_GRAPHS_RELATION_EVERY_N = "5"
+
+[graphs.store]
+# Self-contained storage (kept OUT of CHROMA_VIEWER_DIRS on purpose). Nodes in a
+# Chroma collection; per-object point clouds as .npz sidecars; edges as JSON;
+# thumbnails as object-crop JPEGs. Capacity cap evicts the oldest by last_seen.
+WALKIE_GRAPHS_CHROMA_DIR = "chroma_db_graph"
+WALKIE_GRAPHS_PCDS_DIR = "graph_pcds"
+WALKIE_GRAPHS_THUMBS_DIR = "graph_thumbs"
+WALKIE_GRAPHS_EDGES_PATH = "graph_edges.json"
+WALKIE_GRAPHS_PRUNE_MAX_RECORDS = "500"

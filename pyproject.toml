@@ -10,6 +10,7 @@ dependencies = [
     "langchain>=1.2.14",
     "langchain-openai>=0.2",
     "langgraph>=0.2",
+    "networkx>=3.0",
     "numpy>=2.4.4",
     "onnxruntime>=1.24.4",
     "opencv-python>=4.13.0.92",
@@ -36,6 +37,11 @@ dev = [
 clip = [
     "torch>=2.7",
     "transformers>=4.45",
+]
+# Real-time 3D visualization for walkie_graphs (rerun.io). Imported lazily, so
+# the module + tests run without it; install with `uv sync --extra graphs`.
+graphs = [
+    "rerun-sdk>=0.20",
 ]
 
 [tool.pytest.ini_options]
