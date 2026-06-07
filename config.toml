@@ -231,6 +231,13 @@ WALKIE_GRAPHS_CY = ""
 # [ (0,0,lift_m) + LIFT_TO_HEAD + Ry(tilt) @ PIVOT_TO_OPTIC ].
 WALKIE_GRAPHS_LIFT_TO_HEAD = "0.265,0.0,0.422"
 WALKIE_GRAPHS_PIVOT_TO_OPTIC = "0.065,0.0,0.0"
+# Head tilt (radians, from walkie.robot.head.get_angle()). Geometry expects
+# "positive = camera tilts DOWN". The joint-state sign often differs from the
+# command sign, so if down-tilt projects objects the wrong way, set SIGN = -1.
+# OFFSET adds a constant (radians) when the reported 0 isn't actually level.
+# effective_tilt = SIGN * get_angle() + OFFSET.
+WALKIE_GRAPHS_HEAD_TILT_SIGN = "1"
+WALKIE_GRAPHS_HEAD_TILT_OFFSET_RAD = "0"
 
 [graphs.fusion]
 # Incremental dedup. A detection MERGES into an existing same-class node when its

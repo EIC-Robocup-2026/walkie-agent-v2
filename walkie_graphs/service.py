@@ -90,6 +90,11 @@ class WalkieGraphsService(threading.Thread):
         self._cx, self._cy = _opt_float("WALKIE_GRAPHS_CX"), _opt_float("WALKIE_GRAPHS_CY")
         self._lift_to_head = _vec3(os.getenv("WALKIE_GRAPHS_LIFT_TO_HEAD", "0.265,0.0,0.422"))
         self._pivot_to_optic = _vec3(os.getenv("WALKIE_GRAPHS_PIVOT_TO_OPTIC", "0.065,0.0,0.0"))
+        # head.get_angle() is radians; geometry wants "positive = camera tilts down".
+        # If the joint-state sign is inverted vs that, set SIGN=-1; OFFSET corrects a
+        # non-level zero. effective_tilt = sign * get_angle() + offset.
+        self._tilt_sign = float(os.getenv("WALKIE_GRAPHS_HEAD_TILT_SIGN", "1"))
+        self._tilt_offset = float(os.getenv("WALKIE_GRAPHS_HEAD_TILT_OFFSET_RAD", "0"))
         self._intr_cache: dict[tuple[int, int], Intrinsics] = {}
 
     # ------------------------------------------------------------------
@@ -247,6 +252,7 @@ class WalkieGraphsService(threading.Thread):
     def _tilt_rad(self) -> float:
         try:
             v = self.walkie.robot.head.get_angle()
-            return float(v) if v is not None else 0.0
+            v = float(v) if v is not None else 0.0
         except Exception:  # noqa: BLE001
             return 0.0
+        return self._tilt_sign * v + self._tilt_offset
