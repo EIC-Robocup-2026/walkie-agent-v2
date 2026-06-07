@@ -13,6 +13,7 @@ local model here.
 
 from __future__ import annotations
 
+import math
 import os
 import threading
 import time
@@ -95,6 +96,7 @@ class WalkieGraphsService(threading.Thread):
         # non-level zero. effective_tilt = sign * get_angle() + offset.
         self._tilt_sign = float(os.getenv("WALKIE_GRAPHS_HEAD_TILT_SIGN", "1"))
         self._tilt_offset = float(os.getenv("WALKIE_GRAPHS_HEAD_TILT_OFFSET_RAD", "0"))
+        self._debug = os.getenv("WALKIE_GRAPHS_DEBUG", "0").lower() in ("1", "true", "yes")
         self._intr_cache: dict[tuple[int, int], Intrinsics] = {}
 
     # ------------------------------------------------------------------
@@ -145,15 +147,23 @@ class WalkieGraphsService(threading.Thread):
 
         intr = self._intrinsics(depth.shape[1], depth.shape[0])
         pose = self.walkie.status.get_position() or {"x": 0.0, "y": 0.0, "heading": 0.0}
+        lift_cm = self._lift_cm()
+        tilt = self._tilt_rad()
         cam = compute_camera_pose(
             float(pose.get("x", 0.0)),
             float(pose.get("y", 0.0)),
             float(pose.get("heading", 0.0)),
-            self._lift_cm(),
-            self._tilt_rad(),
+            lift_cm,
+            tilt,
             lift_to_head=self._lift_to_head,
             pivot_to_optic=self._pivot_to_optic,
         )
+        if self._debug:
+            self._log(
+                f"pose lift={lift_cm:.1f}cm tilt={tilt:+.3f}rad/{math.degrees(tilt):+.1f}deg "
+                f"(+down) cam=({cam.t[0]:.2f},{cam.t[1]:.2f},{cam.t[2]:.2f})m "
+                f"heading={float(pose.get('heading', 0.0)):+.2f}rad"
+            )
 
         detections = self.walkieAI.object_detection.detect(
             img, prompts=self.interested or None, return_mask=True
