@@ -48,6 +48,18 @@ def _b64_to_pil(b64: str | None) -> Image.Image | None:
     return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
 
 
+def _b64_to_mask(b64: str | None) -> "np.ndarray | None":
+    """Decode a base64 PNG mask into a 2D uint8 {0,1} array, or None.
+
+    Inverts the server's encoding (a binary mask saved as an 8-bit grayscale
+    PNG scaled by 255), thresholding back to {0, 1}.
+    """
+    if b64 is None:
+        return None
+    img = Image.open(io.BytesIO(base64.b64decode(b64))).convert("L")
+    return (np.asarray(img) > 127).astype(np.uint8)
+
+
 class WalkieBaseClient:
     """Base HTTP client shared by all sub-clients.
 
