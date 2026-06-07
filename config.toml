@@ -236,7 +236,7 @@ WALKIE_GRAPHS_PIVOT_TO_OPTIC = "0.065,0.0,0.0"
 # command sign, so if down-tilt projects objects the wrong way, set SIGN = -1.
 # OFFSET adds a constant (radians) when the reported 0 isn't actually level.
 # effective_tilt = SIGN * get_angle() + OFFSET.
-WALKIE_GRAPHS_HEAD_TILT_SIGN = "1"
+WALKIE_GRAPHS_HEAD_TILT_SIGN = "-1"
 WALKIE_GRAPHS_HEAD_TILT_OFFSET_RAD = "0"
 
 [graphs.fusion]
