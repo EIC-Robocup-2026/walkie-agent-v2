@@ -100,7 +100,7 @@ class RerunViz:
             if len(pts):
                 rr.log(f"world/objects/{n.id}/points", rr.Points3D(pts, colors=[color]))
             half = [e / 2.0 for e in n.extent]
-            label = n.class_name + (f": {n.best_caption}" if n.best_caption else "")
+            label = n.class_name
             rr.log(
                 f"world/objects/{n.id}/box",
                 rr.Boxes3D(centers=[list(n.centroid)], half_sizes=[half],
