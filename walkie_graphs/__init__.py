@@ -145,4 +145,10 @@ class WalkieGraphs:
 
     def visualize(self) -> None:
         if self.viz is not None:
-            self.viz.update(self.memory)
+            pose = None
+            if self.walkie is not None:
+                try:
+                    pose = self.walkie.status.get_position()
+                except Exception:  # noqa: BLE001
+                    pose = None
+            self.viz.update(self.memory, robot_pose=pose)

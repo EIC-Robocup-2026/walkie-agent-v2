@@ -11,6 +11,7 @@ Each :meth:`RerunViz.update` logs, in the ``world`` space:
 
 from __future__ import annotations
 
+import math
 import os
 import socket
 import urllib.parse
@@ -61,6 +62,9 @@ class RerunViz:
         self._rr = rr
         rr.init("walkie_graphs")
 
+        self._show_boxes = os.getenv("WALKIE_GRAPHS_VIZ_BOXES", "1").lower() in ("1", "true", "yes")
+        self._show_robot = os.getenv("WALKIE_GRAPHS_VIZ_ROBOT", "1").lower() in ("1", "true", "yes")
+
         if os.getenv("WALKIE_GRAPHS_RERUN_SERVE", "0").lower() not in ("1", "true", "yes"):
             rr.spawn()  # local native window on the robot
             return
@@ -89,23 +93,23 @@ class RerunViz:
             f"sudo ufw allow {web_port}/tcp && sudo ufw allow {grpc_port}/tcp"
         )
 
-    def update(self, memory) -> None:
+    def update(self, memory, robot_pose=None) -> None:
         rr = self._rr
         nodes = memory.all_objects()
-        seen_ids = set()
         for n in nodes:
-            seen_ids.add(n.id)
             color = _class_color(n.class_name)
             pts = memory.load_pcd(n.id)
             if len(pts):
                 rr.log(f"world/objects/{n.id}/points", rr.Points3D(pts, colors=[color]))
-            half = [e / 2.0 for e in n.extent]
-            label = n.class_name
-            rr.log(
-                f"world/objects/{n.id}/box",
-                rr.Boxes3D(centers=[list(n.centroid)], half_sizes=[half],
-                           labels=[label], colors=[color]),
-            )
+            if self._show_boxes:
+                half = [e / 2.0 for e in n.extent]
+                rr.log(
+                    f"world/objects/{n.id}/box",
+                    rr.Boxes3D(centers=[list(n.centroid)], half_sizes=[half],
+                               labels=[n.class_name], colors=[color]),
+                )
+
+        self._log_robot(robot_pose)
 
         centroids = {n.id: n.centroid for n in nodes}
         strips, labels = [], []
@@ -117,3 +121,26 @@ class RerunViz:
             rr.log("world/relations", rr.LineStrips3D(strips, labels=labels))
         else:
             rr.log("world/relations", rr.Clear(recursive=True))
+
+    def _log_robot(self, robot_pose) -> None:
+        """Mark the robot's position + heading on the map (z=0 ground plane)."""
+        rr = self._rr
+        if not self._show_robot or not robot_pose:
+            return
+        x = float(robot_pose.get("x", 0.0))
+        y = float(robot_pose.get("y", 0.0))
+        h = float(robot_pose.get("heading", 0.0))
+        green = (0, 200, 0)
+        rr.log(
+            "world/robot",
+            rr.Points3D([[x, y, 0.0]], radii=[0.12], colors=[green], labels=["robot"]),
+        )
+        length = 0.5
+        rr.log(
+            "world/robot/heading",
+            rr.Arrows3D(
+                origins=[[x, y, 0.0]],
+                vectors=[[math.cos(h) * length, math.sin(h) * length, 0.0]],
+                colors=[green],
+            ),
+        )

@@ -192,6 +192,9 @@ WALKIE_GRAPHS_EXCLUDE_CLASSES = "person"
 WALKIE_GRAPHS_CAPTION_CLASSES = ""
 # Live 3D visualization backend: none | rerun. rerun needs `uv sync --extra graphs`.
 WALKIE_GRAPHS_VIZ = "none"
+# What to draw in the Rerun viewer. Point clouds are always shown.
+WALKIE_GRAPHS_VIZ_BOXES = "1"   # 0 = hide per-object bounding boxes
+WALKIE_GRAPHS_VIZ_ROBOT = "1"   # 0 = hide the robot position + heading marker
 # Rerun viewer reachability. 0 = spawn a native window ON THE ROBOT (needs a
 # display, local only). 1 = serve a browser viewer + gRPC data stream bound to
 # 0.0.0.0 so any computer on the LAN can watch (prints the URL on startup).

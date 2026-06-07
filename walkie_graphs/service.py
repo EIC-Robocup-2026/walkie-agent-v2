@@ -116,7 +116,7 @@ class WalkieGraphsService(threading.Thread):
                     self.memory.prune()
                 if self.viz is not None and touched is not None:
                     try:
-                        self.viz.update(self.memory)
+                        self.viz.update(self.memory, robot_pose=self.walkie.status.get_position())
                     except Exception as e:  # noqa: BLE001
                         self._log(f"viz update failed: {e}")
             except Exception as e:  # noqa: BLE001 — one bad tick must not kill the thread
