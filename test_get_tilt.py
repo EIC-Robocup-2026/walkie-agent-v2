@@ -51,9 +51,9 @@ def get_robot() -> WalkieRobot:
         camera_port=ZENOH_PORT,
     )
 
+robot = get_robot()
+print("Robot connected:", robot.is_connected)
 while True:
-    robot = get_robot()
-    print("Robot connected:", robot.is_connected)
     # Print tilt
     print("Tilt:", robot.head.get_angle())
     time.sleep(0.5)
