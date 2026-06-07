@@ -74,143 +74,6 @@ def build_model():
     )
 
 
-def _flag(name: str, default: str = "0") -> bool:
-    return os.getenv(name, default).lower() in ("1", "true", "yes")
-
-
-_DISABLED = ("", "0", "off", "none", "false", "no")
-
-
-def _opt_float(name: str, default: str = "") -> float | None:
-    """Parse an env float, treating empty/0/off/none as 'disabled' (None)."""
-    raw = os.getenv(name, default).strip()
-    if raw.lower() in _DISABLED:
-        return None
-    try:
-        return float(raw)
-    except ValueError:
-        return None
-
-
-def _opt_int(name: str, default: str = "") -> int | None:
-    """Parse an env int, treating empty/0/off/none as 'disabled' (None)."""
-    raw = os.getenv(name, default).strip()
-    if raw.lower() in _DISABLED:
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        return None
-
-
-def _lan_ip() -> str | None:
-    """Best-effort primary LAN IPv4 of this machine.
-
-    Opens a UDP socket toward a public address and reads back the local end the
-    OS picked — no packet is actually sent, it just forces interface selection.
-    Returns ``None`` (e.g. fully offline) so callers can fall back gracefully.
-    """
-    import socket
-
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))
-        return s.getsockname()[0]
-    except OSError:
-        return None
-    finally:
-        s.close()
-
-
-_viewer_thread = None  # set on first maybe_start_viewer; guards re-starts.
-
-
-def _register_viewer_stores(stores: list[tuple[str, object]]) -> None:
-    """Swap the viewer's STORES list without restarting the Flask thread.
-
-    Routes consult ``cv.STORES`` per-request, so rebuilding it is enough for the
-    sidebar / overview to pick up a newly-added directory (e.g. ``chroma_db_scene``
-    after run_ready_stage creates the SceneStore). No-op when CHROMA_VIEWER_AUTOSTART
-    is off or the viewer module isn't importable.
-    """
-    if not _flag("CHROMA_VIEWER_AUTOSTART", "1"):
-        return
-    try:
-        from tools import chroma_viewer as cv
-    except Exception:  # noqa: BLE001 — viewer optional
-        return
-    cv.build_stores_inprocess(stores)
-    cv._build_frame_roots(
-        [d for d, _ in stores], os.getenv("SCENE_FRAMES_DIR", "frames")
-    )
-
-
-def maybe_start_viewer(stores: list[tuple[str, object]]):
-    """Start the read-only Chroma web viewer in a daemon thread, in-process.
-
-    Running it inside *this* process — and reusing the robot's own chromadb
-    clients (``stores`` is ``(directory, client)`` pairs) — is what makes it both
-    live and safe. A second OS process opening the same dir would spin up its own
-    HNSW index and corrupt the store under the robot's concurrent writes (that's
-    why the standalone ``tools.chroma_viewer`` defaults to a frozen snapshot
-    copy). Sharing the one live client means there's a single index, so browsing
-    reflects writes instantly and can't desync.
-
-    Idempotent: calling again only swaps the STORES list (so the scene store
-    can be added once run_ready_stage builds it) — the Flask thread keeps running.
-
-    Returns the started thread, or ``None`` when disabled / unstartable. Call it
-    after the stores are built so their clients exist.
-    """
-    global _viewer_thread
-    if not _flag("CHROMA_VIEWER_AUTOSTART", "1"):
-        return None
-    if _viewer_thread is not None:
-        _register_viewer_stores(stores)
-        return _viewer_thread
-    try:
-        import threading
-
-        from tools import chroma_viewer as cv
-    except Exception as e:  # noqa: BLE001 — never let the viewer block the robot
-        print(f"[viewer] not started ({e!r})", file=sys.stderr)
-        return None
-
-    host = os.getenv("CHROMA_VIEWER_HOST", "0.0.0.0")
-    port = int(os.getenv("CHROMA_VIEWER_PORT", "8500"))
-    cv.build_stores_inprocess(stores)
-    cv._build_frame_roots(
-        [d for d, _ in stores], os.getenv("SCENE_FRAMES_DIR", "frames")
-    )
-    # Werkzeug logs a line per request at INFO; keep the command prompt clean.
-    logging.getLogger("werkzeug").setLevel(logging.WARNING)
-
-    def _serve() -> None:
-        try:
-            cv.app.run(
-                host=host, port=port, debug=False, use_reloader=False, threaded=True
-            )
-        except Exception:  # noqa: BLE001 — a viewer crash must not take down the robot
-            _log.exception("chroma viewer thread crashed")
-
-    t = threading.Thread(target=_serve, daemon=True, name="ChromaViewer")
-    t.start()
-    _viewer_thread = t
-    print(
-        f"[viewer] live DB viewer on http://{host}:{port} "
-        f"(in-process — safe to browse while the robot writes)"
-    )
-    # A wildcard bind (0.0.0.0/::) is reachable across the LAN but prints an
-    # unusable host — resolve and log the real address so teammates know the URL.
-    if host in ("0.0.0.0", "::", ""):
-        lan_ip = _lan_ip()
-        if lan_ip:
-            print(f"[viewer] LAN: open http://{lan_ip}:{port} from another machine")
-        else:
-            print("[viewer] LAN IP unavailable (offline?) — use this host's IP")
-    return t
-
-
 def run_ready_stage(walkieAI, walkie, model) -> None:
     perception = PerceptionService(
         walkieAI,
@@ -287,8 +150,6 @@ def run_ready_stage(walkieAI, walkie, model) -> None:
         # never dies and the next launch finds port 8500 still held. close()
         # disconnects the robot, which stops those threads.
         perception.stop_and_join(timeout=5)
-        if scene_service is not None:
-            scene_service.stop_and_join(timeout=5)
         walkie.close()
         print("[main] shutdown complete.")
 
@@ -321,11 +182,6 @@ def main() -> None:
         perception_path=os.getenv("PERCEPTION_PATH", "perception.json"),
     )
     model = build_model()
-
-    # Start the in-process Chroma viewer NOW so it's up from the first second;
-    # run_ready_stage re-registers it with the SceneStore client a moment later
-    # (idempotent).
-    maybe_start_viewer([])
 
     # No explore stage: the robot is ready immediately. The scene DB builds
     # itself in the background (ScenePerceptionService inside run_ready_stage)
