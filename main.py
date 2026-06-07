@@ -19,6 +19,7 @@ from agents.walkie_agent import create_walkie_main_agent
 from client import WalkieAIClient
 from interfaces.walkie_interface import WalkieInterface
 from services import PerceptionService
+from walkie_graphs import WalkieGraphs
 
 
 ZENOH_PORT = 7447
@@ -96,11 +97,18 @@ def run_ready_stage(walkieAI, walkie, model) -> None:
     )
     perception.start()
 
+    # walkie_graphs: 3D scene-graph spatial memory. Built in the background as the
+    # robot looks around; the Database sub-agent queries it. Constructed regardless
+    # so the agent can read existing memory; the observer thread only runs when
+    # WALKIE_GRAPHS_ENABLED is on.
+    graphs = WalkieGraphs(model=model, walkieAI=walkieAI, walkie=walkie)
+    if os.getenv("WALKIE_GRAPHS_ENABLED", "1").lower() in ("1", "true", "yes"):
+        graphs.start()
 
     actuator = create_actuator_agent(model, walkieAI, walkie)
     vision = create_vision_agent(model, walkieAI, walkie)
     database = create_database_agent(
-        model, walkieAI, walkie
+        model, walkieAI, walkie, graphs=graphs
     )
     walkie_agent = create_walkie_main_agent(
         model, walkieAI, walkie, actuator, vision, database
@@ -150,6 +158,7 @@ def run_ready_stage(walkieAI, walkie, model) -> None:
         # never dies and the next launch finds port 8500 still held. close()
         # disconnects the robot, which stops those threads.
         perception.stop_and_join(timeout=5)
+        graphs.stop()
         walkie.close()
         print("[main] shutdown complete.")
 
