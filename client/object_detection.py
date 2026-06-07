@@ -7,13 +7,13 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from .base import WalkieBaseClient, _b64_to_pil, _numpy_to_bytes, _pil_to_bytes
+from .base import WalkieBaseClient, _b64_to_mask, _numpy_to_bytes, _pil_to_bytes
 
 @dataclass
 class DetectedObject:
     """A single detected object from an image."""
 
-    mask: "tuple[tuple[int, int], ...] | None"  # (y, x) coordinates or None
+    mask: "np.ndarray | None"  # 2D uint8 (H, W) {0,1} segmentation mask, or None
     bbox: tuple[int, int, int, int]  # (x1, y1, x2, y2)
     area_ratio: float  # fraction of image area
     # Optional: set by providers that output class and confidence (e.g. YOLO)
@@ -41,6 +41,8 @@ class ObjectDetectionClient(WalkieBaseClient):
         image: Image.Image | np.ndarray,
         max_size: int = 640,
         jpeg_quality: int = 85,
+        prompts: list[str] | None = None,
+        return_mask: bool = False,
     ) -> list[DetectedObject]:
         """Detect objects in *image*.
 
@@ -51,6 +53,12 @@ class ObjectDetectionClient(WalkieBaseClient):
                       no accuracy but costs encoding time and bandwidth.
             jpeg_quality: JPEG quality (1-95). 85 is a good balance of speed
                           vs. detection accuracy.
+            prompts: Optional open-vocabulary text prompts (noun phrases). Used
+                     by concept providers (SAM3 / YOLOE); ignored by YOLO.
+            return_mask: Request a segmentation mask per detection. When True,
+                     each :class:`DetectedObject.mask` is a 2D uint8 {0,1} numpy
+                     array (where the provider/model supports masks); otherwise
+                     ``mask`` is ``None``.
 
         Returns:
             List of :class:`~services.object_detection.base.DetectedObject`.
@@ -71,9 +79,16 @@ class ObjectDetectionClient(WalkieBaseClient):
             #     image = image.resize((int(w * scale), int(h * scale)), Image.BILINEAR)
             image_bytes = _pil_to_bytes(image, fmt="JPEG", quality=jpeg_quality)
 
+        # Repeated "prompts" fields (the server also accepts a comma-separated
+        # single value); "return_mask" as a string flag.
+        form: list[tuple] = [("return_mask", "true" if return_mask else "false")]
+        if prompts:
+            form.extend(("prompts", p) for p in prompts)
+
         data = self._post_files(
             "/object-detection/detect",
             files={"image": ("image.jpg", image_bytes, "image/jpeg")},
+            data=form,
         )
         return [_deserialize_detection(d) for d in data]
 
@@ -90,5 +105,7 @@ def _deserialize_detection(d: dict) -> DetectedObject:
         class_id=d.get("class_id"),
         class_name=d.get("class_name"),
         confidence=d.get("confidence"),
-        mask=None,  # mask_b64 is a PNG-encoded mask — skip reconstruction for now
+        # Decode the base64 PNG mask into a 2D uint8 {0,1} array (None when the
+        # server did not return one, e.g. return_mask=false).
+        mask=_b64_to_mask(d.get("mask_b64")),
     )
