@@ -183,8 +183,9 @@ WALKIE_GRAPHS_ENABLED = "1"
 WALKIE_GRAPHS_INTERVAL_SEC = "3.0"
 # "Interested classes": one comma-separated list that drives the whole module —
 # passed as open-vocab prompts to the detection server, and the scope of what
-# enters the graph. Empty = detect/keep everything the detector emits.
-WALKIE_GRAPHS_INTERESTED_CLASSES = ""
+# enters the graph. Empty = detect/keep everything the detector emits. Class names
+# may contain spaces (split on commas). Grouped here by category for readability.
+WALKIE_GRAPHS_INTERESTED_CLASSES = "cloth,sponge,bowl,cup,fork,knife,plate,spoon,coffee creamer,coke,ice tea,milk,orange juice,red bull,water bottle,bread,cornflakes,instant noodles,potato,tomato soup,apple,avocado,lemon,orange,chips,cookies,gum,mixed nuts,pringles,hand creme,soap,toothpaste,large shelf,dish rack,shelf,monitor,bed,pillow"
 # Classes to always drop before lift/embed/store. Moving objects (people) can't
 # be position-deduped, so they'd spawn a node every tick — keep them out.
 WALKIE_GRAPHS_EXCLUDE_CLASSES = "person"
