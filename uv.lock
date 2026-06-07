@@ -3965,7 +3965,7 @@ provides-extras = ["dev", "clip", "graphs"]
 [[package]]
 name = "walkie-sdk"
 version = "0.2.0"
-source = { git = "https://github.com/EIC-Robocup-2026/walkie-sdk.git#3f1578fccac8a45cb210db518ef2740d2696835b" }
+source = { git = "https://github.com/EIC-Robocup-2026/walkie-sdk.git#b1b6ade4c76da34a21b07e049541bc42caa598fd" }
 dependencies = [
     { name = "eclipse-zenoh" },
     { name = "numpy" },
