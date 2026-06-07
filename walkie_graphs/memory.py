@@ -534,6 +534,15 @@ class GraphMemory:
                     e["src"], e["dst"], key=e["predicate"], weight=e.get("weight", 1.0)
                 )
 
+    def all_relations(self) -> list[Relation]:
+        with self._lock:
+            if self._graph is None:
+                return []
+            return [
+                Relation(u, v, k, data.get("weight", 1.0))
+                for u, v, k, data in self._graph.edges(keys=True, data=True)
+            ]
+
     def relations_of(self, node_id: str) -> list[Relation]:
         with self._lock:
             if self._graph is None or node_id not in self._graph:
