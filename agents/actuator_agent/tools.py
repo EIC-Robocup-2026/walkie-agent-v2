@@ -47,7 +47,8 @@ def make_actuator_tools(walkie: WalkieInterface, walkieAI, *, agent_name: str = 
         result = walkie.nav.go_to(x=x, y=y, heading=heading_rad, blocking=True)
         if _pause_after_walk():
             input("[actuator] Press Enter to continue...")
-        return f"Robot moved successfully (status={result})"
+        
+        return f"Robot moved (status={result})"
 
     @sequential_tool
     @tool(parse_docstring=True)
@@ -81,7 +82,7 @@ def make_actuator_tools(walkie: WalkieInterface, walkieAI, *, agent_name: str = 
         )
         if _pause_after_walk():
             input("[actuator] Press Enter to continue...")
-        return f"Robot moved successfully (status={result})"
+        return f"Robot moved (status={result})"
 
     @parallelable_tool
     @tool
