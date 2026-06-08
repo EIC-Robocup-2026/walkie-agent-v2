@@ -112,6 +112,8 @@ class WalkieGraphsService(threading.Thread):
         self._debug = os.getenv("WALKIE_GRAPHS_DEBUG", "0").lower() in ("1", "true", "yes")
         self._intr_cache: dict[tuple[int, int], Intrinsics] = {}
         self._last_cam = None  # latest CameraPose, for the visualizer
+        self._tick = 0  # ingest_frame call counter, drives the relation/prune/viz cadence
+        self._last_touched: list = []  # nodes upserted by the last ingest_frame (for observe())
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -127,23 +129,11 @@ class WalkieGraphsService(threading.Thread):
 
     def run(self) -> None:
         self._log(f"started (interval={self.interval}s)")
-        tick = 0
         while not self._stop_event.is_set():
             try:
-                touched = self._observe_once()
-                tick += 1
-                if self.relation_every_n > 0 and tick % self.relation_every_n == 0:
-                    self.memory.derive_relations()
-                    self.memory.prune()
-                if self.viz is not None and touched is not None:
-                    try:
-                        self.viz.update(
-                            self.memory,
-                            robot_pose=self.walkie.status.get_position(),
-                            cam_pose=self._last_cam,
-                        )
-                    except Exception as e:  # noqa: BLE001
-                        self._log(f"viz update failed: {e}")
+                # _observe_once -> ingest_frame(tick=True) handles the relation/prune/viz
+                # cadence, so the standalone thread and perception's driver share one path.
+                self._observe_once()
             except Exception as e:  # noqa: BLE001 — one bad tick must not kill the thread
                 self._log(f"tick error: {e}")
             self._stop_event.wait(self.interval)
@@ -153,7 +143,12 @@ class WalkieGraphsService(threading.Thread):
     # One observation
     # ------------------------------------------------------------------
     def _observe_once(self) -> list:
-        """Capture one RGB-D frame and fold every kept detection into the graph."""
+        """Capture one RGB-D frame and fold every kept detection into the graph.
+
+        Standalone path — used by the background thread and the ``observe()`` facade.
+        In production, perception captures + detects once per frame and calls
+        :meth:`ingest_frame` directly, so the detector never runs twice on one frame.
+        """
         depth = self._depth()
         if depth is None:
             return []
@@ -162,36 +157,75 @@ class WalkieGraphsService(threading.Thread):
         except Exception as e:  # noqa: BLE001
             self._log(f"capture failed: {e}")
             return []
-
-        intr = self._intrinsics(depth.shape[1], depth.shape[0])
-        cam = self._camera_pose()
-        if cam is None:
-            return []
-        self._last_cam = cam
-
         detections = self.walkieAI.object_detection.detect(
             img, prompts=self.interested or None, return_mask=True
         )
+        self.ingest_frame(img, detections, depth, tick=True)
+        return self._last_touched
 
-        pending = []  # (detected, points, crop)
-        for d in detections:
-            if not self._keep(d.class_name or ""):
-                continue
-            if float(d.confidence or 0.0) < self.min_confidence:
-                continue
+    def ingest_frame(self, img, detections, depth, *, tick: bool = True) -> dict[int, dict]:
+        """Fold the kept subset of one captured frame's ``detections`` into the graph.
+
+        ``img`` is the PIL RGB frame the detections came from; ``detections`` is a list
+        of ``DetectedObject`` (masks required for 3D — request ``return_mask=True``);
+        ``depth`` is the aligned depth array (H×W float32 metres, NaN invalid) or None.
+
+        Returns a per-detection dict keyed by index into ``detections``::
+
+            {i: {"centroid": (x, y, z) | None, "caption": str}}
+
+        A centroid is returned for **every** detection that deprojects, so the caller
+        (perception) can fill ``position_3d`` for the whole live view; ``None`` when the
+        detection has no mask, depth/pose is missing, or no masked pixel has valid depth.
+        Only detections passing ``_keep`` + ``min_confidence`` + ``min_points`` are
+        upserted into :class:`GraphMemory` — ``min_points`` gates graph entry only, not the
+        returned centroid (a sparse cloud still gives a usable position but is too thin to
+        fuse durably). When ``tick`` is true this advances the relation/prune/viz cadence.
+        """
+        # Default: unknown position, no caption, for every detection.
+        result: dict[int, dict] = {
+            i: {"centroid": None, "caption": ""} for i in range(len(detections))
+        }
+
+        cam = self._camera_pose() if depth is not None else None
+        if cam is None:
+            # No geometry this frame: report unknown positions, upsert nothing, but still
+            # advance the cadence so periodic maintenance keeps ticking.
+            self._last_touched = []
+            self._maybe_tick(tick)
+            return result
+        self._last_cam = cam
+        intr = self._intrinsics(depth.shape[1], depth.shape[0])
+
+        # Deproject every masked detection once: centroid for the live view, and (when
+        # dense enough + a kept class) the full cloud for graph upsert.
+        pending = []  # (orig_index, detected, points, crop)
+        for i, d in enumerate(detections):
             if d.mask is None:
                 continue
             pts = deproject_mask(
                 d.mask, depth, intr, cam, voxel=self.voxel_m, max_points=self.max_points
             )
-            if len(pts) < self.min_points:
+            if len(pts) == 0:
                 continue
-            pending.append((d, pts, _crop_pil(img, d.bbox)))
+            c = pts.mean(axis=0)
+            result[i]["centroid"] = (float(c[0]), float(c[1]), float(c[2]))
+            if (
+                self._keep(d.class_name or "")
+                and float(d.confidence or 0.0) >= self.min_confidence
+                and len(pts) >= self.min_points
+            ):
+                pending.append((i, d, pts, _crop_pil(img, d.bbox)))
 
-        captions = self._caption([p[0] for p in pending], [p[2] for p in pending])
+        # Single caption pass over the captionable kept subset (reuses _caption's policy),
+        # mapped back to original detection indices.
+        captions = self._caption([p[1] for p in pending], [p[3] for p in pending])
+        for local, cap in captions.items():
+            result[pending[local][0]]["caption"] = cap
 
+        # Embed + upsert the kept subset.
         touched = []
-        for i, (d, pts, crop) in enumerate(pending):
+        for i, d, pts, crop in pending:
             det = Detection3D(
                 class_name=d.class_name or "object",
                 class_id=d.class_id,
@@ -199,12 +233,32 @@ class WalkieGraphsService(threading.Thread):
                 bbox_xyxy=tuple(int(v) for v in d.bbox),
                 points_world=pts,
                 clip_emb=self._embed(crop),
-                caption=captions.get(i, ""),
+                caption=result[i]["caption"],
                 ts=time.time(),
                 crop=crop,
             )
             touched.append(self.memory.upsert(det))
-        return touched
+        self._last_touched = touched
+        self._maybe_tick(tick, touched=touched)
+        return result
+
+    def _maybe_tick(self, tick: bool, *, touched: list | None = None) -> None:
+        """Advance the cadence counter; run relations/prune + viz every Nth ingest."""
+        if not tick:
+            return
+        self._tick += 1
+        if self.relation_every_n > 0 and self._tick % self.relation_every_n == 0:
+            self.memory.derive_relations()
+            self.memory.prune()
+        if self.viz is not None and touched is not None:
+            try:
+                self.viz.update(
+                    self.memory,
+                    robot_pose=self.walkie.status.get_position(),
+                    cam_pose=self._last_cam,
+                )
+            except Exception as e:  # noqa: BLE001
+                self._log(f"viz update failed: {e}")
 
     # ------------------------------------------------------------------
     # Per-class scoping

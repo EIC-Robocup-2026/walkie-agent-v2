@@ -120,6 +120,25 @@ class WalkieGraphs:
         return touched
 
     # ------------------------------------------------------------------
+    # Externally-driven ingestion (perception owns capture+detect in production)
+    # ------------------------------------------------------------------
+    def detection_prompts(self) -> Optional[list[str]]:
+        """The open-vocabulary prompt list (interested classes) for the shared detector.
+
+        Perception detects once per frame with these prompts, then feeds the result to
+        :meth:`ingest_frame` — so the detector runs once instead of once here and once in
+        perception. ``None`` when no interested classes are configured."""
+        return self._ensure_service().interested or None
+
+    def ingest_frame(self, img, detections, depth, *, tick: bool = True) -> dict[int, dict]:
+        """Fold one externally-captured frame into the graph; return per-detection
+        ``{"centroid", "caption"}`` (see :meth:`WalkieGraphsService.ingest_frame`).
+
+        Builds the service lazily but does **not** start its thread — perception drives it.
+        """
+        return self._ensure_service().ingest_frame(img, detections, depth, tick=tick)
+
+    # ------------------------------------------------------------------
     # Query passthroughs (used by the database agent)
     # ------------------------------------------------------------------
     def query_text(self, query: str, k: int = 5, *, near=None, radius=None) -> list[ObjectNode]:

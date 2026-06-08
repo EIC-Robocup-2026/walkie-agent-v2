@@ -76,34 +76,22 @@ def build_model():
 
 
 def run_ready_stage(walkieAI, walkie, model) -> None:
+    # walkie_graphs: 3D scene-graph spatial memory the Database sub-agent queries. Built
+    # regardless so the agent can read existing memory. Its background observer thread is
+    # NOT started — perception runs the single per-frame detection and feeds each frame to
+    # graphs.ingest_frame (which owns geometry/caption/embed/upsert), so the detector runs
+    # once instead of once here and once in perception. WALKIE_GRAPHS_ENABLED gates whether
+    # perception feeds the graph (and thus whether objects get 3D positions + captions).
+    graphs = WalkieGraphs(model=model, walkieAI=walkieAI, walkie=walkie)
+
     perception = PerceptionService(
         walkieAI,
         walkie,
         RobotContext.get().perception_path,
         interval=float(os.getenv("PERCEPTION_INTERVAL_SEC", "2.0")),
-        caption_objects=os.getenv("PERCEPTION_CAPTION_OBJECTS", "0").lower() in ("1", "true", "yes"),
-        # Empty = caption every object; a non-empty comma list restricts to those
-        # classes. Strip blanks so the default "" parses to [] (caption all), not
-        # [""] (which matched nothing — captions came out empty).
-        caption_filter=[
-            c.strip()
-            for c in os.getenv("PERCEPTION_CAPTION_FILTER", "").split(",")
-            if c.strip()
-        ],
-        # Depth-lift (walkie.tools.bboxes_to_positions) timeout. The SDK logs
-        # "[Tools] Service call timed out after Ns" when the ROS-3D node is
-        # slower than this; 2s was too tight, so default to 5s.
-        position_timeout=float(os.getenv("PERCEPTION_POSITION_TIMEOUT_SEC", "5.0")),
+        graphs=graphs,
     )
     perception.start()
-
-    # walkie_graphs: 3D scene-graph spatial memory. Built in the background as the
-    # robot looks around; the Database sub-agent queries it. Constructed regardless
-    # so the agent can read existing memory; the observer thread only runs when
-    # WALKIE_GRAPHS_ENABLED is on.
-    graphs = WalkieGraphs(model=model, walkieAI=walkieAI, walkie=walkie)
-    if os.getenv("WALKIE_GRAPHS_ENABLED", "1").lower() in ("1", "true", "yes"):
-        graphs.start()
 
     actuator = create_actuator_agent(model, walkieAI, walkie)
     vision = create_vision_agent(model, walkieAI, walkie)

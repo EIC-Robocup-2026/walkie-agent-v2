@@ -97,6 +97,7 @@ class PerceptionService(threading.Thread):
         output_path: str | Path,
         *,
         interval: float = 2.0,
+        graphs=None,
         caption_objects: bool = True,
         caption_filter: list[str] = [],
         position_timeout: float = 2.0,
@@ -107,6 +108,21 @@ class PerceptionService(threading.Thread):
         self.walkie = walkie
         self.output_path = Path(output_path)
         self.interval = interval
+        # The scene-graph facade. Perception runs the single (open-vocab, masked) detection
+        # and hands each frame to graphs.ingest_frame, which owns geometry/caption/embed/
+        # upsert and returns per-object world centroids + captions for the snapshot.
+        self.graphs = graphs
+        self._graphs_enabled = os.getenv("WALKIE_GRAPHS_ENABLED", "1").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        # Open-vocabulary prompt list shared with the graph (its interested classes). Masks
+        # — needed for the 3D centroids — come from the prompted provider, so this is also
+        # what makes position_3d/caption available. None => detector default vocabulary.
+        self._prompts = graphs.detection_prompts() if graphs is not None else None
+        # caption_objects/caption_filter/position_timeout are retained for signature
+        # stability but unused: captioning + 3D both live in graphs.ingest_frame now.
         self.caption_objects = caption_objects
         self.caption_filter = caption_filter
         self.position_timeout = position_timeout
@@ -132,64 +148,50 @@ class PerceptionService(threading.Thread):
             self._stop_event.wait(self.interval)
         self._log("stopped.")
 
+    def _depth(self):
+        """Latest aligned depth frame (H×W float32 metres, NaN invalid), or None.
+
+        Captured back-to-back with the colour image so a detection's mask deprojects
+        against the matching depth. None when depth is unavailable — positions then
+        degrade to ``null`` while the rest of the snapshot still writes.
+        """
+        try:
+            return self.walkie.robot.camera.get_depth()
+        except Exception as e:  # noqa: BLE001
+            self._log(f"depth unavailable: {e}")
+            return None
+
     def _snapshot(self) -> dict:
         img = self.walkie.camera.capture_pil()
+        depth = self._depth()  # back-to-back with the image so mask↔depth align
         image_width, image_height = img.size
         pose = self.walkie.status.get_position() or {"x": 0.0, "y": 0.0, "heading": 0.0}
         robot_heading = float(pose.get("heading", 0.0))
-        objects = self.walkieAI.object_detection.detect(img)
+
+        # One open-vocabulary, masked detection per frame — the same call the scene graph
+        # used to make on its own. Masks feed the 3D deprojection; prompts scope it to the
+        # task vocabulary (people come from the separate pose_estimation path below).
+        objects = self.walkieAI.object_detection.detect(
+            img, prompts=self._prompts, return_mask=True
+        )
         people = self.walkieAI.pose_estimation.estimate(img)
 
-        # Lift bboxes to 3D in one batched call.
-        positions: list = []
-        if objects:
+        # Hand the frame to the graph: it owns geometry/caption/embed/upsert and returns
+        # per-object world centroids + captions (keyed by index into `objects`). Perception
+        # just consumes that for the snapshot — so detection and captioning run once total.
+        graph_result: dict[int, dict] = {}
+        if self.graphs is not None and self._graphs_enabled:
             try:
-                # print(objects)
-                positions = (
-                    self.walkie.tools.bboxes_to_positions(
-                        [_xyxy_to_cxcywh(o.bbox) for o in objects],
-                        timeout=self.position_timeout,
-                    )
-                    or []
-                )
-                # print(positions)
-            except Exception as e:  # noqa: BLE001
-                self._log(f"bboxes_to_positions failed: {e}")
-                positions = []
+                graph_result = self.graphs.ingest_frame(img, objects, depth) or {}
+            except Exception as e:  # noqa: BLE001 — a graph hiccup must not stop the snapshot
+                self._log(f"graphs ingest failed: {e}")
+                graph_result = {}
 
         obj_records = []
-
-        # Caption objects
-        captions_by_index: dict[int, str] = {}
-        if self.caption_objects:
-            # Empty filter = caption every object; a non-empty filter restricts
-            # captioning to the listed classes. Matched case-insensitively so it
-            # doesn't depend on whatever casing the detector emits ("Person" vs
-            # "person").
-            allow = {c.strip().lower() for c in self.caption_filter if c.strip()}
-            imgs = []
-            prompts = []
-            caption_indices: list[int] = []
-            for i, o in enumerate(objects):
-                cls = o.class_name or ""
-                if allow and cls.lower() not in allow:
-                    continue
-                cropped_img = _crop_image(img, o.bbox)
-                if cls.lower() == "person":
-                    prompt = "Describe the person actions and clothes."
-                else:
-                    prompt = f"Describe the {cls}."
-                imgs.append(cropped_img)
-                prompts.append(prompt)
-                caption_indices.append(i)
-            if imgs:
-                captions = self.walkieAI.image_caption.caption_batch(imgs, prompts=prompts)
-                for idx, cap in zip(caption_indices, captions):
-                    captions_by_index[idx] = cap or ""
-
         for i, o in enumerate(objects):
-            pos = positions[i] if i < len(positions) and positions[i] else None
-            caption = captions_by_index.get(i, "")
+            r = graph_result.get(i) or {}
+            pos = r.get("centroid")
+            caption = r.get("caption", "")
             frame_h, frame_v = _frame_position(o.bbox, image_width, image_height)
             obj_records.append(
                 {
