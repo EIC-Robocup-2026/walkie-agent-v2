@@ -6,7 +6,8 @@ so the core module and tests never need it. Install with ``uv sync --extra graph
 Each :meth:`RerunViz.update` logs, in the ``world`` space:
 - one colored point cloud per object (colored by class),
 - one labelled AABB per object (class + caption),
-- the geometric relations as labelled line segments between object centroids.
+- the geometric relations as labelled line segments between object centroids,
+- the robot position + heading, and the camera's 3D position + look direction.
 """
 
 from __future__ import annotations
@@ -64,6 +65,7 @@ class RerunViz:
 
         self._show_boxes = os.getenv("WALKIE_GRAPHS_VIZ_BOXES", "1").lower() in ("1", "true", "yes")
         self._show_robot = os.getenv("WALKIE_GRAPHS_VIZ_ROBOT", "1").lower() in ("1", "true", "yes")
+        self._show_camera = os.getenv("WALKIE_GRAPHS_VIZ_CAMERA", "1").lower() in ("1", "true", "yes")
 
         if os.getenv("WALKIE_GRAPHS_RERUN_SERVE", "0").lower() not in ("1", "true", "yes"):
             rr.spawn()  # local native window on the robot
@@ -93,7 +95,7 @@ class RerunViz:
             f"sudo ufw allow {web_port}/tcp && sudo ufw allow {grpc_port}/tcp"
         )
 
-    def update(self, memory, robot_pose=None) -> None:
+    def update(self, memory, robot_pose=None, cam_pose=None) -> None:
         rr = self._rr
         nodes = memory.all_objects()
         for n in nodes:
@@ -110,6 +112,7 @@ class RerunViz:
                 )
 
         self._log_robot(robot_pose)
+        self._log_camera(cam_pose)
 
         centroids = {n.id: n.centroid for n in nodes}
         strips, labels = [], []
@@ -143,4 +146,26 @@ class RerunViz:
                 vectors=[[math.cos(h) * length, math.sin(h) * length, 0.0]],
                 colors=[green],
             ),
+        )
+
+    def _log_camera(self, cam_pose) -> None:
+        """Mark the camera's 3D world position + viewing direction.
+
+        ``cam_pose`` is a :class:`~walkie_graphs.geometry.CameraPose`: ``t`` is the
+        optical center in world coords, and the camera-local +x axis is "forward",
+        so ``R @ [1,0,0]`` is the world-frame look direction.
+        """
+        rr = self._rr
+        if not self._show_camera or cam_pose is None:
+            return
+        t = np.asarray(cam_pose.t, dtype=float)
+        forward = np.asarray(cam_pose.R, dtype=float) @ np.array([1.0, 0.0, 0.0])
+        cyan = (0, 200, 220)
+        rr.log(
+            "world/camera",
+            rr.Points3D([t.tolist()], radii=[0.08], colors=[cyan], labels=["camera"]),
+        )
+        rr.log(
+            "world/camera/forward",
+            rr.Arrows3D(origins=[t.tolist()], vectors=[(forward * 0.5).tolist()], colors=[cyan]),
         )

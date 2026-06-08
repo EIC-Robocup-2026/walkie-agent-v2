@@ -110,6 +110,7 @@ class WalkieGraphsService(threading.Thread):
         self._tf_timeout = float(os.getenv("WALKIE_GRAPHS_TF_TIMEOUT_SEC", "1.0"))
         self._debug = os.getenv("WALKIE_GRAPHS_DEBUG", "0").lower() in ("1", "true", "yes")
         self._intr_cache: dict[tuple[int, int], Intrinsics] = {}
+        self._last_cam = None  # latest CameraPose, for the visualizer
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -135,7 +136,11 @@ class WalkieGraphsService(threading.Thread):
                     self.memory.prune()
                 if self.viz is not None and touched is not None:
                     try:
-                        self.viz.update(self.memory, robot_pose=self.walkie.status.get_position())
+                        self.viz.update(
+                            self.memory,
+                            robot_pose=self.walkie.status.get_position(),
+                            cam_pose=self._last_cam,
+                        )
                     except Exception as e:  # noqa: BLE001
                         self._log(f"viz update failed: {e}")
             except Exception as e:  # noqa: BLE001 — one bad tick must not kill the thread
@@ -161,6 +166,7 @@ class WalkieGraphsService(threading.Thread):
         cam = self._camera_pose()
         if cam is None:
             return []
+        self._last_cam = cam
 
         detections = self.walkieAI.object_detection.detect(
             img, prompts=self.interested or None, return_mask=True
