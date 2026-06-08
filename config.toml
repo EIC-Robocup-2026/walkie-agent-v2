@@ -207,6 +207,9 @@ WALKIE_GRAPHS_CAPTION_CLASSES = ""
 WALKIE_GRAPHS_VIZ = "none"
 # What to draw in the Rerun viewer. Point clouds are always shown.
 WALKIE_GRAPHS_VIZ_BOXES = "0"   # 0 = hide per-object bounding boxes
+# Per-object class-name labels, independent of boxes. With boxes ON the label
+# rides on the box; with boxes OFF the label is anchored to the object centroid.
+WALKIE_GRAPHS_VIZ_LABELS = "1"  # 0 = hide per-object class-name labels
 WALKIE_GRAPHS_VIZ_ROBOT = "1"   # 0 = hide the robot position + heading marker
 WALKIE_GRAPHS_VIZ_CAMERA = "1"  # 0 = hide the camera position + look-direction marker
 # Rerun viewer reachability. 0 = spawn a native window ON THE ROBOT (needs a

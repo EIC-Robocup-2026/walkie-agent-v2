@@ -5,7 +5,9 @@ so the core module and tests never need it. Install with ``uv sync --extra graph
 
 Each :meth:`RerunViz.update` logs, in the ``world`` space:
 - one colored point cloud per object (colored by class),
-- one labelled AABB per object (class + caption),
+- one AABB per object (``WALKIE_GRAPHS_VIZ_BOXES``), labelled with the class name
+  (``WALKIE_GRAPHS_VIZ_LABELS``); when boxes are off but labels on, the class name
+  is anchored to the object centroid as a standalone marker instead,
 - the geometric relations as labelled line segments between object centroids,
 - the robot position + heading, and the camera's 3D position + look direction.
 """
@@ -64,6 +66,7 @@ class RerunViz:
         rr.init("walkie_graphs")
 
         self._show_boxes = os.getenv("WALKIE_GRAPHS_VIZ_BOXES", "1").lower() in ("1", "true", "yes")
+        self._show_labels = os.getenv("WALKIE_GRAPHS_VIZ_LABELS", "1").lower() in ("1", "true", "yes")
         self._show_robot = os.getenv("WALKIE_GRAPHS_VIZ_ROBOT", "1").lower() in ("1", "true", "yes")
         self._show_camera = os.getenv("WALKIE_GRAPHS_VIZ_CAMERA", "1").lower() in ("1", "true", "yes")
 
@@ -108,7 +111,16 @@ class RerunViz:
                 rr.log(
                     f"world/objects/{n.id}/box",
                     rr.Boxes3D(centers=[list(n.centroid)], half_sizes=[half],
-                               labels=[n.class_name], colors=[color]),
+                               labels=[n.class_name] if self._show_labels else None,
+                               colors=[color]),
+                )
+            elif self._show_labels:
+                # Boxes hidden but labels wanted: anchor the class name to the
+                # object's centroid as a standalone marker (tiny point + label).
+                rr.log(
+                    f"world/objects/{n.id}/label",
+                    rr.Points3D([list(n.centroid)], radii=[0.01],
+                                labels=[n.class_name], colors=[color]),
                 )
 
         self._log_robot(robot_pose)
