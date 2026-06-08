@@ -225,6 +225,15 @@ WALKIE_GRAPHS_FX = ""
 WALKIE_GRAPHS_FY = ""
 WALKIE_GRAPHS_CX = ""
 WALKIE_GRAPHS_CY = ""
+# Camera world pose: looked up from the robot's TF tree by default —
+# transform.lookup(MAP_FRAME, CAMERA_FRAME) returns the camera body frame's pose in
+# the map frame with lift, head tilt, and every mount offset already baked in (much
+# more accurate than the manual composition below). Set CAMERA_FRAME = "" to disable
+# the lookup and fall back to composing the pose from lift/tilt/mount offsets.
+WALKIE_GRAPHS_TF_MAP_FRAME = "map"
+WALKIE_GRAPHS_TF_CAMERA_FRAME = "zed_head_left_camera_frame"
+WALKIE_GRAPHS_TF_TIMEOUT_SEC = "1.0"
+# --- Fallback composition (used only when the TF lookup is disabled or fails) ---
 # Camera mount offsets in the robot LOCAL frame (metres), x=forward,y=left,z=up.
 # LIFT_TO_HEAD: fixed lift-top -> head tilt pivot. PIVOT_TO_OPTIC: tilt pivot ->
 # optical center (rotates with head tilt). cam_pos = robot_xy0 + Rz(heading) @

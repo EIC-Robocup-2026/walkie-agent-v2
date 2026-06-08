@@ -7,8 +7,11 @@ the **world (map) frame**:
    ZED 2i, so the default is derived from the horizontal FOV
    (``fx = (W/2) / tan(HFOV/2)``, ``fy = fx`` for square rectified pixels,
    principal point at the image center). Pass real calibrated values to override.
-2. :func:`compute_camera_pose` — composes the camera's world pose from the robot's
-   planar pose + lift height + head tilt + fixed mount offsets.
+2. :func:`camera_pose_from_transform` — the camera's world pose straight from the
+   SDK's TF lookup (``transform.lookup("map", "<cam>_camera_frame")``); preferred,
+   since lift/tilt/mounts are already baked into the TF tree.
+   :func:`compute_camera_pose` is the manual fallback — composes that same pose from
+   the robot's planar pose + lift height + head tilt + fixed mount offsets.
 3. :func:`pixel_to_world` / :func:`deproject_mask` — back-project depth pixels.
 
 Frame conventions
@@ -53,6 +56,21 @@ def rot_y(pitch: float) -> np.ndarray:
     """Pitch rotation about +y (head tilt; positive = camera looks down)."""
     c, s = math.cos(pitch), math.sin(pitch)
     return np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])
+
+
+def quat_to_rot(x: float, y: float, z: float, w: float) -> np.ndarray:
+    """Rotation matrix from a quaternion ``(x, y, z, w)`` (Hamilton, ROS order)."""
+    n = math.sqrt(x * x + y * y + z * z + w * w)
+    if n == 0.0:
+        return np.eye(3)
+    x, y, z, w = x / n, y / n, z / n, w / n
+    return np.array(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -143,6 +161,25 @@ def compute_camera_pose(
     )
     cam_pos_world = np.array([robot_x, robot_y, 0.0]) + Rz @ cam_local
     return CameraPose(R=Rz @ Ry, t=cam_pos_world)
+
+
+def camera_pose_from_transform(tf: dict) -> CameraPose:
+    """Build a :class:`CameraPose` from an SDK ``transform.lookup`` result.
+
+    Expects ``walkie.robot.transform.lookup("map", "<cam>_camera_frame")`` →
+    ``{"position": {x, y, z}, "quaternion": {x, y, z, w}}``, i.e. the camera
+    *body* frame's pose in the world/map frame. The ZED ``*_camera_frame`` follows
+    REP-103 (``x=forward, y=left, z=up``) — the same axes the deprojection's
+    robot-local cloud uses — so the quaternion's rotation maps camera-local → world
+    directly (``pose.R``) and the position is the optical center (``pose.t``).
+
+    This supersedes :func:`compute_camera_pose`: the TF tree already accounts for
+    lift, head tilt, and every mount offset, so no manual composition is needed.
+    """
+    p, q = tf["position"], tf["quaternion"]
+    R = quat_to_rot(float(q["x"]), float(q["y"]), float(q["z"]), float(q["w"]))
+    t = np.array([float(p["x"]), float(p["y"]), float(p["z"])])
+    return CameraPose(R=R, t=t)
 
 
 # ---------------------------------------------------------------------------

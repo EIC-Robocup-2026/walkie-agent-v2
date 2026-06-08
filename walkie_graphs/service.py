@@ -1,7 +1,8 @@
 """WalkieGraphsService — the background thread that grows the scene graph.
 
 Mirrors :class:`services.perception.PerceptionService`: a daemon thread that, each
-tick, reads the robot pose + lift + head tilt, captures an RGB-D frame, runs
+tick, resolves the camera's world pose (via the SDK TF lookup, falling back to
+composing it from robot pose + lift + head tilt), captures an RGB-D frame, runs
 masked object detection (scoped to the *interested classes*), lifts each mask to a
 3D world point cloud, embeds + captions the crop via the AI client, and upserts it
 into :class:`~walkie_graphs.memory.GraphMemory`. Every few ticks it recomputes the
@@ -18,7 +19,12 @@ import os
 import threading
 import time
 
-from .geometry import Intrinsics, compute_camera_pose, deproject_mask
+from .geometry import (
+    Intrinsics,
+    camera_pose_from_transform,
+    compute_camera_pose,
+    deproject_mask,
+)
 from .memory import Detection3D, GraphMemory
 
 _CROP_MARGIN_PX = 10
@@ -96,6 +102,12 @@ class WalkieGraphsService(threading.Thread):
         # non-level zero. effective_tilt = sign * get_angle() + offset.
         self._tilt_sign = float(os.getenv("WALKIE_GRAPHS_HEAD_TILT_SIGN", "1"))
         self._tilt_offset = float(os.getenv("WALKIE_GRAPHS_HEAD_TILT_OFFSET_RAD", "0"))
+        # TF lookup: ask the robot for the camera body frame's pose in the map frame
+        # directly (lift + tilt + mounts already baked in). Empty CAMERA_FRAME falls
+        # back to composing the pose from lift/tilt/mount offsets above.
+        self._tf_map_frame = os.getenv("WALKIE_GRAPHS_TF_MAP_FRAME", "map")
+        self._tf_cam_frame = os.getenv("WALKIE_GRAPHS_TF_CAMERA_FRAME", "zed_head_left_camera_frame")
+        self._tf_timeout = float(os.getenv("WALKIE_GRAPHS_TF_TIMEOUT_SEC", "1.0"))
         self._debug = os.getenv("WALKIE_GRAPHS_DEBUG", "0").lower() in ("1", "true", "yes")
         self._intr_cache: dict[tuple[int, int], Intrinsics] = {}
 
@@ -146,24 +158,9 @@ class WalkieGraphsService(threading.Thread):
             return []
 
         intr = self._intrinsics(depth.shape[1], depth.shape[0])
-        pose = self.walkie.status.get_position() or {"x": 0.0, "y": 0.0, "heading": 0.0}
-        lift_cm = self._lift_cm()
-        tilt = self._tilt_rad()
-        cam = compute_camera_pose(
-            float(pose.get("x", 0.0)),
-            float(pose.get("y", 0.0)),
-            float(pose.get("heading", 0.0)),
-            lift_cm,
-            tilt,
-            lift_to_head=self._lift_to_head,
-            pivot_to_optic=self._pivot_to_optic,
-        )
-        if self._debug:
-            self._log(
-                f"pose lift={lift_cm:.1f}cm tilt={tilt:+.3f}rad/{math.degrees(tilt):+.1f}deg "
-                f"(+down) cam=({cam.t[0]:.2f},{cam.t[1]:.2f},{cam.t[2]:.2f})m "
-                f"heading={float(pose.get('heading', 0.0)):+.2f}rad"
-            )
+        cam = self._camera_pose()
+        if cam is None:
+            return []
 
         detections = self.walkieAI.object_detection.detect(
             img, prompts=self.interested or None, return_mask=True
@@ -244,6 +241,52 @@ class WalkieGraphsService(threading.Thread):
                 width, height, self._hfov, fx=self._fx, fy=self._fy, cx=self._cx, cy=self._cy
             )
         return self._intr_cache[key]
+
+    def _camera_pose(self):
+        """Camera world pose: TF lookup first, composed lift/tilt/mounts as fallback.
+
+        ``walkie.robot.transform.lookup(map, cam)`` returns the camera body frame's
+        pose in the map frame with lift, head tilt, and mount offsets already baked
+        in by the TF tree — far more accurate than the manual composition. Returns
+        ``None`` only if both the lookup and the fallback fail (skip the tick)."""
+        if self._tf_cam_frame:
+            try:
+                tf = self.walkie.robot.transform.lookup(
+                    self._tf_map_frame, self._tf_cam_frame, timeout=self._tf_timeout
+                )
+            except Exception as e:  # noqa: BLE001
+                tf = None
+                self._log(f"transform lookup error: {e}")
+            if tf is not None:
+                cam = camera_pose_from_transform(tf)
+                if self._debug:
+                    self._log(
+                        f"pose(tf {self._tf_cam_frame}) "
+                        f"cam=({cam.t[0]:.2f},{cam.t[1]:.2f},{cam.t[2]:.2f})m"
+                    )
+                return cam
+            self._log("transform lookup returned None; falling back to composed pose")
+
+        pose = self.walkie.status.get_position() or {"x": 0.0, "y": 0.0, "heading": 0.0}
+        lift_cm = self._lift_cm()
+        tilt = self._tilt_rad()
+        cam = compute_camera_pose(
+            float(pose.get("x", 0.0)),
+            float(pose.get("y", 0.0)),
+            float(pose.get("heading", 0.0)),
+            lift_cm,
+            tilt,
+            lift_to_head=self._lift_to_head,
+            pivot_to_optic=self._pivot_to_optic,
+        )
+        if self._debug:
+            self._log(
+                f"pose(composed) lift={lift_cm:.1f}cm tilt={tilt:+.3f}rad/"
+                f"{math.degrees(tilt):+.1f}deg (+down) "
+                f"cam=({cam.t[0]:.2f},{cam.t[1]:.2f},{cam.t[2]:.2f})m "
+                f"heading={float(pose.get('heading', 0.0)):+.2f}rad"
+            )
+        return cam
 
     def _depth(self):
         try:
