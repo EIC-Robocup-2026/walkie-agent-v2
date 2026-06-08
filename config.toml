@@ -265,6 +265,9 @@ WALKIE_GRAPHS_DEDUP_VISUAL_K = "5"
 WALKIE_GRAPHS_VOXEL_M = "0.02"
 WALKIE_GRAPHS_MAX_POINTS_PER_OBJ = "2000"
 WALKIE_GRAPHS_MIN_POINTS = "30"
+# Minimum detector confidence to accept a detection. Dropped early (before
+# lift/embed/caption), alongside the class scope and MIN_POINTS checks. 0.0 = keep all.
+WALKIE_GRAPHS_CONFIDENCE_THRESHOLD = "0.7"
 
 [graphs.relations]
 # Geometric (distance-based) edges, recomputed every RELATION_EVERY_N ticks over

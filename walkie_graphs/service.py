@@ -87,6 +87,7 @@ class WalkieGraphsService(threading.Thread):
         cap = _csv(os.getenv("WALKIE_GRAPHS_CAPTION_CLASSES", "")) or self.interested
         self.caption_classes = {c.lower() for c in cap}
 
+        self.min_confidence = float(os.getenv("WALKIE_GRAPHS_CONFIDENCE_THRESHOLD", "0.0"))
         self.min_points = int(os.getenv("WALKIE_GRAPHS_MIN_POINTS", "30"))
         self.voxel_m = float(os.getenv("WALKIE_GRAPHS_VOXEL_M", "0.02"))
         self.max_points = int(os.getenv("WALKIE_GRAPHS_MAX_POINTS_PER_OBJ", "2000"))
@@ -175,6 +176,8 @@ class WalkieGraphsService(threading.Thread):
         pending = []  # (detected, points, crop)
         for d in detections:
             if not self._keep(d.class_name or ""):
+                continue
+            if float(d.confidence or 0.0) < self.min_confidence:
                 continue
             if d.mask is None:
                 continue
