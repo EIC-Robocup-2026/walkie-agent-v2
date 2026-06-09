@@ -29,3 +29,14 @@ master.pdf
 
 # temp
 concept-graphs/
+
+# Walkie Graphs
+perception.json
+graph_thumbs/
+graph_pcds/
+graph_edges.json
+frames/
+chroma_db_scene/
+chroma_db_people/
+chroma_db_graph/
+.thumb_cache/
