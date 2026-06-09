@@ -8,10 +8,10 @@ from walkie_sdk.robot import WalkieRobot
 _log = logging.getLogger(__name__)
 
 class WalkieInterface:
-    def __init__(self, robot: WalkieRobot):
+    def __init__(self, robot: WalkieRobot, microphone_device: int | str | None = None):
         self._robot = robot
         self._speaker = Speaker()
-        self._microphone = Microphone()
+        self._microphone = Microphone(device=microphone_device)
         self._camera = Camera(robot)
         self._nav = robot.nav
         self._status = robot.status

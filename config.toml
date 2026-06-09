@@ -1,8 +1,9 @@
-# walkie-agent-v2 tuning config.
+# walkie-agent-v2 config.
 #
-# This file holds the *tuning knobs* that used to clutter .env — they're not
-# secrets and rarely change per-machine, so they live in version-controllable
-# config instead. Secrets / endpoints / per-robot transport stay in .env.
+# This file holds nearly all configuration — tuning knobs plus the endpoints and
+# transport that used to live in .env. None of it is secret, so it's safe to
+# version-control. The ONLY things left in .env are the OpenRouter API key and
+# its base URL (OPENROUTER_API_KEY / OPENROUTER_BASE_URL).
 #
 # Precedence (highest wins):
 #   1. a real shell environment variable
@@ -15,8 +16,35 @@
 # code's os.getenv() calls expect (e.g. "1"/"0" for flags, "" to disable).
 
 [llm]
+# 1 = use a local OpenAI-compatible LLM (LOCAL_BASE_URL/LOCAL_MODEL) instead of
+# OpenRouter. The OpenRouter API key + base URL are the only things left in .env.
+LLM_USE_LOCAL = "1"
 WALKIE_MODEL = "anthropic/claude-sonnet-4.5"
 WALKIE_TEMPERATURE = "0.5"
+# Local LLM endpoint (OpenAI-compatible), used when LLM_USE_LOCAL=1.
+LOCAL_BASE_URL = "http://10.0.0.210:8000/v1"
+LOCAL_MODEL = "qwen3.5-9b"
+
+[services]
+# Remote AI inference server (walkie-ai-server): STT, TTS, object detection,
+# image captioning, pose estimation, CLIP image-embed.
+WALKIE_AI_BASE_URL = "http://10.201.185.145:5000"
+
+[transport]
+# walkie-sdk robot transport. ROS services over rosbridge (default), camera over
+# zenoh. Force zenoh services only if you've shipped the perception/srv into
+# zenoh_ros2_sdk. Port defaults: 9090 for rosbridge, 7447 for zenoh.
+WALKIE_ROS_PROTOCOL = "rosbridge"
+WALKIE_ROS_PORT = "9090"
+# IP of the robot for the walkie-sdk transport (rosbridge + zenoh camera). Leave
+# 127.0.0.1 when running on the robot itself; set to walkie's own LAN IP (e.g.
+# 10.0.0.201) when running from a developer PC. Note: walkie is NOT the same
+# machine as the AI server at WALKIE_AI_BASE_URL — they're separate boxes.
+WALKIE_ROBOT_IP = "127.0.0.1"
+
+[runtime]
+# 1 = type instructions at a TTY instead of speaking (no mic).
+DISABLE_LISTENING = "0"
 
 [agent]
 # History summarization (agents/core/agent.py middleware).

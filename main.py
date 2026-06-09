@@ -75,7 +75,7 @@ def build_model():
     )
 
 
-def run_ready_stage(walkieAI, walkie, model) -> None:
+def run_ready_stage(walkieAI: WalkieAIClient, walkie: WalkieInterface, model: ChatOpenAI) -> None:
     # walkie_graphs: 3D scene-graph spatial memory the Database sub-agent queries. Built
     # regardless so the agent can read existing memory. Its background observer thread is
     # NOT started — perception runs the single per-frame detection and feeds each frame to
