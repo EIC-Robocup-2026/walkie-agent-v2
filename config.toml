@@ -28,7 +28,7 @@ LOCAL_MODEL = "qwen3.5-9b"
 [services]
 # Remote AI inference server (walkie-ai-server): STT, TTS, object detection,
 # image captioning, pose estimation, CLIP image-embed.
-WALKIE_AI_BASE_URL = "http://10.201.185.145:5000"
+WALKIE_AI_BASE_URL = "http://10.0.0.213:5000"
 
 [transport]
 # walkie-sdk robot transport. ROS services over rosbridge (default), camera over

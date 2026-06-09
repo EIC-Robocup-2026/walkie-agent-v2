@@ -9,7 +9,7 @@ from walkie_sdk import WalkieRobot
 from walkie_config import load_config
 from client import WalkieAIClient
 from interfaces.walkie_interface import WalkieInterface
-from interfaces.devices.microphone import list_audio_devices
+from interfaces.devices.microphone import list_audio_devices, Microphone
 
 
 ZENOH_PORT = 7447
@@ -33,16 +33,16 @@ def get_robot() -> WalkieRobot:
         camera_port=ZENOH_PORT,
     )
 
-
-
-robot = get_robot()
 walkieAI = WalkieAIClient(
-base_url=os.getenv("WALKIE_AI_BASE_URL", "http://10.0.0.213:5000"),
+    base_url=os.getenv("WALKIE_AI_BASE_URL", "http://10.0.0.213:5000"),
 )
-print(f"List audio devices: {list_audio_devices()}")
-walkie = WalkieInterface(robot, microphone_device=9)
+microphone = Microphone()
+print("Available audio devices:")
+for device in list_audio_devices():
+    print(device)
 
 while True:
     print("Say something...")
-    text = walkie.microphone.record_until_silence()
-    print("Transcribed text:", text)
+    audio = microphone.record_until_silence()
+    text = walkieAI.stt.transcribe(audio)
+    print("You said:", text)
