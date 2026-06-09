@@ -1,0 +1,10 @@
+# Doing Laundry overrides — rulebook §5.4.
+#
+# PLACEHOLDER: deformable-object + bimanual manipulation (retrieve clothes from a
+# washing machine, carry a two-arm basket, fold T-shirts) — well beyond the
+# current arm stack. Wired so the task is runnable for the perception/navigation
+# parts; folding/grasping fall back to requesting assistance (see prompt.md).
+
+[model]
+WALKIE_MODEL = "anthropic/claude-opus-4.5"
+WALKIE_TEMPERATURE = "0"

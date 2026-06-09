@@ -1,0 +1,13 @@
+# Open Challenge overrides — rulebook §3.9.
+#
+# SCAFFOLD: a free-form 10-minute open demonstration of the team's own research
+# (8 min demo + Q&A). There is no fixed task, so this just gives the demo its own
+# model/prompt slot. Tailor prompt.md to whatever you choose to show.
+
+[model]
+WALKIE_MODEL = "anthropic/claude-sonnet-4.5"
+WALKIE_TEMPERATURE = "0"
+
+[perception]
+HUMAN_PERCEPTION_ENABLED = "1"
+SCENE_PERCEPTION_ENABLED = "1"

@@ -1,0 +1,14 @@
+# Pick and Place overrides — rulebook §5.2.
+#
+# PLACEHOLDER: manipulation-heavy (dishwasher, pour, grasp/place into narrow
+# spaces) — not yet supported by the current arm stack. Wired so the task is
+# runnable and can drive the perception/planning parts; manipulation pieces fall
+# back to requesting human assistance (see prompt.md). Revisit the model choice
+# once a real manipulation pipeline lands.
+
+[model]
+WALKIE_MODEL = "anthropic/claude-opus-4.5"
+WALKIE_TEMPERATURE = "0"
+
+[perception]
+SCENE_PERCEPTION_ENABLED = "1"

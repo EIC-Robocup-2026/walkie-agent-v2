@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch Walkie for the Receptionist challenge.
+# Launch Walkie for the Finals (household upkeep + assist people) — rulebook §6.2
 #   ./run.sh            # start    ./run.sh fresh   # wipe DBs then start
 # Any repo-root run.sh subcommand works here, now task-aware.
 set -euo pipefail

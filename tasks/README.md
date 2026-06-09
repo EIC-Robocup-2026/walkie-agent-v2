@@ -6,9 +6,30 @@ or the base config. Launch one with its `run.sh`:
 
 ```bash
 ./tasks/GPSR/run.sh                  # General Purpose Service Robot
-./tasks/Receptionist/run.sh          # Receptionist
+./tasks/HRI/run.sh                   # Human Robot Interaction (receptionist)
 ./tasks/GPSR/run.sh fresh            # wipe DBs first, then start
 ```
+
+## RoboCup@Home 2026 challenges
+
+Sourced from `docs/rulebook.pdf` (Revision 2026-01-25). Status reflects current
+robot capability, not rulebook coverage — every prompt is faithful to the
+rulebook; placeholders degrade gracefully (do the supported parts, request
+assistance for the rest) so they're runnable today and ready as capabilities land.
+
+| Dir | § | Challenge | Status |
+|-----|---|-----------|--------|
+| `HRI/` | 5.1 | Human Robot Interaction (receptionist + bag) | 🟢 ready-leaning |
+| `GPSR/` | 5.3 | General Purpose Service Robot | 🟢 ready-leaning |
+| `Restaurant/` | 5.5 | Restaurant (serve orders, unknown venue) | 🟡 partial |
+| `PickAndPlace/` | 5.2 | Pick and Place (kitchen cleanup + breakfast) | 🔴 placeholder |
+| `DoingLaundry/` | 5.4 | Doing Laundry (retrieve + fold clothes) | 🔴 placeholder |
+| `Finals/` | 6.2 | Finals (household upkeep + assist people) | 🔴 placeholder |
+| `OpenChallenge/` | 3.9 | Open Challenge (free research demo) | ⚪ scaffold |
+
+🟢 supported by current agents · 🟡 partly (manipulation-limited) · 🔴 needs
+manipulation that isn't built yet · ⚪ free-form, fill in the demo. Each dir's
+`README.md` has the per-challenge readiness notes and what's needed to advance it.
 
 ## Layout
 
@@ -17,12 +38,12 @@ tasks/
 ├── _run.sh              # shared launcher: exports WALKIE_TASK_DIR, hands off to repo run.sh
 ├── _template/           # copy this to add a challenge
 ├── runtime.py           # the loader (config + prompt) — imported by main.py & the agent factory
-├── GPSR/
+├── GPSR/                # one dir per challenge (see table above)
 │   ├── run.sh           # ./tasks/GPSR/run.sh  → 3-line wrapper over _run.sh
 │   ├── config.toml      # model + tuning overrides for this task
 │   ├── prompt.md        # appended to the Walkie main agent's prompt
 │   └── README.md
-└── Receptionist/
+└── HRI/
     ├── run.sh
     ├── config.toml
     ├── prompt.md
