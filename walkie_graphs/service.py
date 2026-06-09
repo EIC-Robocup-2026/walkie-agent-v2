@@ -92,6 +92,24 @@ class WalkieGraphsService(threading.Thread):
         self.voxel_m = float(os.getenv("WALKIE_GRAPHS_VOXEL_M", "0.02"))
         self.max_points = int(os.getenv("WALKIE_GRAPHS_MAX_POINTS_PER_OBJ", "2000"))
         self.relation_every_n = int(os.getenv("WALKIE_GRAPHS_RELATION_EVERY_N", "5"))
+        # Detection-time filters (ConceptGraphs filter_gobs): reject whole-frame /
+        # background boxes and degenerate masks before they cost a deproject. 1.0 / 0
+        # are no-ops (keep everything); config.toml tightens them.
+        self.max_bbox_area_ratio = float(os.getenv("WALKIE_GRAPHS_MAX_BBOX_AREA_RATIO", "1.0"))
+        self.min_mask_area_px = int(os.getenv("WALKIE_GRAPHS_MIN_MASK_AREA_PX", "0"))
+        # Periodic-maintenance cadences (in ingest ticks), staggered so two heavy
+        # passes never land on the same tick. 0 disables a pass.
+        self.denoise_every_n = int(os.getenv("WALKIE_GRAPHS_DENOISE_EVERY_N", "20"))
+        self.merge_every_n = int(os.getenv("WALKIE_GRAPHS_MERGE_EVERY_N", "20"))
+        self.ghost_every_n = int(os.getenv("WALKIE_GRAPHS_GHOST_EVERY_N", "20"))
+        # Tier 3 (optional LLM): caption refinement + LLM edge inference. 0 = off, and
+        # both require self.model. They only ever run on these cadences when enabled.
+        self.caption_refine_every_n = int(os.getenv("WALKIE_GRAPHS_CAPTION_REFINE_EVERY_N", "0"))
+        self.caption_refine_limit = int(os.getenv("WALKIE_GRAPHS_CAPTION_REFINE_LIMIT", "8"))
+        self.caption_refine_use_images = os.getenv(
+            "WALKIE_GRAPHS_CAPTION_REFINE_USE_IMAGES", "0"
+        ).strip().lower() in ("1", "true", "yes")
+        self.llm_edges_every_n = int(os.getenv("WALKIE_GRAPHS_LLM_EDGES_EVERY_N", "0"))
 
         self._hfov = float(os.getenv("WALKIE_GRAPHS_HFOV_DEG", "110"))
         self._fx, self._fy = _opt_float("WALKIE_GRAPHS_FX"), _opt_float("WALKIE_GRAPHS_FY")
@@ -199,9 +217,15 @@ class WalkieGraphsService(threading.Thread):
 
         # Deproject every masked detection once: centroid for the live view, and (when
         # dense enough + a kept class) the full cloud for graph upsert.
+        try:
+            img_area = int(img.size[0]) * int(img.size[1])
+        except Exception:  # noqa: BLE001
+            img_area = 0
         pending = []  # (orig_index, detected, points, crop)
         for i, d in enumerate(detections):
             if d.mask is None:
+                continue
+            if not self._passes_size_filters(d, img_area):
                 continue
             pts = deproject_mask(
                 d.mask, depth, intr, cam, voxel=self.voxel_m, max_points=self.max_points
@@ -242,14 +266,56 @@ class WalkieGraphsService(threading.Thread):
         self._maybe_tick(tick, touched=touched)
         return result
 
+    def _passes_size_filters(self, d, img_area: int) -> bool:
+        """Drop degenerate masks and whole-frame (background) boxes — CG ``filter_gobs``."""
+        if self.min_mask_area_px > 0 and d.mask is not None:
+            try:
+                if int(d.mask.sum()) < self.min_mask_area_px:
+                    return False
+            except Exception:  # noqa: BLE001
+                pass
+        if self.max_bbox_area_ratio < 1.0 and img_area > 0:
+            x1, y1, x2, y2 = d.bbox
+            if (x2 - x1) * (y2 - y1) > self.max_bbox_area_ratio * img_area:
+                return False
+        return True
+
     def _maybe_tick(self, tick: bool, *, touched: list | None = None) -> None:
-        """Advance the cadence counter; run relations/prune + viz every Nth ingest."""
+        """Advance the cadence counter; run relations/prune + periodic maintenance + viz."""
         if not tick:
             return
         self._tick += 1
-        if self.relation_every_n > 0 and self._tick % self.relation_every_n == 0:
+        t = self._tick
+        if self.relation_every_n > 0 and t % self.relation_every_n == 0:
             self.memory.derive_relations()
             self.memory.prune()
+        # Staggered ConceptGraphs post-processing — offsets 0/1/2 so no two collide,
+        # and only after a full interval has elapsed (no churn on a near-empty graph).
+        if self.denoise_every_n > 0 and t >= self.denoise_every_n and t % self.denoise_every_n == 0:
+            self.memory.denoise_nodes()
+        if self.merge_every_n > 0 and t >= self.merge_every_n and t % self.merge_every_n == 1:
+            self.memory.merge_overlapping_nodes()
+        if self.ghost_every_n > 0 and t >= self.ghost_every_n and t % self.ghost_every_n == 2:
+            self.memory.evict_stale_provisional(time.time())
+        # Tier 3 LLM passes (only when a model is wired and the cadence is enabled).
+        if (
+            self.model is not None
+            and self.caption_refine_every_n > 0
+            and t >= self.caption_refine_every_n
+            and t % self.caption_refine_every_n == 3
+        ):
+            self.memory.refine_captions(
+                self.model,
+                limit=self.caption_refine_limit,
+                use_images=self.caption_refine_use_images,
+            )
+        if (
+            self.model is not None
+            and self.llm_edges_every_n > 0
+            and t >= self.llm_edges_every_n
+            and t % self.llm_edges_every_n == 4
+        ):
+            self.memory.infer_edges_llm(self.model)
         if self.viz is not None and touched is not None:
             try:
                 self.viz.update(

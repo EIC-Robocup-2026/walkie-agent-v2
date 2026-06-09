@@ -49,6 +49,41 @@ def make_det(
     )
 
 
+def make_cloud(center, *, n=40, spread=0.01, seed=0) -> np.ndarray:
+    """A gaussian point cloud (N, 3) around ``center`` (for maintenance tests)."""
+    rng = np.random.default_rng(seed)
+    return rng.normal(center, spread, size=(n, 3)).astype(np.float32)
+
+
+def put_object(
+    mem: GraphMemory,
+    node_id,
+    cls,
+    points,
+    *,
+    emb=None,
+    n_obs=1,
+    conf=0.9,
+    caption="",
+    ts=1.0,
+) -> ObjectNode:
+    """Register a node backed by a real saved point cloud (for merge/denoise tests)."""
+    from walkie_graphs.memory import _normalize, aabb_of
+
+    pts = np.asarray(points, dtype=np.float32)
+    centroid, mn, mx, ext = aabb_of(pts)
+    node = ObjectNode(
+        id=node_id, class_name=cls, class_id=0,
+        centroid=centroid, extent=ext, aabb_min=mn, aabb_max=mx,
+        clip_emb=_normalize(emb) if emb is not None else unit(1, 0, 0),
+        captions=[caption] if caption else [], best_caption=caption,
+        n_obs=n_obs, conf=conf, first_seen_ts=ts, last_seen_ts=ts,
+    )
+    node.pcd_ref = mem._save_pcd(node_id, pts)
+    mem._write_node(node)
+    return node
+
+
 def put_box(mem: GraphMemory, node_id, cls, cmin, cmax, *, emb=None) -> ObjectNode:
     """Register a node with an explicit AABB (for relation tests)."""
     c = tuple((a + b) / 2 for a, b in zip(cmin, cmax))

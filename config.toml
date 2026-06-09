@@ -16,7 +16,7 @@
 
 [llm]
 WALKIE_MODEL = "anthropic/claude-sonnet-4.5"
-WALKIE_TEMPERATURE = "0"
+WALKIE_TEMPERATURE = "0.5"
 
 [agent]
 # History summarization (agents/core/agent.py middleware).
@@ -283,6 +283,72 @@ WALKIE_GRAPHS_MIN_POINTS = "30"
 # Minimum detector confidence to accept a detection. Dropped early (before
 # lift/embed/caption), alongside the class scope and MIN_POINTS checks. 0.0 = keep all.
 WALKIE_GRAPHS_CONFIDENCE_THRESHOLD = "0.6"
+# --- ConceptGraphs-style association (primary path; the SIM_HIGH/LOW cascade above
+# is now the fallback used only when point clouds don't overlap). A detection MERGES
+# into the highest-scoring same-class node whose score
+#   phi = W_GEO * nn_ratio + W_SEM * (0.5*cos + 0.5)
+# clears SIM_THRESHOLD. nn_ratio = fraction of the detection's points within NN_VOXEL_M
+# of the node's cloud (CG's delta_nn = 2.5cm); both terms are in [0,1] so SIM_THRESHOLD
+# lives in [0,2] (1.1 ~ strong geometric overlap + agreeing CLIP). With weights 1/1 a
+# pure-visual match tops out at 1.0 < 1.1, so this path only fires on real overlap.
+WALKIE_GRAPHS_SIM_THRESHOLD = "1.1"
+WALKIE_GRAPHS_W_GEO = "1.0"
+WALKIE_GRAPHS_W_SEM = "1.0"
+WALKIE_GRAPHS_NN_VOXEL_M = "0.025"
+# DBSCAN denoising of each detection's cloud (largest cluster) before it enters the
+# graph — strips mask-edge depth bleed that would inflate AABBs. 1 = on (CG default).
+WALKIE_GRAPHS_DBSCAN_ENABLED = "1"
+WALKIE_GRAPHS_DBSCAN_EPS = "0.05"
+WALKIE_GRAPHS_DBSCAN_MIN_POINTS = "10"
+# Detection-time rejects (CG filter_gobs): drop a box covering more than this fraction
+# of the frame (walls/floor/background), and masks smaller than this many pixels.
+# 1.0 / 0 disable each. 0.9 keeps real objects while dropping whole-frame misfires.
+WALKIE_GRAPHS_MAX_BBOX_AREA_RATIO = "0.9"
+WALKIE_GRAPHS_MIN_MASK_AREA_PX = "64"
+
+[graphs.maintenance]
+# Periodic ConceptGraphs post-processing, each on its own cadence (in ingest ticks,
+# staggered so no two collide). 0 disables a pass.
+# denoise_nodes: re-DBSCAN nodes whose cloud changed, keeping the largest cluster
+#   UNLESS that would drop more than 1 - DENOISE_KEEP_MIN_FRAC of the points (a big
+#   drop means a legitimately spread object, e.g. a table, not noise → left intact).
+WALKIE_GRAPHS_DENOISE_EVERY_N = "20"
+WALKIE_GRAPHS_DENOISE_KEEP_MIN_FRAC = "0.5"
+# merge_overlapping_nodes: fuse two same-class nodes within MERGE_RADIUS_M whose clouds
+# overlap above MERGE_OVERLAP_THRESH (symmetric nn_ratio) and whose CLIP embeddings
+# agree above MERGE_VISUAL_SIM_THRESH — recovers an object first mapped from two sides
+# as two nodes. (TEXT_SIM kept for parity; unused without stored caption embeddings.)
+WALKIE_GRAPHS_MERGE_EVERY_N = "20"
+WALKIE_GRAPHS_MERGE_OVERLAP_THRESH = "0.7"
+WALKIE_GRAPHS_MERGE_VISUAL_SIM_THRESH = "0.7"
+WALKIE_GRAPHS_MERGE_TEXT_SIM_THRESH = "0.7"
+WALKIE_GRAPHS_MERGE_RADIUS_M = "0.5"
+# Node precision (CG obj_min_detections): an object must be seen MIN_OBS_CONFIRM times
+# before it counts. With REQUIRE_CONFIRMATION=1, provisional (under-seen) nodes are
+# HIDDEN from queries/description (non-destructive — a re-sighting promotes them; the
+# viewer and count() still see them). GHOST_GRACE_SEC>0 additionally DELETES provisional
+# nodes unseen that long (0 = never delete, just hide).
+WALKIE_GRAPHS_MIN_OBS_CONFIRM = "3"
+WALKIE_GRAPHS_REQUIRE_CONFIRMATION = "1"
+WALKIE_GRAPHS_GHOST_EVERY_N = "20"
+WALKIE_GRAPHS_GHOST_GRACE_SEC = "0"
+
+[graphs.semantic]
+# Optional LLM layer (ConceptGraphs node captions + scene-graph edges). OFF by default
+# (the EVERY_N cadences are 0); enable by setting them > 0. All run on the wired chat
+# model, best-effort, never blocking the perception loop.
+# BEST_VIEWS: keep this many highest-confidence crops per object (feeds image-grounded
+# caption refinement). Cheap to store; the LLM compute below is what's gated off.
+WALKIE_GRAPHS_BEST_VIEWS = "10"
+# refine_captions: every N ticks, summarize a node's accumulated view captions into one
+# coherent caption (LIMIT nodes/pass, most-recently-changed first). USE_IMAGES=1 also
+# sends the best crops to a multimodal model (costs more); 0 = text-only summary.
+WALKIE_GRAPHS_CAPTION_REFINE_EVERY_N = "0"
+WALKIE_GRAPHS_CAPTION_REFINE_LIMIT = "8"
+WALKIE_GRAPHS_CAPTION_REFINE_USE_IMAGES = "0"
+# infer_edges_llm: every N ticks, label spatial relations over an MST of nearby objects
+# and store them as separate "llm:<label>" edges (geometric edges stay primary).
+WALKIE_GRAPHS_LLM_EDGES_EVERY_N = "0"
 
 [graphs.relations]
 # Geometric (distance-based) edges, recomputed every RELATION_EVERY_N ingest ticks

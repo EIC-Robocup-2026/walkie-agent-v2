@@ -162,6 +162,17 @@ class WalkieGraphs:
     def to_text_description(self) -> str:
         return self.memory.to_text_description()
 
+    # ------------------------------------------------------------------
+    # Optional LLM refinement (Tier 3) — on-demand triggers using the wired model
+    # ------------------------------------------------------------------
+    def refine_captions(self, *, limit: Optional[int] = None, use_images: bool = False) -> int:
+        """Condense each object's view captions into one coherent caption (needs ``model``)."""
+        return self.memory.refine_captions(self.model, limit=limit, use_images=use_images)
+
+    def infer_edges(self, *, max_pairs: Optional[int] = None) -> int:
+        """Label spatial relations between nearby objects with the LLM (needs ``model``)."""
+        return self.memory.infer_edges_llm(self.model, max_pairs=max_pairs)
+
     def visualize(self) -> None:
         if self.viz is not None:
             pose = None

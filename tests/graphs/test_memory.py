@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -81,6 +83,39 @@ def test_far_visual_merge_keeps_higher_conf_geometry(mem):
     node = mem.upsert(make_det(center=(4.0, 0.0, 0.5), emb=unit(1, 0, 0), conf=0.95, ts=2.0))
     assert mem.count() == 1
     assert node.centroid[0] == pytest.approx(4.0, abs=0.1)  # not ~2.5
+
+
+# ---------------------------------------------------------------------------
+# ConceptGraphs additive-greedy association (_associate path, distinct from cascade)
+# ---------------------------------------------------------------------------
+def test_associate_merges_on_overlap_even_with_mid_cosine(mem):
+    # Heavily overlapping clouds + mid cosine: nn_ratio is high, so the additive
+    # score clears sim_threshold via the _associate path (the cascade alone would
+    # need cos>=sim_high). spread small so the two clouds physically coincide.
+    mem.upsert(make_det(center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01))
+    mid = emb_with_cosine(0.7)
+    mem.upsert(make_det(center=(1.005, 0.0, 0.5), emb=mid, spread=0.01, ts=2.0))
+    assert mem.count() == 1
+
+
+def test_associate_is_geometry_gated_on_pure_visual(mem):
+    # _associate never fires on visual alone: even identical embeddings (cos 1.0)
+    # return None when the clouds don't overlap (additive tops out at 1.0 < 1.1).
+    # Probed directly so the _classify cascade's own visual-dedup path (which DOES
+    # merge identical embeddings — drift recovery) doesn't mask the geometric gate.
+    mem.upsert(make_det(center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01))
+    far = make_det(center=(1.3, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01, ts=2.0)
+    far = replace(far, points_world=mem._denoise(far.points_world))
+    assert mem._associate(far) is None
+
+
+def test_associate_geometry_only_merge_without_embedding(mem):
+    # No embeddings at all (embed route down): a re-sighting whose cloud overlaps
+    # still merges geometrically — nn_ratio≈1, phi_sem(0)=0.5 → ~1.5 ≥ 1.1.
+    mem.upsert(make_det(center=(1.0, 0.0, 0.5), emb=[], spread=0.01))
+    node = mem.upsert(make_det(center=(1.005, 0.0, 0.5), emb=[], spread=0.01, ts=2.0))
+    assert mem.count() == 1
+    assert node.n_obs == 2
 
 
 # ---------------------------------------------------------------------------
