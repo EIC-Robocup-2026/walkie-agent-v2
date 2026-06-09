@@ -10,6 +10,7 @@ from langchain_openai import ChatOpenAI
 from walkie_sdk import WalkieRobot
 
 from walkie_config import load_config
+from tasks.runtime import active_task_name, load_task_config
 
 from agents.actuator_agent import create_actuator_agent
 from agents.core.robot_context import RobotContext
@@ -486,10 +487,20 @@ def run_ready_stage(walkieAI, walkie, model) -> None:
 
 def main() -> None:
     load_dotenv()
+    # If launched for a specific RoboCup challenge (tasks/<NAME>/run.sh exports
+    # WALKIE_TASK_DIR), layer that task's config.toml on top of the base one.
+    # It must load BEFORE the base config so its values win (both use setdefault);
+    # .env and shell env still override it. No-op when no task is active.
+    task_overrides = load_task_config()
     # Tuning knobs (perception/scene/explore/viewer) live in config.toml; .env
     # holds only secrets/endpoints/transport. setdefault means .env + real env
     # still win over config.toml.
     load_config()
+    task = active_task_name()
+    if task:
+        print(
+            f"[main] task: {task} ({task_overrides} override(s) from its config.toml)"
+        )
     # Keep third-party libs quiet. Perception emits INFO logs — per-tick summaries
     # plus the `scene.dedup action=INSERT/UPDATE ...` lines — but default them to
     # WARNING here so they don't bury the prompt while you're commanding the robot.

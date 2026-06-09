@@ -1,0 +1,14 @@
+# GPSR overrides.
+#
+# GPSR commands are multi-step and need solid instruction-following and
+# decomposition, so this task pins a stronger model than the default.
+
+[model]
+WALKIE_MODEL = "anthropic/claude-opus-4.5"
+WALKIE_TEMPERATURE = "0"
+
+[perception]
+# The robot moves between rooms a lot; keep the live snapshot fresh so the agent
+# reasons over what's actually in front of it.
+PERCEPTION_INTERVAL_SEC = "3"
+SCENE_PERCEPTION_ENABLED = "1"
