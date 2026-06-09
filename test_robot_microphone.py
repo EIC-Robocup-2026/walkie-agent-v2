@@ -34,12 +34,15 @@ def get_robot() -> WalkieRobot:
     )
 
 
+
+robot = get_robot()
+walkieAI = WalkieAIClient(
+base_url=os.getenv("WALKIE_AI_BASE_URL", "http://10.0.0.213:5000"),
+)
+print(f"List audio devices: {list_audio_devices()}")
+walkie = WalkieInterface(robot, microphone_device=9)
+
 while True:
-    robot = get_robot()
-    walkieAI = WalkieAIClient(
-        base_url=os.getenv("WALKIE_AI_BASE_URL", "http://10.0.0.213:5000"),
-    )
-    print(f"List audio devices: {list_audio_devices()}")
-    walkie = WalkieInterface(robot, microphone_device=1)
+    print("Say something...")
     text = walkie.microphone.record_until_silence()
     print("Transcribed text:", text)
