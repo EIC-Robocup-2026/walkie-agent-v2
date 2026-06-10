@@ -416,7 +416,7 @@ class WalkieGraphsService(threading.Thread):
                         f"cam=({cam.t[0]:.2f},{cam.t[1]:.2f},{cam.t[2]:.2f})m"
                     )
                 return cam
-            self._log(f"transform from {self._tf_map_frame} to {self._tf_cam_frame}: {e} lookup returned None; falling back to composed pose")
+            self._log(f"transform from {self._tf_map_frame} to {self._tf_cam_frame} lookup returned None; falling back to composed pose")
 
         pose = self.walkie.status.get_position() or {"x": 0.0, "y": 0.0, "heading": 0.0}
         lift_cm = self._lift_cm()
