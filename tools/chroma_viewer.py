@@ -96,6 +96,8 @@ TABLE_KEYS = [
     # people store (chroma_db_people) — only present on those records
     "name",
     "drink",
+    "attributes",
+    "notes",
     "enrollments",
     # scene / object stores
     "class_name",
@@ -588,6 +590,13 @@ def _cell(di: int, coll: str, key: str, r: dict) -> str:
         return f"<td>{_ts_html(meta.get(key))}</td>"
     if key == "embedding_model":
         return f"<td class='muted small'>{e(meta.get(key, ''))}</td>"
+    if key == "notes":
+        # One line per remembered fact ("· from Bangkok<br>· likes football").
+        txt = str(meta.get(key, "") or "")
+        if not txt.strip():
+            return "<td></td>"
+        items = "<br>".join(f"· {e(ln)}" for ln in txt.split("\n") if ln.strip())
+        return f"<td class='muted small'>{items}</td>"
     n = _fmt_num(meta.get(key))
     return f"<td>{e(n) if n is not None else e(meta.get(key, ''))}</td>"
 
@@ -623,6 +632,8 @@ def _header(base: str, key: str, cur_sort: str, cur_dir: str) -> str:
         "document": "caption",
         "name": "name",
         "drink": "favorite drink",
+        "attributes": "attributes",
+        "notes": "talked about",
         "enrollments": "enrollments",
         "class_name": "class",
         "position": "position (x, y, z)",

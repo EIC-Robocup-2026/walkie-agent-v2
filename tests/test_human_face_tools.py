@@ -107,6 +107,28 @@ def test_face_service_error_is_caught(ctx):
     assert "face service error" in out and "server down" in out
 
 
+def test_remember_person_detail_then_list_shows_it(ctx):
+    ctx.face.queued = [_face(ALICE)]
+    ctx.tools["enroll_person"].invoke({"name": "Alice", "drink": "cola"})
+    out = ctx.tools["remember_person_detail"].invoke(
+        {"name": "Alice", "detail": "from Bangkok"}
+    )
+    assert "Noted" in out and "from Bangkok" in out
+    ctx.tools["remember_person_detail"].invoke(
+        {"name": "Alice", "detail": "likes football"}
+    )
+    listed = ctx.tools["list_known_people"].invoke({})
+    assert "from Bangkok" in listed and "likes football" in listed
+
+
+def test_remember_detail_requires_enrollment(ctx):
+    out = ctx.tools["remember_person_detail"].invoke(
+        {"name": "Ghost", "detail": "anything"}
+    )
+    assert "enroll" in out.lower()
+    assert ctx.store.count() == 0
+
+
 def test_tools_report_off_without_store(tmp_path):
     walkieAI = NS(face_recognition=_FakeFaceClient())
     walkie = NS(camera=NS(capture_pil=lambda: Image.new("RGB", (8, 8))))
@@ -114,3 +136,4 @@ def test_tools_report_off_without_store(tmp_path):
     assert "off" in tools["enroll_person"].invoke({"name": "A", "drink": "b"}).lower()
     assert "off" in tools["recognize_person"].invoke({}).lower()
     assert "off" in tools["list_known_people"].invoke({}).lower()
+    assert "off" in tools["remember_person_detail"].invoke({"name": "A", "detail": "x"}).lower()

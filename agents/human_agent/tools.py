@@ -412,10 +412,39 @@ def make_human_tools(
                 )
         return "People in view:\n" + "\n".join(lines)
 
+    @sequential_tool
+    @tool(parse_docstring=True)
+    def remember_person_detail(name: str, detail: str) -> str:
+        """Remember something a guest said about themselves.
+
+        Use whenever a guest shares a personal detail in conversation — where
+        they're from, a hobby, something they like, their job ("I'm from
+        Bangkok", "I love football"). The detail is stored on their record so
+        it can be recalled later (e.g. for a richer introduction) and shown in
+        the people database. The guest must already be enrolled.
+
+        Args:
+            name: The enrolled guest the detail belongs to.
+            detail: One short fact, as said ("from Bangkok", "likes football").
+
+        Returns:
+            Confirmation, or a message if the guest isn't enrolled yet.
+        """
+        if people_store is None:
+            return "Face memory is off — I can't remember details right now."
+        rec = people_store.add_note(name, detail)
+        if rec is None:
+            return (
+                f"I don't have {name} enrolled yet — enroll them first "
+                "(enroll_person), then I can remember details about them."
+            )
+        return f"Noted about {rec.name}: {detail.strip()!r}."
+
     @parallelable_tool
     @tool
     def list_known_people() -> str:
-        """List every guest remembered so far, with their favorite drink.
+        """List every guest remembered so far, with their favorite drink and
+        anything they told the robot about themselves.
 
         Use to recall both guests' details when introducing them to each other.
         """
@@ -428,6 +457,9 @@ def make_human_tools(
         for p in people:
             extra = f"; {p.attributes}" if p.attributes else ""
             lines.append(f"- {p.name}: favorite drink {p.drink!r}{extra}")
+            if p.notes:
+                for note in p.notes.split("\n"):
+                    lines.append(f"    · {note}")
         return f"{len(people)} remembered guest(s):\n" + "\n".join(lines)
 
     @parallelable_tool
@@ -537,6 +569,7 @@ def make_human_tools(
         count_people,
         detect_gestures,
         enroll_person,
+        remember_person_detail,
         recognize_person,
         list_known_people,
         find_empty_seat,

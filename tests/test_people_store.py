@@ -200,6 +200,45 @@ def test_reenroll_replaces_attire_latest_wins(store):
     assert old is None
 
 
+# ---------------------------------------------------------------------------
+# Conversation notes — what the guest told the robot (shown in the DB viewer).
+# ---------------------------------------------------------------------------
+
+
+def test_add_note_appends_and_survives_reenroll(store):
+    store.enroll("Alice", "cola", ALICE)
+    store.add_note("Alice", "from Bangkok")
+    rec = store.add_note("Alice", "likes football")
+    assert rec.notes == "from Bangkok\nlikes football"
+    # notes survive a re-enrollment (face refresh must not wipe the chat memory)
+    store.enroll("Alice", "cola", ALICE_2)
+    assert store.get("Alice").notes == "from Bangkok\nlikes football"
+
+
+def test_add_note_unknown_person_returns_none(store):
+    assert store.add_note("Nobody", "anything") is None
+
+
+def test_add_note_blank_is_ignored(store):
+    store.enroll("Alice", "cola", ALICE)
+    rec = store.add_note("Alice", "   ")
+    assert rec is not None and rec.notes == ""
+
+
+def test_add_note_caps_at_max_notes(store):
+    store.enroll("Alice", "cola", ALICE)
+    for i in range(6):
+        store.add_note("Alice", f"fact {i}", max_notes=4)
+    notes = store.get("Alice").notes.split("\n")
+    assert notes == ["fact 2", "fact 3", "fact 4", "fact 5"]
+
+
+def test_add_note_is_case_insensitive_on_name(store):
+    store.enroll("John Smith", "water", BOB)
+    assert store.add_note("john smith", "plays guitar") is not None
+    assert store.get("John Smith").notes == "plays guitar"
+
+
 def test_clear_empties_both_collections(store):
     store.enroll("Alice", "cola", ALICE, app_embedding=ALICE_ATTIRE)
     store.clear()

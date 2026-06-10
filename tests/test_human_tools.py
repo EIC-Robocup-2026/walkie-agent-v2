@@ -101,6 +101,7 @@ def test_make_human_tools_exposes_expected_surface():
         "count_people",
         "detect_gestures",
         "enroll_person",
+        "remember_person_detail",
         "recognize_person",
         "list_known_people",
         "find_empty_seat",

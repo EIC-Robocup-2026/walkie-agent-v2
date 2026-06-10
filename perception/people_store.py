@@ -47,6 +47,9 @@ class PersonRecord:
     name: str
     drink: str
     attributes: str
+    notes: str
+    """Things the guest told the robot ("from Bangkok, likes football"), one
+    per line, appended via :meth:`PeopleStore.add_note`. Shown in the DB viewer."""
     embedding_model: str
     enrollments: int
     first_seen_ts: float
@@ -202,6 +205,7 @@ class PeopleStore:
                 "name": name.strip(),
                 "drink": drink.strip(),
                 "attributes": attributes.strip() or str(meta.get("attributes", "")),
+                "notes": str(meta.get("notes", "")),
                 "embedding_model": self._embedding_model or str(meta.get("embedding_model", "")),
                 "enrollments": int(meta.get("enrollments", 1)) + 1,
                 "first_seen_ts": float(meta.get("first_seen_ts", now)),
@@ -216,6 +220,7 @@ class PeopleStore:
                 "name": name.strip(),
                 "drink": drink.strip(),
                 "attributes": attributes.strip(),
+                "notes": "",
                 "embedding_model": self._embedding_model,
                 "enrollments": 1,
                 "first_seen_ts": now,
@@ -259,6 +264,34 @@ class PeopleStore:
             return str(path)
         except Exception:  # noqa: BLE001 — a thumbnail must never break enrollment
             return None
+
+    def add_note(self, name: str, note: str, *, max_notes: int = 20) -> Optional[PersonRecord]:
+        """Append something the guest told the robot to their record.
+
+        Notes accumulate one per line ("from Bangkok", "likes football") and
+        show up in the DB viewer alongside the name/drink, so an operator can
+        see what each remembered guest talked about. Keeps the newest
+        ``max_notes`` lines. Returns the updated record, or ``None`` if no one
+        with that name is enrolled.
+        """
+        text = " ".join(str(note).split())
+        if not text:
+            return self.get(name)
+        rid = _slug(name)
+        raw = self._raw_get(rid)
+        if raw is None:
+            return None
+        emb, meta = raw
+        lines = [ln for ln in str(meta.get("notes", "")).split("\n") if ln.strip()]
+        lines.append(text)
+        meta = dict(meta)
+        meta["notes"] = "\n".join(lines[-max_notes:])
+        meta["last_seen_ts"] = time.time()
+        document = f"{meta.get('name', '')} — likes {meta.get('drink', '')}".strip(" —")
+        self._collection.upsert(
+            ids=[rid], embeddings=[emb], metadatas=[meta], documents=[document]
+        )
+        return self._to_record(rid, emb, meta)
 
     def clear(self) -> None:
         """Forget everyone (e.g. between Receptionist runs) — both collections."""
@@ -465,6 +498,7 @@ class PeopleStore:
             name=str(meta.get("name", "")),
             drink=str(meta.get("drink", "")),
             attributes=str(meta.get("attributes", "")),
+            notes=str(meta.get("notes", "")),
             embedding_model=str(meta.get("embedding_model", "")),
             enrollments=int(meta.get("enrollments", 1)),
             first_seen_ts=float(meta.get("first_seen_ts", 0.0)),
