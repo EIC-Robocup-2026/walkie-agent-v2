@@ -223,14 +223,14 @@ WALKIE_GRAPHS_INTERVAL_SEC = "3.0"
 # may contain spaces (split on commas). Grouped here by category for readability.
 
 
-# WALKIE_GRAPHS_INTERESTED_CLASSES = "chair,stool,cloth,sponge,bowl,cup,fork,knife,plate,spoon,coffee creamer,coke,ice tea,milk,orange juice,red bull,water bottle,bread,cornflakes,instant noodles,potato,tomato soup,apple,avocado,lemon,orange,chips,cookies,gum,mixed nuts,pringles,hand cream,soap,toothpaste,dish rack,shelf,monitor,bed,pillow"
+# WALKIE_GRAPHS_INTERESTED_CLASSES = "chair,stool,shirt,sponge,bowl,cup,fork,knife,plate,spoon,coffee creamer,coke,ice tea,milk,orange juice,red bull,water bottle,bread,cornflakes,instant noodles,potato,tomato soup,apple,avocado,lemon,orange,chips,cookies,gum,mixed nuts,pringles,hand cream,soap,toothpaste,dish rack,shelf,monitor,bed,pillow"
 
 
 # Classes to always drop before lift/embed/store. Moving objects (people) can't
 # be position-deduped, so they'd spawn a node every tick — keep them out.
 WALKIE_GRAPHS_EXCLUDE_CLASSES = "person"
 # Classes to caption (server image-caption). Empty = same as interested classes.
-WALKIE_GRAPHS_CAPTION_CLASSES = ""
+WALKIE_GRAPHS_CAPTION_CLASSES = "shirt"
 # Live 3D visualization backend: none | rerun. rerun needs `uv sync --extra graphs`.
 WALKIE_GRAPHS_VIZ = "rerun"
 # What to draw in the Rerun viewer. Point clouds are always shown.
