@@ -214,7 +214,7 @@ WALKIE_GRAPHS_ENABLED = "1"
 WALKIE_GRAPHS_PERF="1"
 # Only used by the standalone WalkieGraphsService thread (manual tests). In production
 # the cadence is perception's PERCEPTION_INTERVAL_SEC.
-WALKIE_GRAPHS_INTERVAL_SEC = "3.0"
+WALKIE_GRAPHS_INTERVAL_SEC = "2.0"
 # "Interested classes": one comma-separated list that drives the whole module —
 # passed as open-vocab prompts to the detection server, and the scope of what
 # enters the graph. Empty = detect/keep everything the detector emits. Class names

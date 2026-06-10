@@ -87,6 +87,16 @@ def test_tick_false_runs_nothing(svc):
     assert svc.memory.calls == []
 
 
+def test_fixed_rate_wait(svc):
+    svc.interval = 3.0
+    # cycle faster than the interval → wait the remainder
+    assert svc._wait_after(1.0) == pytest.approx(2.0)
+    assert svc._wait_after(0.0) == pytest.approx(3.0)
+    # cycle at/over the interval → no wait (observe immediately)
+    assert svc._wait_after(3.0) == 0.0
+    assert svc._wait_after(5.0) == 0.0
+
+
 def test_mask_subtract_and_crop_margin_defaults(svc):
     # mask subtraction defaults ON (CG always applies it); crop margin matches CG's 20px.
     assert svc.mask_subtract is True

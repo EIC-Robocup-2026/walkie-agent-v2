@@ -151,16 +151,37 @@ class WalkieGraphsService(threading.Thread):
         if self._perf:
             print(f"==========WALKIE-GRAPH========== {msg}")
 
+    def _wait_after(self, elapsed: float) -> float:
+        """Seconds to sleep for **fixed-rate** scheduling (one observation per interval).
+
+        Returns the leftover of the interval after a cycle that took ``elapsed`` seconds,
+        or 0.0 when the cycle already overran — i.e. observe again immediately. So a 1 s
+        observation with a 3 s interval waits 2 s, and an observation slower than the
+        interval waits not at all.
+        """
+        return max(0.0, self.interval - elapsed)
+
     def run(self) -> None:
         self._log(f"started (interval={self.interval}s)")
         while not self._stop_event.is_set():
+            start = time.perf_counter()
             try:
                 # _observe_once -> ingest_frame(tick=True) handles the relation/prune/viz
                 # cadence, so the standalone thread and perception's driver share one path.
                 self._observe_once()
             except Exception as e:  # noqa: BLE001 — one bad tick must not kill the thread
                 self._log(f"tick error: {e}")
-            self._stop_event.wait(self.interval)
+            # Fixed rate: subtract the time the cycle took from the interval. If it ran
+            # longer than the interval, don't wait — start the next observation now.
+            elapsed = time.perf_counter() - start
+            remaining = self._wait_after(elapsed)
+            if remaining > 0:
+                self._stop_event.wait(remaining)
+            elif elapsed > self.interval:
+                self._perf_log(
+                    f"cycle took {elapsed:.2f}s > interval {self.interval:.1f}s — "
+                    f"observing immediately (no wait)"
+                )
         self._log("stopped.")
 
     # ------------------------------------------------------------------
