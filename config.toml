@@ -211,6 +211,7 @@ CHROMA_VIEWER_THUMB_CACHE = ".thumb_cache"
 # ENABLED now gates whether perception feeds the graph (off => no 3D positions/captions
 # in perception.json either, since the graph owns that work).
 WALKIE_GRAPHS_ENABLED = "1"
+WALKIE_GRAPHS_PERF="1"
 # Only used by the standalone WalkieGraphsService thread (manual tests). In production
 # the cadence is perception's PERCEPTION_INTERVAL_SEC.
 WALKIE_GRAPHS_INTERVAL_SEC = "3.0"
