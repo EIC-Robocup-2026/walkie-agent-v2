@@ -94,9 +94,6 @@ SCENE_PERCEPTION_ENABLED = "1"
 SCENE_EMBED_BACKEND = "local"
 # Local-backend model (must match what built any existing data) + device/dtype.
 # Device empty = auto (CUDA if present). FP16 "auto" = half precision on CUDA.
-SCENE_CLIP_MODEL = "openai/clip-vit-base-patch16"
-SCENE_CLIP_DEVICE = ""
-SCENE_CLIP_FP16 = "auto"
 SCENE_CHROMA_DIR = "chroma_db_scene"
 SCENE_FRAMES_DIR = "frames"
 # Capture cadence. Raised from 5s → 8s so the store isn't churned so often

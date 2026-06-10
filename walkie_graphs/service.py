@@ -128,6 +128,8 @@ class WalkieGraphsService(threading.Thread):
         )
         self._tf_timeout = float(os.getenv("WALKIE_GRAPHS_TF_TIMEOUT_SEC", "1.0"))
         self._debug = os.getenv("WALKIE_GRAPHS_DEBUG", "0").lower() in ("1", "true", "yes")
+        # Per-stage timing breakdown printed each tick (set WALKIE_GRAPHS_PERF=0 to mute).
+        self._perf = os.getenv("WALKIE_GRAPHS_PERF", "1").strip().lower() in ("1", "true", "yes")
         self._intr_cache: dict[tuple[int, int], Intrinsics] = {}
         self._last_cam = None  # latest CameraPose, for the visualizer
         self._tick = 0  # ingest_frame call counter, drives the relation/prune/viz cadence
@@ -144,6 +146,10 @@ class WalkieGraphsService(threading.Thread):
     def _log(self, msg: str) -> None:
         if self.verbose:
             print(f"[graphs] {msg}")
+
+    def _perf_log(self, msg: str) -> None:
+        if self._perf:
+            print(f"==========WALKIE-GRAPH========== {msg}")
 
     def run(self) -> None:
         self._log(f"started (interval={self.interval}s)")
@@ -167,16 +173,27 @@ class WalkieGraphsService(threading.Thread):
         In production, perception captures + detects once per frame and calls
         :meth:`ingest_frame` directly, so the detector never runs twice on one frame.
         """
+        t_depth = time.perf_counter()
         depth = self._depth()
+        d_depth = time.perf_counter() - t_depth
         if depth is None:
+            self._perf_log(f"depth=None ({d_depth * 1000:.0f}ms) — skipping tick")
             return []
         try:
+            t_cap = time.perf_counter()
             img = self.walkie.camera.capture_pil()  # PIL RGB
+            d_cap = time.perf_counter() - t_cap
         except Exception as e:  # noqa: BLE001
             self._log(f"capture failed: {e}")
             return []
+        t_det = time.perf_counter()
         detections = self.walkieAI.object_detection.detect(
             img, prompts=self.interested or None, return_mask=True
+        )
+        d_det = time.perf_counter() - t_det
+        self._perf_log(
+            f"capture stage: depth={d_depth * 1000:.0f}ms capture={d_cap * 1000:.0f}ms "
+            f"detect={d_det * 1000:.0f}ms ({len(detections)} detections)"
         )
         self.ingest_frame(img, detections, depth, tick=True)
         return self._last_touched
@@ -200,19 +217,28 @@ class WalkieGraphsService(threading.Thread):
         returned centroid (a sparse cloud still gives a usable position but is too thin to
         fuse durably). When ``tick`` is true this advances the relation/prune/viz cadence.
         """
+        t_frame = time.perf_counter()
         # Default: unknown position, no caption, for every detection.
         result: dict[int, dict] = {
             i: {"centroid": None, "caption": ""} for i in range(len(detections))
         }
 
+        t = time.perf_counter()
         cam = self._camera_pose() if depth is not None else None
+        d_pose = time.perf_counter() - t
+        t = time.perf_counter()
         intr = self._intrinsics(depth.shape[1], depth.shape[0]) if cam is not None else None
+        d_intr = time.perf_counter() - t
         if cam is None or intr is None:
             # No geometry this frame (pose or intrinsics unavailable): report unknown
             # positions, upsert nothing, but still advance the cadence so periodic
             # maintenance keeps ticking.
             self._last_touched = []
             self._maybe_tick(tick)
+            self._perf_log(
+                f"ingest aborted (no geometry): pose={d_pose * 1000:.0f}ms "
+                f"intr={d_intr * 1000:.0f}ms — pose/intrinsics lookup failed"
+            )
             return result
         self._last_cam = cam
 
@@ -225,6 +251,7 @@ class WalkieGraphsService(threading.Thread):
 
         # CG mask_subtract_contained: remove each contained detection's pixels from its
         # container's mask, so a table's cloud doesn't absorb the mug sitting on it.
+        t = time.perf_counter()
         masks = [d.mask for d in detections]
         if self.mask_subtract and sum(m is not None for m in masks) >= 2:
             try:
@@ -232,11 +259,15 @@ class WalkieGraphsService(threading.Thread):
             except Exception as e:  # noqa: BLE001 — never let mask cleanup kill the tick
                 self._log(f"mask subtract failed: {e}")
                 masks = [d.mask for d in detections]
+        d_masksub = time.perf_counter() - t
 
         # Depth discontinuity map, computed once per frame (shared by all detections):
         # drops "flying pixels" at silhouettes where depth mixes foreground+background.
+        t = time.perf_counter()
         edge_mask = depth_discontinuity_mask(depth, self.depth_edge_thresh_m)
+        d_edge = time.perf_counter() - t
 
+        t = time.perf_counter()
         pending = []  # (orig_index, detected, points, crop)
         for i, d in enumerate(detections):
             mask = masks[i]
@@ -264,30 +295,56 @@ class WalkieGraphsService(threading.Thread):
                 and len(pts) >= self.min_points
             ):
                 pending.append((i, d, pts, _crop_pil(img, d.bbox, self.crop_margin_px)))
+        d_deproject = time.perf_counter() - t
 
         # Single caption pass over the captionable kept subset (reuses _caption's policy),
         # mapped back to original detection indices.
+        t = time.perf_counter()
         captions = self._caption([p[1] for p in pending], [p[3] for p in pending])
         for local, cap in captions.items():
             result[pending[local][0]]["caption"] = cap
+        d_caption = time.perf_counter() - t
 
-        # Embed + upsert the kept subset.
+        # Embed + upsert the kept subset. Embedding is one network round-trip PER object,
+        # so its total is timed separately from the local upsert work.
+        d_embed = 0.0
+        d_upsert = 0.0
         touched = []
         for i, d, pts, crop in pending:
+            t = time.perf_counter()
+            emb = self._embed(crop)
+            d_embed += time.perf_counter() - t
             det = Detection3D(
                 class_name=d.class_name or "object",
                 class_id=d.class_id,
                 confidence=float(d.confidence or 0.0),
                 bbox_xyxy=tuple(int(v) for v in d.bbox),
                 points_world=pts,
-                clip_emb=self._embed(crop),
+                clip_emb=emb,
                 caption=result[i]["caption"],
                 ts=time.time(),
                 crop=crop,
             )
+            t = time.perf_counter()
             touched.append(self.memory.upsert(det))
+            d_upsert += time.perf_counter() - t
         self._last_touched = touched
+
+        t = time.perf_counter()
         self._maybe_tick(tick, touched=touched)
+        d_tick = time.perf_counter() - t
+
+        total = time.perf_counter() - t_frame
+        n_cap = len(captions)
+        self._perf_log(
+            f"ingest tick #{self._tick}: TOTAL={total:.2f}s | "
+            f"pose={d_pose * 1000:.0f}ms intr={d_intr * 1000:.0f}ms "
+            f"masksub={d_masksub * 1000:.0f}ms edge={d_edge * 1000:.0f}ms "
+            f"deproject={d_deproject * 1000:.0f}ms ({len(detections)} det) | "
+            f"caption={d_caption * 1000:.0f}ms ({n_cap}) "
+            f"embed={d_embed * 1000:.0f}ms ({len(pending)}) "
+            f"upsert={d_upsert * 1000:.0f}ms | maint+viz={d_tick * 1000:.0f}ms"
+        )
         return result
 
     def _passes_size_filters(self, d, img_area: int) -> bool:
@@ -310,17 +367,24 @@ class WalkieGraphsService(threading.Thread):
             return
         self._tick += 1
         t = self._tick
+        ran: list[str] = []  # (name=ms) for whatever periodic work actually fired
+
+        def _timed(name, fn):
+            t0 = time.perf_counter()
+            fn()
+            ran.append(f"{name}={ (time.perf_counter() - t0) * 1000:.0f}ms")
+
         if self.relation_every_n > 0 and t % self.relation_every_n == 0:
-            self.memory.derive_relations()
-            self.memory.prune()
+            _timed("relations", self.memory.derive_relations)
+            _timed("prune", self.memory.prune)
         # Staggered ConceptGraphs post-processing — offsets 0/1/2 so no two collide,
         # and only after a full interval has elapsed (no churn on a near-empty graph).
         if self.denoise_every_n > 0 and t >= self.denoise_every_n and t % self.denoise_every_n == 0:
-            self.memory.denoise_nodes()
+            _timed("denoise", self.memory.denoise_nodes)
         if self.merge_every_n > 0 and t >= self.merge_every_n and t % self.merge_every_n == 1:
-            self.memory.merge_overlapping_nodes()
+            _timed("merge", self.memory.merge_overlapping_nodes)
         if self.ghost_every_n > 0 and t >= self.ghost_every_n and t % self.ghost_every_n == 2:
-            self.memory.evict_stale_provisional(time.time())
+            _timed("evict", lambda: self.memory.evict_stale_provisional(time.time()))
         # Tier 3 LLM passes (only when a model is wired and the cadence is enabled).
         if (
             self.model is not None
@@ -328,10 +392,13 @@ class WalkieGraphsService(threading.Thread):
             and t >= self.caption_refine_every_n
             and t % self.caption_refine_every_n == 3
         ):
-            self.memory.refine_captions(
-                self.model,
-                limit=self.caption_refine_limit,
-                use_images=self.caption_refine_use_images,
+            _timed(
+                "refine",
+                lambda: self.memory.refine_captions(
+                    self.model,
+                    limit=self.caption_refine_limit,
+                    use_images=self.caption_refine_use_images,
+                ),
             )
         if (
             self.model is not None
@@ -339,8 +406,9 @@ class WalkieGraphsService(threading.Thread):
             and t >= self.llm_edges_every_n
             and t % self.llm_edges_every_n == 4
         ):
-            self.memory.infer_edges_llm(self.model)
+            _timed("llm_edges", lambda: self.memory.infer_edges_llm(self.model))
         if self.viz is not None and touched is not None:
+            t0 = time.perf_counter()
             try:
                 self.viz.update(
                     self.memory,
@@ -349,6 +417,9 @@ class WalkieGraphsService(threading.Thread):
                 )
             except Exception as e:  # noqa: BLE001
                 self._log(f"viz update failed: {e}")
+            ran.append(f"viz={(time.perf_counter() - t0) * 1000:.0f}ms")
+        if ran:
+            self._perf_log(f"  maintenance: {' '.join(ran)}")
 
     # ------------------------------------------------------------------
     # Per-class scoping

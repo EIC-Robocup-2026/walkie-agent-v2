@@ -44,7 +44,7 @@ uv run python main.py                        # add DISABLE_LISTENING=1 to type i
 uv run python -m tools.scene_explore -y      # press Enter when you're done driving
 ```
 
-`main.py` now brings the **DB viewer up in its own process**, so you don't run a second script — open `http://<ip-of-this-box>:8500` (it binds `0.0.0.0`, so teammates on the LAN can open it too). Because it shares the robot's live ChromaDB client, browsing is fully live *and* can't corrupt the store. Disable it with `CHROMA_VIEWER_AUTOSTART=0`; run it standalone (robot stopped) with `uv run python -m tools.chroma_viewer`. `main.py` and `scene_explore` need **`walkie-ai-server`** up at `WALKIE_AI_BASE_URL` for detection/caption/STT/TTS (CLIP embeddings run in-process by default — see [Embedding backend](#embedding-backend-local-default-or-remote)). Each command is explained in full below.
+`main.py` now brings the **DB viewer up in its own process**, so you don't run a second script — open `http://<ip-of-this-box>:8500` (it binds `0.0.0.0`, so teammates on the LAN can open it too). Because it shares the robot's live ChromaDB client, browsing is fully live _and_ can't corrupt the store. Disable it with `CHROMA_VIEWER_AUTOSTART=0`; run it standalone (robot stopped) with `uv run python -m tools.chroma_viewer`. `main.py` and `scene_explore` need **`walkie-ai-server`** up at `WALKIE_AI_BASE_URL` for detection/caption/STT/TTS (CLIP embeddings run in-process by default — see [Embedding backend](#embedding-backend-local-default-or-remote)). Each command is explained in full below.
 
 > Need a clean slate? `uv run python -m tools.reset_db --all` wipes both vector DBs.
 
@@ -58,13 +58,13 @@ uv run python -m tools.scene_explore -y      # press Enter when you're done driv
 - A background service writes a live perception snapshot to `perception.json`.
 - The agent listens to the mic (STT), runs the **Walkie agent** on each utterance, and speaks replies back (TTS) — so you can look at, update, and command the robot all at once.
 
-(To *deliberately* rebuild the catalogue offline — wipe and just drive to collect — use the standalone [`tools/scene_explore`](#building--rebuilding-it-toolsscene_explore); it's optional now that the ready stage fills the DB on its own.)
+(To _deliberately_ rebuild the catalogue offline — wipe and just drive to collect — use the standalone [`tools/scene_explore`](#building--rebuilding-it-toolsscene_explore); it's optional now that the ready stage fills the DB on its own.)
 
 The agent stack is four agents built from one factory:
 
 - **Walkie main** — user-facing orchestrator; delegates to the sub-agents.
 - **Actuator** — movement + arm (`move_absolute`, `move_relative`, `command_arm`, …).
-- **Vision** — *live camera only*: `detect_objects_from_view`, `image_caption`, `detect_people_poses`, …
+- **Vision** — _live camera only_: `detect_objects_from_view`, `image_caption`, `detect_people_poses`, …
 - **Database** — long-term spatial memory: `find_object` (caption-first), `objects_near`, `recently_seen`, `list_known_objects`. "Where have I seen X / what's near here?" → Database; "what's in front of me now?" → Vision.
 
 > **Note:** the agent only "talks" by calling the `speak` tool. A plain-text model reply with no tool call ends the turn silently — by design.
@@ -73,16 +73,16 @@ The agent stack is four agents built from one factory:
 
 ## Prerequisites
 
-| Requirement | Notes |
-|---|---|
-| **Python 3.12** | Pinned in `.python-version`. |
-| **[uv](https://docs.astral.sh/uv/)** | Package/venv manager used by this repo. |
-| **Git access to `EIC-Robocup-2026/walkie-sdk`** | Resolved automatically by `uv sync`. |
-| **OpenRouter API key** | The LLM brain. Get one at [openrouter.ai](https://openrouter.ai). |
-| **`walkie-ai-server` running** | Needed for STT/TTS/detection/caption/pose. Default `http://localhost:5000`. (CLIP embeddings run in-process by default.) |
-| **`clip` extra (torch + transformers)** | For the default local embedding backend: `uv sync --extra clip`. GPU strongly recommended; RTX 5090 needs a CUDA 12.8 torch build. Skip it only if you set `SCENE_EMBED_BACKEND=remote`. |
-| **A robot (or local webcam)** | Full nav/arm needs the robot; the camera can fall back to `device=0`. |
-| **PortAudio + a mic/speaker** | For `pyaudio`/`sounddevice`. On Debian/Ubuntu: `sudo apt install portaudio19-dev`. |
+| Requirement                                     | Notes                                                                                                                                                                                    |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Python 3.12**                                 | Pinned in `.python-version`.                                                                                                                                                             |
+| **[uv](https://docs.astral.sh/uv/)**            | Package/venv manager used by this repo.                                                                                                                                                  |
+| **Git access to `EIC-Robocup-2026/walkie-sdk`** | Resolved automatically by `uv sync`.                                                                                                                                                     |
+| **OpenRouter API key**                          | The LLM brain. Get one at [openrouter.ai](https://openrouter.ai).                                                                                                                        |
+| **`walkie-ai-server` running**                  | Needed for STT/TTS/detection/caption/pose. Default `http://localhost:5000`. (CLIP embeddings run in-process by default.)                                                                 |
+| **`clip` extra (torch + transformers)**         | For the default local embedding backend: `uv sync --extra clip`. GPU strongly recommended; RTX 5090 needs a CUDA 12.8 torch build. Skip it only if you set `SCENE_EMBED_BACKEND=remote`. |
+| **A robot (or local webcam)**                   | Full nav/arm needs the robot; the camera can fall back to `device=0`.                                                                                                                    |
+| **PortAudio + a mic/speaker**                   | For `pyaudio`/`sounddevice`. On Debian/Ubuntu: `sudo apt install portaudio19-dev`.                                                                                                       |
 
 ---
 
@@ -123,13 +123,13 @@ OPENROUTER_API_KEY=sk-or-...
 
 `.env` variables (the full set):
 
-| Variable | Default | What it does |
-|---|---|---|
-| `OPENROUTER_API_KEY` | *(empty)* | **Required.** Agent calls fail without it. |
-| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | LLM endpoint. |
-| `WALKIE_AI_BASE_URL` | `http://localhost:5000` | Where `walkie-ai-server` lives. |
-| `WALKIE_ROS_PROTOCOL` / `WALKIE_ROS_PORT` | `rosbridge` / `9090` | Robot transport. |
-| `DISABLE_LISTENING` | `0` | Set `1` to type prompts instead of using the mic. |
+| Variable                                  | Default                        | What it does                                      |
+| ----------------------------------------- | ------------------------------ | ------------------------------------------------- |
+| `OPENROUTER_API_KEY`                      | _(empty)_                      | **Required.** Agent calls fail without it.        |
+| `OPENROUTER_BASE_URL`                     | `https://openrouter.ai/api/v1` | LLM endpoint.                                     |
+| `WALKIE_AI_BASE_URL`                      | `http://localhost:5000`        | Where `walkie-ai-server` lives.                   |
+| `WALKIE_ROS_PROTOCOL` / `WALKIE_ROS_PORT` | `rosbridge` / `9090`           | Robot transport.                                  |
+| `DISABLE_LISTENING`                       | `0`                            | Set `1` to type prompts instead of using the mic. |
 
 Tuning lives in **`config.toml`** — e.g. `[llm] WALKIE_MODEL`, `[scene] SCENE_PERCEPTION_INTERVAL_SEC`, `[scene.dedup] SCENE_DEDUP_RADIUS_M`, `[viewer] CHROMA_VIEWER_PORT`. Each key is the exact env-var name the code reads, grouped into tables for readability.
 
@@ -166,7 +166,7 @@ You'll get an `Enter your instruction:` prompt — type and press Enter to drive
 
 ## The legacy object memory (`chroma_db`)
 
-`main.py` **no longer runs an explore stage** — the robot is ready to take commands the instant it starts, and the CLIP scene memory (below) fills itself in the background. The older `WalkieVectorDB` (`chroma_db/`) is kept only as a *fallback* that `find_object_from_memory` reads when the CLIP `/image-embed` route is unavailable; nothing populates it automatically anymore.
+`main.py` **no longer runs an explore stage** — the robot is ready to take commands the instant it starts, and the CLIP scene memory (below) fills itself in the background. The older `WalkieVectorDB` (`chroma_db/`) is kept only as a _fallback_ that `find_object_from_memory` reads when the CLIP `/image-embed` route is unavailable; nothing populates it automatically anymore.
 
 To collect into it deliberately you can still drive the legacy `ExploreService` yourself (it lives in `services/explore.py`), but for "where is the X?" lookups prefer the **CLIP scene memory** below — it's what `find_object_from_memory` uses whenever `/image-embed` is available.
 
@@ -185,7 +185,7 @@ Once it's populated, `find_object_from_memory` (and the **Database agent**) answ
 
 Internally the store keeps two ChromaDB collections under one id space: `scene_entries` (CLIP image embeddings, used for dedup) and `scene_captions` (CLIP text embeddings of the captions, used by `text_query`). The caption index is written automatically on new sightings; for data collected with an older build, set `SCENE_REINDEX_CAPTIONS=1` once (in `.env` or `config.toml`) to backfill it.
 
-Objects whose 3D depth-lift fails — small/distant ones, or a whole crowded frame on timeout — are **dropped** by default, so only objects with a real per-object position enter the catalogue (stamping the robot's own pose instead would store *where the robot stood*, not where the object is, and navigating back there finds nothing). Set `SCENE_POSITION_FALLBACK_POSE=1` to re-enable the old robot-pose fallback once `get_3d_poses` is trustworthy. A separate sanity gate, `SCENE_MAX_LIFT_DISTANCE_M`, rejects lifted positions farther than N metres from the robot as sensor outliers. On a confident re-sighting that merges across a large distance (visual dedup), the position is **not** averaged into the empty space between the two observations — the higher-confidence one is kept.
+Objects whose 3D depth-lift fails — small/distant ones, or a whole crowded frame on timeout — are **dropped** by default, so only objects with a real per-object position enter the catalogue (stamping the robot's own pose instead would store _where the robot stood_, not where the object is, and navigating back there finds nothing). Set `SCENE_POSITION_FALLBACK_POSE=1` to re-enable the old robot-pose fallback once `get_3d_poses` is trustworthy. A separate sanity gate, `SCENE_MAX_LIFT_DISTANCE_M`, rejects lifted positions farther than N metres from the robot as sensor outliers. On a confident re-sighting that merges across a large distance (visual dedup), the position is **not** averaged into the empty space between the two observations — the higher-confidence one is kept.
 
 ### Embedding backend: local (default) or remote
 
@@ -198,7 +198,7 @@ CLIP embeddings can be produced **in-process** (`SCENE_EMBED_BACKEND=local`, the
 
 Either backend records the same `model_name`, so they're interchangeable over one store. Even so, if the embed path is unavailable mid-run, "where is X?" lookups still degrade to a local keyword search (see below).
 
-Tuning knobs (in `config.toml`, `[scene]` / `[scene.dedup]` / `[scene.position]` / `[scene.query]`): `SCENE_PERCEPTION_ENABLED`, `SCENE_EMBED_BACKEND`, `SCENE_CLIP_MODEL`, `SCENE_CLIP_DEVICE`, `SCENE_CLIP_FP16`, `SCENE_CHROMA_DIR`, `SCENE_FRAMES_DIR`, `SCENE_PERCEPTION_INTERVAL_SEC`, `SCENE_MIN_CONF`, `SCENE_CAPTION_PER_OBJECT`, `SCENE_FRAME_REFRESH_ON_UPDATE`, `SCENE_FRAME_CROP`, `SCENE_FRAME_CROP_MARGIN`, `SCENE_REINDEX_CAPTIONS`, `SCENE_DEDUP_RADIUS_M`, `SCENE_DEDUP_VISUAL_K`, `SCENE_POSITION_SOURCE`, `SCENE_POSITION_FALLBACK_POSE`, `SCENE_MAX_LIFT_DISTANCE_M`, `SCENE_QUERY_MIN_CONF`.
+Tuning knobs (in `config.toml`, `[scene]` / `[scene.dedup]` / `[scene.position]` / `[scene.query]`): `SCENE_PERCEPTION_ENABLED`, `SCENE_EMBED_BACKEND`, `SCENE_CHROMA_DIR`, `SCENE_FRAMES_DIR`, `SCENE_PERCEPTION_INTERVAL_SEC`, `SCENE_MIN_CONF`, `SCENE_CAPTION_PER_OBJECT`, `SCENE_FRAME_REFRESH_ON_UPDATE`, `SCENE_FRAME_CROP`, `SCENE_FRAME_CROP_MARGIN`, `SCENE_REINDEX_CAPTIONS`, `SCENE_DEDUP_RADIUS_M`, `SCENE_DEDUP_VISUAL_K`, `SCENE_POSITION_SOURCE`, `SCENE_POSITION_FALLBACK_POSE`, `SCENE_MAX_LIFT_DISTANCE_M`, `SCENE_QUERY_MIN_CONF`.
 
 The stored document is **caption-led** (the detector class is often wrong, so it's kept out of the search text and only used as a fallback when there's no caption), and archived thumbnails are the **object crop** (bbox + `SCENE_FRAME_CROP_MARGIN` padding), not the whole frame. For "where is X?" the Database agent and `find_object_from_memory` accept `near_me=True` to restrict the search to the robot's current vicinity, and drop matches below `SCENE_QUERY_MIN_CONF` so a returned coordinate is always one the robot can actually be sent to. If the `/image-embed` server is down, lookups **fall back to a local keyword (word-overlap) search** over the stored captions so "find X" keeps working offline.
 
@@ -225,7 +225,7 @@ In the **ready** stage the loop periodically prunes objects it no longer sees, s
 
 A **read-only** web UI to browse everything the robot has stored — the legacy `objects` (and older `people` / `scenes`) collections in `chroma_db/`, plus the CLIP `scene_entries` memory in `chroma_db_scene/`.
 
-**The usual way: it starts itself.** `python main.py` launches the viewer in-process (a daemon thread reusing the robot's own ChromaDB clients) and prints its URL. No second script, and — crucially — no risk to the store: it reads the *same* live index the robot writes, so there's only one HNSW index (a separate process opening the same dir would spin up a rival index and corrupt it). Turn it off with `CHROMA_VIEWER_AUTOSTART=0`; change where it binds with `CHROMA_VIEWER_HOST` / `CHROMA_VIEWER_PORT`.
+**The usual way: it starts itself.** `python main.py` launches the viewer in-process (a daemon thread reusing the robot's own ChromaDB clients) and prints its URL. No second script, and — crucially — no risk to the store: it reads the _same_ live index the robot writes, so there's only one HNSW index (a separate process opening the same dir would spin up a rival index and corrupt it). Turn it off with `CHROMA_VIEWER_AUTOSTART=0`; change where it binds with `CHROMA_VIEWER_HOST` / `CHROMA_VIEWER_PORT`.
 
 **Running it standalone** (a separate process — only when the robot is **not** running):
 
@@ -324,10 +324,10 @@ manual_tests/            Interactive webcam/robot demos (run via `python -m manu
 
 Perception emits a line per tick plus a `scene.dedup` line per detection — handy when watching collection, but they bury your prompt when commanding the robot. So the default differs per entrypoint:
 
-| Command | Perception logs | Why |
-|---|---|---|
-| `main.py` | **WARNING** (quiet) | you're typing or speaking commands |
-| `tools.scene_explore` | **INFO** (verbose) | you're watching it collect |
+| Command               | Perception logs     | Why                                |
+| --------------------- | ------------------- | ---------------------------------- |
+| `main.py`             | **WARNING** (quiet) | you're typing or speaking commands |
+| `tools.scene_explore` | **INFO** (verbose)  | you're watching it collect         |
 
 Override with `WALKIE_LOG_LEVEL` — uncomment it in `.env` to force one level everywhere, or set it inline for a single run: `WALKIE_LOG_LEVEL=INFO uv run python main.py`.
 
@@ -335,16 +335,16 @@ Override with `WALKIE_LOG_LEVEL` — uncomment it in `.env` to force one level e
 
 ## Troubleshooting
 
-| Symptom | Likely cause / fix |
-|---|---|
-| `WARNING: OPENROUTER_API_KEY not set` and agent errors | Fill `OPENROUTER_API_KEY` in `.env`. |
-| Perception logs flooding the prompt | Expected at INFO. `main.py` defaults to WARNING; if it's noisy, comment out / unset `WALKIE_LOG_LEVEL` in `.env` (see [Logs / verbosity](#logs--verbosity)). |
-| Connection errors to vision/STT/TTS | `walkie-ai-server` not running or wrong `WALKIE_AI_BASE_URL`. |
-| `PortAudio`/`pyaudio` build or device errors | Install PortAudio (`sudo apt install portaudio19-dev`), or run with `DISABLE_LISTENING=1`. |
-| Robot/Zenoh connection fails | Check the robot is up and `ROBOT_IP`/`ZENOH_PORT` in `main.py` are correct. |
-| `find_object_from_memory` returns nothing | The DB hasn't filled yet — let the robot look around (the ready-stage loop builds it in the background), or collect deliberately with `uv run python -m tools.scene_explore`. Also check matches aren't all being dropped by `SCENE_QUERY_MIN_CONF`. |
-| Walkie "responds" but says nothing aloud | Expected unless the agent calls `speak` — the no-plain-text contract. |
-| `walkie_graphs` Rerun viewer unreachable from another computer (connection **times out**) | The robot's **host firewall** is dropping the ports — the servers bind `0.0.0.0`, but `ufw`/iptables default-deny incoming (only SSH is allowed, which is why ping/SSH work but the viewer doesn't). Open **both** ports on the robot: `sudo ufw allow 9090/tcp && sudo ufw allow 9876/tcp` (use your actual `WALKIE_GRAPHS_RERUN_WEB_PORT` / `WALKIE_GRAPHS_RERUN_GRPC_PORT`). Both are required — the browser loads the page on the web port **and** streams data on the gRPC port. Also confirm you launched with `WALKIE_GRAPHS_VIZ=rerun WALKIE_GRAPHS_RERUN_SERVE=1` (without `RERUN_SERVE=1` it opens a local-only native window). A *connection refused* (instant, not a timeout) instead means it isn't serving — check that startup printed the "Rerun viewer live on the LAN" line. |
+| Symptom                                                                                   | Likely cause / fix                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WARNING: OPENROUTER_API_KEY not set` and agent errors                                    | Fill `OPENROUTER_API_KEY` in `.env`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Perception logs flooding the prompt                                                       | Expected at INFO. `main.py` defaults to WARNING; if it's noisy, comment out / unset `WALKIE_LOG_LEVEL` in `.env` (see [Logs / verbosity](#logs--verbosity)).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Connection errors to vision/STT/TTS                                                       | `walkie-ai-server` not running or wrong `WALKIE_AI_BASE_URL`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `PortAudio`/`pyaudio` build or device errors                                              | Install PortAudio (`sudo apt install portaudio19-dev`), or run with `DISABLE_LISTENING=1`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| Robot/Zenoh connection fails                                                              | Check the robot is up and `ROBOT_IP`/`ZENOH_PORT` in `main.py` are correct.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `find_object_from_memory` returns nothing                                                 | The DB hasn't filled yet — let the robot look around (the ready-stage loop builds it in the background), or collect deliberately with `uv run python -m tools.scene_explore`. Also check matches aren't all being dropped by `SCENE_QUERY_MIN_CONF`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| Walkie "responds" but says nothing aloud                                                  | Expected unless the agent calls `speak` — the no-plain-text contract.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `walkie_graphs` Rerun viewer unreachable from another computer (connection **times out**) | The robot's **host firewall** is dropping the ports — the servers bind `0.0.0.0`, but `ufw`/iptables default-deny incoming (only SSH is allowed, which is why ping/SSH work but the viewer doesn't). Open **both** ports on the robot: `sudo ufw allow 9090/tcp && sudo ufw allow 9876/tcp` (use your actual `WALKIE_GRAPHS_RERUN_WEB_PORT` / `WALKIE_GRAPHS_RERUN_GRPC_PORT`). Both are required — the browser loads the page on the web port **and** streams data on the gRPC port. Also confirm you launched with `WALKIE_GRAPHS_VIZ=rerun WALKIE_GRAPHS_RERUN_SERVE=1` (without `RERUN_SERVE=1` it opens a local-only native window). A _connection refused_ (instant, not a timeout) instead means it isn't serving — check that startup printed the "Rerun viewer live on the LAN" line. |
 
 ---
 
