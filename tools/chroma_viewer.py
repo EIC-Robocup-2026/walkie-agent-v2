@@ -970,7 +970,7 @@ def _class_counts(collection) -> list[tuple[str, int]]:
     return Counter(
         str(m.get("class_name"))
         for m in (res.get("metadatas") or [])
-        if m.get("class_name")
+        if m and m.get("class_name")
     ).most_common()
 
 
@@ -1620,10 +1620,12 @@ def _top_classes(store: Store, name: str, k: int = 3) -> list[tuple[str, int]]:
         res = coll.get(include=["metadatas"], limit=2000)
     except Exception:  # noqa: BLE001
         return []
+    # Embedding-only collections (people_appearance, scene_captions) store
+    # records without metadata — Chroma returns None for those, not {}.
     counter = Counter(
         str(m.get("class_name"))
         for m in (res.get("metadatas") or [])
-        if m.get("class_name")
+        if m and m.get("class_name")
     )
     return counter.most_common(k)
 
@@ -1649,7 +1651,7 @@ def browse(di: int, coll: str) -> str:
     classes = Counter(
         str(m.get("class_name"))
         for m in (cls_res.get("metadatas") or [])
-        if m.get("class_name")
+        if m and m.get("class_name")
     ).most_common()
 
     sort = request.args.get("sort")
