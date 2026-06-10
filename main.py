@@ -10,16 +10,19 @@ from langchain_openai import ChatOpenAI
 from walkie_sdk import WalkieRobot
 
 from walkie_config import load_config
+from tasks.runtime import active_task_name, load_task_config
 
 from agents.actuator_agent import create_actuator_agent
 from agents.core.robot_context import RobotContext
 from agents.database_agent import create_database_agent
+from agents.human_agent import create_human_agent
 from agents.vision_agent import create_vision_agent
 from agents.walkie_agent import create_walkie_main_agent
 from client import WalkieAIClient
 from interfaces.walkie_interface import WalkieInterface
 from perception import (
     LocalCLIPEmbedder,
+    PeopleStore,
     RemoteCLIPEmbedder,
     RobotPoseLifter,
     SceneStore,
@@ -182,6 +185,38 @@ def build_scene_store(walkieAI):
         except Exception as e:  # noqa: BLE001 — never block startup on a backfill
             print(f"[scene] caption reindex failed: {e!r}", file=sys.stderr)
     return store, embedder
+
+
+def build_people_store(walkieAI):
+    """Construct the face-keyed PeopleStore for the HRI / Receptionist tools.
+
+    The store itself (ChromaDB) has no server dependency, so it's built whenever
+    ``HUMAN_PERCEPTION_ENABLED`` is on; the enroll/recognize tools surface a
+    clear message if the ``/face-recognition`` route is unreachable at call time.
+    We probe ``/face-recognition/info`` once for embedding provenance, but a
+    failure there is non-fatal. Returns the store, or ``None`` when disabled.
+    """
+    if not _flag("HUMAN_PERCEPTION_ENABLED", "1"):
+        print("[human] disabled via HUMAN_PERCEPTION_ENABLED=0")
+        return None
+    model_name = ""
+    try:
+        model_name = walkieAI.face_recognition.get_model_name()
+        print(f"[human] face recognition backend: {model_name}")
+    except Exception as e:  # noqa: BLE001 — route may be down; tools report at call time
+        print(
+            f"[human] face service probe failed ({e!r}); people memory is built "
+            "but enroll/recognize need the face service live.",
+            file=sys.stderr,
+        )
+    store = PeopleStore(
+        persist_dir=os.getenv("PEOPLE_CHROMA_DIR", "chroma_db_people"),
+        embedding_model=model_name,
+        # Archive each guest's face crop so the DB viewer shows who's remembered.
+        frames_dir=os.getenv("PEOPLE_FRAMES_DIR", "people_frames"),
+    )
+    print(f"[human] people memory ON ({store.count()} remembered)")
+    return store
 
 
 def _lan_ip() -> str | None:
@@ -381,12 +416,20 @@ def run_ready_stage(walkieAI, walkie, model) -> None:
         )
         scene_service.start()
 
+    # Face-keyed people memory (HRI / Receptionist) — built independently of the
+    # scene store; only needs the /face-recognition route live at tool-call time.
+    people_store = build_people_store(walkieAI)
+
     # Bring up the live DB viewer in-process (see maybe_start_viewer), reusing the
-    # client the scene store already holds so it reads the live index safely.
+    # client each store already holds so it reads the live index safely.
     viewer_stores: list[tuple[str, object]] = []
     if scene_store is not None:
         viewer_stores.append(
             (os.getenv("SCENE_CHROMA_DIR", "chroma_db_scene"), scene_store.client)
+        )
+    if people_store is not None:
+        viewer_stores.append(
+            (os.getenv("PEOPLE_CHROMA_DIR", "chroma_db_people"), people_store.client)
         )
     maybe_start_viewer(viewer_stores)
 
@@ -395,8 +438,9 @@ def run_ready_stage(walkieAI, walkie, model) -> None:
     database = create_database_agent(
         model, walkieAI, walkie, scene_store=scene_store
     )
+    human = create_human_agent(model, walkieAI, walkie, people_store=people_store)
     walkie_agent = create_walkie_main_agent(
-        model, walkieAI, walkie, actuator, vision, database, scene_store=scene_store
+        model, walkieAI, walkie, actuator, vision, database, human, scene_store=scene_store
     )
 
     print("[Ready] Listening — speak to Walkie. Ctrl+C to exit.")
@@ -451,10 +495,20 @@ def run_ready_stage(walkieAI, walkie, model) -> None:
 
 def main() -> None:
     load_dotenv()
+    # If launched for a specific RoboCup challenge (tasks/<NAME>/run.sh exports
+    # WALKIE_TASK_DIR), layer that task's config.toml on top of the base one.
+    # It must load BEFORE the base config so its values win (both use setdefault);
+    # .env and shell env still override it. No-op when no task is active.
+    task_overrides = load_task_config()
     # Tuning knobs (perception/scene/explore/viewer) live in config.toml; .env
     # holds only secrets/endpoints/transport. setdefault means .env + real env
     # still win over config.toml.
     load_config()
+    task = active_task_name()
+    if task:
+        print(
+            f"[main] task: {task} ({task_overrides} override(s) from its config.toml)"
+        )
     # Keep third-party libs quiet. Perception emits INFO logs — per-tick summaries
     # plus the `scene.dedup action=INSERT/UPDATE ...` lines — but default them to
     # WARNING here so they don't bury the prompt while you're commanding the robot.

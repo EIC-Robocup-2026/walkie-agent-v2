@@ -12,6 +12,8 @@ from langchain.agents.middleware import (
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import InMemorySaver
 
+from tasks.runtime import apply_task_prompt
+
 from .middleware import (
     PerceptionContextMiddleware,
     RobotContextMiddleware,
@@ -76,7 +78,9 @@ def create_walkie_agent(
     agent = create_agent(
         model=model,
         tools=tools_list,
-        system_prompt=system_prompt,
+        # Layer any tasks/<active>/prompt(s) addendum on top of the base prompt.
+        # No-op (returns system_prompt unchanged) when no task is active.
+        system_prompt=apply_task_prompt(name, system_prompt),
         middleware=middleware,
         checkpointer=checkpointer or InMemorySaver(),
         name=name,

@@ -1,0 +1,12 @@
+# HRI (Human Robot Interaction) overrides — rulebook §5.1.
+#
+# Conversational + person-centric: a fast model keeps greetings snappy, and
+# human perception (face re-ID) must be on so the robot recognises each guest
+# and can re-introduce them after they switch seats (§5.1 "Switching Places").
+
+[model]
+WALKIE_MODEL = "anthropic/claude-sonnet-4.5"
+WALKIE_TEMPERATURE = "0"
+
+[perception]
+HUMAN_PERCEPTION_ENABLED = "1"

@@ -37,7 +37,33 @@ uv run python -m tools.reset_db --all -y   # both, no confirmation
 
 # Diagnose a corrupt / desynced store, read-only (snapshot copy, never the live files):
 uv run python -m tools.db_doctor --scene   # dangling vectors + caption↔entries desync
+
+# Launch for a specific RoboCup challenge (own model + prompt + tuning):
+./tasks/GPSR/run.sh                        # General Purpose Service Robot
+./tasks/HRI/run.sh                         # HRI & Receptionist
+./tasks/GPSR/run.sh fresh                  # wipe DBs then start (any base run.sh subcommand works)
 ```
+
+### Per-challenge launchers (`tasks/`)
+
+Each RoboCup challenge lives under `tasks/<NAME>/` so it runs with its own model,
+prompt, and tuning without touching `main.py`. The mechanism is purely env-driven
+(no monkey-patching) — see `tasks/runtime.py` and `tasks/README.md`:
+
+- `tasks/<NAME>/run.sh` → `tasks/_run.sh` exports `WALKIE_TASK_DIR` and `exec`s the
+  repo-root `run.sh`, so every base subcommand (`start`/`fresh`/`reset`/`viewer`/
+  `doctor`) and the stale-viewer-port cleanup still work, now task-aware.
+- `main.py` calls `load_task_config()` right after `load_dotenv()` and **before**
+  the base `load_config()`, so `tasks/<NAME>/config.toml` overrides the base one
+  (both use `setdefault`). Model selection per task is just `WALKIE_MODEL` there.
+- The shared agent factory (`agents/core/agent.py`) calls
+  `apply_task_prompt(name, base_prompt)` for **every** agent, so each picks up an
+  optional `tasks/<NAME>/prompts/<name>.md` addendum (the main agent also accepts
+  the shorthand `tasks/<NAME>/prompt.md`), appended under a `# Current task` heading.
+- When no task is active (plain `./run.sh`), every hook is a no-op.
+
+Precedence: **shell env > .env > task config.toml > base config.toml > code default**.
+Add a challenge with `cp -r tasks/_template tasks/<NAME>`.
 
 To run without the microphone (typing prompts at a TTY), set `DISABLE_LISTENING=1`.
 

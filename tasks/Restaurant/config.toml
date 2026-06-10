@@ -1,0 +1,14 @@
+# Restaurant overrides — rulebook §5.5.
+#
+# PARTIAL: gesture detection (waving/calling customer) + online navigation in an
+# unknown venue + verbal order-taking are feasible; serving the order needs
+# manipulation (partial). Human perception on for the calling/waving detection.
+# NOTE §5.5: assume NO wifi / external compute / power at the venue — keep models
+# the robot can reach under those constraints in mind when deploying for real.
+
+[model]
+WALKIE_MODEL = "anthropic/claude-sonnet-4.5"
+WALKIE_TEMPERATURE = "0"
+
+[perception]
+HUMAN_PERCEPTION_ENABLED = "1"

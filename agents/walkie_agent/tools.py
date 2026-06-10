@@ -17,6 +17,7 @@ def make_walkie_main_tools(
     actuator_agent,
     vision_agent,
     database_agent,
+    human_agent,
     *,
     agent_name: str = "walkie",
     scene_store=None,
@@ -105,6 +106,25 @@ def make_walkie_main_tools(
         print(f"[walkie] <- database: {result!r}")
         return result
 
+    @sequential_tool
+    @tool(parse_docstring=True)
+    def delegate_to_human(task: str) -> str:
+        """Delegate a person / HRI question to the Walkie Human sub-agent.
+
+        Use for people in front of the robot: "what does this guest look like?",
+        "how many people are here?", "is anyone waving?", and Receptionist-style
+        introductions. (Face/name memory is not available yet — it describes and
+        counts the live view.) Blocks until the sub-agent finishes.
+
+        Args:
+            task: A clear, self-contained question about the people in view.
+
+        Returns:
+            The human agent's answer.
+        """
+        print(f"[walkie] -> human: {task!r}")
+        return _invoke_subagent(human_agent, task, "human")
+
     @parallelable_tool
     @tool(parse_docstring=True)
     def find_object_from_memory(
@@ -172,6 +192,7 @@ def make_walkie_main_tools(
         delegate_to_actuator,
         delegate_to_vision,
         delegate_to_database,
+        delegate_to_human,
         find_object_from_memory,
         speak,
     ]
