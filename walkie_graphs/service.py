@@ -407,7 +407,7 @@ class WalkieGraphsService(threading.Thread):
                 )
             except Exception as e:  # noqa: BLE001
                 tf = None
-                self._log(f"transform lookup error: {e}")
+                self._log(f"transform lookup error: from {self._tf_map_frame} to {self._tf_cam_frame}: {e}")
             if tf is not None:
                 cam = camera_pose_from_transform(tf)
                 if self._debug:
