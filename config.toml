@@ -270,7 +270,7 @@ WALKIE_GRAPHS_RERUN_CORS = "*"
 #   axes (x right, y down, z forward) match the pinhole back-projection, so no axis
 #   conversion or manual composition is needed.
 WALKIE_GRAPHS_TF_MAP_FRAME = "map"
-WALKIE_GRAPHS_TF_CAMERA_FRAME = "zed_head_left_camera_optical_frame"
+WALKIE_GRAPHS_TF_CAMERA_FRAME = "zed_head_left_camera_frame_optical"
 WALKIE_GRAPHS_TF_TIMEOUT_SEC = "1.0"
 
 [graphs.fusion]

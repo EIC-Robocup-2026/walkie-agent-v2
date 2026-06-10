@@ -114,7 +114,7 @@ class WalkieGraphsService(threading.Thread):
         # match the pinhole math, so no manual composition or axis conversion is needed.
         self._tf_map_frame = os.getenv("WALKIE_GRAPHS_TF_MAP_FRAME", "map")
         self._tf_cam_frame = os.getenv(
-            "WALKIE_GRAPHS_TF_CAMERA_FRAME", "zed_head_left_camera_optical_frame"
+            "WALKIE_GRAPHS_TF_CAMERA_FRAME", "zed_head_left_camera_frame_optical"
         )
         self._tf_timeout = float(os.getenv("WALKIE_GRAPHS_TF_TIMEOUT_SEC", "1.0"))
         self._debug = os.getenv("WALKIE_GRAPHS_DEBUG", "0").lower() in ("1", "true", "yes")

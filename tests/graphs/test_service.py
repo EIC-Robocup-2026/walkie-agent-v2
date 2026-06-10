@@ -147,7 +147,7 @@ def test_camera_pose_from_optical_tf():
     assert np.allclose(pose.R, np.eye(3))
     assert np.allclose(pose.t, [1.0, 2.0, 3.0])
     # it looked up MAP_FRAME -> the optical camera frame
-    assert w.robot.transform.calls == [("map", "zed_head_left_camera_optical_frame")]
+    assert w.robot.transform.calls == [("map", "zed_head_left_camera_frame_optical")]
 
 
 def test_camera_pose_none_when_lookup_fails():
@@ -157,4 +157,4 @@ def test_camera_pose_none_when_lookup_fails():
 
 def test_default_camera_frame_is_optical():
     s, _ = _svc_with_walkie(None)
-    assert s._tf_cam_frame == "zed_head_left_camera_optical_frame"
+    assert s._tf_cam_frame == "zed_head_left_camera_frame_optical"
