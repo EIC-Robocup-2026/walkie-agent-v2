@@ -182,6 +182,3 @@ class WalkieGraphs:
                 except Exception:  # noqa: BLE001
                     pose = None
             self.viz.update(self.memory, robot_pose=pose)
-    
-    def __del__(self):
-        self.stop()

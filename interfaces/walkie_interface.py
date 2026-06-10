@@ -81,6 +81,3 @@ class WalkieInterface:
             connected = True
         if connected:
             robot.disconnect()
-
-    def __del__(self):
-        self.close()
