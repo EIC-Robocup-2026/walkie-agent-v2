@@ -109,6 +109,14 @@ def test_flying_pixel_cleanup_defaults(svc):
     assert svc.depth_edge_thresh_m == pytest.approx(0.05)
 
 
+def test_density_cleanup_defaults_off_in_code(svc):
+    # The depth-relative edge allowance and SOR default OFF in code (config.toml turns
+    # them on), so the unit-test lift path keeps the original fixed-threshold behaviour.
+    assert svc.depth_edge_rel == pytest.approx(0.0)
+    assert svc.sor_k == 0
+    assert svc.sor_std_ratio == pytest.approx(2.0)
+
+
 # ---------------------------------------------------------------------------
 # walkie-sdk integration: intrinsics from get_intrinsics, pose from optical TF
 # ---------------------------------------------------------------------------

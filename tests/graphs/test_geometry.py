@@ -10,6 +10,7 @@ from services.walkie_graphs.geometry import (
     Intrinsics,
     depth_discontinuity_mask,
     deproject_mask,
+    statistical_outlier_removal,
     voxel_downsample,
 )
 
@@ -173,6 +174,52 @@ def test_deproject_edge_mask_drops_flying_pixels():
     assert len(clean) < len(raw)  # boundary pixels removed
     # no surviving point sits at the bled intermediate band (depths are exactly 1.0/1.5)
     assert set(np.round(np.unique(clean[:, 2]), 3)).issubset({1.0, 1.5})
+
+
+def test_depth_discontinuity_relative_threshold_spares_grazing_surface():
+    # A slanted surface at ~3 m, ~6 cm depth step per column (grazing-angle gradient).
+    depth = np.empty((4, 6), dtype=np.float32)
+    depth[:] = (3.0 + 0.06 * np.arange(6))[None, :]
+    # A fixed 5 cm threshold flags the whole surface (every 6 cm step > 5 cm)...
+    assert depth_discontinuity_mask(depth, thresh=0.05).any()
+    # ...but a depth-relative allowance (0.05 + 0.02*3 = 0.11 m > 0.06 m) spares it.
+    assert not depth_discontinuity_mask(depth, thresh=0.05, rel_thresh=0.02).any()
+
+
+def test_depth_discontinuity_relative_still_flags_real_silhouette():
+    # A 0.5 m foreground/background step at 1 m depth is huge relative to local depth,
+    # so the depth-relative threshold (allowance ~0.07 m) still flags it.
+    depth = np.full((6, 6), 1.0, dtype=np.float32)
+    depth[:, 3:] = 1.5
+    edge = depth_discontinuity_mask(depth, thresh=0.05, rel_thresh=0.02)
+    assert edge[:, 2].all() and edge[:, 3].all()
+
+
+def test_sor_removes_sparse_flyers_keeps_dense_surface():
+    # A dense 20x20 cm planar patch (1 cm grid) plus three isolated flying pixels.
+    gx, gy = np.meshgrid(np.arange(20) * 0.01, np.arange(20) * 0.01)
+    surface = np.stack([gx.ravel(), gy.ravel(), np.zeros(gx.size)], axis=1).astype(np.float32)
+    flyers = np.array([[1.0, 1.0, 1.0], [1.5, -1.0, 0.8], [-1.0, 1.2, 1.1]], dtype=np.float32)
+    kept = statistical_outlier_removal(np.vstack([surface, flyers]), k=8, std_ratio=1.0)
+    assert len(kept) == len(surface)  # exactly the sparse flyers removed
+
+
+def test_sor_noop_when_too_few_points():
+    pts = np.zeros((5, 3), dtype=np.float32)
+    assert len(statistical_outlier_removal(pts, k=16, std_ratio=2.0)) == 5
+
+
+def test_deproject_sor_drops_isolated_flyer():
+    intr = _intr()
+    pose = CameraPose(R=np.eye(3), t=np.zeros(3))
+    depth = np.full((480, 640), 2.0, dtype=np.float32)
+    depth[100, 500] = 8.0  # one pixel deprojects far from the dense block
+    mask = np.zeros((480, 640), dtype=np.uint8)
+    mask[100:140, 100:140] = 1
+    mask[100, 500] = 1
+    raw = deproject_mask(mask, depth, intr, pose)
+    cleaned = deproject_mask(mask, depth, intr, pose, sor_k=8, sor_std_ratio=1.0)
+    assert len(cleaned) == len(raw) - 1
 
 
 def test_deproject_erode_shrinks_cloud():

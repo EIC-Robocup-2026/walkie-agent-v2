@@ -100,6 +100,16 @@ class WalkieGraphsService(threading.Thread):
         # jump larger than this many metres. 0 / 0.0 disable each.
         self.mask_erode_px = int(os.getenv("WALKIE_GRAPHS_MASK_ERODE_PX", "2"))
         self.depth_edge_thresh_m = float(os.getenv("WALKIE_GRAPHS_DEPTH_EDGE_THRESH_M", "0.05"))
+        # Make the depth-edge threshold grow with distance (thresh + rel * depth): a fixed
+        # threshold erases grazing surfaces (a bed/table seen edge-on keeps only its near
+        # corner). 0.0 = original fixed behaviour. See depth_discontinuity_mask.
+        self.depth_edge_rel = float(os.getenv("WALKIE_GRAPHS_DEPTH_EDGE_REL", "0.0"))
+        # Statistical outlier removal on each lifted cloud (Open3D remove_statistical_outlier):
+        # a 3D density filter that strips flying pixels the per-pixel edge filter can't, and
+        # unlike a fixed depth-edge threshold never erases grazing surfaces. 0 disables.
+        # Default off in code (tests), on via config.toml — the usual split.
+        self.sor_k = int(os.getenv("WALKIE_GRAPHS_SOR_K", "0"))
+        self.sor_std_ratio = float(os.getenv("WALKIE_GRAPHS_SOR_STD_RATIO", "2.0"))
         # Detection-time filters (ConceptGraphs filter_gobs): reject whole-frame /
         # background boxes and degenerate masks before they cost a deproject. 1.0 / 0
         # are no-ops (keep everything); config.toml tightens them.
@@ -315,7 +325,9 @@ class WalkieGraphsService(threading.Thread):
         # Depth discontinuity map, computed once per frame (shared by all detections):
         # drops "flying pixels" at silhouettes where depth mixes foreground+background.
         t = time.perf_counter()
-        edge_mask = depth_discontinuity_mask(depth, self.depth_edge_thresh_m)
+        edge_mask = depth_discontinuity_mask(
+            depth, self.depth_edge_thresh_m, rel_thresh=self.depth_edge_rel
+        )
         d_edge = time.perf_counter() - t
 
         t = time.perf_counter()
@@ -335,6 +347,8 @@ class WalkieGraphsService(threading.Thread):
                 max_points=self.max_points,
                 erode_px=self.mask_erode_px,
                 edge_mask=edge_mask,
+                sor_k=self.sor_k,
+                sor_std_ratio=self.sor_std_ratio,
             )
             if len(pts) == 0:
                 continue

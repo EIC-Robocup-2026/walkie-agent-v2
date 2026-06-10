@@ -277,9 +277,12 @@ WALKIE_GRAPHS_SIM_LOW = "0.65"
 WALKIE_GRAPHS_DEDUP_VISUAL_K = "5"
 # Point-cloud handling: voxel size for downsampling merged clouds (m), hard cap
 # on points per object, and the minimum valid depth points to accept a detection.
-WALKIE_GRAPHS_VOXEL_M = "0.02"
-WALKIE_GRAPHS_MAX_POINTS_PER_OBJ = "2000"
-WALKIE_GRAPHS_MIN_POINTS = "30"
+# MIN_POINTS gates graph entry only (the live snapshot still gets a centroid below it):
+# keep it low or small/thin/flat objects (a fork) never enter the catalogue.
+# REQUIRE_CONFIRMATION + MIN_OBS_CONFIRM backstop the false-positive risk of a low value.
+WALKIE_GRAPHS_VOXEL_M = "0.01"
+WALKIE_GRAPHS_MAX_POINTS_PER_OBJ = "6000"
+WALKIE_GRAPHS_MIN_POINTS = "15"
 # Minimum detector confidence to accept a detection. Dropped early (before
 # lift/embed/caption), alongside the class scope and MIN_POINTS checks. 0.0 = keep all.
 WALKIE_GRAPHS_CONFIDENCE_THRESHOLD = "0.3"
@@ -305,10 +308,25 @@ WALKIE_GRAPHS_CROSS_CLASS_SIM_THRESHOLD = "1.5"
 # a shadow because a boundary depth pixel mixes the object with the background behind it.
 # Removed at the source (before back-projection), where the discontinuity is visible:
 #   MASK_ERODE_PX     — shrink each mask inward this many px, dropping the unreliable rim.
+#                       Kept at 1: 2 px obliterates thin masks (a fork's tines/handle).
 #   DEPTH_EDGE_THRESH — drop pixels next to a depth jump bigger than this (metres); the
 #                       flying pixels sit exactly on these jumps. 0 disables either.
-WALKIE_GRAPHS_MASK_ERODE_PX = "2"
+#   DEPTH_EDGE_REL    — grow that threshold with depth (effective = THRESH + REL * depth).
+#                       A FIXED threshold erases grazing surfaces: a bed/table seen
+#                       edge-on has far-region per-pixel steps over 5 cm, so only its near
+#                       corner survives. 0.02 lets a slanted surface through while still
+#                       catching the abrupt fg/bg step at a real silhouette. 0 = fixed.
+WALKIE_GRAPHS_MASK_ERODE_PX = "1"
 WALKIE_GRAPHS_DEPTH_EDGE_THRESH_M = "0.05"
+WALKIE_GRAPHS_DEPTH_EDGE_REL = "0.02"
+# Statistical outlier removal on each lifted cloud (Open3D remove_statistical_outlier,
+# what ConceptGraphs uses): drop points whose mean distance to their SOR_K nearest
+# neighbours exceeds mean + SOR_STD_RATIO * std. A 3D DENSITY filter — it removes the
+# flying pixels the per-pixel edge filter misses, and unlike a fixed depth threshold it
+# never erases a grazing surface (the dense bed stays; the sparse shadow trail goes),
+# which is the robust fix for the "bed = only a corner" failure. SOR_K = 0 disables.
+WALKIE_GRAPHS_SOR_K = "16"
+WALKIE_GRAPHS_SOR_STD_RATIO = "2.0"
 # DBSCAN denoising of each detection's cloud (largest cluster) before it enters the
 # graph — strips any residual mask-edge depth bleed that would inflate AABBs. The edge
 # filters above remove most of it at the source; DBSCAN is the 3D backstop. 1 = on.
