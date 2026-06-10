@@ -103,20 +103,36 @@ service feeds it real calibration and pose straight from the **walkie-sdk**.
 </details>
 
 ### 3. Clean it up
-Depth cameras are noisy — a few stray points "fly off" the edges of the mask into the background.
-Those get cleaned away so the object's size and position stay accurate.
+Depth cameras are noisy — at an object's edge, a pixel can mix the object with the wall behind it
+and report an in-between distance, so the point lands *behind* the object like a shadow ("flying
+pixels"). Two filters remove this at the source, then DBSCAN mops up anything left, so the object's
+size and position stay accurate.
 
 <details>
-<summary>Details — DBSCAN denoising</summary>
+<summary>Details — flying-pixel edge cleanup</summary>
+
+These run during back-projection ([walkie_graphs/geometry.py](walkie_graphs/geometry.py)), where the
+depth discontinuity is still visible in 2D — much more reliable than trying to spot the smear in the
+finished 3D cloud:
+
+- **Mask erosion** (`MASK_ERODE_PX`, default 2): shrink each object's mask inward by a couple of
+  pixels, dropping the unreliable rim along the silhouette where foreground and background mix.
+- **Depth-discontinuity rejection** (`DEPTH_EDGE_THRESH_M`, default 0.05 m): `depth_discontinuity_mask`
+  flags every pixel that borders a depth jump bigger than the threshold — the flying pixels sit
+  exactly on these jumps — and they're dropped. It's computed once per frame and shared by all
+  detections. Set either knob to 0 to disable it.
+</details>
+
+<details>
+<summary>Details — DBSCAN denoising (the 3D backstop)</summary>
 
 - [walkie_graphs/dbscan.py](walkie_graphs/dbscan.py) implements DBSCAN clustering and keeps only
   the **largest cluster** of points — exactly what ConceptGraphs does with `pcd_denoise_dbscan`.
   It uses scikit-learn's battle-tested C implementation when installed (the fast path), with a
   pure `scipy.spatial.cKDTree` + union-find fallback so a partial install still works.
 - This runs **once per detection** (`GraphMemory._denoise`, controlled by `DBSCAN_EPS`,
-  `DBSCAN_MIN_POINTS`). Without it, mask-edge "depth bleed" inflates an object's bounding box and
-  drags its centre off-target, which corrupts both the spatial relations and the matching in the
-  next step.
+  `DBSCAN_MIN_POINTS`). The edge filters above remove most depth bleed before it ever becomes a
+  point; DBSCAN catches any residual disconnected blob that would still inflate the bounding box.
 - A safety rule: if denoising would throw away most of the points, it's skipped — a big cloud that
   legitimately spans a gap (a long table, a shelf) shouldn't be truncated to one blob. (See
   `denoise_nodes` and `DENOISE_KEEP_MIN_FRAC` for the periodic version.)

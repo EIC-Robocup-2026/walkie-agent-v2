@@ -21,7 +21,12 @@ import time
 import numpy as np
 
 from .fusion import subtract_contained_masks
-from .geometry import CameraPose, Intrinsics, deproject_mask
+from .geometry import (
+    CameraPose,
+    Intrinsics,
+    depth_discontinuity_mask,
+    deproject_mask,
+)
 from .memory import Detection3D, GraphMemory
 
 
@@ -81,6 +86,11 @@ class WalkieGraphsService(threading.Thread):
         self.voxel_m = float(os.getenv("WALKIE_GRAPHS_VOXEL_M", "0.02"))
         self.max_points = int(os.getenv("WALKIE_GRAPHS_MAX_POINTS_PER_OBJ", "2000"))
         self.relation_every_n = int(os.getenv("WALKIE_GRAPHS_RELATION_EVERY_N", "5"))
+        # Depth "flying pixel" cleanup (the shadow trailing off an object's silhouette):
+        # erode each mask inward by this many pixels, and drop pixels sitting on a depth
+        # jump larger than this many metres. 0 / 0.0 disable each.
+        self.mask_erode_px = int(os.getenv("WALKIE_GRAPHS_MASK_ERODE_PX", "2"))
+        self.depth_edge_thresh_m = float(os.getenv("WALKIE_GRAPHS_DEPTH_EDGE_THRESH_M", "0.05"))
         # Detection-time filters (ConceptGraphs filter_gobs): reject whole-frame /
         # background boxes and degenerate masks before they cost a deproject. 1.0 / 0
         # are no-ops (keep everything); config.toml tightens them.
@@ -223,6 +233,10 @@ class WalkieGraphsService(threading.Thread):
                 self._log(f"mask subtract failed: {e}")
                 masks = [d.mask for d in detections]
 
+        # Depth discontinuity map, computed once per frame (shared by all detections):
+        # drops "flying pixels" at silhouettes where depth mixes foreground+background.
+        edge_mask = depth_discontinuity_mask(depth, self.depth_edge_thresh_m)
+
         pending = []  # (orig_index, detected, points, crop)
         for i, d in enumerate(detections):
             mask = masks[i]
@@ -231,7 +245,14 @@ class WalkieGraphsService(threading.Thread):
             if not self._passes_size_filters(d, img_area):
                 continue
             pts = deproject_mask(
-                mask, depth, intr, cam, voxel=self.voxel_m, max_points=self.max_points
+                mask,
+                depth,
+                intr,
+                cam,
+                voxel=self.voxel_m,
+                max_points=self.max_points,
+                erode_px=self.mask_erode_px,
+                edge_mask=edge_mask,
             )
             if len(pts) == 0:
                 continue

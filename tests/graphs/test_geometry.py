@@ -8,6 +8,7 @@ import pytest
 from walkie_graphs.geometry import (
     CameraPose,
     Intrinsics,
+    depth_discontinuity_mask,
     deproject_mask,
     voxel_downsample,
 )
@@ -128,3 +129,60 @@ def test_voxel_downsample_reduces_count():
     out = voxel_downsample(pts, 0.1)
     assert len(out) == 1
     assert out[0] == pytest.approx(pts.mean(axis=0), abs=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Flying-pixel (depth-bleed) cleanup
+# ---------------------------------------------------------------------------
+def test_depth_discontinuity_flags_step_edge():
+    depth = np.full((10, 10), 1.0, dtype=np.float32)
+    depth[:, 5:] = 1.5  # a 0.5 m step between columns 4 and 5
+    edge = depth_discontinuity_mask(depth, thresh=0.1)
+    # both columns straddling the jump are flagged...
+    assert edge[:, 4].all() and edge[:, 5].all()
+    # ...and a flat interior column is not.
+    assert not edge[:, 0].any() and not edge[:, 9].any()
+
+
+def test_depth_discontinuity_ignores_small_steps_and_disabled():
+    depth = np.full((10, 10), 1.0, dtype=np.float32)
+    depth[:, 5:] = 1.02  # 2 cm step, below threshold
+    assert not depth_discontinuity_mask(depth, thresh=0.1).any()
+    assert depth_discontinuity_mask(depth, thresh=0.0) is None
+
+
+def test_depth_discontinuity_ignores_nan():
+    depth = np.full((6, 6), 1.0, dtype=np.float32)
+    depth[:, 3:] = np.nan  # invalid region, not a real surface jump
+    edge = depth_discontinuity_mask(depth, thresh=0.1)
+    assert not edge.any()
+
+
+def test_deproject_edge_mask_drops_flying_pixels():
+    # Object plane at 1.0 m on the left, wall at 1.5 m on the right; a vertical mask
+    # spanning the boundary. The edge filter should drop the silhouette columns.
+    intr = _intr()
+    pose = CameraPose(R=np.eye(3), t=np.zeros(3))
+    depth = np.full((480, 640), 1.0, dtype=np.float32)
+    depth[:, 320:] = 1.5
+    mask = np.zeros((480, 640), dtype=np.uint8)
+    mask[200:260, 315:325] = 1  # straddles the depth step at column 320
+    edge = depth_discontinuity_mask(depth, thresh=0.1)
+    clean = deproject_mask(mask, depth, intr, pose, edge_mask=edge)
+    raw = deproject_mask(mask, depth, intr, pose)
+    assert len(clean) < len(raw)  # boundary pixels removed
+    # no surviving point sits at the bled intermediate band (depths are exactly 1.0/1.5)
+    assert set(np.round(np.unique(clean[:, 2]), 3)).issubset({1.0, 1.5})
+
+
+def test_deproject_erode_shrinks_cloud():
+    intr = _intr()
+    pose = CameraPose(R=np.eye(3), t=np.zeros(3))
+    depth = np.full((480, 640), 2.0, dtype=np.float32)
+    mask = np.zeros((480, 640), dtype=np.uint8)
+    mask[200:240, 300:340] = 1  # 40x40 = 1600 px block
+    full = deproject_mask(mask, depth, intr, pose)
+    eroded = deproject_mask(mask, depth, intr, pose, erode_px=2)
+    assert len(eroded) < len(full)
+    # eroding a 40x40 block by 2 px → ~36x36 = 1296
+    assert len(eroded) == 36 * 36

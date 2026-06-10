@@ -223,7 +223,7 @@ WALKIE_GRAPHS_INTERVAL_SEC = "3.0"
 # may contain spaces (split on commas). Grouped here by category for readability.
 
 
-# WALKIE_GRAPHS_INTERESTED_CLASSES = "cloth,sponge,bowl,cup,fork,knife,plate,spoon,coffee creamer,coke,ice tea,milk,orange juice,red bull,water bottle,bread,cornflakes,instant noodles,potato,tomato soup,apple,avocado,lemon,orange,chips,cookies,gum,mixed nuts,pringles,hand cream,soap,toothpaste,dish rack,shelf,monitor,bed,pillow"
+WALKIE_GRAPHS_INTERESTED_CLASSES = "chair,stool,cloth,sponge,bowl,cup,fork,knife,plate,spoon,coffee creamer,coke,ice tea,milk,orange juice,red bull,water bottle,bread,cornflakes,instant noodles,potato,tomato soup,apple,avocado,lemon,orange,chips,cookies,gum,mixed nuts,pringles,hand cream,soap,toothpaste,dish rack,shelf,monitor,bed,pillow"
 
 
 # Classes to always drop before lift/embed/store. Moving objects (people) can't
@@ -310,8 +310,17 @@ WALKIE_GRAPHS_NN_VOXEL_M = "0.025"
 # score clears this STRICTER gate (needs ~full overlap AND agreeing CLIP — with
 # weights 1/1, 1.5 means nn_ratio + phi_sem >= 1.5). 0 = same-class only.
 WALKIE_GRAPHS_CROSS_CLASS_SIM_THRESHOLD = "1.5"
+# Depth "flying pixel" cleanup — the points that smear off an object's silhouette into
+# a shadow because a boundary depth pixel mixes the object with the background behind it.
+# Removed at the source (before back-projection), where the discontinuity is visible:
+#   MASK_ERODE_PX     — shrink each mask inward this many px, dropping the unreliable rim.
+#   DEPTH_EDGE_THRESH — drop pixels next to a depth jump bigger than this (metres); the
+#                       flying pixels sit exactly on these jumps. 0 disables either.
+WALKIE_GRAPHS_MASK_ERODE_PX = "2"
+WALKIE_GRAPHS_DEPTH_EDGE_THRESH_M = "0.05"
 # DBSCAN denoising of each detection's cloud (largest cluster) before it enters the
-# graph — strips mask-edge depth bleed that would inflate AABBs. 1 = on (CG default).
+# graph — strips any residual mask-edge depth bleed that would inflate AABBs. The edge
+# filters above remove most of it at the source; DBSCAN is the 3D backstop. 1 = on.
 WALKIE_GRAPHS_DBSCAN_ENABLED = "1"
 WALKIE_GRAPHS_DBSCAN_EPS = "0.05"
 WALKIE_GRAPHS_DBSCAN_MIN_POINTS = "10"

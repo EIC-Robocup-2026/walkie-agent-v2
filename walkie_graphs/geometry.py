@@ -90,6 +90,31 @@ def voxel_downsample(points: np.ndarray, voxel: float) -> np.ndarray:
     return (sums / counts).astype(np.float32)
 
 
+def depth_discontinuity_mask(depth: np.ndarray, thresh: float) -> np.ndarray | None:
+    """Boolean HxW map: True where a pixel borders a depth jump larger than ``thresh`` (m).
+
+    These are the "flying pixel" / "mixed pixel" edges: at an object's silhouette a
+    depth pixel straddles the foreground and the background, so the sensor reports an
+    averaged depth that back-projects to a point hanging in space behind the object (a
+    shadow). Both pixels on either side of each jump are flagged so the whole bleed
+    band is excluded. Invalid (NaN/≤0) depth is ignored (``NaN > thresh`` is ``False``),
+    and those pixels are dropped anyway. Returns ``None`` when ``thresh <= 0``.
+    """
+    if thresh is None or thresh <= 0:
+        return None
+    d = depth.astype(np.float32)
+    d = np.where(np.isfinite(d) & (d > 0), d, np.nan)
+    edge = np.zeros(d.shape, dtype=bool)
+    # Vertical then horizontal neighbour jumps; mark both sides of each.
+    vj = np.abs(np.diff(d, axis=0)) > thresh
+    edge[:-1, :] |= vj
+    edge[1:, :] |= vj
+    hj = np.abs(np.diff(d, axis=1)) > thresh
+    edge[:, :-1] |= hj
+    edge[:, 1:] |= hj
+    return edge
+
+
 def deproject_mask(
     mask: np.ndarray,
     depth: np.ndarray,
@@ -98,6 +123,8 @@ def deproject_mask(
     *,
     voxel: float | None = None,
     max_points: int | None = None,
+    erode_px: int = 0,
+    edge_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     """Back-project all masked pixels with valid depth to an ``(N, 3)`` map-frame cloud.
 
@@ -106,6 +133,14 @@ def deproject_mask(
     back-projected into the camera optical frame and mapped into the world by the
     optical-frame pose (``P_map = P_optical @ R.T + t``). Optionally voxel-downsampled
     and capped at ``max_points`` (deterministic uniform stride).
+
+    Two edge-cleanup options remove depth "flying pixels" (the shadow trailing off an
+    object's silhouette):
+
+    * ``erode_px`` shrinks the mask inward by that many pixels, dropping the unreliable
+      rim where foreground/background mix.
+    * ``edge_mask`` (a depth-resolution boolean map from :func:`depth_discontinuity_mask`,
+      computed once per frame) drops any masked pixel sitting on a depth jump.
     """
     if mask.shape[:2] != depth.shape[:2]:
         if cv2 is None:  # pragma: no cover
@@ -116,12 +151,18 @@ def deproject_mask(
             interpolation=cv2.INTER_NEAREST,
         )
 
+    if erode_px and erode_px > 0 and cv2 is not None:
+        kernel = np.ones((3, 3), np.uint8)
+        mask = cv2.erode(mask.astype(np.uint8), kernel, iterations=int(erode_px))
+
     ys, xs = np.nonzero(mask)
     if len(xs) == 0:
         return np.zeros((0, 3), dtype=np.float32)
 
     d = depth[ys, xs].astype(np.float64)
     valid = np.isfinite(d) & (d > 0)
+    if edge_mask is not None:
+        valid &= ~edge_mask[ys, xs]
     if not np.any(valid):
         return np.zeros((0, 3), dtype=np.float32)
     xs, ys, d = xs[valid], ys[valid], d[valid]

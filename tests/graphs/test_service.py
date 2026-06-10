@@ -93,6 +93,12 @@ def test_mask_subtract_and_crop_margin_defaults(svc):
     assert svc.crop_margin_px == 20
 
 
+def test_flying_pixel_cleanup_defaults(svc):
+    # depth-bleed cleanup defaults ON: erode 2px + reject depth jumps over 5cm.
+    assert svc.mask_erode_px == 2
+    assert svc.depth_edge_thresh_m == pytest.approx(0.05)
+
+
 # ---------------------------------------------------------------------------
 # walkie-sdk integration: intrinsics from get_intrinsics, pose from optical TF
 # ---------------------------------------------------------------------------
