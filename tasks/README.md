@@ -79,7 +79,7 @@ shell env  >  .env  >  task config.toml  >  base config.toml  >  code default
 So a task pins its model in `config.toml`, but you can still override per launch:
 
 ```bash
-WALKIE_MODEL=anthropic/claude-opus-4.5 ./tasks/Receptionist/run.sh
+WALKIE_MODEL=anthropic/claude-opus-4.5 ./tasks/HRI/run.sh
 ```
 
 ## Add a challenge

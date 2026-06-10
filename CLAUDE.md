@@ -40,7 +40,7 @@ uv run python -m tools.db_doctor --scene   # dangling vectors + caption↔entrie
 
 # Launch for a specific RoboCup challenge (own model + prompt + tuning):
 ./tasks/GPSR/run.sh                        # General Purpose Service Robot
-./tasks/Receptionist/run.sh                # Receptionist
+./tasks/HRI/run.sh                         # HRI & Receptionist
 ./tasks/GPSR/run.sh fresh                  # wipe DBs then start (any base run.sh subcommand works)
 ```
 
