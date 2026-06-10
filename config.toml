@@ -371,7 +371,7 @@ WALKIE_GRAPHS_MERGE_RADIUS_M = "0.5"
 # HIDDEN from queries/description (non-destructive — a re-sighting promotes them; the
 # viewer and count() still see them). GHOST_GRACE_SEC>0 additionally DELETES provisional
 # nodes unseen that long (0 = never delete, just hide).
-WALKIE_GRAPHS_MIN_OBS_CONFIRM = "3"
+WALKIE_GRAPHS_MIN_OBS_CONFIRM = "2"
 WALKIE_GRAPHS_REQUIRE_CONFIRMATION = "1"
 WALKIE_GRAPHS_GHOST_EVERY_N = "20"
 WALKIE_GRAPHS_GHOST_GRACE_SEC = "0"
