@@ -10,8 +10,15 @@ that need **no new walkie-ai-server route** — they reuse the existing
 - ``count_people`` — how many people are visible, with a best-effort
   arm-raised / posture breakdown from pose keypoints.
 
-Face enrollment / recognition (the ``/face-embed`` server route + a face-keyed
-people store) land in a later slice — see ``docs/human_recognition_design.md``.
+Face enrollment / recognition use the ``/face-recognition`` route + the
+face-keyed ``PeopleStore`` — see ``docs/human_recognition_design.md``.
+
+When the server also exposes ``/appearance/embed`` (OSNet attire/body re-ID —
+pipeline design by Chalk, EIC team, from the ``eic-human`` subproject), enroll
+additionally stores an appearance vector and recognize fuses both modalities,
+so a guest can still be identified when their face isn't visible. Without the
+route (or with ``HUMAN_APPEARANCE_ENABLED=0``) everything degrades to the
+face-only behavior.
 
 Read-only lookups are ``@parallelable_tool``; ``speak`` moves audio so it's
 ``@sequential_tool``.
@@ -56,6 +63,18 @@ def _match_threshold() -> float:
         return float(os.getenv("FACE_MATCH_THRESHOLD", "0.4"))
     except ValueError:
         return 0.4
+
+
+def _appearance_enabled() -> bool:
+    return os.getenv("HUMAN_APPEARANCE_ENABLED", "1") == "1"
+
+
+def _appearance_threshold() -> float:
+    """Min fused similarity score for a two-modality match (Chalk's default)."""
+    try:
+        return float(os.getenv("APPEARANCE_MATCH_THRESHOLD", "0.5"))
+    except ValueError:
+        return 0.5
 
 
 def _camera_hfov() -> float:
@@ -119,6 +138,62 @@ def make_human_tools(
 
     def _capture():
         return walkie.camera.capture_pil()
+
+    # -- appearance (attire/body) re-ID helpers --------------------------------
+    # Pipeline design by Chalk (EIC team): OSNet appearance embeddings fused
+    # with the face vector. All optional — every failure path returns None so
+    # the face-only behavior is the floor, never broken by the extra modality.
+
+    def _appearance_client():
+        if not _appearance_enabled():
+            return None
+        return getattr(walkieAI, "appearance", None)
+
+    def _person_boxes(img) -> list[tuple[int, int, int, int]]:
+        """Person bboxes (xyxy) from pose estimation; [] when unavailable."""
+        pose = getattr(walkieAI, "pose_estimation", None)
+        if pose is None:
+            return []
+        try:
+            return [_cxcywh_to_xyxy(p.bbox) for p in pose.estimate(img)]
+        except Exception:  # noqa: BLE001 — appearance is best-effort
+            return []
+
+    def _crop_box(img, box) -> Optional[object]:
+        w, h = img.size
+        x1, y1 = max(0, box[0]), max(0, box[1])
+        x2, y2 = min(w, box[2]), min(h, box[3])
+        if x2 - x1 < 2 or y2 - y1 < 2:
+            return None
+        return img.crop((x1, y1, x2, y2))
+
+    def _embed_appearance(img, face_bbox_xyxy=None, person_boxes=None):
+        """Attire/body embedding for the person owning *face_bbox_xyxy*.
+
+        Crops to the pose person-bbox containing the face center (the tightest
+        one when several overlap); with no pose available the whole frame is
+        embedded (fine for one guest up front). Returns None on any failure.
+        """
+        client = _appearance_client()
+        if client is None:
+            return None
+        crop = img
+        boxes = person_boxes if person_boxes is not None else _person_boxes(img)
+        if face_bbox_xyxy is not None and boxes:
+            fx = (face_bbox_xyxy[0] + face_bbox_xyxy[2]) / 2
+            fy = (face_bbox_xyxy[1] + face_bbox_xyxy[3]) / 2
+            owners = [
+                b for b in boxes if b[0] <= fx <= b[2] and b[1] <= fy <= b[3]
+            ]
+            if owners:
+                tightest = min(
+                    owners, key=lambda b: (b[2] - b[0]) * (b[3] - b[1])
+                )
+                crop = _crop_box(img, tightest) or img
+        try:
+            return client.embed(crop) or None
+        except Exception:  # noqa: BLE001 — route may not exist on the server yet
+            return None
 
     @parallelable_tool
     @tool(parse_docstring=True)
@@ -210,8 +285,9 @@ def make_human_tools(
         """Remember a guest's face together with their name and favorite drink.
 
         Use right after greeting a new guest, while they are looking at the
-        robot. Stores the face so the guest can be re-identified later (even if
-        they move or switch seats). Re-enrolling the same name refreshes it.
+        robot. Stores the face (and, when available, their clothing/body
+        appearance) so the guest can be re-identified later — even if they
+        move, switch seats, or face away. Re-enrolling the same name refreshes it.
 
         Args:
             name: The guest's name, as they gave it.
@@ -231,20 +307,66 @@ def make_human_tools(
         if not faces:
             return "I don't see a clear face — ask the guest to look at me, then try again."
         face = max(faces, key=lambda f: f.area())  # the person up front
+        app_emb = _embed_appearance(img, face.bbox_xyxy)
         rec = people_store.enroll(
-            name, drink, face.embedding, frame=img, face_bbox_xyxy=face.bbox_xyxy
+            name,
+            drink,
+            face.embedding,
+            app_embedding=app_emb,
+            frame=img,
+            face_bbox_xyxy=face.bbox_xyxy,
         )
         again = "" if rec.enrollments <= 1 else f" (refreshed, seen {rec.enrollments}×)"
-        return f"Remembered {rec.name}, favorite drink {rec.drink!r}{again}."
+        attire = " Face and attire remembered." if app_emb else ""
+        return f"Remembered {rec.name}, favorite drink {rec.drink!r}{again}.{attire}"
+
+    def _recognize_by_appearance(img) -> str:
+        """No face in view — try to match people by attire/body instead."""
+        boxes = _person_boxes(img)
+        if not boxes:
+            return "No clear face in view."
+        boxes.sort(key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True)
+        min_score = _appearance_threshold()
+        lines = []
+        known = 0
+        for i, b in enumerate(boxes):
+            crop = _crop_box(img, b)
+            emb = None
+            if crop is not None:
+                try:
+                    emb = _appearance_client().embed(crop) or None
+                except Exception:  # noqa: BLE001
+                    emb = None
+            rec = (
+                people_store.recognize_fused(None, emb, min_score=min_score)
+                if emb
+                else None
+            )
+            if rec is None:
+                lines.append(f"- person {i+1}: unknown")
+            else:
+                known += 1
+                lines.append(
+                    f"- person {i+1}: probably {rec.name}, favorite drink "
+                    f"{rec.drink!r} (match {rec.similarity:.2f} by clothing/"
+                    "appearance — face not visible, less certain)"
+                )
+        if not known:
+            return "No clear face in view, and nobody matches by appearance."
+        return "No clear face in view; matched by appearance instead:\n" + "\n".join(lines)
 
     @parallelable_tool
     @tool
     def recognize_person() -> str:
         """Identify the people in view against the remembered guests.
 
-        Returns each visible face as a known guest (name + favorite drink) or as
-        unknown. Use to greet a returning guest, or to see who is sitting where
-        before an introduction. Reports on the live camera only.
+        Returns each visible person as a known guest (name + favorite drink)
+        or as unknown. Matches by face when one is visible; when the server's
+        appearance service is available it also weighs clothing/body, and can
+        even identify a remembered guest whose face is hidden (turned away) —
+        such matches are flagged as less certain. Use to greet a returning
+        guest, or to see who is sitting where before an introduction. Reports
+        on the live camera only.
         """
         if people_store is None:
             return "Face memory is off — I can't recognize people right now."
@@ -256,19 +378,37 @@ def make_human_tools(
         except Exception as e:  # noqa: BLE001
             return f"I couldn't read faces (face service error): {e}"
         faces = [f for f in faces if f.det_score >= _min_det_score()]
+        app_client = _appearance_client()
         if not faces:
-            return "No clear face in view."
+            if app_client is None:
+                return "No clear face in view."
+            return _recognize_by_appearance(img)
         threshold = _match_threshold()
         faces.sort(key=lambda f: f.area(), reverse=True)  # nearest first
+        person_boxes = _person_boxes(img) if app_client is not None else []
         lines = []
         for i, f in enumerate(faces):
-            rec = people_store.recognize(f.embedding, max_distance=threshold)
+            app_emb = (
+                _embed_appearance(img, f.bbox_xyxy, person_boxes=person_boxes)
+                if app_client is not None
+                else None
+            )
+            if app_emb is not None:
+                rec = people_store.recognize_fused(
+                    f.embedding,
+                    app_emb,
+                    face_confidence=f.det_score,
+                    min_score=_appearance_threshold(),
+                )
+            else:
+                rec = people_store.recognize(f.embedding, max_distance=threshold)
             if rec is None:
                 lines.append(f"- person {i+1}: unknown (not a remembered guest)")
             else:
+                via = f" by {rec.matched_by}" if rec.matched_by else ""
                 lines.append(
                     f"- person {i+1}: {rec.name}, favorite drink {rec.drink!r} "
-                    f"(match {rec.similarity:.2f})"
+                    f"(match {rec.similarity:.2f}{via})"
                 )
         return "People in view:\n" + "\n".join(lines)
 

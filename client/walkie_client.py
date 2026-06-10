@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .appearance import AppearanceClient
 from .face_recognition import FaceRecognitionClient
 from .image_caption import ImageCaptionClient
 from .image_embed import ImageEmbedClient
@@ -63,3 +64,4 @@ class WalkieAIClient:
         self.image_caption = ImageCaptionClient(base_url=base_url, timeout=timeout)
         self.image_embed = ImageEmbedClient(base_url=base_url, timeout=timeout)
         self.face_recognition = FaceRecognitionClient(base_url=base_url, timeout=timeout)
+        self.appearance = AppearanceClient(base_url=base_url, timeout=timeout)

@@ -77,16 +77,17 @@ In the **`ready`** stage two background threads run alongside the agent: `Percep
 
 The legacy explore stage (`ExploreService`) and its object store (`WalkieVectorDB`/`chroma_db`) were removed; the `SceneStore` is the only long-term memory backend. `tools/reset_db --object` / `db_doctor --object` still operate on a leftover `chroma_db/` dir by path for cleanup, but nothing writes it anymore.
 
-### Four-agent topology
+### Five-agent topology
 
-All four agents are built by the same factory: `agents/core/agent.py::create_walkie_agent`, which wraps `langchain.agents.create_agent` with a fixed middleware stack.
+All five agents are built by the same factory: `agents/core/agent.py::create_walkie_agent`, which wraps `langchain.agents.create_agent` with a fixed middleware stack.
 
-- **Walkie main** (`agents/walkie_agent/`) — user-facing orchestrator. Owns the conversation thread (`thread_id="main"`). Delegates with `delegate_to_actuator` / `delegate_to_vision` / `delegate_to_database` (sequential tools that invoke the sub-agent graphs synchronously), plus a fast-path `find_object_from_memory` and `speak`.
+- **Walkie main** (`agents/walkie_agent/`) — user-facing orchestrator. Owns the conversation thread (`thread_id="main"`). Delegates with `delegate_to_actuator` / `delegate_to_vision` / `delegate_to_database` / `delegate_to_human` (sequential tools that invoke the sub-agent graphs synchronously), plus a fast-path `find_object_from_memory` and `speak`.
 - **Actuator** (`agents/actuator_agent/`) — `move_absolute`, `move_relative`, `get_current_pose`, `command_arm`, `speak`. `move_relative` does the local→global frame conversion in-process before calling `walkie.nav.go_to`.
 - **Vision** (`agents/vision_agent/`) — **live camera only**: `detect_objects_from_view`, `image_caption`, `detect_people_poses`, `get_camera_view_description`, `speak`. (Long-term memory lookups were moved out to the Database agent.)
 - **Database** (`agents/database_agent/`) — long-term spatial-memory specialist over the `SceneStore`: `find_object` (caption-first), `objects_near`, `recently_seen`, `list_known_objects`, `speak`. Use for "where have I seen X / what's near here / what did I just see".
+- **Human** (`agents/human_agent/`) — HRI/people specialist (Receptionist etc.): `describe_person`, `count_people`, `detect_gestures`, `enroll_person` / `recognize_person` / `list_known_people` over the face-keyed `PeopleStore` (`chroma_db_people`), `find_empty_seat`, `locate_person`, `speak`. Recognition is **two-modality** when the server exposes `/appearance/embed` (OSNet attire re-ID — pipeline design by Chalk, EIC team; see `docs/eic_human_review.md`): face + attire fused adaptively by face-detection confidence (`PeopleStore.recognize_fused`), with an appearance-only fallback when no face is visible. Without the route it degrades to face-only.
 
-Division of labour: "what's in front of me now" → Vision; "where have I seen it / what's stored" → Database.
+Division of labour: "what's in front of me now" → Vision; "where have I seen it / what's stored" → Database; "who is this person / remember them" → Human.
 
 Sub-agents are invoked as plain tools — there's no streaming or interleaving; the parent blocks until the sub-agent returns its last AIMessage content.
 

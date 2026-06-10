@@ -198,3 +198,16 @@ FACE_MIN_DET_SCORE = "0.5"
 # Lower = stricter. ~0.4 is a sane start for InsightFace buffalo_l; tune on real
 # faces (same person should land well under it, different people well above).
 FACE_MATCH_THRESHOLD = "0.4"
+
+[human.appearance]
+# Appearance (attire/body) re-ID — second modality for the people memory, so a
+# guest can be recognized even when their face isn't visible. Pipeline design
+# by Chalk (EIC team), from the eic-human subproject (OSNet x1.0 via torchreid).
+# Needs walkie-ai-server's /appearance/embed route — see
+# docs/walkie_ai_server_appearance_service.md. Until the route exists (or with
+# this off) everything degrades gracefully to face-only recognition.
+HUMAN_APPEARANCE_ENABLED = "1"
+# Min fused similarity score ([0,1], Chalk's default 0.5) for a two-modality
+# match. Appearance-only matches (face hidden) use the same floor but are
+# reported as less certain.
+APPEARANCE_MATCH_THRESHOLD = "0.5"
