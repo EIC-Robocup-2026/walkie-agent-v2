@@ -128,6 +128,8 @@ class PerceptionService(threading.Thread):
         self.position_timeout = position_timeout
         self.verbose = verbose
         self._stop_event = threading.Event()
+        # Per-stage timing breakdown printed each tick (set WALKIE_GRAPHS_PERF=0 to mute).
+        self._perf = os.getenv("WALKIE_GRAPHS_PERF", "1").strip().lower() in ("1", "true", "yes")
 
     def stop_and_join(self, timeout: float | None = None) -> None:
         self._stop_event.set()
@@ -137,15 +139,35 @@ class PerceptionService(threading.Thread):
         if self.verbose:
             print(f"[perception] {msg}")
 
+    def _perf_log(self, msg: str) -> None:
+        if self._perf:
+            print(f"==========WALKIE-GRAPH========== {msg}")
+
+    def _wait_after(self, elapsed: float) -> float:
+        """Fixed-rate scheduling: the leftover of the interval, or 0 when the cycle
+        already overran (run the next snapshot immediately)."""
+        return max(0.0, self.interval - elapsed)
+
     def run(self) -> None:
         self._log(f"started (interval={self.interval}s, output={self.output_path})")
         while not self._stop_event.is_set():
+            start = time.perf_counter()
             try:
                 snap = self._snapshot()
                 self._write_atomic(snap)
             except Exception as e:  # noqa: BLE001
                 self._log(f"tick error: {e}")
-            self._stop_event.wait(self.interval)
+            # Fixed rate: wait only the remainder of the interval after the work; if the
+            # cycle overran, start the next snapshot now instead of adding a full interval.
+            elapsed = time.perf_counter() - start
+            remaining = self._wait_after(elapsed)
+            if remaining > 0:
+                self._stop_event.wait(remaining)
+            elif elapsed > self.interval:
+                self._perf_log(
+                    f"perception cycle took {elapsed:.2f}s > interval {self.interval:.1f}s "
+                    f"— running immediately (no wait)"
+                )
         self._log("stopped.")
 
     def _depth(self):
@@ -162,23 +184,35 @@ class PerceptionService(threading.Thread):
             return None
 
     def _snapshot(self) -> dict:
+        t_snap = time.perf_counter()
+        t = time.perf_counter()
         img = self.walkie.camera.capture_pil()
+        d_cap = time.perf_counter() - t
+        t = time.perf_counter()
         depth = self._depth()  # back-to-back with the image so mask↔depth align
+        d_depth = time.perf_counter() - t
         image_width, image_height = img.size
+        t = time.perf_counter()
         pose = self.walkie.status.get_position() or {"x": 0.0, "y": 0.0, "heading": 0.0}
+        d_pose = time.perf_counter() - t
         robot_heading = float(pose.get("heading", 0.0))
 
         # One open-vocabulary, masked detection per frame — the same call the scene graph
         # used to make on its own. Masks feed the 3D deprojection; prompts scope it to the
         # task vocabulary (people come from the separate pose_estimation path below).
+        t = time.perf_counter()
         objects = self.walkieAI.object_detection.detect(
             img, prompts=self._prompts, return_mask=True
         )
+        d_detect = time.perf_counter() - t
+        t = time.perf_counter()
         people = self.walkieAI.pose_estimation.estimate(img)
+        d_pose_est = time.perf_counter() - t
 
         # Hand the frame to the graph: it owns geometry/caption/embed/upsert and returns
         # per-object world centroids + captions (keyed by index into `objects`). Perception
         # just consumes that for the snapshot — so detection and captioning run once total.
+        t = time.perf_counter()
         graph_result: dict[int, dict] = {}
         if self.graphs is not None and self._graphs_enabled:
             try:
@@ -186,6 +220,14 @@ class PerceptionService(threading.Thread):
             except Exception as e:  # noqa: BLE001 — a graph hiccup must not stop the snapshot
                 self._log(f"graphs ingest failed: {e}")
                 graph_result = {}
+        d_ingest = time.perf_counter() - t
+
+        self._perf_log(
+            f"perception step: capture={d_cap * 1000:.0f}ms depth={d_depth * 1000:.0f}ms "
+            f"pose={d_pose * 1000:.0f}ms DETECT={d_detect * 1000:.0f}ms ({len(objects)} obj) "
+            f"POSE_EST={d_pose_est * 1000:.0f}ms ({len(people)} ppl) "
+            f"ingest={d_ingest * 1000:.0f}ms | TOTAL={time.perf_counter() - t_snap:.2f}s"
+        )
 
         obj_records = []
         for i, o in enumerate(objects):
