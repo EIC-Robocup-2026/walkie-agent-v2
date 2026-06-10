@@ -223,7 +223,7 @@ WALKIE_GRAPHS_INTERVAL_SEC = "3.0"
 # may contain spaces (split on commas). Grouped here by category for readability.
 
 
-WALKIE_GRAPHS_INTERESTED_CLASSES = "chair,stool,cloth,sponge,bowl,cup,fork,knife,plate,spoon,coffee creamer,coke,ice tea,milk,orange juice,red bull,water bottle,bread,cornflakes,instant noodles,potato,tomato soup,apple,avocado,lemon,orange,chips,cookies,gum,mixed nuts,pringles,hand cream,soap,toothpaste,dish rack,shelf,monitor,bed,pillow"
+# WALKIE_GRAPHS_INTERESTED_CLASSES = "chair,stool,cloth,sponge,bowl,cup,fork,knife,plate,spoon,coffee creamer,coke,ice tea,milk,orange juice,red bull,water bottle,bread,cornflakes,instant noodles,potato,tomato soup,apple,avocado,lemon,orange,chips,cookies,gum,mixed nuts,pringles,hand cream,soap,toothpaste,dish rack,shelf,monitor,bed,pillow"
 
 
 # Classes to always drop before lift/embed/store. Moving objects (people) can't
@@ -291,7 +291,7 @@ WALKIE_GRAPHS_MAX_POINTS_PER_OBJ = "2000"
 WALKIE_GRAPHS_MIN_POINTS = "30"
 # Minimum detector confidence to accept a detection. Dropped early (before
 # lift/embed/caption), alongside the class scope and MIN_POINTS checks. 0.0 = keep all.
-WALKIE_GRAPHS_CONFIDENCE_THRESHOLD = "0.6"
+WALKIE_GRAPHS_CONFIDENCE_THRESHOLD = "0.3"
 # --- ConceptGraphs-style association (primary path; the SIM_HIGH/LOW cascade above
 # is now the fallback used only when point clouds don't overlap). A detection MERGES
 # into the highest-scoring same-class node whose score
