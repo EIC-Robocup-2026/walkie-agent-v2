@@ -19,6 +19,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -53,6 +54,27 @@ def _crop_pil(img, bbox, margin: int = 20):
     if x2 <= x1 or y2 <= y1:
         return img
     return img.crop((x1, y1, x2, y2))
+
+
+@dataclass
+class FrameSnapshot:
+    """Every sensor + pose read for one tick, taken together at the capture instant.
+
+    The detection round-trip that follows is slow and the robot keeps moving through it,
+    so reading the camera/robot pose *after* detection would describe a different instant
+    than the depth/image it lifts. Capturing it all here pins the lift pose, intrinsics,
+    and snapshot heading to the moment the frame was actually taken. ``cam``/``intr`` may
+    be ``None`` (pose or camera-info unavailable) and are handled downstream as "no
+    geometry this frame"; ``depth`` and ``img`` are always present (a missing one skips
+    the tick before a snapshot is built).
+    """
+
+    ts: float
+    img: object  # PIL RGB frame
+    depth: np.ndarray  # aligned depth, H×W metres (NaN invalid)
+    cam: CameraPose | None  # camera optical-frame pose in the map frame
+    intr: Intrinsics | None  # pinhole intrinsics at the depth resolution
+    robot_pose: dict | None  # status.get_position() — snapshot heading + viz marker
 
 
 class WalkieGraphsService(threading.Thread):
@@ -210,61 +232,99 @@ class WalkieGraphsService(threading.Thread):
     # One observation
     # ------------------------------------------------------------------
     def _observe_once(self) -> list:
-        """Capture one RGB-D frame, fold every kept detection into the graph, and (when a
-        ``snapshot_path`` is set) write the live ``perception.json`` view of the frame.
+        """Capture one RGB-D frame *with* its pose/intrinsics in one atomic read, fold every
+        kept detection into the graph, and (when a ``snapshot_path`` is set) write the live
+        ``perception.json`` view of the frame.
 
         This is *the* production perception loop: the background thread runs it every tick.
-        Detection is scoped to the interested classes (``prompts=self.interested``), so both
-        the graph and the snapshot only ever carry those.
+        The full sensor + pose :class:`FrameSnapshot` is taken up front, *before* the slow
+        detection round-trip, so the camera pose that lifts the depth (and the robot heading
+        in the snapshot) matches where the robot was when the frame was taken — the robot
+        keeps moving while detection runs. Detection is scoped to the interested classes
+        (``prompts=self.interested``), so both the graph and the snapshot only carry those.
+        """
+        frame = self._capture_frame()
+        if frame is None:
+            return []
+        t_det = time.perf_counter()
+        detections = self.walkieAI.object_detection.detect(
+            frame.img, prompts=self.interested or None, return_mask=True
+        )
+        d_det = time.perf_counter() - t_det
+        self._perf_log(f"detect: {d_det * 1000:.0f}ms ({len(detections)} detections)")
+        result = self.ingest_frame(frame, detections, tick=True)
+        if self.snapshot_path is not None:
+            self._write_snapshot(frame, detections, result)
+        return self._last_touched
+
+    def _capture_frame(self) -> FrameSnapshot | None:
+        """Read depth, RGB, camera pose, intrinsics, and robot pose as one atomic frame.
+
+        Everything the rest of the tick consumes is read here, back-to-back and *before*
+        detection, so it all describes the same instant — the camera pose that lifts the
+        depth isn't skewed by the detection round-trip the robot drives through. Returns
+        ``None`` (skip the tick) when depth or the image is unavailable (both mandatory);
+        ``cam``/``intr`` may be ``None`` and are handled downstream as "no geometry".
         """
         t_depth = time.perf_counter()
         depth = self._depth()
         d_depth = time.perf_counter() - t_depth
         if depth is None:
             self._perf_log(f"depth=None ({d_depth * 1000:.0f}ms) — skipping tick")
-            return []
+            return None
         try:
             t_cap = time.perf_counter()
             img = self.walkie.camera.capture_pil()  # PIL RGB
             d_cap = time.perf_counter() - t_cap
         except Exception as e:  # noqa: BLE001
             self._log(f"capture failed: {e}")
-            return []
-        t_det = time.perf_counter()
-        detections = self.walkieAI.object_detection.detect(
-            img, prompts=self.interested or None, return_mask=True
-        )
-        d_det = time.perf_counter() - t_det
+            return None
+        # Pose, intrinsics, and robot pose: read NOW, still at the capture instant, so the
+        # lift pose matches the depth/image instead of trailing the detection round-trip.
+        ts = time.time()
+        t_pose = time.perf_counter()
+        cam = self._camera_pose()
+        d_pose = time.perf_counter() - t_pose
+        t_intr = time.perf_counter()
+        intr = self._intrinsics(depth.shape[1], depth.shape[0]) if cam is not None else None
+        d_intr = time.perf_counter() - t_intr
+        robot_pose = self._robot_pose()
         self._perf_log(
             f"capture stage: depth={d_depth * 1000:.0f}ms capture={d_cap * 1000:.0f}ms "
-            f"detect={d_det * 1000:.0f}ms ({len(detections)} detections)"
+            f"pose={d_pose * 1000:.0f}ms intr={d_intr * 1000:.0f}ms"
         )
-        result = self.ingest_frame(img, detections, depth, tick=True)
-        if self.snapshot_path is not None:
-            self._write_snapshot(img, detections, result)
-        return self._last_touched
+        return FrameSnapshot(
+            ts=ts, img=img, depth=depth, cam=cam, intr=intr, robot_pose=robot_pose
+        )
 
-    def _write_snapshot(self, img, detections, ingest_result: dict[int, dict]) -> None:
-        """Write the live perception.json from one frame's detections + ingest result.
+    def _write_snapshot(
+        self, frame: FrameSnapshot, detections, ingest_result: dict[int, dict]
+    ) -> None:
+        """Write the live perception.json from one frame's snapshot + detections + ingest result.
 
         Reuses the centroids/captions the ingest pass already produced (no extra detection
-        or caption work). A graph hiccup or pose read failure must never take the loop down,
-        so the whole write is best-effort.
+        or caption work) and the robot heading captured *with* the frame, so the per-object
+        headings match where the robot was at capture time. A graph hiccup or a build error
+        must never take the loop down, so the whole write is best-effort.
         """
         try:
-            pose = self.walkie.status.get_position() or {"heading": 0.0}
+            pose = frame.robot_pose or {"heading": 0.0}
             robot_heading = float(pose.get("heading", 0.0))
-            objs = build_object_records(detections, ingest_result, img.size, robot_heading)
-            write_atomic(self.snapshot_path, {"ts": time.time(), "objects": objs})
+            objs = build_object_records(detections, ingest_result, frame.img.size, robot_heading)
+            write_atomic(self.snapshot_path, {"ts": frame.ts, "objects": objs})
         except Exception as e:  # noqa: BLE001
             self._log(f"snapshot write failed: {e}")
 
-    def ingest_frame(self, img, detections, depth, *, tick: bool = True) -> dict[int, dict]:
+    def ingest_frame(
+        self, frame: FrameSnapshot, detections, *, tick: bool = True
+    ) -> dict[int, dict]:
         """Fold the kept subset of one captured frame's ``detections`` into the graph.
 
-        ``img`` is the PIL RGB frame the detections came from; ``detections`` is a list
-        of ``DetectedObject`` (masks required for 3D — request ``return_mask=True``);
-        ``depth`` is the aligned depth array (H×W float32 metres, NaN invalid) or None.
+        ``frame`` is the atomic :class:`FrameSnapshot` from :meth:`_capture_frame` — its
+        ``img``/``depth``/``cam``/``intr``/``robot_pose`` were all read at the *same* instant
+        the frame was taken, so the camera pose that lifts the depth matches the image
+        instead of trailing the detection round-trip. ``detections`` is the list of
+        ``DetectedObject`` for that frame (masks required for 3D — ``return_mask=True``).
 
         Returns a per-detection dict keyed by index into ``detections``::
 
@@ -279,27 +339,19 @@ class WalkieGraphsService(threading.Thread):
         fuse durably). When ``tick`` is true this advances the relation/prune/viz cadence.
         """
         t_frame = time.perf_counter()
+        img, depth, cam, intr = frame.img, frame.depth, frame.cam, frame.intr
         # Default: unknown position, no caption, for every detection.
         result: dict[int, dict] = {
             i: {"centroid": None, "caption": ""} for i in range(len(detections))
         }
 
-        t = time.perf_counter()
-        cam = self._camera_pose() if depth is not None else None
-        d_pose = time.perf_counter() - t
-        t = time.perf_counter()
-        intr = self._intrinsics(depth.shape[1], depth.shape[0]) if cam is not None else None
-        d_intr = time.perf_counter() - t
         if cam is None or intr is None:
-            # No geometry this frame (pose or intrinsics unavailable): report unknown
-            # positions, upsert nothing, but still advance the cadence so periodic
+            # No geometry this frame (pose or camera-info unavailable at capture): report
+            # unknown positions, upsert nothing, but still advance the cadence so periodic
             # maintenance keeps ticking.
             self._last_touched = []
-            self._maybe_tick(tick)
-            self._perf_log(
-                f"ingest aborted (no geometry): pose={d_pose * 1000:.0f}ms "
-                f"intr={d_intr * 1000:.0f}ms — pose/intrinsics lookup failed"
-            )
+            self._maybe_tick(tick, robot_pose=frame.robot_pose)
+            self._perf_log("ingest aborted (no geometry): pose/intrinsics unavailable at capture")
             return result
         self._last_cam = cam
 
@@ -397,14 +449,13 @@ class WalkieGraphsService(threading.Thread):
         self._last_touched = touched
 
         t = time.perf_counter()
-        self._maybe_tick(tick, touched=touched)
+        self._maybe_tick(tick, touched=touched, robot_pose=frame.robot_pose)
         d_tick = time.perf_counter() - t
 
         total = time.perf_counter() - t_frame
         n_cap = len(captions)
         self._perf_log(
             f"ingest tick #{self._tick}: TOTAL={total:.2f}s | "
-            f"pose={d_pose * 1000:.0f}ms intr={d_intr * 1000:.0f}ms "
             f"masksub={d_masksub * 1000:.0f}ms edge={d_edge * 1000:.0f}ms "
             f"deproject={d_deproject * 1000:.0f}ms ({len(detections)} det) | "
             f"caption={d_caption * 1000:.0f}ms ({n_cap}) "
@@ -427,8 +478,14 @@ class WalkieGraphsService(threading.Thread):
                 return False
         return True
 
-    def _maybe_tick(self, tick: bool, *, touched: list | None = None) -> None:
-        """Advance the cadence counter; run relations/prune + periodic maintenance + viz."""
+    def _maybe_tick(
+        self, tick: bool, *, touched: list | None = None, robot_pose=None
+    ) -> None:
+        """Advance the cadence counter; run relations/prune + periodic maintenance + viz.
+
+        ``robot_pose`` is the frame-time robot pose (from the snapshot), used for the viz
+        marker so it matches the objects just ingested.
+        """
         if not tick:
             return
         self._tick += 1
@@ -475,12 +532,9 @@ class WalkieGraphsService(threading.Thread):
             _timed("llm_edges", lambda: self.memory.infer_edges_llm(self.model))
         if self.viz is not None and touched is not None:
             t0 = time.perf_counter()
+            # Frame-time robot pose so the viz marker matches the objects just ingested.
             try:
-                self.viz.update(
-                    self.memory,
-                    robot_pose=self.walkie.status.get_position(),
-                    cam_pose=self._last_cam,
-                )
+                self.viz.update(self.memory, robot_pose=robot_pose, cam_pose=self._last_cam)
             except Exception as e:  # noqa: BLE001
                 self._log(f"viz update failed: {e}")
             ran.append(f"viz={(time.perf_counter() - t0) * 1000:.0f}ms")
@@ -604,4 +658,16 @@ class WalkieGraphsService(threading.Thread):
             return self.walkie.robot.camera.get_depth()
         except Exception as e:  # noqa: BLE001
             self._log(f"depth unavailable: {e}")
+            return None
+
+    def _robot_pose(self):
+        """Robot base pose dict (``status.get_position()``) — snapshot heading + viz marker.
+
+        Read as part of the frame snapshot so the snapshot's per-object headings use the
+        pose from capture time, not a later read. Best-effort: returns ``None`` on failure
+        (the snapshot then degrades the heading to 0.0 and the viz marker is omitted)."""
+        try:
+            return self.walkie.status.get_position()
+        except Exception as e:  # noqa: BLE001
+            self._log(f"robot pose unavailable: {e}")
             return None

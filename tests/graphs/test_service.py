@@ -227,36 +227,54 @@ def test_snapshot_path_stored_as_path(tmp_path):
     assert s.snapshot_path == out
 
 
-def test_write_snapshot_writes_objects_only(tmp_path):
+def test_write_snapshot_uses_frame_time_pose_and_ts(tmp_path):
     import json
 
+    from services.walkie_graphs.service import FrameSnapshot
+
     out = tmp_path / "perception.json"
-    walkie = SimpleNamespace(status=SimpleNamespace(get_position=lambda: {"heading": 0.0}))
     s = WalkieGraphsService(
-        walkieAI=None, walkie=walkie, memory=_StubMemory(), snapshot_path=out, verbose=False
+        walkieAI=None, walkie=None, memory=_StubMemory(), snapshot_path=out, verbose=False
     )
     img = SimpleNamespace(size=(640, 480))
     dets = [SimpleNamespace(class_name="cup", bbox=(300, 220, 340, 260), confidence=0.9)]
     result = {0: {"centroid": (1.0, 2.0, 3.0), "caption": "a cup"}}
-    s._write_snapshot(img, dets, result)
+    # The heading + ts come from the frame snapshot (capture time), not a live read.
+    frame = FrameSnapshot(
+        ts=123.0, img=img, depth=None, cam=None, intr=None, robot_pose={"heading": 0.0}
+    )
+    s._write_snapshot(frame, dets, result)
 
     snap = json.loads(out.read_text())
     assert "people" not in snap  # pose/people are gone from the perception path
+    assert snap["ts"] == 123.0  # capture-time stamp, not write time
     assert snap["objects"][0]["class"] == "cup"
     assert snap["objects"][0]["position_3d"] == [1.0, 2.0, 3.0]
     assert snap["objects"][0]["caption"] == "a cup"
 
 
-def test_write_snapshot_swallows_pose_failure(tmp_path):
-    # a status read that raises must not propagate out of the loop
+def test_robot_pose_swallows_status_failure():
+    # a status read that raises must not propagate out of the loop — _robot_pose returns None
     def _boom():
         raise RuntimeError("no pose")
 
-    out = tmp_path / "perception.json"
     walkie = SimpleNamespace(status=SimpleNamespace(get_position=_boom))
+    s = WalkieGraphsService(walkieAI=None, walkie=walkie, memory=_StubMemory(), verbose=False)
+    assert s._robot_pose() is None
+
+
+def test_write_snapshot_degrades_when_robot_pose_none(tmp_path):
+    # robot_pose=None (status read failed at capture) → heading degrades to 0.0, still writes
+    import json
+
+    from services.walkie_graphs.service import FrameSnapshot
+
+    out = tmp_path / "perception.json"
     s = WalkieGraphsService(
-        walkieAI=None, walkie=walkie, memory=_StubMemory(), snapshot_path=out, verbose=False
+        walkieAI=None, walkie=None, memory=_StubMemory(), snapshot_path=out, verbose=False
     )
     img = SimpleNamespace(size=(640, 480))
-    s._write_snapshot(img, [], {})  # must not raise
-    assert not out.exists()  # nothing written when the build failed mid-way
+    frame = FrameSnapshot(ts=1.0, img=img, depth=None, cam=None, intr=None, robot_pose=None)
+    s._write_snapshot(frame, [], {})  # must not raise
+    snap = json.loads(out.read_text())
+    assert snap["objects"] == []
