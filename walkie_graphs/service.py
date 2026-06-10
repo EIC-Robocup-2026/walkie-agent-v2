@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -103,6 +104,9 @@ class WalkieGraphsService(threading.Thread):
         )
         # Context margin around the bbox for the CLIP/caption crop (CG pads 20 px).
         self.crop_margin_px = int(os.getenv("WALKIE_GRAPHS_CROP_MARGIN_PX", "20"))
+        # Concurrency for the per-object CLIP embed calls (no batch endpoint exists, so
+        # fan the I/O-bound round-trips out across a thread pool). 1 = sequential.
+        self._embed_workers = int(os.getenv("WALKIE_GRAPHS_EMBED_WORKERS", "8"))
         # Periodic-maintenance cadences (in ingest ticks), staggered so two heavy
         # passes never land on the same tick. 0 disables a pass.
         self.denoise_every_n = int(os.getenv("WALKIE_GRAPHS_DENOISE_EVERY_N", "20"))
@@ -326,29 +330,30 @@ class WalkieGraphsService(threading.Thread):
             result[pending[local][0]]["caption"] = cap
         d_caption = time.perf_counter() - t
 
-        # Embed + upsert the kept subset. Embedding is one network round-trip PER object,
-        # so its total is timed separately from the local upsert work.
-        d_embed = 0.0
-        d_upsert = 0.0
+        # Embed the kept crops — one network round-trip PER object, run concurrently so
+        # the per-frame embed cost is the slowest single call, not their sum.
+        t = time.perf_counter()
+        embeddings = self._embed_batch([p[3] for p in pending])
+        d_embed = time.perf_counter() - t
+
+        # Upsert the kept subset, batching the per-object Chroma writes into one flush.
+        t = time.perf_counter()
         touched = []
-        for i, d, pts, crop in pending:
-            t = time.perf_counter()
-            emb = self._embed(crop)
-            d_embed += time.perf_counter() - t
-            det = Detection3D(
-                class_name=d.class_name or "object",
-                class_id=d.class_id,
-                confidence=float(d.confidence or 0.0),
-                bbox_xyxy=tuple(int(v) for v in d.bbox),
-                points_world=pts,
-                clip_emb=emb,
-                caption=result[i]["caption"],
-                ts=time.time(),
-                crop=crop,
-            )
-            t = time.perf_counter()
-            touched.append(self.memory.upsert(det))
-            d_upsert += time.perf_counter() - t
+        with self.memory.batch_writes():
+            for (i, d, pts, crop), emb in zip(pending, embeddings):
+                det = Detection3D(
+                    class_name=d.class_name or "object",
+                    class_id=d.class_id,
+                    confidence=float(d.confidence or 0.0),
+                    bbox_xyxy=tuple(int(v) for v in d.bbox),
+                    points_world=pts,
+                    clip_emb=emb,
+                    caption=result[i]["caption"],
+                    ts=time.time(),
+                    crop=crop,
+                )
+                touched.append(self.memory.upsert(det))
+        d_upsert = time.perf_counter() - t
         self._last_touched = touched
 
         t = time.perf_counter()
@@ -475,6 +480,17 @@ class WalkieGraphsService(threading.Thread):
         except Exception as e:  # noqa: BLE001 — embed route may be disabled server-side
             self._log(f"embed failed (degrading to spatial dedup): {e}")
             return []
+
+    def _embed_batch(self, crops: list) -> list[list[float]]:
+        """Embed many crops concurrently — there's no batch endpoint, so fan the
+        per-crop network calls out across a small thread pool (they're I/O-bound)."""
+        if not crops:
+            return []
+        workers = min(len(crops), max(1, self._embed_workers))
+        if workers <= 1:
+            return [self._embed(c) for c in crops]
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            return list(ex.map(self._embed, crops))
 
     # ------------------------------------------------------------------
     # Sensor reads

@@ -333,6 +333,10 @@ WALKIE_GRAPHS_MIN_MASK_AREA_PX = "64"
 WALKIE_GRAPHS_MASK_SUBTRACT = "1"
 # Context margin (px) around the bbox for the CLIP/caption crop (CG pads 20).
 WALKIE_GRAPHS_CROP_MARGIN_PX = "20"
+# Per-object CLIP embeds have no batch endpoint, so the round-trips are fanned out
+# across this many threads (I/O-bound). 1 = sequential. Raise toward the object count
+# if the embed server handles concurrent requests well.
+WALKIE_GRAPHS_EMBED_WORKERS = "8"
 
 [graphs.maintenance]
 # Periodic ConceptGraphs post-processing, each on its own cadence (in ingest ticks,
@@ -368,9 +372,13 @@ WALKIE_GRAPHS_GHOST_GRACE_SEC = "0"
 # Optional LLM layer (ConceptGraphs node captions + scene-graph edges). OFF by default
 # (the EVERY_N cadences are 0); enable by setting them > 0. All run on the wired chat
 # model, best-effort, never blocking the perception loop.
-# BEST_VIEWS: keep this many highest-confidence crops per object (feeds image-grounded
-# caption refinement). Cheap to store; the LLM compute below is what's gated off.
-WALKIE_GRAPHS_BEST_VIEWS = "10"
+# BEST_VIEWS: keep this many highest-confidence crops per object — ONLY consumed by
+# image-grounded caption refinement (CAPTION_REFINE_USE_IMAGES=1). Saving them is a
+# JPEG encode per object per frame, so it's OFF (0) unless that feature is enabled.
+WALKIE_GRAPHS_BEST_VIEWS = "0"
+# Save an object-crop thumbnail JPEG per node (for the chroma_viewer debug tool). It's
+# a disk write per object per sighting; set 0 on slow storage if you don't view them.
+WALKIE_GRAPHS_THUMBNAILS = "1"
 # refine_captions: every N ticks, summarize a node's accumulated view captions into one
 # coherent caption (LIMIT nodes/pass, most-recently-changed first). USE_IMAGES=1 also
 # sends the best crops to a multimodal model (costs more); 0 = text-only summary.

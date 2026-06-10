@@ -23,6 +23,7 @@ import json
 import os
 import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Optional
@@ -201,6 +202,7 @@ class GraphMemory:
         require_confirmation: bool = False,
         ghost_grace_sec: float = 0.0,
         best_views_n: int = 0,
+        thumbnails: bool = True,
         voxel_m: float = 0.02,
         max_points_per_obj: int = 2000,
         relation_max_dist: float = 1.0,
@@ -241,6 +243,7 @@ class GraphMemory:
         self.require_confirmation = require_confirmation
         self.ghost_grace_sec = ghost_grace_sec
         self.best_views_n = best_views_n
+        self.thumbnails = thumbnails
         self.voxel_m = voxel_m
         self.max_points_per_obj = max_points_per_obj
         self.relation_max_dist = relation_max_dist
@@ -272,6 +275,12 @@ class GraphMemory:
         # the lock), so serve those from memory instead of re-reading .npz from disk.
         # Bounded by the prune cap (500 nodes x 2000 pts x 12 B ~ 12 MB).
         self._pcd_cache: dict[str, np.ndarray] = {}
+        # Chroma write batching: inside a ``batch_writes()`` block, node writes only
+        # update the in-memory dict (what association/maintenance read) and queue the
+        # Chroma upsert, which is flushed as a single call on exit — one batched
+        # sqlite/HNSW write per frame instead of one per object.
+        self._batching = False
+        self._chroma_pending: dict[str, ObjectNode] = {}
         self._graph = nx.MultiDiGraph() if nx is not None else None
         self._load_nodes()
         self._load_edges()
@@ -316,7 +325,8 @@ class GraphMemory:
             min_obs_confirm=_i("WALKIE_GRAPHS_MIN_OBS_CONFIRM", "3"),
             require_confirmation=_b("WALKIE_GRAPHS_REQUIRE_CONFIRMATION", "1"),
             ghost_grace_sec=_f("WALKIE_GRAPHS_GHOST_GRACE_SEC", "0"),
-            best_views_n=_i("WALKIE_GRAPHS_BEST_VIEWS", "10"),
+            best_views_n=_i("WALKIE_GRAPHS_BEST_VIEWS", "0"),
+            thumbnails=_b("WALKIE_GRAPHS_THUMBNAILS", "1"),
             voxel_m=_f("WALKIE_GRAPHS_VOXEL_M", "0.02"),
             max_points_per_obj=_i("WALKIE_GRAPHS_MAX_POINTS_PER_OBJ", "2000"),
             relation_max_dist=_f("WALKIE_GRAPHS_RELATION_MAX_DIST", "1.0"),
@@ -383,14 +393,45 @@ class GraphMemory:
             self._nodes[node_id] = self._node_from_chroma(node_id, emb, mds[i])
 
     def _write_node(self, n: ObjectNode) -> None:
-        emb = n.clip_emb if n.clip_emb else [0.0] * self.emb_dim
-        self._col.upsert(
-            ids=[n.id],
-            embeddings=[list(emb)],
-            metadatas=[self._metadata(n)],
-            documents=[n.best_caption or n.class_name],
-        )
         self._nodes[n.id] = n
+        if self._batching:
+            self._chroma_pending[n.id] = n  # flushed in one batched upsert on exit
+        else:
+            self._chroma_upsert([n])
+
+    def _chroma_upsert(self, nodes: list[ObjectNode]) -> None:
+        """Upsert a batch of nodes' embeddings + metadata into Chroma in one call."""
+        if not nodes:
+            return
+        self._col.upsert(
+            ids=[n.id for n in nodes],
+            embeddings=[list(n.clip_emb if n.clip_emb else [0.0] * self.emb_dim) for n in nodes],
+            metadatas=[self._metadata(n) for n in nodes],
+            documents=[n.best_caption or n.class_name for n in nodes],
+        )
+
+    def _flush_chroma(self) -> None:
+        with self._lock:
+            pending = list(self._chroma_pending.values())
+            self._chroma_pending.clear()
+        if pending:
+            self._chroma_upsert(pending)
+
+    @contextmanager
+    def batch_writes(self):
+        """Defer Chroma writes to a single batched upsert on exit (one per frame).
+
+        In-memory state (``self._nodes``, point clouds, edges) stays immediately
+        consistent inside the block — only the Chroma persistence/text-index write is
+        batched. Safe to leave Chroma slightly behind the in-memory graph: queries are
+        eventually consistent and maintenance reads the in-memory dict.
+        """
+        self._batching = True
+        try:
+            yield
+        finally:
+            self._batching = False
+            self._flush_chroma()
 
     def _pcd_path(self, node_id: str) -> Path:
         return self.pcds_dir / f"{node_id}.npz"
@@ -398,7 +439,9 @@ class GraphMemory:
     def _save_pcd(self, node_id: str, points: np.ndarray) -> str:
         pts = points.astype(np.float32)
         path = self._pcd_path(node_id)
-        np.savez_compressed(path, points=pts)
+        # Uncompressed: these clouds are small and rewritten every sighting, so the
+        # zlib cost per save outweighs the disk saved (the cache serves reads anyway).
+        np.savez(path, points=pts)
         self._pcd_cache[node_id] = pts
         return str(path)
 
@@ -415,7 +458,7 @@ class GraphMemory:
         return pts
 
     def _save_thumb(self, node_id: str, crop) -> Optional[str]:
-        if crop is None:
+        if crop is None or not self.thumbnails:
             return None
         path = self.thumbs_dir / f"{node_id}.jpg"
         try:
@@ -1190,6 +1233,7 @@ class GraphMemory:
         for _conf, p in (node.best_views if node else []):
             Path(p).unlink(missing_ok=True)
         self._pcd_cache.pop(node_id, None)
+        self._chroma_pending.pop(node_id, None)
         self._dirty.discard(node_id)
         if self._graph is not None and node_id in self._graph:
             self._graph.remove_node(node_id)
@@ -1200,6 +1244,7 @@ class GraphMemory:
                 self._delete(node_id)
             self._dirty.clear()
             self._pcd_cache.clear()
+            self._chroma_pending.clear()
             if self._graph is not None:
                 self._graph.clear()
             self._persist_edges()

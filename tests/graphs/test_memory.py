@@ -235,6 +235,49 @@ def test_persistence_reload(tmp_path):
     assert len(m2.load_pcd(node.id)) > 0
 
 
+def test_batch_writes_defers_chroma_then_flushes(tmp_path):
+    chroma = str(tmp_path / "chroma")
+    pcds = str(tmp_path / "pcds")
+    thumbs = str(tmp_path / "thumbs")
+    edges = str(tmp_path / "edges.json")
+    m = GraphMemory(chroma_dir=chroma, pcds_dir=pcds, thumbs_dir=thumbs, edges_path=edges)
+    with m.batch_writes():
+        m.upsert(make_det(class_name="mug", center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), caption="mug"))
+        m.upsert(make_det(class_name="ball", center=(3.0, 0.0, 0.5), emb=unit(0, 1, 0), caption="ball"))
+        assert m.count() == 2  # in-memory is immediately consistent
+        assert len(m._chroma_pending) == 2  # but Chroma is deferred
+    assert m._chroma_pending == {}  # flushed on exit
+    # a fresh store reads them back from Chroma → the batched flush persisted
+    m2 = GraphMemory(chroma_dir=chroma, pcds_dir=pcds, thumbs_dir=thumbs, edges_path=edges)
+    assert m2.count() == 2
+
+
+def test_batch_writes_flushes_on_exception(tmp_path):
+    chroma = str(tmp_path / "chroma")
+    m = GraphMemory(chroma_dir=chroma, pcds_dir=str(tmp_path / "p"),
+                    thumbs_dir=str(tmp_path / "t"), edges_path=str(tmp_path / "e.json"))
+    with pytest.raises(RuntimeError):
+        with m.batch_writes():
+            m.upsert(make_det(class_name="mug", center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0)))
+            raise RuntimeError("boom")
+    assert m._chroma_pending == {}  # finally-flushed despite the exception
+    m2 = GraphMemory(chroma_dir=chroma, pcds_dir=str(tmp_path / "p"),
+                     thumbs_dir=str(tmp_path / "t"), edges_path=str(tmp_path / "e.json"))
+    assert m2.count() == 1
+
+
+def test_thumbnails_disabled_skips_jpeg(tmp_path):
+    thumbs = tmp_path / "thumbs"
+    from PIL import Image
+    from dataclasses import replace as _replace
+    m = GraphMemory(chroma_dir=None, pcds_dir=str(tmp_path / "p"), thumbs_dir=str(thumbs),
+                    edges_path=str(tmp_path / "e.json"), thumbnails=False)
+    det = _replace(make_det(center=(1.0, 0.0, 0.5)), crop=Image.new("RGB", (8, 8)))
+    node = m.upsert(det)
+    assert node.frame_ref is None
+    assert not list(thumbs.glob("*.jpg"))  # no thumbnail written
+
+
 def test_pcd_cache_write_through_and_invalidation(mem):
     node = mem.upsert(make_det(center=(1.0, 0.0, 0.5)))
     cached = mem.load_pcd(node.id)
