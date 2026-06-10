@@ -7,12 +7,23 @@ mis-identification heavily), so position can't identify a guest — their face
 embedding can. There is therefore **no spatial dedup and no location prune**
 here; a person is one record, recalled by nearest face vector.
 
-One ChromaDB collection (``people``), cosine space. Each record stores the
-person's face embedding (the query vector) plus their ``name``, ``drink``, a
-free-text ``attributes`` string, and provenance/bookkeeping in metadata.
+Two ChromaDB collections, one id space (the same pattern as ``SceneStore``):
+``people`` holds the face embedding (the primary query vector) plus the
+person's ``name``, ``drink``, free-text ``attributes`` and provenance in
+metadata; ``people_appearance`` holds an optional **appearance** (attire/body)
+embedding for the same id, so a guest can still be re-identified when their
+face is not visible (turned away, far, occluded). Faces fold into a running
+centroid across enrollments; appearance is latest-wins, because clothing is
+session-specific. :meth:`recognize_fused` combines the two modalities with
+adaptive weighting by face-detection confidence.
 
-The server (``/face-recognition/embed``) is stateless — all enrollment and
-matching lives here. See ``docs/human_recognition_design.md`` (C2/C3).
+The two-modality fusion design is by **Chalk (EIC team)** — adopted from the
+``eic-human`` subproject (``eic_human/core.py::_fuse_score`` and
+``pipeline/store.py``), re-homed onto this store's ChromaDB backend.
+
+The server routes (``/face-recognition/embed``, ``/appearance/embed``) are
+stateless — all enrollment and matching lives here. See
+``docs/human_recognition_design.md`` (C2/C3).
 """
 
 from __future__ import annotations
@@ -45,7 +56,12 @@ class PersonRecord:
     embedding: tuple[float, ...] = field(default_factory=tuple)
     distance: Optional[float] = None
     """Cosine distance to the query vector when returned from :meth:`recognize`
-    (``0`` = identical, ``2`` = opposite). ``None`` for metadata reads."""
+    (``0`` = identical, ``2`` = opposite). For :meth:`recognize_fused` it is
+    ``1 - fused score``, so :attr:`similarity` is the fused score either way.
+    ``None`` for metadata reads."""
+    matched_by: Optional[str] = None
+    """Which modality produced a :meth:`recognize_fused` match —
+    ``"face+appearance"``, ``"face"`` or ``"appearance"``. ``None`` otherwise."""
 
     @property
     def similarity(self) -> Optional[float]:
@@ -57,6 +73,26 @@ def _slug(name: str) -> str:
     """Stable record id from a name: lowercased, non-alnum → single hyphen."""
     s = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-")
     return s or "unknown"
+
+
+def _cosine_sim(a: Sequence[float], b: Sequence[float]) -> float:
+    """Cosine similarity of two vectors (norm-guarded; inputs are ~unit length)."""
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(x * x for x in b) ** 0.5
+    return dot / (na * nb + 1e-8)
+
+
+# Adaptive face↔appearance fusion weights — design by Chalk (EIC team), from
+# eic_human/core.py. A confident face detection is trusted mostly on the face;
+# a marginal one leans harder on attire; no face at all → appearance only.
+# The appearance weight is always the face weight's complement.
+FUSION_DEFAULTS = {
+    "face_conf_high": 0.8,    # det_score above this → "high confidence" face
+    "face_conf_med": 0.5,     # det_score above this → "medium confidence" face
+    "face_weight_high": 0.75,
+    "face_weight_med": 0.55,
+}
 
 
 def _mean_unit(vectors: Sequence[Sequence[float]]) -> list[float]:
@@ -82,6 +118,7 @@ class PeopleStore:
     """Read/write façade over the face-keyed people vector DB."""
 
     COLLECTION = "people"
+    APP_COLLECTION = "people_appearance"
 
     def __init__(
         self,
@@ -103,6 +140,10 @@ class PeopleStore:
             )
         self._collection = self._client.get_or_create_collection(
             name=self.COLLECTION,
+            metadata={"hnsw:space": "cosine"},
+        )
+        self._app_collection = self._client.get_or_create_collection(
+            name=self.APP_COLLECTION,
             metadata={"hnsw:space": "cosine"},
         )
         self._embedding_model = embedding_model
@@ -129,6 +170,7 @@ class PeopleStore:
         embedding: Sequence[float],
         *,
         attributes: str = "",
+        app_embedding: Optional[Sequence[float]] = None,
         frame: Optional[Image.Image] = None,
         face_bbox_xyxy: Optional[Sequence[int]] = None,
         ts: Optional[float] = None,
@@ -137,9 +179,12 @@ class PeopleStore:
 
         Re-enrolling a known name updates their drink/attributes and folds the
         new face vector into a running centroid (more robust recognition across
-        lighting/pose), bumping the enrollment count. When ``frame`` (and a
-        ``face_bbox_xyxy``) are given and a frames dir is configured, the guest's
-        face crop is archived for the DB viewer. Returns the stored record.
+        lighting/pose), bumping the enrollment count. ``app_embedding`` (the
+        OSNet attire/body vector) is stored latest-wins — clothing changes
+        between sessions, so averaging it would blur identities. When ``frame``
+        (and a ``face_bbox_xyxy``) are given and a frames dir is configured, the
+        guest's face crop is archived for the DB viewer. Returns the stored
+        record.
         """
         if not name or not name.strip():
             raise ValueError("name must be non-empty")
@@ -184,6 +229,12 @@ class PeopleStore:
         self._collection.upsert(
             ids=[rid], embeddings=[new_emb], metadatas=[metadata], documents=[document]
         )
+        if app_embedding is not None:
+            app = [float(x) for x in app_embedding]
+            if app:
+                self._app_collection.upsert(
+                    ids=[rid], embeddings=[app], documents=[document]
+                )
         return self._to_record(rid, new_emb, metadata)
 
     def _archive_face(
@@ -210,10 +261,15 @@ class PeopleStore:
             return None
 
     def clear(self) -> None:
-        """Forget everyone (e.g. between Receptionist runs)."""
+        """Forget everyone (e.g. between Receptionist runs) — both collections."""
         self._client.delete_collection(self.COLLECTION)
         self._collection = self._client.get_or_create_collection(
             name=self.COLLECTION,
+            metadata={"hnsw:space": "cosine"},
+        )
+        self._client.delete_collection(self.APP_COLLECTION)
+        self._app_collection = self._client.get_or_create_collection(
+            name=self.APP_COLLECTION,
             metadata={"hnsw:space": "cosine"},
         )
 
@@ -248,6 +304,109 @@ class PeopleStore:
         metas = res.get("metadatas")
         meta = (metas[0][0] if metas is not None and len(metas) and len(metas[0]) else {}) or {}
         return self._to_record(ids[0][0], stored_emb, meta, distance=dist)
+
+    def recognize_fused(
+        self,
+        face_embedding: Optional[Sequence[float]] = None,
+        app_embedding: Optional[Sequence[float]] = None,
+        *,
+        face_confidence: float = 0.0,
+        min_score: float = 0.5,
+        fusion: Optional[dict] = None,
+    ) -> Optional[PersonRecord]:
+        """Two-modality recognition: face + appearance, adaptively fused.
+
+        Scores every enrolled person on both modalities and combines them with
+        confidence-adaptive weights (design by Chalk, EIC team): a confident
+        face detection (``face_confidence`` above ``face_conf_high``) trusts
+        the face at ``face_weight_high``; a marginal one (above
+        ``face_conf_med``) at ``face_weight_med``; with no usable face the
+        match is appearance-only. A modality missing on either side (no query
+        vector, or the person was enrolled without one) falls back to the
+        available modality alone rather than scoring it as zero.
+
+        The store is tiny (a handful of Receptionist guests), so this scans
+        all records exactly instead of merging two approximate HNSW queries.
+
+        Args:
+            face_embedding: Query face vector, or ``None`` if no face visible.
+            app_embedding: Query appearance (attire) vector, or ``None``.
+            face_confidence: Face detection score in ``[0, 1]``.
+            min_score: Minimum fused similarity to count as a match
+                (Chalk's default 0.5; tune via ``APPEARANCE_MATCH_THRESHOLD``).
+            fusion: Optional overrides for :data:`FUSION_DEFAULTS` keys.
+
+        Returns:
+            The best-matching person with :attr:`PersonRecord.matched_by` set,
+            or ``None`` when nobody clears ``min_score``.
+        """
+        face = [float(x) for x in face_embedding] if face_embedding else None
+        app = [float(x) for x in app_embedding] if app_embedding else None
+        if (face is None and app is None) or self.count() == 0:
+            return None
+        cfg = {**FUSION_DEFAULTS, **(fusion or {})}
+
+        res = self._collection.get(include=["embeddings", "metadatas"])
+        ids = res.get("ids") or []
+        face_embs = res.get("embeddings")
+        metas = res.get("metadatas")
+        app_res = self._app_collection.get(include=["embeddings"])
+        app_ids = app_res.get("ids") or []
+        app_embs = app_res.get("embeddings")
+        app_by_id = {
+            rid: app_embs[i]
+            for i, rid in enumerate(app_ids)
+            if app_embs is not None and i < len(app_embs) and app_embs[i] is not None
+        }
+
+        best: Optional[tuple[float, str, int, dict, str]] = None
+        for i, rid in enumerate(ids):
+            stored_face = (
+                face_embs[i]
+                if face_embs is not None and i < len(face_embs)
+                else None
+            )
+            meta = (metas[i] if metas is not None and i < len(metas) else {}) or {}
+            face_sim = (
+                _cosine_sim(face, stored_face)
+                if face is not None and stored_face is not None and len(stored_face)
+                else None
+            )
+            stored_app = app_by_id.get(rid)
+            app_sim = (
+                _cosine_sim(app, stored_app)
+                if app is not None and stored_app is not None
+                else None
+            )
+
+            if face_sim is not None and app_sim is not None:
+                if face_confidence > cfg["face_conf_high"]:
+                    w = cfg["face_weight_high"]
+                elif face_confidence > cfg["face_conf_med"]:
+                    w = cfg["face_weight_med"]
+                else:
+                    w = 0.0
+                score = w * face_sim + (1.0 - w) * app_sim
+                matched_by = "face+appearance" if w > 0.0 else "appearance"
+            elif face_sim is not None:
+                score = face_sim
+                matched_by = "face"
+            elif app_sim is not None:
+                score = app_sim
+                matched_by = "appearance"
+            else:
+                continue
+
+            if score >= min_score and (best is None or score > best[0]):
+                best = (score, rid, i, meta, matched_by)
+
+        if best is None:
+            return None
+        score, rid, i, meta, matched_by = best
+        stored_face = face_embs[i] if face_embs is not None and i < len(face_embs) else None
+        return self._to_record(
+            rid, stored_face, meta, distance=1.0 - score, matched_by=matched_by
+        )
 
     def get(self, name: str) -> Optional[PersonRecord]:
         """Look a person up by name (exact, case-insensitive via the slug)."""
@@ -291,7 +450,13 @@ class PeopleStore:
         return emb, meta
 
     def _to_record(
-        self, rid: str, embedding, meta: dict, *, distance: Optional[float] = None
+        self,
+        rid: str,
+        embedding,
+        meta: dict,
+        *,
+        distance: Optional[float] = None,
+        matched_by: Optional[str] = None,
     ) -> PersonRecord:
         emb = tuple(float(x) for x in embedding) if embedding is not None else tuple()
         ref = meta.get("frame_ref")
@@ -307,4 +472,5 @@ class PeopleStore:
             frame_ref=str(ref) if ref else None,
             embedding=emb,
             distance=distance,
+            matched_by=matched_by,
         )

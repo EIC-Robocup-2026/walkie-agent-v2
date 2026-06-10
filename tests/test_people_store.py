@@ -122,3 +122,86 @@ def test_enroll_archives_face_crop_when_frames_dir_set(tmp_path):
 def test_enroll_without_frames_dir_has_no_frame_ref(store):
     rec = store.enroll("Bob", "milk", BOB, frame=Image.new("RGB", (10, 10)), face_bbox_xyxy=(0, 0, 5, 5))
     assert rec.frame_ref is None
+
+
+# ---------------------------------------------------------------------------
+# Two-modality fused recognition (face + appearance) — design by Chalk (EIC).
+# Appearance vectors live in a second collection keyed by the same ids.
+# ---------------------------------------------------------------------------
+
+# Attire vectors: Alice wears red, Bob wears blue. A second sighting of
+# Alice's outfit is close to hers and far from Bob's.
+ALICE_ATTIRE = _unit(1.0, 0.0, 0.1)
+ALICE_ATTIRE_2 = _unit(0.95, 0.05, 0.15)
+BOB_ATTIRE = _unit(0.0, 1.0, 0.1)
+STRANGER_ATTIRE = _unit(0.1, 0.1, 1.0)
+
+
+def test_fused_face_and_appearance_match(store):
+    store.enroll("Alice", "cola", ALICE, app_embedding=ALICE_ATTIRE)
+    store.enroll("Bob", "milk", BOB, app_embedding=BOB_ATTIRE)
+    rec = store.recognize_fused(ALICE_2, ALICE_ATTIRE_2, face_confidence=0.95)
+    assert rec is not None and rec.name == "Alice"
+    assert rec.matched_by == "face+appearance"
+    assert rec.similarity is not None and rec.similarity > 0.9
+
+
+def test_appearance_only_match_when_no_face(store):
+    """A guest facing away (no face embedding) is still found by attire."""
+    store.enroll("Alice", "cola", ALICE, app_embedding=ALICE_ATTIRE)
+    store.enroll("Bob", "milk", BOB, app_embedding=BOB_ATTIRE)
+    rec = store.recognize_fused(None, ALICE_ATTIRE_2)
+    assert rec is not None and rec.name == "Alice"
+    assert rec.matched_by == "appearance"
+
+
+def test_face_only_fallback_when_person_has_no_attire(store):
+    """Enrolled without an appearance vector → face alone still matches."""
+    store.enroll("Alice", "cola", ALICE)  # no app_embedding stored
+    rec = store.recognize_fused(ALICE_2, ALICE_ATTIRE_2, face_confidence=0.95)
+    assert rec is not None and rec.name == "Alice"
+    assert rec.matched_by == "face"
+
+
+def test_fused_rejects_stranger(store):
+    store.enroll("Alice", "cola", ALICE, app_embedding=ALICE_ATTIRE)
+    assert store.recognize_fused(CAROL, STRANGER_ATTIRE, face_confidence=0.95) is None
+    assert store.recognize_fused(None, STRANGER_ATTIRE) is None
+
+
+def test_low_face_confidence_leans_on_appearance(store):
+    """With an unreliable face detection, attire dominates (w_face = 0)."""
+    store.enroll("Alice", "cola", ALICE, app_embedding=ALICE_ATTIRE)
+    # face vector says "not Alice" but the detection is junk; attire says Alice
+    rec = store.recognize_fused(CAROL, ALICE_ATTIRE_2, face_confidence=0.1)
+    assert rec is not None and rec.name == "Alice"
+    assert rec.matched_by == "appearance"
+
+
+def test_fused_min_score_is_respected(store):
+    store.enroll("Alice", "cola", ALICE, app_embedding=ALICE_ATTIRE)
+    assert store.recognize_fused(ALICE_2, ALICE_ATTIRE_2, face_confidence=0.95, min_score=0.999) is None
+
+
+def test_fused_empty_store_and_empty_query(store):
+    assert store.recognize_fused(ALICE, ALICE_ATTIRE) is None  # empty store
+    store.enroll("Alice", "cola", ALICE, app_embedding=ALICE_ATTIRE)
+    assert store.recognize_fused(None, None) is None  # nothing to match on
+
+
+def test_reenroll_replaces_attire_latest_wins(store):
+    """Clothing changes between sessions — the newest attire vector wins."""
+    store.enroll("Alice", "cola", ALICE, app_embedding=ALICE_ATTIRE)
+    store.enroll("Alice", "cola", ALICE_2, app_embedding=BOB_ATTIRE)  # changed outfit
+    rec = store.recognize_fused(None, BOB_ATTIRE)
+    assert rec is not None and rec.name == "Alice"
+    # the old outfit no longer matches her strongly enough on its own
+    old = store.recognize_fused(None, STRANGER_ATTIRE)
+    assert old is None
+
+
+def test_clear_empties_both_collections(store):
+    store.enroll("Alice", "cola", ALICE, app_embedding=ALICE_ATTIRE)
+    store.clear()
+    assert store.count() == 0
+    assert store.recognize_fused(None, ALICE_ATTIRE) is None
