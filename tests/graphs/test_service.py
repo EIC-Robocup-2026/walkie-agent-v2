@@ -91,3 +91,70 @@ def test_mask_subtract_and_crop_margin_defaults(svc):
     # mask subtraction defaults ON (CG always applies it); crop margin matches CG's 20px.
     assert svc.mask_subtract is True
     assert svc.crop_margin_px == 20
+
+
+# ---------------------------------------------------------------------------
+# walkie-sdk integration: intrinsics from get_intrinsics, pose from optical TF
+# ---------------------------------------------------------------------------
+class _FakeCamera:
+    def get_intrinsics(self):
+        return {"fx": 500.0, "fy": 500.0, "cx": 320.0, "cy": 240.0, "width": 640, "height": 480}
+
+
+class _FakeTransform:
+    def __init__(self, tf):
+        self.tf = tf
+        self.calls = []
+
+    def lookup(self, source, target, timeout=1.0):
+        self.calls.append((source, target))
+        return self.tf
+
+
+class _FakeRobot:
+    def __init__(self, tf):
+        self.camera = _FakeCamera()
+        self.transform = _FakeTransform(tf)
+
+
+class _FakeWalkie:
+    def __init__(self, tf):
+        self.robot = _FakeRobot(tf)
+
+
+def _svc_with_walkie(tf):
+    w = _FakeWalkie(tf)
+    s = WalkieGraphsService(walkieAI=None, walkie=w, memory=_StubMemory(), verbose=False)
+    return s, w
+
+
+def test_intrinsics_from_sdk_scaled_to_depth():
+    s, _ = _svc_with_walkie(None)
+    intr = s._intrinsics(640, 480)
+    assert (intr.fx, intr.cx, intr.cy) == pytest.approx((500.0, 320.0, 240.0))
+    # different depth resolution → intrinsics rescaled
+    half = s._intrinsics(320, 240)
+    assert (half.fx, half.cx) == pytest.approx((250.0, 160.0))
+
+
+def test_camera_pose_from_optical_tf():
+    tf = {
+        "position": {"x": 1.0, "y": 2.0, "z": 3.0},
+        "quaternion": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},  # identity
+    }
+    s, w = _svc_with_walkie(tf)
+    pose = s._camera_pose()
+    assert np.allclose(pose.R, np.eye(3))
+    assert np.allclose(pose.t, [1.0, 2.0, 3.0])
+    # it looked up MAP_FRAME -> the optical camera frame
+    assert w.robot.transform.calls == [("map", "zed_head_left_camera_optical_frame")]
+
+
+def test_camera_pose_none_when_lookup_fails():
+    s, _ = _svc_with_walkie(None)  # lookup returns None
+    assert s._camera_pose() is None
+
+
+def test_default_camera_frame_is_optical():
+    s, _ = _svc_with_walkie(None)
+    assert s._tf_cam_frame == "zed_head_left_camera_optical_frame"

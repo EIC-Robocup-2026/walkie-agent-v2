@@ -1,29 +1,22 @@
 """Camera geometry for walkie_graphs — pure numpy, no robot/SDK imports.
 
-Everything needed to turn a masked detection in an RGB-D frame into 3D points in
-the **world (map) frame**:
+Turns a masked detection in an RGB-D frame into 3D points in the **map frame**,
+using two things the walkie-sdk now provides directly:
 
-1. :class:`Intrinsics` — pinhole model. The SDK exposes no ``camera_info`` for the
-   ZED 2i, so the default is derived from the horizontal FOV
-   (``fx = (W/2) / tan(HFOV/2)``, ``fy = fx`` for square rectified pixels,
-   principal point at the image center). Pass real calibrated values to override.
-2. :func:`camera_pose_from_transform` — the camera's world pose straight from the
-   SDK's TF lookup (``transform.lookup("map", "<cam>_camera_frame")``); preferred,
-   since lift/tilt/mounts are already baked into the TF tree.
-   :func:`compute_camera_pose` is the manual fallback — composes that same pose from
-   the robot's planar pose + lift height + head tilt + fixed mount offsets.
-3. :func:`pixel_to_world` / :func:`deproject_mask` — back-project depth pixels.
+1. :class:`Intrinsics` — real pinhole intrinsics from ``bot.camera.get_intrinsics()``
+   (``fx, fy, cx, cy``). :meth:`Intrinsics.scaled_to` rescales them if the depth
+   image is a different resolution than the ``CameraInfo`` they came from.
+2. :class:`CameraPose` — the camera **optical** frame's pose in the map frame, built
+   in the service from ``bot.transform.lookup("map", "<cam>_optical_frame")``. The
+   optical frame's axes (``x right, y down, z forward``) are exactly the axes the
+   pinhole back-projection produces, so the rotation maps camera points straight into
+   the map — no intermediate body-frame conversion, no manual lift/tilt composition.
 
-Frame conventions
------------------
-Robot LOCAL frame: ``x = forward, y = left, z = up``. World frame uses the same
-axes; ``heading`` is yaw (CCW from world +x, ROS REP-103). The camera OPTICAL
-frame is OpenCV style: ``x = right, y = down, z = forward``.
+:func:`deproject_mask` ties them together: ``P_map = P_optical @ R.T + t``.
 """
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -34,51 +27,12 @@ except Exception:  # pragma: no cover - cv2 always present in this project
     cv2 = None
 
 
-# Fixed camera mount offsets, robot LOCAL frame (metres), x=forward y=left z=up.
-# LIFT_TO_HEAD: lift-top -> head tilt pivot. PIVOT_TO_OPTIC: tilt pivot -> optical
-# center (this one rotates with the head tilt servo).
-DEFAULT_LIFT_TO_HEAD = (0.265, 0.0, 0.422)
-DEFAULT_PIVOT_TO_OPTIC = (0.065, 0.0, 0.0)
-
-LIFT_CM_TO_M = 0.01  # walkie.robot.lift.get(norm_pos=False) returns CENTIMETRES
-
-
-# ---------------------------------------------------------------------------
-# Rotations
-# ---------------------------------------------------------------------------
-def rot_z(yaw: float) -> np.ndarray:
-    """Yaw rotation about +z (CCW)."""
-    c, s = math.cos(yaw), math.sin(yaw)
-    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
-
-
-def rot_y(pitch: float) -> np.ndarray:
-    """Pitch rotation about +y (head tilt; positive = camera looks down)."""
-    c, s = math.cos(pitch), math.sin(pitch)
-    return np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])
-
-
-def quat_to_rot(x: float, y: float, z: float, w: float) -> np.ndarray:
-    """Rotation matrix from a quaternion ``(x, y, z, w)`` (Hamilton, ROS order)."""
-    n = math.sqrt(x * x + y * y + z * z + w * w)
-    if n == 0.0:
-        return np.eye(3)
-    x, y, z, w = x / n, y / n, z / n, w / n
-    return np.array(
-        [
-            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
-            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
-        ]
-    )
-
-
 # ---------------------------------------------------------------------------
 # Intrinsics
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class Intrinsics:
-    """Pinhole camera intrinsics (pixels)."""
+    """Pinhole camera intrinsics (pixels). Straight from ``camera.get_intrinsics()``."""
 
     fx: float
     fy: float
@@ -87,122 +41,41 @@ class Intrinsics:
     width: int
     height: int
 
-    @classmethod
-    def from_hfov(
-        cls,
-        width: int,
-        height: int,
-        hfov_deg: float = 110.0,
-        *,
-        fx: float | None = None,
-        fy: float | None = None,
-        cx: float | None = None,
-        cy: float | None = None,
-    ) -> "Intrinsics":
-        """Build intrinsics, deriving any value left as ``None`` from the FOV.
+    def scaled_to(self, width: int, height: int) -> "Intrinsics":
+        """Rescale to a different image resolution (e.g. depth ≠ CameraInfo size).
 
-        ``fx`` defaults to ``(width / 2) / tan(hfov / 2)`` (ZED 2i HFOV ≈ 110°),
-        ``fy`` defaults to ``fx`` (square pixels on the rectified stream), and the
-        principal point defaults to the image center.
+        The ZED head registers depth to the rectified left image, so this is usually
+        a no-op; it only matters if the depth stream is downscaled relative to the
+        ``CameraInfo`` the intrinsics came from.
         """
-        f = (width / 2.0) / math.tan(math.radians(hfov_deg) / 2.0)
-        fx = f if fx is None else float(fx)
-        fy = fx if fy is None else float(fy)
-        cx = (width / 2.0) if cx is None else float(cx)
-        cy = (height / 2.0) if cy is None else float(cy)
-        return cls(fx=fx, fy=fy, cx=cx, cy=cy, width=int(width), height=int(height))
+        if not self.width or not self.height or (width == self.width and height == self.height):
+            return self
+        sx, sy = width / self.width, height / self.height
+        return Intrinsics(
+            self.fx * sx, self.fy * sy, self.cx * sx, self.cy * sy, int(width), int(height)
+        )
 
 
 # ---------------------------------------------------------------------------
-# Camera world pose
+# Camera pose (optical frame -> map)
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class CameraPose:
-    """Camera pose in the world frame.
+    """Camera **optical** frame pose in the map frame.
 
-    ``R`` maps a point from the robot-local camera frame to the world frame
-    (``R = Rz(heading) @ Ry(tilt)``); ``t`` is the optical-center position.
+    ``R`` (3x3) rotates a point from the camera optical frame into the map frame and
+    ``t`` (3,) is the optical centre in the map frame, so a point ``p`` maps as
+    ``R @ p + t`` (equivalently ``p @ R.T + t`` for a batch). Build it from the SDK
+    transform: ``R = quaternion_to_matrix(*q)``, ``t = (x, y, z)``.
     """
 
     R: np.ndarray  # (3, 3)
     t: np.ndarray  # (3,)
 
 
-def compute_camera_pose(
-    robot_x: float,
-    robot_y: float,
-    heading: float,
-    lift_cm: float,
-    tilt_rad: float,
-    *,
-    lift_to_head: tuple[float, float, float] = DEFAULT_LIFT_TO_HEAD,
-    pivot_to_optic: tuple[float, float, float] = DEFAULT_PIVOT_TO_OPTIC,
-) -> CameraPose:
-    """Compose the camera's world pose.
-
-    ``cam_pos = (robot_x, robot_y, 0) + Rz(heading) @ [ (0,0,lift_m)
-    + LIFT_TO_HEAD + Ry(tilt) @ PIVOT_TO_OPTIC ]``, where ``lift_m = lift_cm/100``.
-    Orientation (world ← camera-local) is ``Rz(heading) @ Ry(tilt)``.
-
-    Args:
-        robot_x, robot_y: Robot planar position in the world/map frame (metres).
-        heading: Robot yaw (radians).
-        lift_cm: Lift height in **centimetres** (the SDK's native unit).
-        tilt_rad: Head tilt in radians (positive = looking down).
-    """
-    lift_m = lift_cm * LIFT_CM_TO_M
-    Rz = rot_z(heading)
-    Ry = rot_y(tilt_rad)
-
-    cam_local = (
-        np.array([0.0, 0.0, lift_m])
-        + np.asarray(lift_to_head, dtype=float)
-        + Ry @ np.asarray(pivot_to_optic, dtype=float)
-    )
-    cam_pos_world = np.array([robot_x, robot_y, 0.0]) + Rz @ cam_local
-    return CameraPose(R=Rz @ Ry, t=cam_pos_world)
-
-
-def camera_pose_from_transform(tf: dict) -> CameraPose:
-    """Build a :class:`CameraPose` from an SDK ``transform.lookup`` result.
-
-    Expects ``walkie.robot.transform.lookup("map", "<cam>_camera_frame")`` →
-    ``{"position": {x, y, z}, "quaternion": {x, y, z, w}}``, i.e. the camera
-    *body* frame's pose in the world/map frame. The ZED ``*_camera_frame`` follows
-    REP-103 (``x=forward, y=left, z=up``) — the same axes the deprojection's
-    robot-local cloud uses — so the quaternion's rotation maps camera-local → world
-    directly (``pose.R``) and the position is the optical center (``pose.t``).
-
-    This supersedes :func:`compute_camera_pose`: the TF tree already accounts for
-    lift, head tilt, and every mount offset, so no manual composition is needed.
-    """
-    p, q = tf["position"], tf["quaternion"]
-    R = quat_to_rot(float(q["x"]), float(q["y"]), float(q["z"]), float(q["w"]))
-    t = np.array([float(p["x"]), float(p["y"]), float(p["z"])])
-    return CameraPose(R=R, t=t)
-
-
 # ---------------------------------------------------------------------------
-# Deprojection (depth -> world points)
+# Deprojection (depth -> map points)
 # ---------------------------------------------------------------------------
-def _optical_to_local(P_optical: np.ndarray) -> np.ndarray:
-    """OpenCV optical axes (x right, y down, z forward) → robot-local (fwd, left, up)."""
-    # forward = Zc, left = -Xc, up = -Yc
-    return np.stack([P_optical[:, 2], -P_optical[:, 0], -P_optical[:, 1]], axis=1)
-
-
-def pixel_to_world(
-    u: float, v: float, depth: float, intr: Intrinsics, pose: CameraPose
-) -> tuple[float, float, float]:
-    """Back-project a single pixel + depth to a world-frame point."""
-    Xc = (u - intr.cx) * depth / intr.fx
-    Yc = (v - intr.cy) * depth / intr.fy
-    Zc = depth
-    p_local = np.array([Zc, -Xc, -Yc])  # optical -> robot-local
-    p_world = pose.t + pose.R @ p_local
-    return float(p_world[0]), float(p_world[1]), float(p_world[2])
-
-
 def voxel_downsample(points: np.ndarray, voxel: float) -> np.ndarray:
     """Grid-quantize to ``voxel``-sized cells, returning one mean point per cell."""
     if voxel is None or voxel <= 0 or len(points) == 0:
@@ -226,11 +99,12 @@ def deproject_mask(
     voxel: float | None = None,
     max_points: int | None = None,
 ) -> np.ndarray:
-    """Back-project all masked pixels with valid depth to an ``(N, 3)`` world cloud.
+    """Back-project all masked pixels with valid depth to an ``(N, 3)`` map-frame cloud.
 
-    NaN/zero depth pixels are dropped. If ``mask`` and ``depth`` differ in shape
-    (the ZED color and depth streams can), the mask is resized to the depth
-    resolution with nearest-neighbour interpolation. Optionally voxel-downsampled
+    NaN/zero depth pixels are dropped. If ``mask`` and ``depth`` differ in shape, the
+    mask is resized to the depth resolution (nearest-neighbour). Each pixel is
+    back-projected into the camera optical frame and mapped into the world by the
+    optical-frame pose (``P_map = P_optical @ R.T + t``). Optionally voxel-downsampled
     and capped at ``max_points`` (deterministic uniform stride).
     """
     if mask.shape[:2] != depth.shape[:2]:
@@ -252,12 +126,13 @@ def deproject_mask(
         return np.zeros((0, 3), dtype=np.float32)
     xs, ys, d = xs[valid], ys[valid], d[valid]
 
+    # Pinhole back-projection into the camera optical frame (x right, y down, z fwd).
     Xc = (xs - intr.cx) * d / intr.fx
     Yc = (ys - intr.cy) * d / intr.fy
     Zc = d
     P_optical = np.stack([Xc, Yc, Zc], axis=1)
-    P_local = _optical_to_local(P_optical)
-    P_world = (pose.R @ P_local.T).T + pose.t
+    # Optical-frame pose maps these straight into the map frame.
+    P_world = P_optical @ pose.R.T + pose.t
 
     if voxel:
         P_world = voxel_downsample(P_world, voxel)

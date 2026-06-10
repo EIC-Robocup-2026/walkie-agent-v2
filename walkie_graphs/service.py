@@ -1,12 +1,12 @@
 """WalkieGraphsService — the background thread that grows the scene graph.
 
 Mirrors :class:`services.perception.PerceptionService`: a daemon thread that, each
-tick, resolves the camera's world pose (via the SDK TF lookup, falling back to
-composing it from robot pose + lift + head tilt), captures an RGB-D frame, runs
-masked object detection (scoped to the *interested classes*), lifts each mask to a
-3D world point cloud, embeds + captions the crop via the AI client, and upserts it
-into :class:`~walkie_graphs.memory.GraphMemory`. Every few ticks it recomputes the
-geometric relations, prunes, and pushes to the visualizer.
+tick, resolves the camera's pose (the optical frame's pose in the map frame from the
+SDK ``transform.lookup``) and intrinsics (``camera.get_intrinsics``), captures an
+RGB-D frame, runs masked object detection (scoped to the *interested classes*), lifts
+each mask to a 3D world point cloud, embeds + captions the crop via the AI client, and
+upserts it into :class:`~walkie_graphs.memory.GraphMemory`. Every few ticks it
+recomputes the geometric relations, prunes, and pushes to the visualizer.
 
 Detection/caption/embedding are all direct ``walkieAI`` client calls — there is no
 local model here.
@@ -14,33 +14,19 @@ local model here.
 
 from __future__ import annotations
 
-import math
 import os
 import threading
 import time
 
+import numpy as np
+
 from .fusion import subtract_contained_masks
-from .geometry import (
-    Intrinsics,
-    camera_pose_from_transform,
-    compute_camera_pose,
-    deproject_mask,
-)
+from .geometry import CameraPose, Intrinsics, deproject_mask
 from .memory import Detection3D, GraphMemory
 
 
 def _csv(value: str) -> list[str]:
     return [c.strip() for c in value.split(",") if c.strip()]
-
-
-def _opt_float(name: str):
-    v = os.getenv(name, "")
-    return float(v) if v.strip() else None
-
-
-def _vec3(value: str) -> tuple[float, float, float]:
-    parts = [float(x) for x in value.split(",")]
-    return (parts[0], parts[1], parts[2])
 
 
 def _crop_pil(img, bbox, margin: int = 20):
@@ -121,21 +107,15 @@ class WalkieGraphsService(threading.Thread):
         ).strip().lower() in ("1", "true", "yes")
         self.llm_edges_every_n = int(os.getenv("WALKIE_GRAPHS_LLM_EDGES_EVERY_N", "0"))
 
-        self._hfov = float(os.getenv("WALKIE_GRAPHS_HFOV_DEG", "110"))
-        self._fx, self._fy = _opt_float("WALKIE_GRAPHS_FX"), _opt_float("WALKIE_GRAPHS_FY")
-        self._cx, self._cy = _opt_float("WALKIE_GRAPHS_CX"), _opt_float("WALKIE_GRAPHS_CY")
-        self._lift_to_head = _vec3(os.getenv("WALKIE_GRAPHS_LIFT_TO_HEAD", "0.265,0.0,0.422"))
-        self._pivot_to_optic = _vec3(os.getenv("WALKIE_GRAPHS_PIVOT_TO_OPTIC", "0.065,0.0,0.0"))
-        # head.get_angle() is radians; geometry wants "positive = camera tilts down".
-        # If the joint-state sign is inverted vs that, set SIGN=-1; OFFSET corrects a
-        # non-level zero. effective_tilt = sign * get_angle() + offset.
-        self._tilt_sign = float(os.getenv("WALKIE_GRAPHS_HEAD_TILT_SIGN", "1"))
-        self._tilt_offset = float(os.getenv("WALKIE_GRAPHS_HEAD_TILT_OFFSET_RAD", "0"))
-        # TF lookup: ask the robot for the camera body frame's pose in the map frame
-        # directly (lift + tilt + mounts already baked in). Empty CAMERA_FRAME falls
-        # back to composing the pose from lift/tilt/mount offsets above.
+        # Camera calibration + pose come straight from the walkie-sdk: real pinhole
+        # intrinsics from camera.get_intrinsics(), and the camera OPTICAL frame's pose
+        # in the map frame from transform.lookup(MAP_FRAME, CAMERA_FRAME) — the optical
+        # frame already bakes in lift, head tilt, and every mount offset, and its axes
+        # match the pinhole math, so no manual composition or axis conversion is needed.
         self._tf_map_frame = os.getenv("WALKIE_GRAPHS_TF_MAP_FRAME", "map")
-        self._tf_cam_frame = os.getenv("WALKIE_GRAPHS_TF_CAMERA_FRAME", "zed_head_left_camera_frame")
+        self._tf_cam_frame = os.getenv(
+            "WALKIE_GRAPHS_TF_CAMERA_FRAME", "zed_head_left_camera_optical_frame"
+        )
         self._tf_timeout = float(os.getenv("WALKIE_GRAPHS_TF_TIMEOUT_SEC", "1.0"))
         self._debug = os.getenv("WALKIE_GRAPHS_DEBUG", "0").lower() in ("1", "true", "yes")
         self._intr_cache: dict[tuple[int, int], Intrinsics] = {}
@@ -216,14 +196,15 @@ class WalkieGraphsService(threading.Thread):
         }
 
         cam = self._camera_pose() if depth is not None else None
-        if cam is None:
-            # No geometry this frame: report unknown positions, upsert nothing, but still
-            # advance the cadence so periodic maintenance keeps ticking.
+        intr = self._intrinsics(depth.shape[1], depth.shape[0]) if cam is not None else None
+        if cam is None or intr is None:
+            # No geometry this frame (pose or intrinsics unavailable): report unknown
+            # positions, upsert nothing, but still advance the cadence so periodic
+            # maintenance keeps ticking.
             self._last_touched = []
             self._maybe_tick(tick)
             return result
         self._last_cam = cam
-        intr = self._intrinsics(depth.shape[1], depth.shape[0])
 
         # Deproject every masked detection once: centroid for the live view, and (when
         # dense enough + a kept class) the full cloud for graph upsert.
@@ -385,59 +366,69 @@ class WalkieGraphsService(threading.Thread):
     # ------------------------------------------------------------------
     # Sensor reads
     # ------------------------------------------------------------------
-    def _intrinsics(self, width: int, height: int) -> Intrinsics:
+    def _intrinsics(self, width: int, height: int):
+        """Real pinhole intrinsics from the SDK, scaled to the depth resolution.
+
+        ``camera.get_intrinsics()`` reads the ZED's ``CameraInfo`` (cached by the SDK —
+        intrinsics are static) and applies to the registered depth too. Returns
+        ``None`` (skip the tick) when no camera info is available yet."""
         key = (width, height)
-        if key not in self._intr_cache:
-            self._intr_cache[key] = Intrinsics.from_hfov(
-                width, height, self._hfov, fx=self._fx, fy=self._fy, cx=self._cx, cy=self._cy
-            )
-        return self._intr_cache[key]
+        cached = self._intr_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            raw = self.walkie.robot.camera.get_intrinsics()
+        except Exception as e:  # noqa: BLE001
+            self._log(f"intrinsics unavailable: {e}")
+            return None
+        if not raw:
+            self._log("intrinsics unavailable (camera_info not published yet)")
+            return None
+        intr = Intrinsics(
+            fx=float(raw["fx"]),
+            fy=float(raw["fy"]),
+            cx=float(raw["cx"]),
+            cy=float(raw["cy"]),
+            width=int(raw.get("width") or width),
+            height=int(raw.get("height") or height),
+        ).scaled_to(width, height)
+        self._intr_cache[key] = intr
+        return intr
 
     def _camera_pose(self):
-        """Camera world pose: TF lookup first, composed lift/tilt/mounts as fallback.
+        """Camera optical-frame pose in the map frame, from the SDK transform tree.
 
-        ``walkie.robot.transform.lookup(map, cam)`` returns the camera body frame's
-        pose in the map frame with lift, head tilt, and mount offsets already baked
-        in by the TF tree — far more accurate than the manual composition. Returns
-        ``None`` only if both the lookup and the fallback fail (skip the tick)."""
-        if self._tf_cam_frame:
-            try:
-                tf = self.walkie.robot.transform.lookup(
-                    self._tf_map_frame, self._tf_cam_frame, timeout=self._tf_timeout
-                )
-            except Exception as e:  # noqa: BLE001
-                tf = None
-                self._log(f"transform lookup error: from {self._tf_map_frame} to {self._tf_cam_frame}: {e}")
-            if tf is not None:
-                cam = camera_pose_from_transform(tf)
-                if self._debug:
-                    self._log(
-                        f"pose(tf {self._tf_cam_frame}) "
-                        f"cam=({cam.t[0]:.2f},{cam.t[1]:.2f},{cam.t[2]:.2f})m"
-                    )
-                return cam
-            self._log(f"transform from {self._tf_map_frame} to {self._tf_cam_frame} lookup returned None; falling back to composed pose")
+        ``transform.lookup(MAP_FRAME, CAMERA_FRAME)`` with the camera *optical* frame
+        returns a pose whose rotation maps camera-optical points straight into the map
+        (lift, head tilt, and mount offsets already baked in), so deprojection needs no
+        further composition. Returns ``None`` (skip the tick) when the lookup fails."""
+        try:
+            tf = self.walkie.robot.transform.lookup(
+                self._tf_map_frame, self._tf_cam_frame, timeout=self._tf_timeout
+            )
+        except Exception as e:  # noqa: BLE001
+            self._log(
+                f"transform lookup error ({self._tf_map_frame} -> {self._tf_cam_frame}): {e}"
+            )
+            return None
+        if tf is None:
+            self._log(
+                f"transform lookup returned None ({self._tf_map_frame} -> "
+                f"{self._tf_cam_frame}); skipping tick"
+            )
+            return None
 
-        pose = self.walkie.status.get_position() or {"x": 0.0, "y": 0.0, "heading": 0.0}
-        lift_cm = self._lift_cm()
-        tilt = self._tilt_rad()
-        cam = compute_camera_pose(
-            float(pose.get("x", 0.0)),
-            float(pose.get("y", 0.0)),
-            float(pose.get("heading", 0.0)),
-            lift_cm,
-            tilt,
-            lift_to_head=self._lift_to_head,
-            pivot_to_optic=self._pivot_to_optic,
-        )
+        from walkie_sdk.utils.converters import quaternion_to_matrix
+
+        q, p = tf["quaternion"], tf["position"]
+        R = quaternion_to_matrix(float(q["x"]), float(q["y"]), float(q["z"]), float(q["w"]))
+        t = np.array([float(p["x"]), float(p["y"]), float(p["z"])])
         if self._debug:
             self._log(
-                f"pose(composed) lift={lift_cm:.1f}cm tilt={tilt:+.3f}rad/"
-                f"{math.degrees(tilt):+.1f}deg (+down) "
-                f"cam=({cam.t[0]:.2f},{cam.t[1]:.2f},{cam.t[2]:.2f})m "
-                f"heading={float(pose.get('heading', 0.0)):+.2f}rad"
+                f"pose(optical tf {self._tf_cam_frame}) "
+                f"cam=({t[0]:.2f},{t[1]:.2f},{t[2]:.2f})m"
             )
-        return cam
+        return CameraPose(R=R, t=t)
 
     def _depth(self):
         try:
@@ -445,18 +436,3 @@ class WalkieGraphsService(threading.Thread):
         except Exception as e:  # noqa: BLE001
             self._log(f"depth unavailable: {e}")
             return None
-
-    def _lift_cm(self) -> float:
-        try:
-            v = self.walkie.robot.lift.get(norm_pos=False)
-            return float(v) if v is not None else 0.0
-        except Exception:  # noqa: BLE001
-            return 0.0
-
-    def _tilt_rad(self) -> float:
-        try:
-            v = self.walkie.robot.head.get_angle()
-            v = float(v) if v is not None else 0.0
-        except Exception:  # noqa: BLE001
-            return 0.0
-        return self._tilt_sign * v + self._tilt_offset

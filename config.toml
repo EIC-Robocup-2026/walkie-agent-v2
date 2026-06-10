@@ -261,36 +261,17 @@ WALKIE_GRAPHS_RERUN_HOST = ""
 WALKIE_GRAPHS_RERUN_CORS = "*"
 
 [graphs.camera]
-# ZED 2i FOV: 110 H x 70 V. The SDK exposes no camera_info, so intrinsics default
-# to fx=(W/2)/tan(HFOV/2), fy=fx (square pixels), cx=W/2, cy=H/2 from the live
-# frame size. Set FX/FY/CX/CY to real calibrated values to override (blank=derive).
-WALKIE_GRAPHS_HFOV_DEG = "110"
-WALKIE_GRAPHS_FX = ""
-WALKIE_GRAPHS_FY = ""
-WALKIE_GRAPHS_CX = ""
-WALKIE_GRAPHS_CY = ""
-# Camera world pose: looked up from the robot's TF tree by default —
-# transform.lookup(MAP_FRAME, CAMERA_FRAME) returns the camera body frame's pose in
-# the map frame with lift, head tilt, and every mount offset already baked in (much
-# more accurate than the manual composition below). Set CAMERA_FRAME = "" to disable
-# the lookup and fall back to composing the pose from lift/tilt/mount offsets.
+# Camera calibration + pose come straight from the walkie-sdk — no manual tuning.
+# Intrinsics: camera.get_intrinsics() reads the ZED's CameraInfo (cached; applies to
+#   the registered depth too), scaled to the depth resolution if they differ.
+# Pose: transform.lookup(MAP_FRAME, CAMERA_FRAME) with the camera OPTICAL frame returns
+#   a pose whose rotation maps camera-optical points straight into the map (lift, head
+#   tilt, and every mount offset already baked in by the TF tree). The optical frame's
+#   axes (x right, y down, z forward) match the pinhole back-projection, so no axis
+#   conversion or manual composition is needed.
 WALKIE_GRAPHS_TF_MAP_FRAME = "map"
-WALKIE_GRAPHS_TF_CAMERA_FRAME = "zed_head_left_camera_frame"
+WALKIE_GRAPHS_TF_CAMERA_FRAME = "zed_head_left_camera_optical_frame"
 WALKIE_GRAPHS_TF_TIMEOUT_SEC = "1.0"
-# --- Fallback composition (used only when the TF lookup is disabled or fails) ---
-# Camera mount offsets in the robot LOCAL frame (metres), x=forward,y=left,z=up.
-# LIFT_TO_HEAD: fixed lift-top -> head tilt pivot. PIVOT_TO_OPTIC: tilt pivot ->
-# optical center (rotates with head tilt). cam_pos = robot_xy0 + Rz(heading) @
-# [ (0,0,lift_m) + LIFT_TO_HEAD + Ry(tilt) @ PIVOT_TO_OPTIC ].
-WALKIE_GRAPHS_LIFT_TO_HEAD = "0.265,0.0,0.422"
-WALKIE_GRAPHS_PIVOT_TO_OPTIC = "0.065,0.0,0.0"
-# Head tilt (radians, from walkie.robot.head.get_angle()). Geometry expects
-# "positive = camera tilts DOWN". The joint-state sign often differs from the
-# command sign, so if down-tilt projects objects the wrong way, set SIGN = -1.
-# OFFSET adds a constant (radians) when the reported 0 isn't actually level.
-# effective_tilt = SIGN * get_angle() + OFFSET.
-WALKIE_GRAPHS_HEAD_TILT_SIGN = "1"
-WALKIE_GRAPHS_HEAD_TILT_OFFSET_RAD = "0"
 
 [graphs.fusion]
 # Incremental dedup. A detection MERGES into an existing same-class node when its

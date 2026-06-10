@@ -4003,14 +4003,14 @@ requires-dist = [
     { name = "sounddevice", specifier = ">=0.5.5" },
     { name = "torch", marker = "extra == 'clip'", specifier = ">=2.7" },
     { name = "transformers", marker = "extra == 'clip'", specifier = ">=4.45" },
-    { name = "walkie-sdk", git = "https://github.com/EIC-Robocup-2026/walkie-sdk.git" },
+    { name = "walkie-sdk", git = "https://github.com/EIC-Robocup-2026/walkie-sdk.git?rev=feat%2Fcamera_info" },
 ]
 provides-extras = ["dev", "clip", "graphs"]
 
 [[package]]
 name = "walkie-sdk"
 version = "0.2.0"
-source = { git = "https://github.com/EIC-Robocup-2026/walkie-sdk.git#6f45a0215deb9be522932033d459046443784a98" }
+source = { git = "https://github.com/EIC-Robocup-2026/walkie-sdk.git?rev=feat%2Fcamera_info#be6bd62d7b7b54ac273066ffb4f3fe22d641f7a3" }
 dependencies = [
     { name = "eclipse-zenoh" },
     { name = "numpy" },

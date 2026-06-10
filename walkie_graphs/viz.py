@@ -164,14 +164,15 @@ class RerunViz:
         """Mark the camera's 3D world position + viewing direction.
 
         ``cam_pose`` is a :class:`~walkie_graphs.geometry.CameraPose`: ``t`` is the
-        optical center in world coords, and the camera-local +x axis is "forward",
-        so ``R @ [1,0,0]`` is the world-frame look direction.
+        optical center in world coords and ``R`` maps the optical frame into the world,
+        where the camera looks along the optical +z axis, so ``R @ [0,0,1]`` is the
+        world-frame look direction.
         """
         rr = self._rr
         if not self._show_camera or cam_pose is None:
             return
         t = np.asarray(cam_pose.t, dtype=float)
-        forward = np.asarray(cam_pose.R, dtype=float) @ np.array([1.0, 0.0, 0.0])
+        forward = np.asarray(cam_pose.R, dtype=float) @ np.array([0.0, 0.0, 1.0])
         cyan = (0, 200, 220)
         rr.log(
             "world/camera",

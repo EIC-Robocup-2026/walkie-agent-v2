@@ -1,143 +1,125 @@
-"""Unit tests for walkie_graphs.geometry — the camera math, no robot/server."""
+"""Unit tests for walkie_graphs.geometry — optical-frame deprojection, no robot."""
 
 from __future__ import annotations
-
-import math
 
 import numpy as np
 import pytest
 
 from walkie_graphs.geometry import (
-    DEFAULT_LIFT_TO_HEAD,
-    DEFAULT_PIVOT_TO_OPTIC,
     CameraPose,
     Intrinsics,
-    compute_camera_pose,
     deproject_mask,
-    pixel_to_world,
-    rot_y,
     voxel_downsample,
 )
 
 
-def _project_world_to_pixel(p_world, intr: Intrinsics, pose: CameraPose):
-    """Inverse of pixel_to_world, used to test the round-trip."""
-    p_local = pose.R.T @ (np.asarray(p_world, dtype=float) - pose.t)
-    Zc = p_local[0]
-    Xc = -p_local[1]
-    Yc = -p_local[2]
-    u = Xc * intr.fx / Zc + intr.cx
-    v = Yc * intr.fy / Zc + intr.cy
-    return u, v, Zc
+def _intr(width=640, height=480, fx=500.0, fy=500.0, cx=320.0, cy=240.0):
+    return Intrinsics(fx=fx, fy=fy, cx=cx, cy=cy, width=width, height=height)
+
+
+def _rot_z(yaw):
+    c, s = np.cos(yaw), np.sin(yaw)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
 
 
 # ---------------------------------------------------------------------------
-# Camera pose composition
+# Intrinsics
 # ---------------------------------------------------------------------------
-def test_lift_cm_to_m_conversion():
-    # 37 cm of lift must add exactly 0.37 m to the camera height, not 37 m.
-    pose = compute_camera_pose(0.0, 0.0, 0.0, lift_cm=37.0, tilt_rad=0.0)
-    expected_z = 0.37 + DEFAULT_LIFT_TO_HEAD[2]  # + pivot z (0 at tilt 0)
-    assert pose.t[2] == pytest.approx(expected_z, abs=1e-9)
+def test_intrinsics_scaled_to_noop_when_same_res():
+    intr = _intr(640, 480)
+    assert intr.scaled_to(640, 480) is intr
 
 
-def test_pose_at_zero():
-    pose = compute_camera_pose(0.0, 0.0, 0.0, lift_cm=0.0, tilt_rad=0.0)
-    expected = np.array(
-        [
-            DEFAULT_LIFT_TO_HEAD[0] + DEFAULT_PIVOT_TO_OPTIC[0],  # 0.265 + 0.065
-            0.0,
-            DEFAULT_LIFT_TO_HEAD[2],  # 0.422
-        ]
-    )
-    assert pose.t == pytest.approx(expected, abs=1e-9)
-    assert pose.R == pytest.approx(np.eye(3), abs=1e-9)
+def test_intrinsics_scaled_to_halves():
+    intr = _intr(640, 480, fx=500.0, fy=500.0, cx=320.0, cy=240.0)
+    half = intr.scaled_to(320, 240)
+    assert (half.fx, half.fy, half.cx, half.cy) == pytest.approx((250.0, 250.0, 160.0, 120.0))
+    assert (half.width, half.height) == (320, 240)
 
 
-def test_pose_tilt_down_lowers_and_advances_optical_center():
-    t = math.pi / 4  # 45° down
-    pose = compute_camera_pose(0.0, 0.0, 0.0, lift_cm=0.0, tilt_rad=t)
-    # x = 0.265 + 0.065*cos(t); z = 0.422 - 0.065*sin(t)
-    assert pose.t[0] == pytest.approx(0.265 + 0.065 * math.cos(t), abs=1e-9)
-    assert pose.t[2] == pytest.approx(0.422 - 0.065 * math.sin(t), abs=1e-9)
-    assert pose.R == pytest.approx(rot_y(t), abs=1e-9)
-
-
-def test_tilt_sign_points_camera_down():
-    # Positive tilt must aim the optical axis (local forward +x) below horizontal.
-    pose = compute_camera_pose(0.0, 0.0, 0.0, lift_cm=0.0, tilt_rad=0.3)
-    forward_world = pose.R @ np.array([1.0, 0.0, 0.0])
-    assert forward_world[2] < 0.0  # looking down
-
-
-def test_heading_rotates_offset_into_world():
-    # Facing +y (heading 90°): the forward mount offset should land along world +y.
-    pose = compute_camera_pose(0.0, 0.0, math.pi / 2, lift_cm=0.0, tilt_rad=0.0)
-    assert pose.t[0] == pytest.approx(0.0, abs=1e-9)
-    assert pose.t[1] == pytest.approx(0.265 + 0.065, abs=1e-9)
+def test_intrinsics_scaled_to_unknown_native_res_is_noop():
+    intr = Intrinsics(fx=500.0, fy=500.0, cx=320.0, cy=240.0, width=0, height=0)
+    assert intr.scaled_to(640, 480) is intr
 
 
 # ---------------------------------------------------------------------------
-# Deprojection
+# Deprojection (optical frame -> map)
 # ---------------------------------------------------------------------------
-def test_pixel_to_world_center_pixel():
-    intr = Intrinsics.from_hfov(1280, 720, 110.0)
-    pose = compute_camera_pose(0.0, 0.0, 0.0, lift_cm=0.0, tilt_rad=0.0)
-    x, y, z = pixel_to_world(intr.cx, intr.cy, 2.0, intr, pose)
-    # 2 m straight ahead + the camera's own forward/height offset.
-    assert (x, y, z) == pytest.approx((2.0 + 0.330, 0.0, 0.422), abs=1e-6)
+def test_deproject_identity_pose_is_optical_plus_translation():
+    # R = I, t = (1,2,3): a center pixel at depth 2 → optical (0,0,2) → map (1,2,5).
+    intr = _intr()
+    pose = CameraPose(R=np.eye(3), t=np.array([1.0, 2.0, 3.0]))
+    depth = np.full((480, 640), 2.0, dtype=np.float32)
+    mask = np.zeros((480, 640), dtype=np.uint8)
+    mask[240, 320] = 1  # the principal point
+    pts = deproject_mask(mask, depth, intr, pose)
+    assert pts.shape == (1, 3)
+    assert pts[0] == pytest.approx((1.0, 2.0, 5.0), abs=1e-5)
 
 
-def test_pixel_to_world_round_trip():
-    intr = Intrinsics.from_hfov(1280, 720, 110.0)
-    pose = compute_camera_pose(1.2, -0.4, 0.3, lift_cm=20.0, tilt_rad=0.2)
-    target = np.array([2.5, 0.7, 0.9])
-    u, v, depth = _project_world_to_pixel(target, intr, pose)
-    back = pixel_to_world(u, v, depth, intr, pose)
-    assert back == pytest.approx(tuple(target), abs=1e-6)
+def test_deproject_applies_rotation():
+    # 90° yaw about map-z: optical (0,0,z) maps to map (0, 0, ...)? Check a known point.
+    # Place a single off-center pixel so optical x is non-zero, then rotate.
+    intr = _intr()
+    R = _rot_z(np.pi / 2)  # maps (x,y,z) -> (-y, x, z)
+    pose = CameraPose(R=R, t=np.zeros(3))
+    depth = np.full((480, 640), 4.0, dtype=np.float32)
+    mask = np.zeros((480, 640), dtype=np.uint8)
+    mask[240, 420] = 1  # x offset of +100 px → optical Xc = 100*4/500 = 0.8
+    pts = deproject_mask(mask, depth, intr, pose)
+    # optical point ≈ (0.8, 0, 4); after Rz(90°): (-0, 0.8, 4)
+    assert pts[0] == pytest.approx((0.0, 0.8, 4.0), abs=1e-4)
 
 
-def test_deproject_mask_constant_plane():
-    intr = Intrinsics.from_hfov(1280, 720, 110.0)
-    pose = compute_camera_pose(0.0, 0.0, 0.0, lift_cm=0.0, tilt_rad=0.0)
-    depth = np.full((720, 1280), 2.0, dtype=np.float32)
-    mask = np.zeros((720, 1280), dtype=np.uint8)
-    mask[300:360, 600:680] = 1
+def test_deproject_constant_plane_count_and_value():
+    intr = _intr()
+    pose = CameraPose(R=np.eye(3), t=np.zeros(3))
+    depth = np.full((480, 640), 2.0, dtype=np.float32)
+    mask = np.zeros((480, 640), dtype=np.uint8)
+    mask[200:260, 300:380] = 1
     pts = deproject_mask(mask, depth, intr, pose)
     assert len(pts) == 60 * 80
-    # Frontoparallel plane at Zc=2, identity rotation → all share world x = 2.33.
-    assert np.allclose(pts[:, 0], 2.0 + 0.330, atol=1e-4)
+    assert np.allclose(pts[:, 2], 2.0)  # frontoparallel plane → constant optical z = map z
 
 
-def test_deproject_mask_drops_nan_and_zero():
-    intr = Intrinsics.from_hfov(640, 480, 110.0)
-    pose = compute_camera_pose(0.0, 0.0, 0.0, lift_cm=0.0, tilt_rad=0.0)
+def test_deproject_drops_nan_and_zero():
+    intr = _intr()
+    pose = CameraPose(R=np.eye(3), t=np.zeros(3))
     depth = np.full((480, 640), 1.5, dtype=np.float32)
     depth[0, 0] = np.nan
     depth[0, 1] = 0.0
     mask = np.zeros((480, 640), dtype=np.uint8)
-    mask[0, 0:4] = 1  # 4 pixels: nan, zero, and two valid
+    mask[0, 0:4] = 1  # nan, zero, and two valid
     pts = deproject_mask(mask, depth, intr, pose)
     assert len(pts) == 2
 
 
-def test_deproject_mask_resizes_to_depth_shape():
-    intr = Intrinsics.from_hfov(1280, 720, 110.0)
-    pose = compute_camera_pose(0.0, 0.0, 0.0, lift_cm=0.0, tilt_rad=0.0)
+def test_deproject_resizes_mask_to_depth():
+    intr = _intr(1280, 720)
+    pose = CameraPose(R=np.eye(3), t=np.zeros(3))
     depth = np.full((720, 1280), 2.0, dtype=np.float32)
     mask = np.zeros((360, 640), dtype=np.uint8)  # half-res mask
     mask[100:200, 100:200] = 1
     pts = deproject_mask(mask, depth, intr, pose)
-    assert len(pts) > 0  # resized without crashing
+    assert len(pts) > 0
 
 
-def test_deproject_mask_empty():
-    intr = Intrinsics.from_hfov(640, 480, 110.0)
-    pose = compute_camera_pose(0.0, 0.0, 0.0, lift_cm=0.0, tilt_rad=0.0)
+def test_deproject_empty_mask():
+    intr = _intr()
+    pose = CameraPose(R=np.eye(3), t=np.zeros(3))
     depth = np.full((480, 640), 1.5, dtype=np.float32)
     mask = np.zeros((480, 640), dtype=np.uint8)
-    pts = deproject_mask(mask, depth, intr, pose)
-    assert pts.shape == (0, 3)
+    assert deproject_mask(mask, depth, intr, pose).shape == (0, 3)
+
+
+def test_deproject_voxel_and_cap():
+    intr = _intr()
+    pose = CameraPose(R=np.eye(3), t=np.zeros(3))
+    depth = np.full((480, 640), 2.0, dtype=np.float32)
+    mask = np.zeros((480, 640), dtype=np.uint8)
+    mask[100:300, 100:400] = 1
+    capped = deproject_mask(mask, depth, intr, pose, max_points=500)
+    assert len(capped) == 500
 
 
 def test_voxel_downsample_reduces_count():
@@ -146,11 +128,3 @@ def test_voxel_downsample_reduces_count():
     out = voxel_downsample(pts, 0.1)
     assert len(out) == 1
     assert out[0] == pytest.approx(pts.mean(axis=0), abs=1e-4)
-
-
-def test_intrinsics_overrides():
-    intr = Intrinsics.from_hfov(1280, 720, 110.0, fx=500.0, cx=600.0)
-    assert intr.fx == 500.0
-    assert intr.fy == 500.0  # fy defaults to fx
-    assert intr.cx == 600.0
-    assert intr.cy == 360.0  # derived

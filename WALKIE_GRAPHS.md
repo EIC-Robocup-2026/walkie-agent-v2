@@ -80,22 +80,26 @@ point in the room. The result is a little **3D point cloud** shaped like the obj
 <details>
 <summary>Details — depth back-projection &amp; camera pose</summary>
 
-All the camera math lives in [walkie_graphs/geometry.py](walkie_graphs/geometry.py) (pure numpy).
+The camera math lives in [walkie_graphs/geometry.py](walkie_graphs/geometry.py) (pure numpy); the
+service feeds it real calibration and pose straight from the **walkie-sdk**.
 
-- **Camera pose** (`_camera_pose` in service.py): the robot is asked for the camera's world pose
-  directly via its transform tree (`transform.lookup("map", "<camera>_frame")`) — this already
-  bakes in the lift height, head tilt, and mount offsets. If that lookup fails, it falls back to
-  *composing* the pose from robot position + lift + tilt + fixed mount offsets
-  (`compute_camera_pose`).
+- **Intrinsics** (`_intrinsics` in service.py): `bot.camera.get_intrinsics()` returns the ZED's true
+  pinhole `fx, fy, cx, cy` from its `CameraInfo` (cached by the SDK — intrinsics are static — and
+  registered to the depth image too). If the depth stream is a different resolution, the intrinsics
+  are rescaled (`Intrinsics.scaled_to`). No field-of-view guessing.
+- **Camera pose** (`_camera_pose`): `bot.transform.lookup("map", "<camera>_optical_frame")` returns
+  the camera **optical** frame's pose in the map frame — lift height, head tilt, and every mount
+  offset already baked in by the TF tree. The rotation (built from the quaternion via the SDK's
+  `quaternion_to_matrix`) maps camera-optical points *straight into the map*. If the lookup fails,
+  the tick is skipped.
 - **Deprojection** (`deproject_mask`): every masked pixel with valid depth is back-projected with
-  the pinhole model `X = (u−cx)·d/fx`, converted from camera-optical axes to the robot/world frame,
-  and stacked into an `(N, 3)` cloud. The cloud is voxel-downsampled (`VOXEL_M`, 2 cm) and capped at
+  the pinhole model `X = (u−cx)·d/fx` into the optical frame, then mapped into the world in one step,
+  `P_map = P_optical @ R.T + t`. Because the lookup already uses the *optical* frame (whose axes —
+  `x right, y down, z forward` — match the pinhole math), there's no intermediate axis swap or manual
+  lift/tilt composition. The cloud is voxel-downsampled (`VOXEL_M`, 2 cm) and capped at
   `MAX_POINTS_PER_OBJ` (2000).
-- **Intrinsics**: the ZED 2i exposes no `camera_info`, so focal length defaults to one derived from
-  the horizontal field of view (`Intrinsics.from_hfov`, `HFOV_DEG` ≈ 110°). Real calibrated
-  `FX/FY/CX/CY` can override.
-- **Frame conventions**: robot/world = `x forward, y left, z up`; camera optical = `x right,
-  y down, z forward`.
+- **Config**: just the two TF frame names (`TF_MAP_FRAME`, `TF_CAMERA_FRAME`) and a lookup timeout —
+  the calibration and mounts come from the robot, not config.
 </details>
 
 ### 3. Clean it up
@@ -355,7 +359,7 @@ code default.
 | Table | What it controls |
 |-------|------------------|
 | `[graphs]` | enable flag, tick interval, class scoping, the Rerun 3D visualizer |
-| `[graphs.camera]` | field of view / intrinsics, transform-tree frames, mount offsets |
+| `[graphs.camera]` | the two transform-tree frame names + lookup timeout (calibration comes from the SDK) |
 | `[graphs.fusion]` | **matching & denoising** — `SIM_THRESHOLD`, `W_GEO`/`W_SEM`, `NN_VOXEL_M`, DBSCAN, size filters, the legacy cascade |
 | `[graphs.maintenance]` | **map cleanup** — re-merge thresholds, denoise/ghost cadences, the confirmation gate |
 | `[graphs.relations]` | geometric edge thresholds (`NEAR_M`, `ON_GAP`, …) |
@@ -386,8 +390,9 @@ background-box rejection, DBSCAN on). See the comments in `config.toml` for each
 
 **Data flow:** `PerceptionService` → `WalkieGraphs.ingest_frame` → `WalkieGraphsService.ingest_frame`
 → `GraphMemory.upsert`. Queries flow `database_agent` → `WalkieGraphs` → `GraphMemory`. The module
-depends on the **AI client** (detection, caption, CLIP embed) and the **hardware interface**
-(camera, depth, pose, lift, head tilt) — both passed in, never created here.
+depends on the **AI client** (detection, caption, CLIP embed) and the **walkie-sdk robot**
+(RGB + depth, camera intrinsics, and the camera optical-frame transform) — both passed in, never
+created here.
 </details>
 
 <details>
