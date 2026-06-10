@@ -65,6 +65,10 @@ pixel outline, not just a box).
   - **`MAX_BBOX_AREA_RATIO`** — a box covering most of the frame is almost always a wall/floor/
     background misfire, so it's rejected.
   - **`MIN_MASK_AREA_PX`** — masks too small to be a real object are dropped.
+- **Containment subtraction** (`MASK_SUBTRACT`, ConceptGraphs' `mask_subtract_contained`): when one
+  detection sits inside another — a mug on a table — the mug's pixels are removed from the table's
+  mask before any 3D work, so the table's point cloud and image crop aren't polluted by the objects
+  resting on it (`subtract_contained_masks` in [walkie_graphs/fusion.py](walkie_graphs/fusion.py)).
 - Then per-class scoping (`_keep`): an `EXCLUDE_CLASSES` list (default `person` — people move and
   can't be position-mapped) and an optional `INTERESTED_CLASSES` allow-list.
 </details>
@@ -101,9 +105,10 @@ Those get cleaned away so the object's size and position stay accurate.
 <details>
 <summary>Details — DBSCAN denoising</summary>
 
-- [walkie_graphs/dbscan.py](walkie_graphs/dbscan.py) implements DBSCAN clustering with
-  `scipy.spatial.cKDTree` + union-find (no scikit-learn/open3d needed) and keeps only the
-  **largest cluster** of points — exactly what ConceptGraphs does with `pcd_denoise_dbscan`.
+- [walkie_graphs/dbscan.py](walkie_graphs/dbscan.py) implements DBSCAN clustering and keeps only
+  the **largest cluster** of points — exactly what ConceptGraphs does with `pcd_denoise_dbscan`.
+  It uses scikit-learn's battle-tested C implementation when installed (the fast path), with a
+  pure `scipy.spatial.cKDTree` + union-find fallback so a partial install still works.
 - This runs **once per detection** (`GraphMemory._denoise`, controlled by `DBSCAN_EPS`,
   `DBSCAN_MIN_POINTS`). Without it, mask-edge "depth bleed" inflates an object's bounding box and
   drags its centre off-target, which corrupts both the spatial relations and the matching in the
@@ -160,6 +165,13 @@ Both terms live in `[0, 1]`, so the combined score is in `[0, 2]`. The detection
 **highest-scoring** object whose score clears `SIM_THRESHOLD` (default **1.1**); otherwise it's a
 new object. With equal weights, a *purely visual* match tops out at 1.0 < 1.1, so this path only
 ever fires on **real geometric overlap**.
+
+**Why it can match across class labels.** The detector's class names flip-flop — the same object
+can be "cup" one frame and "mug" the next, which would otherwise create a duplicate. So a candidate
+of a *different* class may also merge, but only past a **stricter** gate
+(`CROSS_CLASS_SIM_THRESHOLD`, default 1.5 ≈ near-full physical overlap *and* agreeing appearance).
+ConceptGraphs goes further and ignores classes entirely; the stricter gate keeps the label as a
+soft prior instead. Set it to 0 to forbid cross-class merging.
 
 **Why there's a fallback.** A re-sighting whose depth drifted (so the clouds no longer overlap)
 would be missed by overlap alone. So when `_associate` finds no geometric match, the original
@@ -239,7 +251,10 @@ All in [walkie_graphs/memory.py](walkie_graphs/memory.py), scheduled by `_maybe_
 
 - **`merge_overlapping_nodes`** — fuses two objects that turned out to be the same thing seen from
   different sides (high cloud overlap + similar appearance). This is the cleanup the per-frame
-  matcher can't do, since at first sighting the two clouds were on opposite faces.
+  matcher can't do, since at first sighting the two clouds were on opposite faces. Candidate pairs
+  come from a KD-tree radius query, so the pass stays fast even on a full map. Cross-class pairs
+  (label flip-flops) are eligible when `CROSS_CLASS_SIM_THRESHOLD` > 0, and those additionally
+  *require* CLIP agreement — geometry alone never overrides the labels.
   Knobs: `MERGE_OVERLAP_THRESH`, `MERGE_VISUAL_SIM_THRESH`, `MERGE_RADIUS_M`.
 - **`denoise_nodes`** — re-runs DBSCAN on objects whose cloud has grown, clearing accreted
   cross-view noise (with the "don't gut a spread object" guard).
@@ -439,16 +454,17 @@ uv run pytest tests/graphs -q
 | ConceptGraphs | Walkie Graphs |
 |---------------|---------------|
 | Class-agnostic SAM masks | Open-vocabulary detector + masks (the "CG-Detect" variant) |
-| CLIP per-mask features | Same (CLIP ViT-B/16 image embeddings) |
-| Depth back-projection + DBSCAN denoise | Same (`geometry.py` + `dbscan.py`) |
-| Association = point overlap (`nn_ratio`) + CLIP, additive, greedy | Same (`fusion.py` + `_associate`), **plus** a visual fallback that recovers drifted re-sightings ConceptGraphs would duplicate |
-| Periodic merge of overlapping objects | `merge_overlapping_nodes` |
+| CLIP per-mask features (20 px padded crops) | Same (CLIP ViT-B/16 image embeddings, same 20 px crop margin) |
+| `mask_subtract_contained` (containers don't absorb their contents) | Same (`subtract_contained_masks`) |
+| Depth back-projection + DBSCAN denoise | Same (`geometry.py` + `dbscan.py`; sklearn fast path, scipy fallback) |
+| Association = point overlap (`nn_ratio`) + CLIP, additive, greedy, **class-agnostic** | Same (`fusion.py` + `_associate`) — cross-class merges pass a stricter gate (label as a soft prior), **plus** a visual fallback that recovers drifted re-sightings ConceptGraphs would duplicate |
+| Periodic merge of overlapping objects | `merge_overlapping_nodes` (KD-tree pair prefilter) |
 | Filter objects seen < 3 times | The confirmation gate (hides rather than deletes, so it's reversible) |
 | LLM node captions (best-N views) | `refine_captions` (optional) |
 | LLM scene-graph edges via MST | `infer_edges_llm` (optional) — **plus** always-on geometric `near/on/above/inside` edges the paper doesn't have |
-| Offline, batch, GPU (open3d/faiss/torch) | Online, incremental, **pure numpy/scipy** — runs on the robot inside the perception loop |
+| Offline, batch, GPU (open3d/faiss/torch) | Online, incremental, numpy/scipy/sklearn — runs on the robot inside the perception loop |
 
 In short: the same data-processing backbone, adapted to run live on the robot, with a few
 robustness additions (the drift-recovery fallback, reversible confirmation, free geometric
-relations) on top.
+relations, in-memory cloud caching) on top.
 </details>

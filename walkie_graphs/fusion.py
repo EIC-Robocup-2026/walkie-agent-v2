@@ -59,6 +59,18 @@ def nn_ratio_symmetric(a_points: np.ndarray, b_points: np.ndarray, voxel_m: floa
     )
 
 
+def pairs_within(centroids: np.ndarray, radius: float) -> list[tuple[int, int]]:
+    """Index pairs (i < j) of ``centroids`` within ``radius`` of each other.
+
+    KD-tree pair query — the prefilter that keeps the periodic node-merge pass
+    O(nearby pairs) instead of O(N²) over the whole map.
+    """
+    pts = np.asarray(centroids, dtype=np.float64)
+    if len(pts) < 2 or cKDTree is None:
+        return []
+    return sorted(cKDTree(pts).query_pairs(r=float(radius)))
+
+
 def aabb_overlap(a_min, a_max, b_min, b_max, *, pad: float = 0.0) -> bool:
     """Do two axis-aligned boxes intersect (optionally grown by ``pad`` on every side)?
 
@@ -69,6 +81,52 @@ def aabb_overlap(a_min, a_max, b_min, b_max, *, pad: float = 0.0) -> bool:
         if a_max[i] + pad < b_min[i] - pad or b_max[i] + pad < a_min[i] - pad:
             return False
     return True
+
+
+def subtract_contained_masks(
+    bboxes: np.ndarray,
+    masks: list,
+    *,
+    th_contained: float = 0.8,
+    th_container: float = 0.7,
+) -> list:
+    """Subtract each contained detection's mask from its container's mask.
+
+    ConceptGraphs' ``mask_subtract_contained``: when box *j* sits mostly inside box *i*
+    (the intersection covers > ``th_contained`` of box *j* but < ``th_container`` of
+    box *i*), the mug-on-the-table case, then ``mask_i &= ~mask_j`` — so the table's
+    pixels no longer include the mug. Without this, the container's point cloud and
+    CLIP crop are polluted by every object resting on/in it.
+
+    ``bboxes`` is ``(N, 4)`` xyxy; ``masks`` a list of ``(H, W)`` bool arrays (``None``
+    entries pass through untouched). Returns a new list; inputs are not mutated.
+    """
+    n = len(masks)
+    out = [m.copy() if m is not None else None for m in masks]
+    if n < 2:
+        return out
+    xyxy = np.asarray(bboxes, dtype=np.float64).reshape(n, 4)
+    areas = np.maximum(0.0, xyxy[:, 2] - xyxy[:, 0]) * np.maximum(0.0, xyxy[:, 3] - xyxy[:, 1])
+
+    lt = np.maximum(xyxy[:, None, :2], xyxy[None, :, :2])
+    rb = np.minimum(xyxy[:, None, 2:], xyxy[None, :, 2:])
+    inter = np.clip(rb - lt, 0.0, None)
+    inter_areas = inter[:, :, 0] * inter[:, :, 1]
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        inter_over_i = np.where(areas[:, None] > 0, inter_areas / areas[:, None], 0.0)
+    inter_over_j = inter_over_i.T
+
+    # contained[i, j] = "box j is contained by box i" → subtract mask j from mask i.
+    contained = (inter_over_i < th_container) & (inter_over_j > th_contained)
+    np.fill_diagonal(contained, False)
+    for i, j in zip(*contained.nonzero()):
+        if out[i] is None or masks[j] is None:
+            continue
+        if out[i].shape != masks[j].shape:
+            continue
+        out[i] &= ~masks[j].astype(bool)
+    return out
 
 
 def phi_sem(cos: float) -> float:

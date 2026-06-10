@@ -146,8 +146,6 @@ def run_ready_stage(walkieAI: WalkieAIClient, walkie: WalkieInterface, model: Ch
         # never dies and the next launch finds port 8500 still held. close()
         # disconnects the robot, which stops those threads.
         perception.stop_and_join(timeout=5)
-        graphs.stop()
-        walkie.close()
         print("[main] shutdown complete.")
 
 

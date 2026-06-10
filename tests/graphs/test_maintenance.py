@@ -38,9 +38,30 @@ def test_merge_refuses_when_not_overlapping(mem):
     assert mem.count() == 2
 
 
-def test_merge_only_same_class(mem):
+def test_merge_only_same_class_by_default(mem):
+    # Constructor default: cross_class_sim_threshold = 0 → cross-class never merges.
     put_object(mem, "a", "chair", make_cloud((0, 0, 0), seed=1), emb=unit(1, 0, 0))
     put_object(mem, "b", "table", make_cloud((0, 0, 0), seed=2), emb=unit(1, 0, 0))
+    assert mem.merge_overlapping_nodes() == 0
+    assert mem.count() == 2
+
+
+def test_merge_cross_class_when_enabled(mem):
+    # One physical object stored under two detector labels: with cross-class on,
+    # coincident clouds + agreeing embeddings fuse despite the class mismatch.
+    mem.cross_class_sim_threshold = 1.5
+    put_object(mem, "a", "cup", make_cloud((0, 0, 0), seed=1), emb=unit(1, 0, 0), n_obs=3)
+    put_object(mem, "b", "mug", make_cloud((0, 0, 0), seed=2), emb=unit(1, 0, 0), n_obs=1)
+    assert mem.merge_overlapping_nodes() == 1
+    assert mem.count() == 1
+    assert mem.all_objects()[0].class_name == "cup"  # higher-n_obs node kept
+
+
+def test_merge_cross_class_requires_embeddings(mem):
+    # Without CLIP evidence, geometry alone must not override the class labels.
+    mem.cross_class_sim_threshold = 1.5
+    put_object(mem, "a", "cup", make_cloud((0, 0, 0), seed=1), emb=[])
+    put_object(mem, "b", "mug", make_cloud((0, 0, 0), seed=2), emb=[])
     assert mem.merge_overlapping_nodes() == 0
     assert mem.count() == 2
 

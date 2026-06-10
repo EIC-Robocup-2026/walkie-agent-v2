@@ -1,18 +1,21 @@
-"""DBSCAN point-cloud denoising — pure numpy + scipy, no sklearn/open3d.
+"""DBSCAN point-cloud denoising.
 
 ConceptGraphs denoises every per-detection point cloud by running DBSCAN and
 keeping only the **largest cluster**, which drops the depth outliers that bleed in
 around a mask's edges (flying pixels, background slivers) and would otherwise
 inflate the object's bounding box and shift its centroid. The reference uses
-``open3d``'s ``cluster_dbscan`` (``concept-graphs/.../slam/utils.py::pcd_denoise_dbscan``);
-we reproduce it with :class:`scipy.spatial.cKDTree` (already a dependency) so the
-module stays free of the heavy ``clip``/``graphs`` extras.
+``open3d``'s ``cluster_dbscan`` (``concept-graphs/.../slam/utils.py::pcd_denoise_dbscan``).
 
-Algorithm (textbook DBSCAN): a point is a **core** point if it has at least
-``min_points`` neighbours within ``eps`` (the point counts itself); core points
-within ``eps`` of each other are unioned into one cluster; non-core points within
-``eps`` of a core point are **border** points joined to that cluster; everything
-else is **noise** (label ``-1``).
+Two backends, same semantics:
+
+- **scikit-learn** (preferred when installed): its C-implemented DBSCAN is the
+  battle-tested fast path — several times quicker on dense clouds.
+- **pure numpy + scipy fallback**: textbook DBSCAN via :class:`scipy.spatial.cKDTree`
+  + union-find, so a partial install (no sklearn) still works. A point is a **core**
+  point if it has at least ``min_points`` neighbours within ``eps`` (counting
+  itself); core points within ``eps`` of each other join one cluster; non-core
+  points within ``eps`` of a core point are **border** points; the rest is noise
+  (label ``-1``).
 """
 
 from __future__ import annotations
@@ -23,6 +26,11 @@ try:  # scipy is a hard dep (pyproject); guard only so a partial install fails l
     from scipy.spatial import cKDTree
 except Exception:  # pragma: no cover
     cKDTree = None
+
+try:  # sklearn is a hard dep too, but the scipy fallback keeps us running without it
+    from sklearn.cluster import DBSCAN as _SKDBSCAN
+except Exception:  # pragma: no cover
+    _SKDBSCAN = None
 
 
 class _UnionFind:
@@ -54,13 +62,20 @@ class _UnionFind:
 def dbscan_labels(points: np.ndarray, eps: float, min_points: int) -> np.ndarray:
     """Return per-point DBSCAN cluster labels (``-1`` = noise) for an ``(N, 3)`` cloud.
 
-    Deterministic: border points join the lowest-indexed core point within ``eps``.
-    Returns an all-``-1`` array when there are too few points to form a core point.
+    Uses scikit-learn's DBSCAN when available (fast C path), otherwise the scipy
+    fallback below (deterministic: border points join the lowest-indexed core
+    neighbour). Returns an all-``-1`` array when there are too few points to form a
+    core point.
     """
     pts = np.asarray(points, dtype=np.float64)
     n = len(pts)
     labels = np.full(n, -1, dtype=np.int64)
-    if n == 0 or min_points <= 0 or n < min_points or cKDTree is None:
+    if n == 0 or min_points <= 0 or n < min_points:
+        return labels
+
+    if _SKDBSCAN is not None:
+        return _SKDBSCAN(eps=float(eps), min_samples=int(min_points)).fit_predict(pts)
+    if cKDTree is None:  # pragma: no cover — scipy and sklearn both absent
         return labels
 
     tree = cKDTree(pts)

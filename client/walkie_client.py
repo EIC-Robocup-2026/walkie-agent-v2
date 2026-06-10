@@ -1,6 +1,7 @@
 """Top-level WalkieClient — single entry point for the entire HTTP API."""
 
 from __future__ import annotations
+import os
 
 from .image_caption import ImageCaptionClient
 from .image_embed import ImageEmbedClient
@@ -52,9 +53,12 @@ class WalkieAIClient:
 
     def __init__(
         self,
-        base_url: str = "http://localhost:5000",
+        base_url: str|None = None,
         timeout: int = 60,
     ) -> None:
+        base_url = base_url or os.getenv("WALKIE_AI_BASE_URL")
+        if not base_url:
+            raise ValueError("base_url must be provided either as an argument or via the WALKIE_AI_BASE_URL environment variable.")
         self.stt = STTClient(base_url=base_url, timeout=timeout)
         self.tts = TTSClient(base_url=base_url, timeout=timeout)
         self.object_detection = ObjectDetectionClient(base_url=base_url, timeout=timeout)

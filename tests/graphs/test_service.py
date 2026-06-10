@@ -85,3 +85,9 @@ def test_maintenance_cadence_staggered(svc):
 def test_tick_false_runs_nothing(svc):
     svc._maybe_tick(False)
     assert svc.memory.calls == []
+
+
+def test_mask_subtract_and_crop_margin_defaults(svc):
+    # mask subtraction defaults ON (CG always applies it); crop margin matches CG's 20px.
+    assert svc.mask_subtract is True
+    assert svc.crop_margin_px == 20

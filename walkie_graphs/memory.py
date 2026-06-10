@@ -37,7 +37,13 @@ except Exception:  # pragma: no cover
 import chromadb
 
 from .dbscan import dbscan_largest_cluster
-from .fusion import aabb_overlap, additive_similarity, nn_ratio, nn_ratio_symmetric
+from .fusion import (
+    aabb_overlap,
+    additive_similarity,
+    nn_ratio,
+    nn_ratio_symmetric,
+    pairs_within,
+)
 
 DEFAULT_EMB_DIM = 512  # CLIP ViT-B/16
 
@@ -178,6 +184,7 @@ class GraphMemory:
         sim_low: float = 0.65,
         dedup_visual_k: int = 5,
         sim_threshold: float = 1.1,
+        cross_class_sim_threshold: float = 0.0,
         w_geo: float = 1.0,
         w_sem: float = 1.0,
         nn_voxel_m: float = 0.025,
@@ -217,6 +224,7 @@ class GraphMemory:
         self.sim_low = sim_low
         self.dedup_visual_k = dedup_visual_k
         self.sim_threshold = sim_threshold
+        self.cross_class_sim_threshold = cross_class_sim_threshold
         self.w_geo = w_geo
         self.w_sem = w_sem
         self.nn_voxel_m = nn_voxel_m
@@ -259,6 +267,10 @@ class GraphMemory:
 
         self._nodes: dict[str, ObjectNode] = {}
         self._dirty: set[str] = set()  # node ids whose cloud changed since last denoise
+        # Write-through cloud cache: association reads every candidate's cloud (under
+        # the lock), so serve those from memory instead of re-reading .npz from disk.
+        # Bounded by the prune cap (500 nodes x 2000 pts x 12 B ~ 12 MB).
+        self._pcd_cache: dict[str, np.ndarray] = {}
         self._graph = nx.MultiDiGraph() if nx is not None else None
         self._load_nodes()
         self._load_edges()
@@ -288,6 +300,7 @@ class GraphMemory:
             sim_low=_f("WALKIE_GRAPHS_SIM_LOW", "0.65"),
             dedup_visual_k=_i("WALKIE_GRAPHS_DEDUP_VISUAL_K", "5"),
             sim_threshold=_f("WALKIE_GRAPHS_SIM_THRESHOLD", "1.1"),
+            cross_class_sim_threshold=_f("WALKIE_GRAPHS_CROSS_CLASS_SIM_THRESHOLD", "1.5"),
             w_geo=_f("WALKIE_GRAPHS_W_GEO", "1.0"),
             w_sem=_f("WALKIE_GRAPHS_W_SEM", "1.0"),
             nn_voxel_m=_f("WALKIE_GRAPHS_NN_VOXEL_M", "0.025"),
@@ -382,15 +395,23 @@ class GraphMemory:
         return self.pcds_dir / f"{node_id}.npz"
 
     def _save_pcd(self, node_id: str, points: np.ndarray) -> str:
+        pts = points.astype(np.float32)
         path = self._pcd_path(node_id)
-        np.savez_compressed(path, points=points.astype(np.float32))
+        np.savez_compressed(path, points=pts)
+        self._pcd_cache[node_id] = pts
         return str(path)
 
     def load_pcd(self, node_id: str) -> np.ndarray:
+        """The node's world cloud — from the write-through cache, disk on a cold start."""
+        cached = self._pcd_cache.get(node_id)
+        if cached is not None:
+            return cached
         path = self._pcd_path(node_id)
         if not path.exists():
             return np.zeros((0, 3), dtype=np.float32)
-        return np.load(path)["points"]
+        pts = np.load(path)["points"]
+        self._pcd_cache[node_id] = pts
+        return pts
 
     def _save_thumb(self, node_id: str, crop) -> Optional[str]:
         if crop is None:
@@ -477,13 +498,18 @@ class GraphMemory:
     def _associate(self, det: Detection3D) -> Optional[ObjectNode]:
         """ConceptGraphs additive-greedy match, or None if nothing overlaps enough.
 
-        Over same-class nodes that pass a cheap prefilter (AABB intersection padded by
-        the NN radius, OR within ``dedup_radius_m``), score
-        ``w_geo·nn_ratio + w_sem·(0.5·cos + 0.5)`` and return the argmax when it clears
-        ``sim_threshold``. With the default 1.1 threshold this can only fire on real
-        geometric overlap (pure visual tops out at ``w_sem`` = 1.0 < 1.1), so a
-        re-sighting whose 3D estimate drifted produces no match here and flows to the
-        ``_classify`` fallback unchanged.
+        Over nodes that pass a cheap prefilter (AABB intersection padded by the NN
+        radius, OR within ``dedup_radius_m``), score
+        ``w_geo·nn_ratio + w_sem·(0.5·cos + 0.5)`` and return the best candidate that
+        clears its threshold. Same-class candidates need ``sim_threshold``; candidates
+        of a **different** class need the stricter ``cross_class_sim_threshold`` —
+        CG's association is fully class-agnostic, and the detector here flip-flops
+        labels for one object ("cup" vs "mug"), which a same-class-only matcher turns
+        into duplicate nodes. ``cross_class_sim_threshold = 0`` disables cross-class.
+
+        With the default thresholds this path can only fire on real geometric overlap
+        (pure visual tops out at ``w_sem`` = 1.0 < 1.1), so a re-sighting whose 3D
+        estimate drifted produces no match here and flows to ``_classify`` unchanged.
         """
         if len(det.points_world) == 0:
             return None
@@ -491,21 +517,21 @@ class GraphMemory:
         best: Optional[ObjectNode] = None
         best_sim = -1.0
         for n in self._nodes.values():
-            if n.class_name != det.class_name:
+            same_class = n.class_name == det.class_name
+            if not same_class and self.cross_class_sim_threshold <= 0:
                 continue
             if not (
                 aabb_overlap(det_mn, det_mx, n.aabb_min, n.aabb_max, pad=self.nn_voxel_m)
-                or l2(det_c, n.centroid) <= self.dedup_radius_m
+                or (same_class and l2(det_c, n.centroid) <= self.dedup_radius_m)
             ):
                 continue
             ratio = nn_ratio(self.load_pcd(n.id), det.points_world, self.nn_voxel_m)
             cos = cosine(det.clip_emb, n.clip_emb)
             sim = additive_similarity(ratio, cos, w_geo=self.w_geo, w_sem=self.w_sem)
-            if sim > best_sim:
+            gate = self.sim_threshold if same_class else self.cross_class_sim_threshold
+            if sim >= gate and sim > best_sim:
                 best, best_sim = n, sim
-        if best is not None and best_sim >= self.sim_threshold:
-            return best
-        return None
+        return best
 
     def _candidates(self, det: Detection3D) -> list[ObjectNode]:
         same = [n for n in self._nodes.values() if n.class_name == det.class_name]
@@ -896,21 +922,20 @@ class GraphMemory:
                 (n.id, n.class_name, n.centroid, n.aabb_min, n.aabb_max, list(n.clip_emb))
                 for n in self._nodes.values()
             ]
-        # Candidate pairs: same class, centroids close, AABBs touch — cheap prefilter
-        # before any nn_ratio (the O(points) part), mirroring CG's bbox-IoU>0 gate.
-        by_class: dict[str, list[tuple]] = {}
-        for s in snap:
-            by_class.setdefault(s[1], []).append(s)
+        if len(snap) < 2:
+            return 0
+        # Candidate pairs: centroids close (KD-tree pair query), AABBs touch, and the
+        # classes either match or cross-class merging is enabled (the detector's labels
+        # flip-flop, so one object can be stored under two class names) — all cheap
+        # prefilters before any nn_ratio (the O(points) part), mirroring CG's
+        # bbox-IoU>0 gate. CG itself merges with no class constraint at all.
         cand: list[tuple[tuple, tuple]] = []
-        for group in by_class.values():
-            for i in range(len(group)):
-                a = group[i]
-                for j in range(i + 1, len(group)):
-                    b = group[j]
-                    if l2(a[2], b[2]) > self.merge_radius_m:
-                        continue
-                    if aabb_overlap(a[3], a[4], b[3], b[4], pad=self.nn_voxel_m):
-                        cand.append((a, b))
+        for i, j in pairs_within([s[2] for s in snap], self.merge_radius_m):
+            a, b = snap[i], snap[j]
+            if a[1] != b[1] and self.cross_class_sim_threshold <= 0:
+                continue
+            if aabb_overlap(a[3], a[4], b[3], b[4], pad=self.nn_voxel_m):
+                cand.append((a, b))
         if not cand:
             return 0
         # Load only the clouds that survived the prefilter (outside the lock).
@@ -921,7 +946,12 @@ class GraphMemory:
             overlap = nn_ratio_symmetric(clouds[a[0]], clouds[b[0]], self.nn_voxel_m)
             if overlap <= self.merge_overlap_thresh:
                 continue
-            if a[5] and b[5] and cosine(a[5], b[5]) < self.merge_visual_sim_thresh:
+            if a[5] and b[5]:
+                if cosine(a[5], b[5]) < self.merge_visual_sim_thresh:
+                    continue
+            elif a[1] != b[1]:
+                # Cross-class merge needs visual agreement; without embeddings the
+                # only evidence is geometry, not enough to override the class labels.
                 continue
             pairs.append((overlap, a[0], b[0]))
         pairs.sort(reverse=True)  # strongest overlap first
@@ -1158,6 +1188,7 @@ class GraphMemory:
         (self.thumbs_dir / f"{node_id}.jpg").unlink(missing_ok=True)
         for _conf, p in (node.best_views if node else []):
             Path(p).unlink(missing_ok=True)
+        self._pcd_cache.pop(node_id, None)
         self._dirty.discard(node_id)
         if self._graph is not None and node_id in self._graph:
             self._graph.remove_node(node_id)
@@ -1167,6 +1198,7 @@ class GraphMemory:
             for node_id in list(self._nodes.keys()):
                 self._delete(node_id)
             self._dirty.clear()
+            self._pcd_cache.clear()
             if self._graph is not None:
                 self._graph.clear()
             self._persist_edges()

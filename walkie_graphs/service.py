@@ -19,6 +19,7 @@ import os
 import threading
 import time
 
+from .fusion import subtract_contained_masks
 from .geometry import (
     Intrinsics,
     camera_pose_from_transform,
@@ -26,8 +27,6 @@ from .geometry import (
     deproject_mask,
 )
 from .memory import Detection3D, GraphMemory
-
-_CROP_MARGIN_PX = 10
 
 
 def _csv(value: str) -> list[str]:
@@ -44,14 +43,18 @@ def _vec3(value: str) -> tuple[float, float, float]:
     return (parts[0], parts[1], parts[2])
 
 
-def _crop_pil(img, bbox):
-    """Crop a PIL image to ``bbox`` (x1,y1,x2,y2) with a small margin, clamped."""
+def _crop_pil(img, bbox, margin: int = 20):
+    """Crop a PIL image to ``bbox`` (x1,y1,x2,y2) with a clamped margin.
+
+    The margin gives CLIP/captioning some surrounding context (ConceptGraphs pads
+    its feature crops by 20 px for the same reason).
+    """
     w, h = img.size
     x1, y1, x2, y2 = bbox
-    x1 = max(0, int(x1) - _CROP_MARGIN_PX)
-    y1 = max(0, int(y1) - _CROP_MARGIN_PX)
-    x2 = min(w, int(x2) + _CROP_MARGIN_PX)
-    y2 = min(h, int(y2) + _CROP_MARGIN_PX)
+    x1 = max(0, int(x1) - margin)
+    y1 = max(0, int(y1) - margin)
+    x2 = min(w, int(x2) + margin)
+    y2 = min(h, int(y2) + margin)
     if x2 <= x1 or y2 <= y1:
         return img
     return img.crop((x1, y1, x2, y2))
@@ -97,6 +100,13 @@ class WalkieGraphsService(threading.Thread):
         # are no-ops (keep everything); config.toml tightens them.
         self.max_bbox_area_ratio = float(os.getenv("WALKIE_GRAPHS_MAX_BBOX_AREA_RATIO", "1.0"))
         self.min_mask_area_px = int(os.getenv("WALKIE_GRAPHS_MIN_MASK_AREA_PX", "0"))
+        # Subtract a contained detection's mask from its container's (CG
+        # mask_subtract_contained): keeps the mug's pixels out of the table's cloud/crop.
+        self.mask_subtract = os.getenv("WALKIE_GRAPHS_MASK_SUBTRACT", "1").strip().lower() in (
+            "1", "true", "yes",
+        )
+        # Context margin around the bbox for the CLIP/caption crop (CG pads 20 px).
+        self.crop_margin_px = int(os.getenv("WALKIE_GRAPHS_CROP_MARGIN_PX", "20"))
         # Periodic-maintenance cadences (in ingest ticks), staggered so two heavy
         # passes never land on the same tick. 0 disables a pass.
         self.denoise_every_n = int(os.getenv("WALKIE_GRAPHS_DENOISE_EVERY_N", "20"))
@@ -221,14 +231,26 @@ class WalkieGraphsService(threading.Thread):
             img_area = int(img.size[0]) * int(img.size[1])
         except Exception:  # noqa: BLE001
             img_area = 0
+
+        # CG mask_subtract_contained: remove each contained detection's pixels from its
+        # container's mask, so a table's cloud doesn't absorb the mug sitting on it.
+        masks = [d.mask for d in detections]
+        if self.mask_subtract and sum(m is not None for m in masks) >= 2:
+            try:
+                masks = subtract_contained_masks([d.bbox for d in detections], masks)
+            except Exception as e:  # noqa: BLE001 — never let mask cleanup kill the tick
+                self._log(f"mask subtract failed: {e}")
+                masks = [d.mask for d in detections]
+
         pending = []  # (orig_index, detected, points, crop)
         for i, d in enumerate(detections):
-            if d.mask is None:
+            mask = masks[i]
+            if mask is None or not mask.any():
                 continue
             if not self._passes_size_filters(d, img_area):
                 continue
             pts = deproject_mask(
-                d.mask, depth, intr, cam, voxel=self.voxel_m, max_points=self.max_points
+                mask, depth, intr, cam, voxel=self.voxel_m, max_points=self.max_points
             )
             if len(pts) == 0:
                 continue
@@ -239,7 +261,7 @@ class WalkieGraphsService(threading.Thread):
                 and float(d.confidence or 0.0) >= self.min_confidence
                 and len(pts) >= self.min_points
             ):
-                pending.append((i, d, pts, _crop_pil(img, d.bbox)))
+                pending.append((i, d, pts, _crop_pil(img, d.bbox, self.crop_margin_px)))
 
         # Single caption pass over the captionable kept subset (reuses _caption's policy),
         # mapped back to original detection indices.

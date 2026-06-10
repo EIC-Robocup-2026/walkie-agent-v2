@@ -10,7 +10,9 @@ from walkie_graphs.fusion import (
     additive_similarity,
     nn_ratio,
     nn_ratio_symmetric,
+    pairs_within,
     phi_sem,
+    subtract_contained_masks,
 )
 
 
@@ -84,3 +86,49 @@ def test_pure_visual_never_reaches_default_threshold():
     # With nnratio=0 and any cosine, additive (w=1,1) tops out at phi_sem(1)=1.0 < 1.1.
     for cos in (-1.0, 0.0, 0.5, 1.0):
         assert additive_similarity(0.0, cos) < 1.1
+
+
+# ---------------------------------------------------------------------------
+# mask_subtract_contained (CG): the table's mask loses the mug's pixels
+# ---------------------------------------------------------------------------
+def _mask_of(bbox, shape=(100, 100)):
+    m = np.zeros(shape, dtype=bool)
+    x1, y1, x2, y2 = bbox
+    m[y1:y2, x1:x2] = True
+    return m
+
+
+def test_subtract_contained_removes_inner_from_outer():
+    table_box, mug_box = (10, 10, 90, 90), (40, 40, 55, 55)
+    masks = [_mask_of(table_box), _mask_of(mug_box)]
+    out = subtract_contained_masks([table_box, mug_box], masks)
+    # mug pixels removed from the table's mask...
+    assert not out[0][45, 45]
+    assert out[0][20, 20]  # ...but the rest of the table survives
+    # the mug's own mask is untouched
+    assert np.array_equal(out[1], masks[1])
+    # inputs not mutated
+    assert masks[0][45, 45]
+
+
+def test_subtract_contained_ignores_partial_overlap():
+    # Two side-by-side boxes overlapping a sliver: neither contains the other.
+    a, b = (10, 10, 60, 60), (50, 10, 100, 60)
+    masks = [_mask_of(a), _mask_of(b)]
+    out = subtract_contained_masks([a, b], masks)
+    assert np.array_equal(out[0], masks[0])
+    assert np.array_equal(out[1], masks[1])
+
+
+def test_subtract_contained_passes_none_through():
+    a, b = (10, 10, 90, 90), (40, 40, 55, 55)
+    out = subtract_contained_masks([a, b], [None, _mask_of(b)])
+    assert out[0] is None
+    assert np.array_equal(out[1], _mask_of(b))
+
+
+def test_pairs_within():
+    pts = [(0, 0, 0), (0.3, 0, 0), (5, 0, 0)]
+    assert pairs_within(pts, 0.5) == [(0, 1)]
+    assert pairs_within(pts, 10.0) == [(0, 1), (0, 2), (1, 2)]
+    assert pairs_within([(0, 0, 0)], 1.0) == []

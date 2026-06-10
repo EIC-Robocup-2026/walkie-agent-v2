@@ -1,10 +1,25 @@
-"""DBSCAN largest-cluster denoising (pure numpy/scipy, no robot/server)."""
+"""DBSCAN largest-cluster denoising (no robot/server).
+
+Every test runs against BOTH backends: sklearn's DBSCAN (the fast path) and the
+pure scipy/union-find fallback (used when sklearn is absent).
+"""
 
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
+import walkie_graphs.dbscan as dbscan_mod
 from walkie_graphs.dbscan import dbscan_labels, dbscan_largest_cluster
+
+
+@pytest.fixture(autouse=True, params=["sklearn", "scipy-fallback"])
+def backend(request, monkeypatch):
+    if request.param == "scipy-fallback":
+        monkeypatch.setattr(dbscan_mod, "_SKDBSCAN", None)
+    elif dbscan_mod._SKDBSCAN is None:
+        pytest.skip("scikit-learn not installed")
+    return request.param
 
 
 def _blob(center, n, spread=0.005, seed=0):

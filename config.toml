@@ -323,6 +323,12 @@ WALKIE_GRAPHS_SIM_THRESHOLD = "1.1"
 WALKIE_GRAPHS_W_GEO = "1.0"
 WALKIE_GRAPHS_W_SEM = "1.0"
 WALKIE_GRAPHS_NN_VOXEL_M = "0.025"
+# Cross-class association (ConceptGraphs matches with NO class constraint). The
+# detector's labels flip-flop ("cup" one frame, "mug" the next), so a same-class-only
+# matcher stores one object twice. A different-class candidate may merge when its
+# score clears this STRICTER gate (needs ~full overlap AND agreeing CLIP — with
+# weights 1/1, 1.5 means nn_ratio + phi_sem >= 1.5). 0 = same-class only.
+WALKIE_GRAPHS_CROSS_CLASS_SIM_THRESHOLD = "1.5"
 # DBSCAN denoising of each detection's cloud (largest cluster) before it enters the
 # graph — strips mask-edge depth bleed that would inflate AABBs. 1 = on (CG default).
 WALKIE_GRAPHS_DBSCAN_ENABLED = "1"
@@ -333,6 +339,12 @@ WALKIE_GRAPHS_DBSCAN_MIN_POINTS = "10"
 # 1.0 / 0 disable each. 0.9 keeps real objects while dropping whole-frame misfires.
 WALKIE_GRAPHS_MAX_BBOX_AREA_RATIO = "0.9"
 WALKIE_GRAPHS_MIN_MASK_AREA_PX = "64"
+# Subtract a contained detection's mask from its container's before deprojection
+# (CG mask_subtract_contained): keeps the mug's pixels out of the table's cloud and
+# crop, so containers don't absorb the objects resting on/in them. 1 = on.
+WALKIE_GRAPHS_MASK_SUBTRACT = "1"
+# Context margin (px) around the bbox for the CLIP/caption crop (CG pads 20).
+WALKIE_GRAPHS_CROP_MARGIN_PX = "20"
 
 [graphs.maintenance]
 # Periodic ConceptGraphs post-processing, each on its own cadence (in ingest ticks,
@@ -342,10 +354,13 @@ WALKIE_GRAPHS_MIN_MASK_AREA_PX = "64"
 #   drop means a legitimately spread object, e.g. a table, not noise → left intact).
 WALKIE_GRAPHS_DENOISE_EVERY_N = "20"
 WALKIE_GRAPHS_DENOISE_KEEP_MIN_FRAC = "0.5"
-# merge_overlapping_nodes: fuse two same-class nodes within MERGE_RADIUS_M whose clouds
-# overlap above MERGE_OVERLAP_THRESH (symmetric nn_ratio) and whose CLIP embeddings
-# agree above MERGE_VISUAL_SIM_THRESH — recovers an object first mapped from two sides
-# as two nodes. (TEXT_SIM kept for parity; unused without stored caption embeddings.)
+# merge_overlapping_nodes: fuse two nodes within MERGE_RADIUS_M whose clouds overlap
+# above MERGE_OVERLAP_THRESH (symmetric nn_ratio) and whose CLIP embeddings agree
+# above MERGE_VISUAL_SIM_THRESH — recovers an object first mapped from two sides as
+# two nodes. Same-class pairs always considered; different-class pairs only when
+# CROSS_CLASS_SIM_THRESHOLD > 0 (and they additionally REQUIRE the CLIP gate — pure
+# geometry never overrides the labels). (TEXT_SIM kept for parity; unused without
+# stored caption embeddings.)
 WALKIE_GRAPHS_MERGE_EVERY_N = "20"
 WALKIE_GRAPHS_MERGE_OVERLAP_THRESH = "0.7"
 WALKIE_GRAPHS_MERGE_VISUAL_SIM_THRESH = "0.7"

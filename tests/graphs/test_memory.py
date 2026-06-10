@@ -118,6 +118,39 @@ def test_associate_geometry_only_merge_without_embedding(mem):
     assert node.n_obs == 2
 
 
+def test_cross_class_assoc_merges_detector_label_flipflop(mem):
+    # The detector calls one object "cup" then "mug": same place (clouds overlap),
+    # same appearance. With cross-class association on (strict threshold), the second
+    # sighting folds into the first node instead of duplicating it.
+    mem.cross_class_sim_threshold = 1.5
+    mem.upsert(make_det(class_name="cup", center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01))
+    node = mem.upsert(
+        make_det(class_name="mug", center=(1.005, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01, ts=2.0)
+    )
+    assert mem.count() == 1
+    assert node.n_obs == 2
+    assert node.class_name == "cup"  # the original node's identity is kept
+
+
+def test_cross_class_assoc_respects_strict_threshold(mem):
+    # Cross-class needs ~full overlap AND agreeing CLIP. Overlapping clouds but a
+    # mid cosine (phi ≈ 1.0 + 0.85 = 1.85 ≥ 1.5 would merge — so use orthogonal
+    # embeddings: phi ≈ 1.0 + 0.5 = 1.5... boundary). Use clearly-different emb so
+    # phi ≈ 1.0 + 0.25 < 1.5 → stays two objects.
+    mem.cross_class_sim_threshold = 1.5
+    mem.upsert(make_det(class_name="cup", center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01))
+    mem.upsert(
+        make_det(
+            class_name="bottle",
+            center=(1.005, 0.0, 0.5),
+            emb=[-0.5, 0.866, 0.0],  # cos -0.5 vs unit(1,0,0) → phi_sem 0.25
+            spread=0.01,
+            ts=2.0,
+        )
+    )
+    assert mem.count() == 2
+
+
 # ---------------------------------------------------------------------------
 # Queries
 # ---------------------------------------------------------------------------
@@ -198,3 +231,19 @@ def test_persistence_reload(tmp_path):
     node = next(n for n in m2.all_objects() if n.class_name == "mug")
     assert node.best_caption == "mug"
     assert len(node.clip_emb) == 3  # embedding round-tripped through Chroma
+    # Point cloud round-trips through the .npz sidecar (cold cache on the new store).
+    assert len(m2.load_pcd(node.id)) > 0
+
+
+def test_pcd_cache_write_through_and_invalidation(mem):
+    node = mem.upsert(make_det(center=(1.0, 0.0, 0.5)))
+    cached = mem.load_pcd(node.id)
+    assert node.id in mem._pcd_cache
+    assert np.array_equal(cached, mem._pcd_cache[node.id])
+    # Disk and cache agree after a merge rewrites the cloud.
+    mem.upsert(make_det(center=(1.01, 0.0, 0.5), ts=2.0))
+    assert np.array_equal(mem.load_pcd(node.id), np.load(mem._pcd_path(node.id))["points"])
+    # Deleting the node evicts the cache entry.
+    mem._delete(node.id)
+    assert node.id not in mem._pcd_cache
+    assert len(mem.load_pcd(node.id)) == 0
