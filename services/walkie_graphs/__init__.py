@@ -67,6 +67,8 @@ class WalkieGraphs:
             pose, lift, and head tilt.
         memory: Override the store (mainly for tests); built from env otherwise.
         viz: Override the visualizer; built from ``WALKIE_GRAPHS_VIZ`` otherwise.
+        snapshot_path: Where the observer loop writes the live ``perception.json`` snapshot
+            the agents read each turn. ``None`` (default) writes no snapshot.
     """
 
     def __init__(
@@ -77,10 +79,12 @@ class WalkieGraphs:
         *,
         memory: Optional[GraphMemory] = None,
         viz=None,
+        snapshot_path=None,
     ) -> None:
         self.model = model
         self.walkieAI = walkieAI
         self.walkie = walkie
+        self.snapshot_path = snapshot_path
 
         embed_text = None
         if walkieAI is not None:
@@ -97,7 +101,12 @@ class WalkieGraphs:
     def _ensure_service(self) -> WalkieGraphsService:
         if self._service is None:
             self._service = WalkieGraphsService(
-                self.walkieAI, self.walkie, self.memory, model=self.model, viz=self.viz
+                self.walkieAI,
+                self.walkie,
+                self.memory,
+                model=self.model,
+                viz=self.viz,
+                snapshot_path=self.snapshot_path,
             )
         return self._service
 

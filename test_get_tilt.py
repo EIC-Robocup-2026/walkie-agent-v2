@@ -19,8 +19,7 @@ from agents.vision_agent import create_vision_agent
 from agents.walkie_agent import create_walkie_main_agent
 from client import WalkieAIClient
 from interfaces.walkie_interface import WalkieInterface
-from services import PerceptionService
-from walkie_graphs import WalkieGraphs
+from services.walkie_graphs import WalkieGraphs
 
 
 ZENOH_PORT = 7447

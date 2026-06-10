@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from walkie_graphs.memory import Detection3D
+from services.walkie_graphs.memory import Detection3D
 from tests.graphs.conftest import make_det, put_box, unit
 
 

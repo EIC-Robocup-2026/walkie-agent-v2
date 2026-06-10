@@ -24,7 +24,7 @@ class RobotContext:
 
     - speech log: what each agent has said recently (so all agents can see it)
     - stage: 'explore' or 'ready' — used by perception middleware to no-op early
-    - perception_path: where the PerceptionService writes the latest snapshot
+    - perception_path: where the walkie_graphs perception loop writes the latest snapshot
     """
 
     _instance: "RobotContext | None" = None

@@ -25,7 +25,7 @@ from walkie_sdk import WalkieRobot
 from client import WalkieAIClient
 from interfaces.walkie_interface import WalkieInterface
 from walkie_config import load_config
-from walkie_graphs import WalkieGraphs
+from services.walkie_graphs import WalkieGraphs
 
 ZENOH_PORT = 7447
 

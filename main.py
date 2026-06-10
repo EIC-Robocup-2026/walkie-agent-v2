@@ -18,8 +18,7 @@ from agents.vision_agent import create_vision_agent
 from agents.walkie_agent import create_walkie_main_agent
 from client import WalkieAIClient
 from interfaces.walkie_interface import WalkieInterface
-from services import PerceptionService
-from walkie_graphs import WalkieGraphs
+from services.walkie_graphs import WalkieGraphs
 
 
 ZENOH_PORT = 7447
@@ -76,22 +75,21 @@ def build_model():
 
 
 def run_ready_stage(walkieAI: WalkieAIClient, walkie: WalkieInterface, model: ChatOpenAI) -> None:
-    # walkie_graphs: 3D scene-graph spatial memory the Database sub-agent queries. Built
-    # regardless so the agent can read existing memory. Its background observer thread is
-    # NOT started — perception runs the single per-frame detection and feeds each frame to
-    # graphs.ingest_frame (which owns geometry/caption/embed/upsert), so the detector runs
-    # once instead of once here and once in perception. WALKIE_GRAPHS_ENABLED gates whether
-    # perception feeds the graph (and thus whether objects get 3D positions + captions).
-    graphs = WalkieGraphs(model=model, walkieAI=walkieAI, walkie=walkie)
-
-    perception = PerceptionService(
-        walkieAI,
-        walkie,
-        RobotContext.get().perception_path,
-        interval=float(os.getenv("PERCEPTION_INTERVAL_SEC", "2.0")),
-        graphs=graphs,
+    # walkie_graphs: 3D scene-graph spatial memory the Database sub-agent queries, AND the
+    # robot's perception loop. Its background observer thread is the single per-frame
+    # pipeline: detect (scoped to the interested classes) → lift/caption/embed/upsert into the
+    # graph object records → write the live perception.json snapshot the agents read each turn.
+    # Built regardless so the Database agent can read existing memory; WALKIE_GRAPHS_ENABLED
+    # gates whether the loop runs (and thus whether new objects + snapshots are produced).
+    graphs = WalkieGraphs(
+        model=model,
+        walkieAI=walkieAI,
+        walkie=walkie,
+        snapshot_path=RobotContext.get().perception_path,
     )
-    perception.start()
+    graphs_enabled = os.getenv("WALKIE_GRAPHS_ENABLED", "1").lower() in ("1", "true", "yes")
+    if graphs_enabled:
+        graphs.start()  # background perception loop: detect → ingest → write perception.json
 
     actuator = create_actuator_agent(model, walkieAI, walkie)
     vision = create_vision_agent(model, walkieAI, walkie)
@@ -140,13 +138,12 @@ def run_ready_stage(walkieAI: WalkieAIClient, walkie: WalkieInterface, model: Ch
     except KeyboardInterrupt:
         print("\n[main] interrupt — shutting down.")
     finally:
-        # Stop the background services, then tear down the robot connection.
+        # Stop the background perception loop, then tear down the robot connection.
         # The SDK's rosbridge/zenoh threads are non-daemon: leaving them running
         # hangs the interpreter at exit (threading._shutdown), so the process
         # never dies and the next launch finds port 8500 still held. close()
         # disconnects the robot, which stops those threads.
         graphs.stop()
-        perception.stop_and_join(timeout=5)
         walkie.close()
         print("[main] shutdown complete.")
 
@@ -180,10 +177,10 @@ def main() -> None:
     )
     model = build_model()
 
-    # No explore stage: the robot is ready immediately. The scene DB builds
-    # itself in the background (ScenePerceptionService inside run_ready_stage)
-    # while the agent already takes commands — see, update, and act without any
-    # "drive around then press Enter" gate.
+    # No explore stage: the robot is ready immediately. The scene graph builds
+    # itself in the background (the walkie_graphs perception loop started inside
+    # run_ready_stage) while the agent already takes commands — see, update, and
+    # act without any "drive around then press Enter" gate.
     ctx.stage = "ready"
     run_ready_stage(walkieAI, walkie, model)
 

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from walkie_graphs.service import WalkieGraphsService
+from services.walkie_graphs.service import WalkieGraphsService
 
 
 class _StubMemory:
@@ -201,3 +201,54 @@ def test_embed_batch_empty_and_single():
     assert s._embed_batch([]) == []
     s._embed_workers = 1
     assert s._embed_batch(["a"]) == [[1.0]]
+
+
+# ---------------------------------------------------------------------------
+# Live perception.json snapshot (written by the loop, from the ingest result)
+# ---------------------------------------------------------------------------
+def test_snapshot_path_defaults_to_none(svc):
+    # default: no snapshot — keeps the manual observe()/ingest paths side-effect-free
+    assert svc.snapshot_path is None
+
+
+def test_snapshot_path_stored_as_path(tmp_path):
+    out = tmp_path / "perception.json"
+    s = WalkieGraphsService(
+        walkieAI=None, walkie=None, memory=_StubMemory(), snapshot_path=out, verbose=False
+    )
+    assert s.snapshot_path == out
+
+
+def test_write_snapshot_writes_objects_only(tmp_path):
+    import json
+
+    out = tmp_path / "perception.json"
+    walkie = SimpleNamespace(status=SimpleNamespace(get_position=lambda: {"heading": 0.0}))
+    s = WalkieGraphsService(
+        walkieAI=None, walkie=walkie, memory=_StubMemory(), snapshot_path=out, verbose=False
+    )
+    img = SimpleNamespace(size=(640, 480))
+    dets = [SimpleNamespace(class_name="cup", bbox=(300, 220, 340, 260), confidence=0.9)]
+    result = {0: {"centroid": (1.0, 2.0, 3.0), "caption": "a cup"}}
+    s._write_snapshot(img, dets, result)
+
+    snap = json.loads(out.read_text())
+    assert "people" not in snap  # pose/people are gone from the perception path
+    assert snap["objects"][0]["class"] == "cup"
+    assert snap["objects"][0]["position_3d"] == [1.0, 2.0, 3.0]
+    assert snap["objects"][0]["caption"] == "a cup"
+
+
+def test_write_snapshot_swallows_pose_failure(tmp_path):
+    # a status read that raises must not propagate out of the loop
+    def _boom():
+        raise RuntimeError("no pose")
+
+    out = tmp_path / "perception.json"
+    walkie = SimpleNamespace(status=SimpleNamespace(get_position=_boom))
+    s = WalkieGraphsService(
+        walkieAI=None, walkie=walkie, memory=_StubMemory(), snapshot_path=out, verbose=False
+    )
+    img = SimpleNamespace(size=(640, 480))
+    s._write_snapshot(img, [], {})  # must not raise
+    assert not out.exists()  # nothing written when the build failed mid-way

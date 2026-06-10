@@ -69,19 +69,13 @@ EXPLORE_DEDUP_RADIUS_M = "1.0"
 EXPLORE_MIN_CONF = "0.6"
 
 [perception]
-# Ready-stage live snapshot written to perception.json. Perception runs the single
-# per-frame detection (open-vocab, masked) and feeds each frame to the scene graph; the
-# graph returns per-object world centroids -> position_3d and captions. So object 3D
-# positions + captions require WALKIE_GRAPHS_ENABLED=1 (the graph owns that work now).
-PERCEPTION_INTERVAL_SEC = "5.0"
+# Ready-stage live snapshot written to perception.json by the walkie_graphs perception
+# loop: it runs the single per-frame detection (open-vocab, masked, scoped to
+# WALKIE_GRAPHS_INTERESTED_CLASSES), folds each frame into the scene graph, and writes the
+# snapshot (object class/bbox/conf/position_3d/heading/frame/caption — no people). The tick
+# cadence is WALKIE_GRAPHS_INTERVAL_SEC (the loop's own interval). PERCEPTION_STALE_SEC is
+# how old the snapshot may be before PerceptionContextMiddleware stops injecting it.
 PERCEPTION_STALE_SEC = "10"
-# DEPRECATED — captioning now lives in the graph's ingest_frame, governed by
-# WALKIE_GRAPHS_CAPTION_CLASSES (defaults to the interested list). These two are unused.
-PERCEPTION_CAPTION_OBJECTS = "0"
-PERCEPTION_CAPTION_FILTER = ""
-# DEPRECATED — the old bboxes_to_positions ROS lift is gone; position_3d now comes from
-# mask deprojection in the graph. Unused (kept for config/signature stability).
-PERCEPTION_POSITION_TIMEOUT_SEC = "5.0"
 
 [scene]
 # CLIP long-term semantic memory (ready stage). Embeds detections into
@@ -202,18 +196,17 @@ CHROMA_VIEWER_REFRESH_SEC = "5"
 CHROMA_VIEWER_THUMB_CACHE = ".thumb_cache"
 
 [graphs]
-# walkie_graphs: open-vocabulary 3D scene-graph spatial memory. Lifts masked
-# detections to 3D world points, fuses them into object nodes, and derives
-# distance-based relations. The database sub-agent queries this store. Self-contained:
-# its own Chroma dir, point-cloud sidecars, and edge file (NOT the legacy chroma_db).
-# In production, perception drives ingestion (graphs.ingest_frame) per detected frame —
-# the WalkieGraphsService thread only self-drives in manual_tests/test_graphs_live.py.
-# ENABLED now gates whether perception feeds the graph (off => no 3D positions/captions
-# in perception.json either, since the graph owns that work).
+# walkie_graphs: open-vocabulary 3D scene-graph spatial memory AND the robot's perception
+# loop. Lifts masked detections to 3D world points, fuses them into object nodes, derives
+# distance-based relations, and writes the live perception.json snapshot each tick. The
+# database sub-agent queries this store. Self-contained: its own Chroma dir, point-cloud
+# sidecars, and edge file (NOT the legacy chroma_db). ENABLED gates whether the perception
+# loop runs at all (off => no new objects ingested and no perception.json written; the
+# graph is still built so the database agent can read existing memory).
 WALKIE_GRAPHS_ENABLED = "1"
 WALKIE_GRAPHS_PERF="1"
-# Only used by the standalone WalkieGraphsService thread (manual tests). In production
-# the cadence is perception's PERCEPTION_INTERVAL_SEC.
+# The perception loop's tick cadence (seconds): detect → ingest → write perception.json,
+# once per interval. This is the active cadence in production.
 WALKIE_GRAPHS_INTERVAL_SEC = "2.0"
 # "Interested classes": one comma-separated list that drives the whole module —
 # passed as open-vocab prompts to the detection server, and the scope of what
@@ -391,9 +384,8 @@ WALKIE_GRAPHS_LLM_EDGES_EVERY_N = "0"
 
 [graphs.relations]
 # Geometric (distance-based) edges, recomputed every RELATION_EVERY_N ingest ticks
-# (in production a tick is one perception frame, so ~RELATION_EVERY_N *
-# PERCEPTION_INTERVAL_SEC seconds) over
-# pairs whose centroids are within RELATION_MAX_DIST. near: centroid <= NEAR_M.
+# (a tick is one perception frame, so ~RELATION_EVERY_N * WALKIE_GRAPHS_INTERVAL_SEC
+# seconds) over pairs whose centroids are within RELATION_MAX_DIST. near: centroid <= NEAR_M.
 # on/above: XY-AABB-IoU >= XY_OVERLAP_MIN and a.zmin ~ b.zmax within Z_TOL (gap
 # <= ON_GAP => "on", else "above"). inside: 3D AABB containment within CONTAIN_TOL.
 WALKIE_GRAPHS_RELATION_MAX_DIST = "1.0"

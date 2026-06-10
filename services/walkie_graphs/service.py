@@ -1,15 +1,16 @@
-"""WalkieGraphsService — the background thread that grows the scene graph.
+"""WalkieGraphsService — the robot's perception loop and scene-graph builder.
 
-Mirrors :class:`services.perception.PerceptionService`: a daemon thread that, each
-tick, resolves the camera's pose (the optical frame's pose in the map frame from the
-SDK ``transform.lookup``) and intrinsics (``camera.get_intrinsics``), captures an
-RGB-D frame, runs masked object detection (scoped to the *interested classes*), lifts
-each mask to a 3D world point cloud, embeds + captions the crop via the AI client, and
-upserts it into :class:`~walkie_graphs.memory.GraphMemory`. Every few ticks it
-recomputes the geometric relations, prunes, and pushes to the visualizer.
+A daemon thread that, each tick, resolves the camera's pose (the optical frame's pose in
+the map frame from the SDK ``transform.lookup``) and intrinsics (``camera.get_intrinsics``),
+captures an RGB-D frame, runs masked object detection (scoped to the *interested classes*),
+lifts each mask to a 3D world point cloud, embeds + captions the crop via the AI client, and
+upserts it into :class:`~services.walkie_graphs.memory.GraphMemory`. When a ``snapshot_path``
+is configured it then writes the live ``perception.json`` view of the frame (the agents'
+"what's in front of me now" context). Every few ticks it recomputes the geometric relations,
+prunes, and pushes to the visualizer.
 
 Detection/caption/embedding are all direct ``walkieAI`` client calls — there is no
-local model here.
+local model here. Pose/people detection is intentionally not part of this loop.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import numpy as np
 
@@ -29,6 +31,7 @@ from .geometry import (
     deproject_mask,
 )
 from .memory import Detection3D, GraphMemory
+from .snapshot import build_object_records, write_atomic
 
 
 def _csv(value: str) -> list[str]:
@@ -63,6 +66,7 @@ class WalkieGraphsService(threading.Thread):
         *,
         model=None,
         viz=None,
+        snapshot_path: str | Path | None = None,
         verbose: bool = True,
     ) -> None:
         super().__init__(daemon=True, name="WalkieGraphsService")
@@ -71,6 +75,10 @@ class WalkieGraphsService(threading.Thread):
         self.memory = memory
         self.model = model  # currently unused (server captions + geometric edges)
         self.viz = viz
+        # Where the loop writes the live perception.json snapshot each tick (the agents'
+        # "what's in front of me now" view). None => don't write a snapshot — keeps the
+        # manual observe() path side-effect-free; main.py passes the real path in production.
+        self.snapshot_path = Path(snapshot_path) if snapshot_path is not None else None
         self.verbose = verbose
         self._stop_event = threading.Event()
 
@@ -192,11 +200,12 @@ class WalkieGraphsService(threading.Thread):
     # One observation
     # ------------------------------------------------------------------
     def _observe_once(self) -> list:
-        """Capture one RGB-D frame and fold every kept detection into the graph.
+        """Capture one RGB-D frame, fold every kept detection into the graph, and (when a
+        ``snapshot_path`` is set) write the live ``perception.json`` view of the frame.
 
-        Standalone path — used by the background thread and the ``observe()`` facade.
-        In production, perception captures + detects once per frame and calls
-        :meth:`ingest_frame` directly, so the detector never runs twice on one frame.
+        This is *the* production perception loop: the background thread runs it every tick.
+        Detection is scoped to the interested classes (``prompts=self.interested``), so both
+        the graph and the snapshot only ever carry those.
         """
         t_depth = time.perf_counter()
         depth = self._depth()
@@ -220,8 +229,25 @@ class WalkieGraphsService(threading.Thread):
             f"capture stage: depth={d_depth * 1000:.0f}ms capture={d_cap * 1000:.0f}ms "
             f"detect={d_det * 1000:.0f}ms ({len(detections)} detections)"
         )
-        self.ingest_frame(img, detections, depth, tick=True)
+        result = self.ingest_frame(img, detections, depth, tick=True)
+        if self.snapshot_path is not None:
+            self._write_snapshot(img, detections, result)
         return self._last_touched
+
+    def _write_snapshot(self, img, detections, ingest_result: dict[int, dict]) -> None:
+        """Write the live perception.json from one frame's detections + ingest result.
+
+        Reuses the centroids/captions the ingest pass already produced (no extra detection
+        or caption work). A graph hiccup or pose read failure must never take the loop down,
+        so the whole write is best-effort.
+        """
+        try:
+            pose = self.walkie.status.get_position() or {"heading": 0.0}
+            robot_heading = float(pose.get("heading", 0.0))
+            objs = build_object_records(detections, ingest_result, img.size, robot_heading)
+            write_atomic(self.snapshot_path, {"ts": time.time(), "objects": objs})
+        except Exception as e:  # noqa: BLE001
+            self._log(f"snapshot write failed: {e}")
 
     def ingest_frame(self, img, detections, depth, *, tick: bool = True) -> dict[int, dict]:
         """Fold the kept subset of one captured frame's ``detections`` into the graph.

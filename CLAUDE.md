@@ -47,7 +47,7 @@ To run without the microphone (typing prompts at a TTY), set `DISABLE_LISTENING=
 
 `main.py` sets `RobotContext.stage = "ready"` and runs `run_ready_stage` directly — there is no separate explore/catalogue-building stage and no operator "drive around then press Enter" gate.
 
-In the **`ready`** stage two background threads run alongside the agent: `PerceptionService` writes the latest live scene snapshot to `perception.json` every `PERCEPTION_INTERVAL_SEC`, and `ScenePerceptionService` builds the long-term CLIP scene catalogue (`chroma_db_scene`) continuously — detect, lift, caption, embed, dedup, prune. The agent stack listens to mic input via STT, runs the Walkie agent on each utterance, and speaks back via TTS. So the scene DB fills itself in the background while the robot already takes commands.
+In the **`ready`** stage a single background thread — the `walkie_graphs` perception loop (`services.walkie_graphs`, started by `graphs.start()`) — runs alongside the agent. Each tick (every `WALKIE_GRAPHS_INTERVAL_SEC`) it captures an RGB-D frame, runs one masked open-vocabulary detection scoped to `WALKIE_GRAPHS_INTERESTED_CLASSES`, lifts each mask to a 3D world point, fuses/captions/embeds it into the scene-graph object records, and writes the latest live snapshot to `perception.json`. The agent stack listens to mic input via STT, runs the Walkie agent on each utterance, and speaks back via TTS. So the scene graph fills itself in the background while the robot already takes commands. (Pose/people detection is **not** part of this loop — live pose lookups live only in the Vision agent's tools.)
 
 The legacy explore stage (`ExploreService`) and its object store (`WalkieVectorDB`/`chroma_db`) were removed; the `SceneStore` is the only long-term memory backend. `tools/reset_db --object` / `db_doctor --object` still operate on a leftover `chroma_db/` dir by path for cleanup, but nothing writes it anymore.
 
@@ -88,7 +88,7 @@ Convention: read-only inspection / DB lookup → parallelable. Anything that mov
 
 `agents/core/robot_context.py` is a thread-safe process-wide singleton (`RobotContext.init(...)` in `main.py`, then `RobotContext.get()` everywhere else). It holds:
 
-- `perception_path` — where `PerceptionService` writes.
+- `perception_path` — where the `walkie_graphs` perception loop writes the live snapshot.
 - `stage` — currently always `"ready"` (set in `main.py`); the field is kept because perception middleware gates on it.
 - `speech_log` — bounded deque of `(agent_name, text, ts)` appended whenever any agent's `speak` tool fires. Read by `RobotContextMiddleware` to inject into prompts.
 
@@ -125,5 +125,5 @@ Tuning knobs live in **`config.toml`** (version-controlled), secrets/endpoints/t
 
 - **Adding a tool to an agent**: write it in that agent's `tools.py`, decorate with `@parallelable_tool` or `@sequential_tool` *outside* the `@tool` decorator (the wrapper sets the `_walkie_parallelable` attribute on the `BaseTool` instance), and document via Google-style docstring with `parse_docstring=True` if the tool takes args.
 - **Adding a new sub-agent**: copy the shape of `agents/vision_agent/` (a `__init__.py` exporting a `create_*_agent` factory, a `prompts.py`, a `tools.py`). Wire it into `main.py:run_ready_stage` and add a `delegate_to_*` tool in `agents/walkie_agent/tools.py`.
-- **Atomic perception writes**: `PerceptionService._write_atomic` writes `perception.json.tmp` then `os.replace` — readers in `PerceptionContextMiddleware` are tolerant of read-during-write but never read a half-written file. Preserve this if you add new on-disk shared state.
-- **Bbox conventions**: `walkie-ai-server` returns object bboxes in `xyxy` (used directly in JSON), but `walkie.tools.bboxes_to_positions` expects `cxcywh`. Conversion lives in `_xyxy_to_cxcywh` (in `services/perception.py`; the scene path converts in `perception/pipeline.py`).
+- **Atomic perception writes**: `services.walkie_graphs.snapshot.write_atomic` writes `perception.json.tmp` then `os.replace` — readers in `PerceptionContextMiddleware` are tolerant of read-during-write but never read a half-written file. Preserve this if you add new on-disk shared state.
+- **Bbox conventions**: `walkie-ai-server` returns object bboxes in `xyxy` (used directly in the snapshot JSON and as crop/heading bounds). The `walkie_graphs` path lifts each detection's *mask* to 3D via depth deprojection (`services/walkie_graphs/geometry.py`), not the legacy `bboxes_to_positions` ROS lift, so no `xyxy`→`cxcywh` conversion is involved.

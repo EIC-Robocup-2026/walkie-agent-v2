@@ -9,8 +9,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import walkie_graphs.dbscan as dbscan_mod
-from walkie_graphs.dbscan import dbscan_labels, dbscan_largest_cluster
+import services.walkie_graphs.dbscan as dbscan_mod
+from services.walkie_graphs.dbscan import dbscan_labels, dbscan_largest_cluster
 
 
 @pytest.fixture(autouse=True, params=["sklearn", "scipy-fallback"])

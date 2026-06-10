@@ -7,7 +7,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from walkie_graphs.memory import GraphMemory
+from services.walkie_graphs.memory import GraphMemory
 from tests.graphs.conftest import emb_with_cosine, make_det, unit
 
 

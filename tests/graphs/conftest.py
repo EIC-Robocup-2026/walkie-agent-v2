@@ -1,4 +1,4 @@
-"""Shared fixtures/helpers for walkie_graphs tests — no robot/server needed."""
+"""Shared fixtures/helpers for services.walkie_graphs tests — no robot/server needed."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import math
 import numpy as np
 import pytest
 
-from walkie_graphs.memory import Detection3D, GraphMemory, ObjectNode
+from services.walkie_graphs.memory import Detection3D, GraphMemory, ObjectNode
 
 
 def unit(*vals) -> list[float]:
@@ -68,7 +68,7 @@ def put_object(
     ts=1.0,
 ) -> ObjectNode:
     """Register a node backed by a real saved point cloud (for merge/denoise tests)."""
-    from walkie_graphs.memory import _normalize, aabb_of
+    from services.walkie_graphs.memory import _normalize, aabb_of
 
     pts = np.asarray(points, dtype=np.float32)
     centroid, mn, mx, ext = aabb_of(pts)

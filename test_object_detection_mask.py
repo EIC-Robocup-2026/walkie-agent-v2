@@ -18,7 +18,7 @@ def _color_for(class_name: str | None) -> tuple[int, int, int]:
 
 
 def test_object_detection_mask():
-    walkieAI = WalkieAIClient()
+    walkieAI = WalkieAIClient(base_url="http://localhost:5000")
     print("Walkie Client initialized")
 
     cap = cv2.VideoCapture(0)
@@ -41,6 +41,8 @@ def test_object_detection_mask():
 
         # Request a segmentation mask per detection.
         detections = walkieAI.object_detection.detect(frame, return_mask=True)
+
+        print(f"Frame shape: {frame.shape}, Detections: {len(detections)}")
 
         # Blend all masks onto a copy, then draw bboxes/labels on top.
         overlay = frame.copy()

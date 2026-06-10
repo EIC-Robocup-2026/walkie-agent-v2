@@ -1,6 +1,6 @@
 # Walkie Graphs — the robot's spatial memory
 
-`walkie_graphs/` is the part of Walkie that **remembers what it has seen and where**.
+`services/walkie_graphs/` is the part of Walkie that **remembers what it has seen and where**.
 
 As the robot moves around, its camera keeps spotting objects — a mug, a chair, a bottle.
 Walkie Graphs takes each sighting, works out *where in the room* the object is, and keeps a
@@ -61,14 +61,14 @@ pixel outline, not just a box).
 - Walkie Graphs is therefore the **CG-Detect** flavour of ConceptGraphs: an open-vocabulary
   detector + masks, rather than class-agnostic SAM segmentation.
 - Before doing any 3D work, two cheap **size filters** drop junk
-  ([walkie_graphs/service.py](walkie_graphs/service.py), `_passes_size_filters`):
+  ([services/walkie_graphs/service.py](services/walkie_graphs/service.py), `_passes_size_filters`):
   - **`MAX_BBOX_AREA_RATIO`** — a box covering most of the frame is almost always a wall/floor/
     background misfire, so it's rejected.
   - **`MIN_MASK_AREA_PX`** — masks too small to be a real object are dropped.
 - **Containment subtraction** (`MASK_SUBTRACT`, ConceptGraphs' `mask_subtract_contained`): when one
   detection sits inside another — a mug on a table — the mug's pixels are removed from the table's
   mask before any 3D work, so the table's point cloud and image crop aren't polluted by the objects
-  resting on it (`subtract_contained_masks` in [walkie_graphs/fusion.py](walkie_graphs/fusion.py)).
+  resting on it (`subtract_contained_masks` in [services/walkie_graphs/fusion.py](services/walkie_graphs/fusion.py)).
 - Then per-class scoping (`_keep`): an `EXCLUDE_CLASSES` list (default `person` — people move and
   can't be position-mapped) and an optional `INTERESTED_CLASSES` allow-list.
 </details>
@@ -80,7 +80,7 @@ point in the room. The result is a little **3D point cloud** shaped like the obj
 <details>
 <summary>Details — depth back-projection &amp; camera pose</summary>
 
-The camera math lives in [walkie_graphs/geometry.py](walkie_graphs/geometry.py) (pure numpy); the
+The camera math lives in [services/walkie_graphs/geometry.py](services/walkie_graphs/geometry.py) (pure numpy); the
 service feeds it real calibration and pose straight from the **walkie-sdk**.
 
 - **Intrinsics** (`_intrinsics` in service.py): `bot.camera.get_intrinsics()` returns the ZED's true
@@ -111,7 +111,7 @@ size and position stay accurate.
 <details>
 <summary>Details — flying-pixel edge cleanup</summary>
 
-These run during back-projection ([walkie_graphs/geometry.py](walkie_graphs/geometry.py)), where the
+These run during back-projection ([services/walkie_graphs/geometry.py](services/walkie_graphs/geometry.py)), where the
 depth discontinuity is still visible in 2D — much more reliable than trying to spot the smear in the
 finished 3D cloud:
 
@@ -126,7 +126,7 @@ finished 3D cloud:
 <details>
 <summary>Details — DBSCAN denoising (the 3D backstop)</summary>
 
-- [walkie_graphs/dbscan.py](walkie_graphs/dbscan.py) implements DBSCAN clustering and keeps only
+- [services/walkie_graphs/dbscan.py](services/walkie_graphs/dbscan.py) implements DBSCAN clustering and keeps only
   the **largest cluster** of points — exactly what ConceptGraphs does with `pcd_denoise_dbscan`.
   It uses scikit-learn's battle-tested C implementation when installed (the fast path), with a
   pure `scipy.spatial.cKDTree` + union-find fallback so a partial install still works.
@@ -165,8 +165,8 @@ This is the heart of the system. Walkie Graphs checks: *"Have I seen this object
 <details>
 <summary>Details — the association algorithm (the core of ConceptGraphs)</summary>
 
-Implemented in [walkie_graphs/memory.py](walkie_graphs/memory.py) (`_associate`) and
-[walkie_graphs/fusion.py](walkie_graphs/fusion.py).
+Implemented in [services/walkie_graphs/memory.py](services/walkie_graphs/memory.py) (`_associate`) and
+[services/walkie_graphs/fusion.py](services/walkie_graphs/fusion.py).
 
 Each new detection is scored against existing **same-class** objects that are nearby (a cheap
 bounding-box / radius prefilter keeps this fast even with hundreds of objects). The score combines
@@ -224,7 +224,7 @@ is *inside* the drawer, the kettle is *near* the mug.
 <summary>Details — spatial relations (edges)</summary>
 
 `GraphMemory.derive_relations` recomputes geometric edges from the objects' bounding boxes
-(see [walkie_graphs/memory.py](walkie_graphs/memory.py)). For each pair within `RELATION_MAX_DIST`:
+(see [services/walkie_graphs/memory.py](services/walkie_graphs/memory.py)). For each pair within `RELATION_MAX_DIST`:
 
 | Relation  | Rule |
 |-----------|------|
@@ -266,8 +266,8 @@ jobs run on a slow cadence (every ~20 frames, staggered so they never pile up) t
 <details>
 <summary>Details — the maintenance passes</summary>
 
-All in [walkie_graphs/memory.py](walkie_graphs/memory.py), scheduled by `_maybe_tick` in
-[walkie_graphs/service.py](walkie_graphs/service.py):
+All in [services/walkie_graphs/memory.py](services/walkie_graphs/memory.py), scheduled by `_maybe_tick` in
+[services/walkie_graphs/service.py](services/walkie_graphs/service.py):
 
 - **`merge_overlapping_nodes`** — fuses two objects that turned out to be the same thing seen from
   different sides (high cloud overlap + similar appearance). This is the cleanup the per-frame
@@ -346,7 +346,7 @@ deployment.
 <details>
 <summary>Details — caption refinement &amp; LLM edges</summary>
 
-Both live in [walkie_graphs/memory.py](walkie_graphs/memory.py) and use the chat model already
+Both live in [services/walkie_graphs/memory.py](services/walkie_graphs/memory.py) and use the chat model already
 threaded into `WalkieGraphs`:
 
 - **`refine_captions(model)`** — summarises each object's accumulated captions into one coherent
@@ -395,14 +395,14 @@ background-box rejection, DBSCAN on). See the comments in `config.toml` for each
 
 | File | Role |
 |------|------|
-| [walkie_graphs/__init__.py](walkie_graphs/__init__.py) | `WalkieGraphs` facade — ties store + observer + visualizer together; what the rest of the app uses |
-| [walkie_graphs/service.py](walkie_graphs/service.py) | `WalkieGraphsService` — the per-frame ingestion pipeline + maintenance scheduling |
-| [walkie_graphs/memory.py](walkie_graphs/memory.py) | `GraphMemory` — the store: association, merging, relations, queries, maintenance, persistence |
-| [walkie_graphs/geometry.py](walkie_graphs/geometry.py) | camera math — intrinsics, pose, depth→world deprojection |
-| [walkie_graphs/fusion.py](walkie_graphs/fusion.py) | association math — `nn_ratio` overlap, AABB prefilter, additive score |
-| [walkie_graphs/dbscan.py](walkie_graphs/dbscan.py) | point-cloud denoising (DBSCAN, largest cluster) |
-| [walkie_graphs/viz.py](walkie_graphs/viz.py) | optional real-time 3D visualization via Rerun |
-| [walkie_graphs/tools/reset.py](walkie_graphs/tools/reset.py) | CLI to wipe the store |
+| [services/walkie_graphs/__init__.py](services/walkie_graphs/__init__.py) | `WalkieGraphs` facade — ties store + observer + visualizer together; what the rest of the app uses |
+| [services/walkie_graphs/service.py](services/walkie_graphs/service.py) | `WalkieGraphsService` — the per-frame ingestion pipeline + maintenance scheduling |
+| [services/walkie_graphs/memory.py](services/walkie_graphs/memory.py) | `GraphMemory` — the store: association, merging, relations, queries, maintenance, persistence |
+| [services/walkie_graphs/geometry.py](services/walkie_graphs/geometry.py) | camera math — intrinsics, pose, depth→world deprojection |
+| [services/walkie_graphs/fusion.py](services/walkie_graphs/fusion.py) | association math — `nn_ratio` overlap, AABB prefilter, additive score |
+| [services/walkie_graphs/dbscan.py](services/walkie_graphs/dbscan.py) | point-cloud denoising (DBSCAN, largest cluster) |
+| [services/walkie_graphs/viz.py](services/walkie_graphs/viz.py) | optional real-time 3D visualization via Rerun |
+| [services/walkie_graphs/tools/reset.py](services/walkie_graphs/tools/reset.py) | CLI to wipe the store |
 
 **Data flow:** `PerceptionService` → `WalkieGraphs.ingest_frame` → `WalkieGraphsService.ingest_frame`
 → `GraphMemory.upsert`. Queries flow `database_agent` → `WalkieGraphs` → `GraphMemory`. The module
@@ -438,8 +438,8 @@ viewer — a local window on the robot, or a browser viewer over the LAN
 <summary>Reset the store</summary>
 
 ```bash
-uv run python -m walkie_graphs.tools.reset      # confirm first
-uv run python -m walkie_graphs.tools.reset -y   # no prompt
+uv run python -m services.walkie_graphs.tools.reset      # confirm first
+uv run python -m services.walkie_graphs.tools.reset -y   # no prompt
 ```
 
 Wipes the ChromaDB collection, point-cloud sidecars, thumbnails, and the edges file. Run with the
