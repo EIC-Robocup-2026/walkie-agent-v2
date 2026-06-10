@@ -204,7 +204,7 @@ CHROMA_VIEWER_THUMB_CACHE = ".thumb_cache"
 # loop runs at all (off => no new objects ingested and no perception.json written; the
 # graph is still built so the database agent can read existing memory).
 WALKIE_GRAPHS_ENABLED = "1"
-WALKIE_GRAPHS_PERF="1"
+WALKIE_GRAPHS_PERF="0"
 # The perception loop's tick cadence (seconds): detect → ingest → write perception.json,
 # once per interval. This is the active cadence in production.
 WALKIE_GRAPHS_INTERVAL_SEC = "2.0"
