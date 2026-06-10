@@ -232,7 +232,7 @@ WALKIE_GRAPHS_EXCLUDE_CLASSES = "person"
 # Classes to caption (server image-caption). Empty = same as interested classes.
 WALKIE_GRAPHS_CAPTION_CLASSES = ""
 # Live 3D visualization backend: none | rerun. rerun needs `uv sync --extra graphs`.
-WALKIE_GRAPHS_VIZ = "none"
+WALKIE_GRAPHS_VIZ = "rerun"
 # What to draw in the Rerun viewer. Point clouds are always shown.
 WALKIE_GRAPHS_VIZ_BOXES = "0"   # 0 = hide per-object bounding boxes
 # Per-object class-name labels, independent of boxes. With boxes ON the label
@@ -251,8 +251,8 @@ WALKIE_GRAPHS_VIZ_CAMERA = "1"  # 0 = hide the camera position + look-direction 
 # GRPC_PORT — both are required):
 #     sudo ufw allow 9090/tcp && sudo ufw allow 9876/tcp
 # (use the actual WEB_PORT/GRPC_PORT below if you change them).
-WALKIE_GRAPHS_RERUN_SERVE = "0"
-WALKIE_GRAPHS_RERUN_WEB_PORT = "9090"
+WALKIE_GRAPHS_RERUN_SERVE = "1"
+WALKIE_GRAPHS_RERUN_WEB_PORT = "8008"
 WALKIE_GRAPHS_RERUN_GRPC_PORT = "9876"
 # Host/IP that REMOTE browsers use to reach the robot (blank = auto-detect LAN IP).
 WALKIE_GRAPHS_RERUN_HOST = ""
