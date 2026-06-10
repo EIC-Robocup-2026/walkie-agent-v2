@@ -18,7 +18,7 @@
 [llm]
 # 1 = use a local OpenAI-compatible LLM (LOCAL_BASE_URL/LOCAL_MODEL) instead of
 # OpenRouter. The OpenRouter API key + base URL are the only things left in .env.
-LLM_USE_LOCAL = "1"
+LLM_USE_LOCAL = "0"
 WALKIE_MODEL = "anthropic/claude-sonnet-4.5"
 WALKIE_TEMPERATURE = "0.5"
 # Local LLM endpoint (OpenAI-compatible), used when LLM_USE_LOCAL=1.
