@@ -44,6 +44,7 @@ from .fusion import (
     nn_ratio_symmetric,
     pairs_within,
 )
+from .geometry import voxel_downsample
 
 DEFAULT_EMB_DIM = 512  # CLIP ViT-B/16
 
@@ -1213,14 +1214,6 @@ def _normalize(vec) -> list[float]:
     return (v / n).tolist() if n > 0 else v.tolist()
 
 
-def _voxel(points: np.ndarray, voxel: float) -> np.ndarray:
-    if voxel is None or voxel <= 0 or len(points) == 0:
-        return points
-    keys = np.floor(points / voxel).astype(np.int64)
-    _, inverse = np.unique(keys, axis=0, return_inverse=True)
-    inverse = inverse.ravel()
-    n_cells = int(inverse.max()) + 1
-    sums = np.zeros((n_cells, 3), dtype=np.float64)
-    np.add.at(sums, inverse, points)
-    counts = np.bincount(inverse, minlength=n_cells).reshape(-1, 1)
-    return (sums / counts).astype(np.float32)
+# The point-cloud voxel grid is shared with the deprojection path — one fast
+# (bincount-based) implementation, used here for the merge/fuse downsampling too.
+_voxel = voxel_downsample

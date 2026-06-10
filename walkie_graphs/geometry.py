@@ -77,17 +77,33 @@ class CameraPose:
 # Deprojection (depth -> map points)
 # ---------------------------------------------------------------------------
 def voxel_downsample(points: np.ndarray, voxel: float) -> np.ndarray:
-    """Grid-quantize to ``voxel``-sized cells, returning one mean point per cell."""
-    if voxel is None or voxel <= 0 or len(points) == 0:
-        return points
-    keys = np.floor(points / voxel).astype(np.int64)
-    _, inverse = np.unique(keys, axis=0, return_inverse=True)
+    """Grid-quantize to ``voxel``-sized cells, returning one mean point per cell.
+
+    Each cell's integer coordinates are hashed into a single 1-D key, so the grouping
+    uses a fast 1-D ``np.unique`` and C-level ``np.bincount`` summation — far cheaper on
+    dense clouds than ``np.unique(..., axis=0)`` (a 2-D lexsort) + ``np.add.at`` (an
+    unbuffered scatter), which dominated the per-detection deprojection cost.
+    """
+    pts = np.asarray(points)
+    if voxel is None or voxel <= 0 or len(pts) == 0:
+        return pts
+    keys = np.floor(pts / voxel).astype(np.int64)
+    keys -= keys.min(axis=0)  # shift to non-negative so the hash stays small
+    dims = keys.max(axis=0) + 1
+    flat = (keys[:, 0] * dims[1] + keys[:, 1]) * dims[2] + keys[:, 2]
+    _, inverse = np.unique(flat, return_inverse=True)
     inverse = inverse.ravel()
-    n_cells = int(inverse.max()) + 1
-    sums = np.zeros((n_cells, 3), dtype=np.float64)
-    np.add.at(sums, inverse, points)
-    counts = np.bincount(inverse, minlength=n_cells).reshape(-1, 1)
-    return (sums / counts).astype(np.float32)
+    counts = np.bincount(inverse)
+    p = pts.astype(np.float64)
+    sums = np.stack(
+        [
+            np.bincount(inverse, weights=p[:, 0]),
+            np.bincount(inverse, weights=p[:, 1]),
+            np.bincount(inverse, weights=p[:, 2]),
+        ],
+        axis=1,
+    )
+    return (sums / counts[:, None]).astype(np.float32)
 
 
 def depth_discontinuity_mask(depth: np.ndarray, thresh: float) -> np.ndarray | None:
@@ -151,25 +167,46 @@ def deproject_mask(
             interpolation=cv2.INTER_NEAREST,
         )
 
+    # Crop to the mask's bounding box: erode / nonzero / back-projection over a mostly
+    # empty multi-megapixel frame is the per-detection hotspot, and the object only
+    # occupies a small window. ``np.any`` row/col reductions find the box cheaply; all
+    # subsequent per-pixel work runs on the (small) crop, with a pad so erosion still
+    # sees real background. Pixel coords are offset back to full-frame for the pinhole.
+    rows = np.any(mask, axis=1)
+    if not rows.any():
+        return np.zeros((0, 3), dtype=np.float32)
+    cols = np.any(mask, axis=0)
+    yy = np.where(rows)[0]
+    xx = np.where(cols)[0]
+    pad = int(erode_px) + 1 if (erode_px and erode_px > 0) else 0
+    h, w = depth.shape[:2]
+    y0, y1 = max(0, int(yy[0]) - pad), min(h, int(yy[-1]) + 1 + pad)
+    x0, x1 = max(0, int(xx[0]) - pad), min(w, int(xx[-1]) + 1 + pad)
+
+    sub_mask = mask[y0:y1, x0:x1]
+    sub_depth = depth[y0:y1, x0:x1]
+    sub_edge = edge_mask[y0:y1, x0:x1] if edge_mask is not None else None
+
     if erode_px and erode_px > 0 and cv2 is not None:
         kernel = np.ones((3, 3), np.uint8)
-        mask = cv2.erode(mask.astype(np.uint8), kernel, iterations=int(erode_px))
+        sub_mask = cv2.erode(sub_mask.astype(np.uint8), kernel, iterations=int(erode_px))
 
-    ys, xs = np.nonzero(mask)
+    ys, xs = np.nonzero(sub_mask)
     if len(xs) == 0:
         return np.zeros((0, 3), dtype=np.float32)
 
-    d = depth[ys, xs].astype(np.float64)
+    d = sub_depth[ys, xs].astype(np.float64)
     valid = np.isfinite(d) & (d > 0)
-    if edge_mask is not None:
-        valid &= ~edge_mask[ys, xs]
+    if sub_edge is not None:
+        valid &= ~sub_edge[ys, xs]
     if not np.any(valid):
         return np.zeros((0, 3), dtype=np.float32)
     xs, ys, d = xs[valid], ys[valid], d[valid]
 
-    # Pinhole back-projection into the camera optical frame (x right, y down, z fwd).
-    Xc = (xs - intr.cx) * d / intr.fx
-    Yc = (ys - intr.cy) * d / intr.fy
+    # Pinhole back-projection into the camera optical frame (x right, y down, z fwd),
+    # offsetting the cropped pixel coords back to full-frame (cx/cy are full-frame).
+    Xc = ((xs + x0) - intr.cx) * d / intr.fx
+    Yc = ((ys + y0) - intr.cy) * d / intr.fy
     Zc = d
     P_optical = np.stack([Xc, Yc, Zc], axis=1)
     # Optical-frame pose maps these straight into the map frame.
