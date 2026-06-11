@@ -172,22 +172,30 @@ def describe_seated_person(
         return None
 
 
-def seat_world_position(ctx: TaskContext, seat: SeatCandidate) -> tuple[float, float] | None:
+def _cxcywh_to_world_position(ctx: TaskContext, bbox: BBox) -> tuple[float, float] | None:
+    """Lift a bbox to a map-frame (x, y) via the perception service."""
+    cx, cy, w, h = bbox
+    cxcywh = (cx, cy, w, h)
+    try:
+        positions = ctx.walkie.tools.bboxes_to_positions([cxcywh])
+    except Exception as exc:
+        print(f"[skills] get world position failed ({exc})")
+        return None
+    if not positions:
+        return None
+    x, y, _z = positions[0]
+    return x, y
+
+
+def bboxes_world_position(ctx: TaskContext, bboxes: BBox) -> tuple[float, float] | None:
     """Lift a seat's bbox to a map-frame (x, y) via the perception service.
 
     Call right after the scan, before the robot moves — the service deprojects
     against the camera's *current* depth frame, not the scanned image.
     """
-    x1, y1, x2, y2 = seat.bbox_xyxy
+    x1, y1, x2, y2 = bboxes
     cxcywh = [(x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1]
-    try:
-        positions = ctx.walkie.tools.bboxes_to_positions([cxcywh])
-    except Exception as exc:
-        print(f"[skills] seat 3D lift failed ({exc})")
-        return None
-    if not positions:
-        return None
-    x, y, _z = positions[0]
+    x, y = _cxcywh_to_world_position(ctx, cxcywh)
     return x, y
 
 
@@ -227,7 +235,7 @@ def describe_seating_scene(
     """Text rendering of one seat scan for the LLM seat picker.
 
     Everything the model needs to decide and to word the offer: each seat's
-    position in the frame (pixels + spoken direction), size, confidence and
+    position in the frame (pixel x, where x=0 is far left), size, confidence and
     occupancy, each person's position, per-seat person overlap, the host
     (always present and seated, with drink/appearance when known), and where
     an earlier guest was seated.
@@ -261,8 +269,7 @@ def describe_seating_scene(
         if overlap > 0:
             status += f" (a person's box covers {overlap:.0%} of it)"
         lines.append(
-            f"  [{i}] {seat.class_name} — center x={seat.center_px[0]:.0f}px "
-            f"({direction_phrase(seat.center_px[0], img_w)}), "
+            f"  [{i}] {seat.class_name} — center x={seat.center_px[0]:.0f}px, "
             f"{x2 - x1:.0f}x{y2 - y1:.0f}px, "
             f"detection confidence {seat.confidence:.2f}, {status}"
         )
@@ -272,8 +279,7 @@ def describe_seating_scene(
         for p in persons:
             cx, _cy, w, h = p.bbox
             lines.append(
-                f"  - person at x={cx:.0f}px "
-                f"({direction_phrase(cx, img_w)}), {w:.0f}x{h:.0f}px"
+                f"  - person at x={cx:.0f}px, {w:.0f}x{h:.0f}px"
             )
     else:
         lines.append("No people detected in the frame.")
@@ -331,29 +337,3 @@ def llm_pick_seat(
     print(f"[skills] LLM picked seat [{choice.seat_index}] {seat.class_name}"
           f" ({choice.reason or 'no reason given'})")
     return seat, (choice.announcement or "").strip() or None
-
-
-def direction_phrase(center_x: float, img_w: int) -> str:
-    """Frame thirds -> a spoken direction (camera faces forward)."""
-    if img_w <= 0:
-        return "in front of me"
-    third = center_x / img_w
-    if third < 1 / 3:
-        return "to my left"
-    if third > 2 / 3:
-        return "to my right"
-    return "in front of me"
-
-
-def heading_to_pixel(ctx: TaskContext, px_x: float, img_w: int) -> float:
-    """Map-frame heading that would center the given pixel column."""
-    hfov = math.radians(float(os.getenv("HRI_CAMERA_HFOV_DEG", "90")))
-    offset = (0.5 - px_x / img_w) * hfov  # left of center -> positive (CCW)
-    return ctx.current_pose()["heading"] + offset
-
-
-def face_pixel(ctx: TaskContext, px_x: float, img_w: int) -> bool:
-    """Rotate the base to look toward a pixel column. Best-effort one-shot."""
-    if img_w <= 0:
-        return False
-    return ctx.rotate_to(heading_to_pixel(ctx, px_x, img_w))

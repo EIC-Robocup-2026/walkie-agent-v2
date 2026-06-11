@@ -286,7 +286,7 @@ WALKIE_GRAPHS_MERGE_EVERY_N = "20"
 WALKIE_GRAPHS_MERGE_OVERLAP_THRESH = "0.7"
 WALKIE_GRAPHS_MERGE_VISUAL_SIM_THRESH = "0.7"
 WALKIE_GRAPHS_MERGE_TEXT_SIM_THRESH = "0.7"
-WALKIE_GRAPHS_MERGE_RADIUS_M = "0.2"
+WALKIE_GRAPHS_MERGE_RADIUS_M = "0.4"
 # Node precision (CG obj_min_detections): an object must be seen MIN_OBS_CONFIRM times
 # before it counts. With REQUIRE_CONFIRMATION=1, provisional (under-seen) nodes are
 # HIDDEN from queries/description (non-destructive — a re-sighting promotes them; the
