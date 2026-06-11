@@ -141,7 +141,7 @@ WALKIE_GRAPHS_DEDUP_VISUAL_K = "5"
 # keep it low or small/thin/flat objects (a fork) never enter the catalogue.
 # REQUIRE_CONFIRMATION + MIN_OBS_CONFIRM backstop the false-positive risk of a low value.
 WALKIE_GRAPHS_VOXEL_M = "0.01"
-WALKIE_GRAPHS_MAX_POINTS_PER_OBJ = "6000"
+WALKIE_GRAPHS_MAX_POINTS_PER_OBJ = "12000"
 WALKIE_GRAPHS_MIN_POINTS = "15"
 # Minimum detector confidence to accept a detection. Dropped early (before
 # lift/embed/caption), alongside the class scope and MIN_POINTS checks. 0.0 = keep all.
