@@ -764,19 +764,26 @@ class GraphMemory:
 
         if union:
             stored = self.load_pcd(node.id)
-            if self.icp_max_dist_m > 0 and assoc_overlap < self.icp_skip_overlap:
+            if self.icp_max_dist_m > 0:
                 # Residual camera-pose error lands each sighting a few cm off; ICP-align
                 # the new cloud to the stored one so the union sharpens the shape
-                # instead of double-exposing it. Applied only on confident alignments
-                # (enough points on both sides + fitness gate inside icp_align).
+                # instead of double-exposing it. But ICP is the most expensive step in
+                # the whole upsert, so first establish the clouds are actually
+                # misaligned: reuse the association's overlap ratio, or measure it now
+                # (a ~ms nn_ratio) when the match came through the visual cascade.
+                # Pre-aligned clouds (ratio >= icp_skip_overlap) skip ICP outright.
                 t0 = time.perf_counter()
-                det_pts, _fit = icp_align(
-                    det_pts,
-                    stored,
-                    self.icp_max_dist_m,
-                    min_fitness=self.icp_min_fitness,
-                    min_points=self.icp_min_points,
-                )
+                ratio = assoc_overlap
+                if ratio <= 0.0:
+                    ratio = nn_ratio(stored, det_pts, self.nn_voxel_m)
+                if ratio < self.icp_skip_overlap:
+                    det_pts, _fit = icp_align(
+                        det_pts,
+                        stored,
+                        self.icp_max_dist_m,
+                        min_fitness=self.icp_min_fitness,
+                        min_points=self.icp_min_points,
+                    )
                 self._perf_add("icp", t0)
             t0 = time.perf_counter()
             merged = np.vstack([stored, det_pts])

@@ -181,9 +181,9 @@ def icp_align(
 
     reg = o3d.pipelines.registration
     # Estimate the transform on bounded subsamples (uniform stride — keeps coverage),
-    # then apply it to the FULL source: rigid-transform accuracy barely depends on
-    # density past ~2000 points, while ICP cost is superlinear in it.
-    cap = 2000
+    # then apply it to the FULL source: a rigid transform is fully constrained by a
+    # few hundred well-spread points, while ICP cost scales with count × iterations.
+    cap = 800
     src_est = src if len(src) <= cap else src[np.linspace(0, len(src) - 1, cap).astype(int)]
     tgt = np.asarray(target, dtype=np.float64)
     tgt_est = tgt if len(tgt) <= cap else tgt[np.linspace(0, len(tgt) - 1, cap).astype(int)]
@@ -195,11 +195,11 @@ def icp_align(
         float(max_corr_dist),
         np.eye(4),
         reg.TransformationEstimationPointToPoint(),
-        # 50 iterations of headroom (default 30 can stop short on a few-cm offset),
-        # but KEEP the default 1e-6 relative epsilons: they early-stop converged runs
-        # after ~10-30 iterations. Tighter epsilons force every merge to burn the full
-        # budget — seconds per frame on the robot's CPU for no extra accuracy.
-        reg.ICPConvergenceCriteria(max_iteration=50),
+        # 30 iterations: a few-cm pose offset fully converges by ~25 (measured 3 mm
+        # residual; 15 leaves ~18 mm), and the default 1e-6 relative epsilons stop
+        # converged runs earlier — so the cap is the worst-case ceiling, not the
+        # typical cost. This runs inside the perception tick on the robot's CPU.
+        reg.ICPConvergenceCriteria(max_iteration=30),
     )
     fitness = float(result.fitness)
     if fitness < min_fitness:

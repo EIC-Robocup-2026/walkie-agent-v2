@@ -222,10 +222,12 @@ WALKIE_GRAPHS_SOR_STD_RATIO = "2.0"
 WALKIE_GRAPHS_ICP_MAX_DIST_M = "0.1"
 WALKIE_GRAPHS_ICP_MIN_FITNESS = "0.6"
 WALKIE_GRAPHS_ICP_MIN_POINTS = "150"
-# Skip ICP when the association already found the clouds coinciding (its nn_ratio >=
-# this): with a good pose most frames are pre-aligned, so ICP only runs (and only
-# costs CPU) on the frames that are actually misaligned.
-WALKIE_GRAPHS_ICP_SKIP_OVERLAP = "0.75"
+# Skip ICP when the clouds already coincide (overlap nn_ratio >= this — reused from
+# association, or measured cheaply at merge time): with a good pose most frames are
+# pre-aligned, so the expensive ICP only runs on actually-misaligned frames. At 0.6,
+# "most of the detection already within 2.5cm" counts as aligned — raise toward 0.8
+# for stricter (more frequent, costlier) alignment.
+WALKIE_GRAPHS_ICP_SKIP_OVERLAP = "0.6"
 # Defer per-sighting point-cloud .npz writes: reads always come from the in-memory
 # cache, so the disk write only needs to happen on a cadence (PCD_FLUSH_EVERY_N ticks,
 # in [graphs.maintenance]) instead of once per object per frame — on slow robot
