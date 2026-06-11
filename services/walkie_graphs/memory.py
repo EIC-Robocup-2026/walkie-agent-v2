@@ -37,7 +37,7 @@ except Exception:  # pragma: no cover
 
 import chromadb
 
-from .dbscan import dbscan_largest_cluster
+from .dbscan import dbscan_largest_cluster, dbscan_remove_noise
 from .fusion import (
     aabb_overlap,
     additive_similarity,
@@ -635,21 +635,25 @@ class GraphMemory:
         return node
 
     def _merge(self, node: ObjectNode, det: Detection3D) -> ObjectNode:
-        n = node.n_obs
-        far = l2(det.centroid, node.centroid) > self.dedup_radius_m
-        det_pts = det.points_world.astype(np.float32)
+        """Fold a matched detection into ``node``, growing its cloud whenever possible.
 
-        if far:
-            # Visual-only re-sighting whose 3D estimate drifted: don't average two
-            # far positions into empty space — keep the higher-confidence geometry.
-            if det.confidence > node.conf:
-                centroid, mn, mx, ext = aabb_of(det_pts)
-                node.centroid, node.aabb_min, node.aabb_max, node.extent = (
-                    centroid, mn, mx, ext
-                )
-                node.pcd_ref = self._save_pcd(node.id, det_pts)
-            node.conf = max(node.conf, float(det.confidence))
-        else:
+        **Union** (vstack old + new, voxel, cap) whenever the detection's points
+        geometrically overlap the stored cloud OR its centroid is near — so a *partial*
+        view of a large object (one end of a bed) adds to the accumulated cloud instead
+        of replacing it, and the object fills in across sightings. Only a matched
+        detection that is far AND non-overlapping (a pure-visual re-sighting whose 3D
+        estimate drifted into empty space, or an object that physically moved) takes the
+        **replace** branch — unioning there would smear one object across two places.
+        """
+        n = node.n_obs
+        det_pts = det.points_world.astype(np.float32)
+        _, det_mn, det_mx, _ = aabb_of(det_pts)
+        union = (
+            l2(det.centroid, node.centroid) <= self.dedup_radius_m
+            or aabb_overlap(det_mn, det_mx, node.aabb_min, node.aabb_max, pad=self.nn_voxel_m)
+        )
+
+        if union:
             merged = np.vstack([self.load_pcd(node.id), det_pts])
             merged = _voxel(merged, self.voxel_m)
             if len(merged) > self.max_points_per_obj:
@@ -661,6 +665,16 @@ class GraphMemory:
             )
             node.pcd_ref = self._save_pcd(node.id, merged)
             node.conf = (node.conf * n + float(det.confidence)) / (n + 1)
+        else:
+            # Drifted/moved re-sighting: don't average two far positions into empty
+            # space — keep the higher-confidence geometry.
+            if det.confidence > node.conf:
+                centroid, mn, mx, ext = aabb_of(det_pts)
+                node.centroid, node.aabb_min, node.aabb_max, node.extent = (
+                    centroid, mn, mx, ext
+                )
+                node.pcd_ref = self._save_pcd(node.id, det_pts)
+            node.conf = max(node.conf, float(det.confidence))
 
         if det.clip_emb:
             blended = np.asarray(node.clip_emb, float) * n + np.asarray(det.clip_emb, float)
@@ -678,8 +692,8 @@ class GraphMemory:
             node.frame_ref = self._save_thumb(node.id, det.crop)
             self._record_view(node, det.confidence, det.crop)
         self._write_node(node)
-        if not far:
-            self._dirty.add(node.id)  # cloud grew; the far branch swaps, never accretes
+        if union:
+            self._dirty.add(node.id)  # cloud grew; the replace branch swaps, never accretes
         return node
 
     # ------------------------------------------------------------------
@@ -911,12 +925,15 @@ class GraphMemory:
     def denoise_nodes(self) -> int:
         """DBSCAN-denoise the clouds of nodes that changed since the last pass.
 
-        ConceptGraphs' ``denoise_objects``: re-cluster each object and keep the largest
-        cluster, clearing cross-view outliers that a multi-view merge accreted. We only
-        touch *dirty* nodes (changed since the last call) and **skip** a node when
-        denoising would drop more than ``denoise_keep_min_frac`` of its points — a big
-        drop means a legitimately spread object (long table, shelf), not noise, which a
-        blind largest-cluster keep would wrongly truncate. Returns the number changed.
+        ConceptGraphs' ``denoise_objects`` analog, adapted for accumulated multi-view
+        clouds: drop only **noise** points (isolated scatter, DBSCAN label ``-1``) and
+        keep every real cluster — a cloud built from disjoint partial views (the two
+        ends of a bed) is legitimately multi-cluster, and the largest-cluster keep CG
+        uses would truncate it. (Per-detection denoise in ``upsert`` still keeps the
+        largest cluster — a single view of one object is one blob.) Only *dirty* nodes
+        (changed since the last call) are touched, and a node is skipped when denoising
+        would drop more than ``denoise_keep_min_frac`` of its points (a big drop means
+        real structure, not noise). Returns the number changed.
         """
         if not self.dbscan_enabled:
             return 0
@@ -931,7 +948,7 @@ class GraphMemory:
                 pts = self.load_pcd(nid)
             if len(pts) < self.dbscan_min_points:
                 continue
-            kept = dbscan_largest_cluster(pts, self.dbscan_eps, self.dbscan_min_points)
+            kept = dbscan_remove_noise(pts, self.dbscan_eps, self.dbscan_min_points)
             if len(kept) >= len(pts):  # nothing removed
                 continue
             if len(kept) < self.denoise_keep_min_frac * len(pts):

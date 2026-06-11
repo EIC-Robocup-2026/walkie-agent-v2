@@ -74,7 +74,7 @@ WALKIE_GRAPHS_INTERVAL_SEC = "2.0"
 # may contain spaces (split on commas). Grouped here by category for readability.
 
 
-WALKIE_GRAPHS_INTERESTED_CLASSES = "chair,table,stool,shirt,sponge,bowl,cup,fork,knife,plate,spoon,coffee creamer,coke,ice tea,milk,orange juice,red bull,water bottle,bread,cornflakes,instant noodles,potato,tomato soup,apple,avocado,lemon,orange,chips,cookies,gum,mixed nuts,pringles,hand cream,soap,toothpaste,dish rack,shelf,monitor,bed,pillow"
+WALKIE_GRAPHS_INTERESTED_CLASSES = "door,chair,table,stool,shirt,sponge,bowl,cup,fork,knife,plate,spoon,coffee creamer,coke,ice tea,milk,orange juice,red bull,water bottle,bread,cornflakes,instant noodles,potato,tomato soup,apple,avocado,lemon,orange,chips,cookies,gum,mixed nuts,pringles,hand cream,soap,toothpaste,dish rack,shelf,monitor,bed,pillow"
 
 
 # Classes to always drop before lift/embed/store. Moving objects (people) can't
@@ -212,9 +212,10 @@ WALKIE_GRAPHS_EMBED_WORKERS = "8"
 [graphs.maintenance]
 # Periodic ConceptGraphs post-processing, each on its own cadence (in ingest ticks,
 # staggered so no two collide). 0 disables a pass.
-# denoise_nodes: re-DBSCAN nodes whose cloud changed, keeping the largest cluster
-#   UNLESS that would drop more than 1 - DENOISE_KEEP_MIN_FRAC of the points (a big
-#   drop means a legitimately spread object, e.g. a table, not noise → left intact).
+# denoise_nodes: re-DBSCAN nodes whose cloud changed, dropping only NOISE points
+#   (isolated scatter) — every real cluster is kept, so a cloud accumulated from
+#   disjoint partial views (two ends of a bed) is never truncated. Skipped entirely
+#   if it would drop more than 1 - DENOISE_KEEP_MIN_FRAC of the points (safety net).
 WALKIE_GRAPHS_DENOISE_EVERY_N = "20"
 WALKIE_GRAPHS_DENOISE_KEEP_MIN_FRAC = "0.5"
 # merge_overlapping_nodes: fuse two nodes within MERGE_RADIUS_M whose clouds overlap

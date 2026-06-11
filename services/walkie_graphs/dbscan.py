@@ -140,3 +140,23 @@ def dbscan_largest_cluster(
     if counts[best] < min_cluster_size:
         return pts
     return pts[labels == best]
+
+
+def dbscan_remove_noise(points: np.ndarray, eps: float, min_points: int) -> np.ndarray:
+    """Drop only DBSCAN **noise** points (label ``-1``), keeping every real cluster.
+
+    The right cleanup for an object cloud *accumulated across views*: disjoint partial
+    sightings (the two ends of a bed, middle never seen) legitimately form multiple
+    clusters, which a largest-cluster keep would truncate — here they all survive, and
+    only isolated scatter is removed. Falls back to the **original** cloud when there
+    are too few points to cluster or everything is labelled noise (a sparse-but-real
+    cloud is never thrown away).
+    """
+    pts = np.asarray(points)
+    if len(pts) < min_points:
+        return pts
+    labels = dbscan_labels(pts, eps, min_points)
+    keep = labels >= 0
+    if not keep.any():
+        return pts
+    return pts[keep]

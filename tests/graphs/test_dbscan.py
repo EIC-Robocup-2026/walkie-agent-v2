@@ -10,7 +10,11 @@ import numpy as np
 import pytest
 
 import services.walkie_graphs.dbscan as dbscan_mod
-from services.walkie_graphs.dbscan import dbscan_labels, dbscan_largest_cluster
+from services.walkie_graphs.dbscan import (
+    dbscan_labels,
+    dbscan_largest_cluster,
+    dbscan_remove_noise,
+)
 
 
 @pytest.fixture(autouse=True, params=["sklearn", "scipy-fallback"])
@@ -79,3 +83,38 @@ def test_determinism():
     a = dbscan_largest_cluster(pts, eps=0.05, min_points=10)
     b = dbscan_largest_cluster(pts, eps=0.05, min_points=10)
     assert np.array_equal(a, b)
+
+
+# ---------------------------------------------------------------------------
+# dbscan_remove_noise — keep every cluster, drop only isolated scatter
+# ---------------------------------------------------------------------------
+def test_remove_noise_keeps_multiple_clusters():
+    big = _blob((0, 0, 0), 60, seed=1)
+    small = _blob((2, 2, 2), 20, seed=2)  # a second REAL cluster, far from the first
+    strays = np.array([[9, 9, 9], [-8, 0, 4]], dtype=np.float32)
+    pts = np.vstack([big, small, strays])
+    kept = dbscan_remove_noise(pts, eps=0.05, min_points=10)
+    assert len(kept) == 80  # both clusters survive; only the 2 strays are dropped
+    # (largest-cluster keep would have returned just the 60-point blob)
+    assert len(dbscan_largest_cluster(pts, eps=0.05, min_points=10)) == 60
+
+
+def test_remove_noise_all_noise_falls_back_to_original():
+    # 12 isolated points, no cluster possible → return the original cloud untouched.
+    rng = np.random.default_rng(3)
+    pts = rng.uniform(-5, 5, size=(12, 3)).astype(np.float32)
+    kept = dbscan_remove_noise(pts, eps=0.05, min_points=10)
+    assert np.array_equal(kept, pts)
+
+
+def test_remove_noise_too_few_points_passthrough():
+    few = _blob((0, 0, 0), 4, seed=4)
+    assert np.array_equal(dbscan_remove_noise(few, eps=0.05, min_points=10), few)
+    empty = np.zeros((0, 3), np.float32)
+    assert len(dbscan_remove_noise(empty, eps=0.05, min_points=10)) == 0
+
+
+def test_remove_noise_clean_cloud_unchanged():
+    pts = _blob((1, 1, 1), 50, seed=5)
+    kept = dbscan_remove_noise(pts, eps=0.05, min_points=10)
+    assert len(kept) == 50

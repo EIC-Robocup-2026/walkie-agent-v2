@@ -126,16 +126,19 @@ finished 3D cloud:
 <details>
 <summary>Details — DBSCAN denoising (the 3D backstop)</summary>
 
-- [services/walkie_graphs/dbscan.py](services/walkie_graphs/dbscan.py) implements DBSCAN clustering and keeps only
-  the **largest cluster** of points — exactly what ConceptGraphs does with `pcd_denoise_dbscan`.
-  It uses scikit-learn's battle-tested C implementation when installed (the fast path), with a
+- [services/walkie_graphs/dbscan.py](services/walkie_graphs/dbscan.py) implements DBSCAN clustering,
+  using scikit-learn's battle-tested C implementation when installed (the fast path), with a
   pure `scipy.spatial.cKDTree` + union-find fallback so a partial install still works.
-- This runs **once per detection** (`GraphMemory._denoise`, controlled by `DBSCAN_EPS`,
-  `DBSCAN_MIN_POINTS`). The edge filters above remove most depth bleed before it ever becomes a
-  point; DBSCAN catches any residual disconnected blob that would still inflate the bounding box.
-- A safety rule: if denoising would throw away most of the points, it's skipped — a big cloud that
-  legitimately spans a gap (a long table, a shelf) shouldn't be truncated to one blob. (See
-  `denoise_nodes` and `DENOISE_KEEP_MIN_FRAC` for the periodic version.)
+- **Per detection** (`GraphMemory._denoise`, controlled by `DBSCAN_EPS`, `DBSCAN_MIN_POINTS`):
+  keeps only the **largest cluster** — exactly ConceptGraphs' `pcd_denoise_dbscan`. A single
+  view of one object is one blob, so anything else is mask bleed. The edge filters above remove
+  most of it before it ever becomes a point; this catches the residue.
+- **Periodically over stored objects** (`denoise_nodes`): drops only **noise points** (isolated
+  scatter, no cluster), keeping *every* real cluster — a cloud accumulated from disjoint partial
+  views (the two ends of a bed, middle never seen) is legitimately multi-cluster and must never
+  be truncated to its newest view.
+- A safety rule: if denoising would throw away most of the points, it's skipped
+  (`DENOISE_KEEP_MIN_FRAC`).
 </details>
 
 ### 4. Describe it
@@ -204,16 +207,18 @@ which recovers drifted re-sightings without fusing two genuinely-different look-
 <summary>Details — what "merge" actually updates</summary>
 
 When a detection merges into an existing object (`_merge`):
-- **Point cloud**: the two clouds are combined, voxel-downsampled, and capped — the object's shape
-  sharpens with each view.
+- **Point cloud**: whenever the new points geometrically **overlap** the stored cloud (or land
+  near it), the two clouds are **unioned**, voxel-downsampled, and capped — so a *partial* view
+  of a large object (one end of the bed) adds to the accumulated cloud rather than replacing it,
+  and the object fills in across sightings. Old points are never discarded by a re-sighting.
 - **CLIP embedding**: blended as a running average weighted by how many times the object's been
   seen (so one bad frame can't hijack it).
 - **Captions**: accumulated; the longest is kept as `best_caption` (until the optional LLM step
   rewrites it — see below).
 - **Confidence & timestamps**: updated; `n_obs` (sighting count) increments.
-- A special case: if a confident re-sighting lands *far* from the stored position (depth drift),
-  the system keeps the higher-confidence geometry instead of averaging two positions into empty
-  space.
+- The only exception: a matched re-sighting that is far away AND doesn't overlap the stored
+  cloud at all (a drifted depth estimate, or an object that physically moved). There the system
+  keeps the higher-confidence geometry instead of smearing one object across two places.
 </details>
 
 ### 6. Link it to its neighbours
@@ -400,7 +405,7 @@ background-box rejection, DBSCAN on). See the comments in `config.toml` for each
 | [services/walkie_graphs/memory.py](services/walkie_graphs/memory.py) | `GraphMemory` — the store: association, merging, relations, queries, maintenance, persistence |
 | [services/walkie_graphs/geometry.py](services/walkie_graphs/geometry.py) | camera math — intrinsics, pose, depth→world deprojection |
 | [services/walkie_graphs/fusion.py](services/walkie_graphs/fusion.py) | association math — `nn_ratio` overlap, AABB prefilter, additive score |
-| [services/walkie_graphs/dbscan.py](services/walkie_graphs/dbscan.py) | point-cloud denoising (DBSCAN, largest cluster) |
+| [services/walkie_graphs/dbscan.py](services/walkie_graphs/dbscan.py) | point-cloud denoising (DBSCAN: largest-cluster per detection, noise-only for stored objects) |
 | [services/walkie_graphs/viz.py](services/walkie_graphs/viz.py) | optional real-time 3D visualization via Rerun |
 | [services/walkie_graphs/tools/reset.py](services/walkie_graphs/tools/reset.py) | CLI to wipe the store |
 

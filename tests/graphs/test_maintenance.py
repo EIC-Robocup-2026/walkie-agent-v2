@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from tests.graphs.conftest import make_cloud, make_det, put_object, unit
 
@@ -84,8 +85,8 @@ def test_denoise_strips_outlier_cluster(mem):
 
 
 def test_denoise_skips_fragmented_spread_object(mem):
-    # Three equal sub-blobs: the largest cluster is < keep_min_frac of the cloud, so a
-    # blind largest-cluster keep would gut a legitimately spread object → left intact.
+    # Three equal sub-blobs: all are real clusters, so the noise-only denoise removes
+    # nothing — a legitimately spread/multi-view object is preserved by design.
     pts = np.vstack(
         [
             make_cloud((0, 0, 0), n=20, spread=0.005, seed=1),
@@ -95,8 +96,28 @@ def test_denoise_skips_fragmented_spread_object(mem):
     )
     put_object(mem, "y", "shelf", pts, emb=unit(1, 0, 0))
     mem._dirty.add("y")
-    assert mem.denoise_nodes() == 0  # skipped by the keep-min-frac guard
+    assert mem.denoise_nodes() == 0  # nothing removed
     assert len(mem.load_pcd("y")) == 60
+
+
+def test_denoise_keeps_all_view_clusters_drops_only_strays(mem):
+    # An accumulated two-view cloud (two ends of a bed, middle never seen) + isolated
+    # stray points: the periodic denoise must remove ONLY the strays — both view
+    # clusters survive and the AABB still spans them.
+    blob_a = make_cloud((0, 0, 0), n=40, spread=0.005, seed=1)
+    blob_b = make_cloud((1.5, 0, 0), n=40, spread=0.005, seed=2)
+    strays = np.array(
+        [[5, 5, 5], [-4, 0, 2], [0, -6, 1], [7, 1, 0], [3, 3, -3]], dtype=np.float32
+    )
+    node = put_object(mem, "bed", "bed", np.vstack([blob_a, blob_b, strays]), emb=unit(1, 0, 0))
+    assert node.aabb_max[0] > 6  # strays inflate the AABB before denoise
+    mem._dirty.add("bed")
+    assert mem.denoise_nodes() == 1
+    pts = mem.load_pcd("bed")
+    assert len(pts) == 80  # only the 5 strays removed; BOTH clusters kept
+    n = mem.get("bed")
+    assert n.aabb_min[0] == pytest.approx(0.0, abs=0.05)
+    assert n.aabb_max[0] == pytest.approx(1.5, abs=0.05)  # spans both views, no strays
 
 
 def test_denoise_only_touches_dirty(mem):

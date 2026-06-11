@@ -86,6 +86,50 @@ def test_far_visual_merge_keeps_higher_conf_geometry(mem):
 
 
 # ---------------------------------------------------------------------------
+# Cloud accumulation: partial views UNION; only non-overlapping far replaces
+# ---------------------------------------------------------------------------
+def _line_cloud(x0, x1, n, *, seed=0):
+    """A dense cloud along x∈[x0,x1] (like a bed seen side-on), tight in y/z."""
+    rng = np.random.default_rng(seed)
+    pts = np.zeros((n, 3), dtype=np.float32)
+    pts[:, 0] = np.linspace(x0, x1, n)
+    pts[:, 1] = rng.normal(0.0, 0.01, n)
+    pts[:, 2] = 0.5 + rng.normal(0.0, 0.01, n)
+    return pts
+
+
+def test_partial_view_unions_into_fuller_cloud(mem):
+    # Map a whole "bed" spanning x∈[0,2], then re-see only one END (x∈[1.5,2.5]) —
+    # the partial view's centroid (~2.0) is >dedup_radius from the bed centroid (~1.0),
+    # but the clouds overlap, so the merge must UNION: old points kept, cloud extended.
+    bed = make_det(class_name="bed", center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), conf=0.6)
+    bed = replace(bed, points_world=_line_cloud(0.0, 2.0, 400, seed=1))
+    node = mem.upsert(bed)
+    assert node.aabb_max[0] == pytest.approx(2.0, abs=0.05)
+
+    partial = make_det(class_name="bed", center=(2.0, 0.0, 0.5), emb=unit(1, 0, 0), conf=0.95, ts=2.0)
+    partial = replace(partial, points_world=_line_cloud(1.5, 2.5, 200, seed=2))
+    node = mem.upsert(partial)
+
+    assert mem.count() == 1
+    # old extent retained AND new extent added — the cloud got fuller, not swapped.
+    assert node.aabb_min[0] == pytest.approx(0.0, abs=0.1)
+    assert node.aabb_max[0] == pytest.approx(2.5, abs=0.1)
+    pts = mem.load_pcd(node.id)
+    assert pts[:, 0].min() < 0.2 and pts[:, 0].max() > 2.3  # both ends present
+
+
+def test_moved_object_replaces_without_smearing(mem):
+    # Companion to the union test: a far re-sighting with NO overlap (the object moved
+    # or its estimate drifted) must NOT union — the cloud lives only at the new spot.
+    mem.upsert(make_det(center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), conf=0.6, spread=0.005))
+    node = mem.upsert(make_det(center=(4.0, 0.0, 0.5), emb=unit(1, 0, 0), conf=0.95, spread=0.005, ts=2.0))
+    assert mem.count() == 1
+    pts = mem.load_pcd(node.id)
+    assert pts[:, 0].min() > 3.5  # nothing left at the old location → no smear
+
+
+# ---------------------------------------------------------------------------
 # ConceptGraphs additive-greedy association (_associate path, distinct from cascade)
 # ---------------------------------------------------------------------------
 def test_associate_merges_on_overlap_even_with_mid_cosine(mem):
