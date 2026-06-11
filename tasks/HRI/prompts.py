@@ -26,6 +26,41 @@ EXTRACT_GUEST_INFO_INSTRUCTIONS = (
     "the intended word is clear (e.g. 'cocacola' -> 'Coca-Cola')."
 )
 
+
+class SeatChoice(BaseModel):
+    """LLM decision for which scanned seat to offer a guest."""
+
+    seat_index: int | None = Field(
+        None,
+        description=(
+            "Zero-based index of the chosen seat from the numbered list, "
+            "or null if no detected seat is suitable to offer"
+        ),
+    )
+    reason: str | None = Field(
+        None, description="One short sentence explaining the choice"
+    )
+
+
+PICK_SEAT_INSTRUCTIONS = (
+    "You are the seating planner for a receptionist robot at a party. The "
+    "robot stands in the living room facing the seating area and must point a "
+    "newly arrived guest to one specific seat, then rotate to face it. You are "
+    "given a text description of the robot's current camera frame: every "
+    "detected seat (numbered, with class, position in the frame, size, "
+    "detection confidence, and occupancy) and every detected person. Choose "
+    "the seat to offer:\n"
+    "- Never pick an occupied seat. If a person's box overlaps a seat, treat "
+    "it as occupied even when it is listed as free — occupancy detection can "
+    "miss.\n"
+    "- A sofa counts as a single seat; skip it if anyone is on it.\n"
+    "- Prefer confidently detected, larger seats over marginal detections.\n"
+    "- If an earlier guest is already seated, prefer a free seat near them so "
+    "the guests can later be introduced to each other — but never that same "
+    "seat.\n"
+    "Return null for seat_index only when every detected seat is unusable."
+)
+
 # --- Greeting ---------------------------------------------------------------
 
 GREET_ASK_BOTH = (
@@ -45,6 +80,7 @@ APPEARANCE_CAPTION_PROMPT = (
 
 FOLLOW_ME = "Please follow me to the living room."
 OFFER_SEAT_TEMPLATE = "Please take a seat on the {seat_class} {direction}."
+OFFER_SEAT_FACING = "right here in front of me"  # used after rotating to face the seat
 OFFER_SEAT_FALLBACK = "Please take any free seat you like."
 
 # --- Introductions ------------------------------------------------------------

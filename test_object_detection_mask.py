@@ -40,7 +40,7 @@ def test_object_detection_mask():
             break
 
         # Request a segmentation mask per detection.
-        detections = walkieAI.object_detection.detect(frame, return_mask=True)
+        detections = walkieAI.object_detection.detect(frame, prompts=["chair", "table", "stool", "shirt"], return_mask=True)
 
         print(f"Frame shape: {frame.shape}, Detections: {len(detections)}")
 

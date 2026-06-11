@@ -8,7 +8,9 @@ other while facing them. Bag handover / follow-host are gated stubs.
 
 Blackboard layout (ctx.data):
     guests: {1: {"name", "drink", "appearance"}, 2: {...}}
-    seats:  {guest_number: (SeatCandidate, img_w)}  # from the offer-seat scan
+    seats:  {guest_number: (SeatCandidate, img_w, world_xy | None)}
+            # from the offer-seat scan; world_xy is the seat's map-frame
+            # position when the 3D lift succeeded
 """
 
 from __future__ import annotations
@@ -22,11 +24,14 @@ from . import prompts
 from .skills import (
     direction_phrase,
     face_pixel,
+    face_point,
     find_persons,
     heading_to_pixel,
+    heading_to_point,
+    llm_pick_seat,
     parse_pose,
-    pick_free_seat,
     scan_seats,
+    seat_world_position,
 )
 
 
@@ -113,7 +118,7 @@ class GuideToLivingRoom(SubTask):
 
 
 class OfferSeat(SubTask):
-    """Scan for a free seat, face it, and announce it to the guest."""
+    """Scan the room, let the LLM pick a seat, face it, and announce it."""
 
     def __init__(self, guest: int):
         super().__init__(f"OfferSeat(guest {guest})")
@@ -121,14 +126,25 @@ class OfferSeat(SubTask):
 
     def run(self, ctx: TaskContext) -> StepResult:
         time.sleep(2) # wait for navigation to settle
-        seats, img_w = scan_seats(ctx)
-        seat = pick_free_seat(seats)
+        seats, persons, img_w = scan_seats(ctx)
+        seat = llm_pick_seat(
+            ctx, seats, persons, img_w,
+            guest=self.guest, prior_seats=ctx.data.get("seats"),
+        )
         if seat is None:
             ctx.say(prompts.OFFER_SEAT_FALLBACK)
             return StepResult.DONE
-        ctx.data.setdefault("seats", {})[self.guest] = (seat, img_w)
-        direction = direction_phrase(seat.center_px[0], img_w)
-        face_pixel(ctx, seat.center_px[0], img_w)  # best-effort look-at
+        # Lift the seat to a map-frame point while the camera still sees the
+        # scanned scene; facing then uses odometry + atan2 instead of the
+        # pixel/HFOV approximation. Pixel facing stays as the fallback.
+        world_xy = seat_world_position(ctx, seat)
+        ctx.data.setdefault("seats", {})[self.guest] = (seat, img_w, world_xy)
+        faced = face_point(ctx, *world_xy) if world_xy else False
+        if not faced:
+            faced = face_pixel(ctx, seat.center_px[0], img_w)
+        # If the rotation lands, the seat is now centered ahead — the
+        # pre-rotation left/right phrase would be stale by the time it's said.
+        direction = prompts.OFFER_SEAT_FACING if faced else direction_phrase(seat.center_px[0], img_w)
         ctx.say(prompts.OFFER_SEAT_TEMPLATE.format(seat_class=seat.class_name, direction=direction))
         return StepResult.DONE
 
@@ -162,26 +178,32 @@ class IntroduceGuests(SubTask):
         g1, g2 = _guest(ctx, 1), _guest(ctx, 2)
         seats: dict = ctx.data.get("seats", {})
 
-        # Anchor each guest to a pixel column: the live person nearest their
-        # offered seat, falling back to the stored seat center itself.
-        anchors: dict[int, tuple[float, int]] = {}  # guest -> (px_x, img_w)
+        # Anchor each guest: the live person nearest their offered seat, then
+        # the seat's stored map-frame point, then the stored pixel (stale —
+        # the robot has rotated since that scan). Compute both headings from
+        # the same pose BEFORE the first rotation: rotating invalidates the
+        # pixel->heading mapping (world-point headings survive it, but one
+        # rule for all keeps this simple).
         persons = find_persons(ctx)
+        headings: dict[int, float] = {}
         for n in (1, 2):
             if n not in seats:
                 continue
-            seat, img_w = seats[n]
+            seat, img_w, world_xy = seats[n]
             px = seat.center_px[0]
+            person_px = None
             if persons:
                 nearest = min(persons, key=lambda p: abs(p.bbox[0] - px))
                 if abs(nearest.bbox[0] - px) < img_w / 4:  # plausibly on that seat
-                    px = nearest.bbox[0]
-            anchors[n] = (px, img_w)
-
-        # Compute both headings from the same pose BEFORE the first rotation —
-        # rotating invalidates the pixel->heading mapping of the second anchor.
-        headings = {
-            n: heading_to_pixel(ctx, px, img_w) for n, (px, img_w) in anchors.items()
-        }
+                    person_px = nearest.bbox[0]
+            heading = None
+            if person_px is not None:
+                heading = heading_to_pixel(ctx, person_px, img_w)
+            elif world_xy is not None:
+                heading = heading_to_point(ctx, *world_xy)
+            if heading is None:
+                heading = heading_to_pixel(ctx, px, img_w)
+            headings[n] = heading
 
         def intro_line(listener: dict, other: dict) -> str:
             return prompts.INTRO_TEMPLATE.format(
