@@ -120,6 +120,7 @@ class OfferSeat(SubTask):
         self.guest = guest
 
     def run(self, ctx: TaskContext) -> StepResult:
+        time.sleep(2) # wait for navigation to settle
         seats, img_w = scan_seats(ctx)
         seat = pick_free_seat(seats)
         if seat is None:
