@@ -11,6 +11,9 @@ Blackboard layout (ctx.data):
     seats:  {guest_number: (SeatCandidate, img_w, world_xy | None)}
             # from the offer-seat scan; world_xy is the seat's map-frame
             # position when the 3D lift succeeded
+    host:   {"appearance": str | None}  # captured during OfferSeat(1) — the
+            # only seated person then is the host; name/drink come from
+            # HRI_HOST_NAME / HRI_HOST_DRINK (known from the briefing)
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from tasks.base import StepResult, SubTask, Task, TaskContext
 
 from . import prompts
 from .skills import (
+    describe_seated_person,
     direction_phrase,
     face_pixel,
     face_point,
@@ -118,7 +122,8 @@ class GuideToLivingRoom(SubTask):
 
 
 class OfferSeat(SubTask):
-    """Scan the room, let the LLM pick a seat, face it, and announce it."""
+    """Scan the room, let the LLM pick a seat and word the offer, face the
+    seat, then speak."""
 
     def __init__(self, guest: int):
         super().__init__(f"OfferSeat(guest {guest})")
@@ -126,10 +131,21 @@ class OfferSeat(SubTask):
 
     def run(self, ctx: TaskContext) -> StepResult:
         time.sleep(2) # wait for navigation to settle
-        seats, persons, img_w = scan_seats(ctx)
-        seat = llm_pick_seat(
+        seats, persons, img = scan_seats(ctx)
+        img_w = img.width if img is not None else 0
+        host = ctx.data.setdefault("host", {})
+        # First offer: the only seated person can be the host (guest 1 is
+        # still standing next to the robot) — remember what they look like.
+        if self.guest == 1 and img is not None and not host.get("appearance"):
+            host["appearance"] = describe_seated_person(ctx, img, persons, seats)
+        seat, announcement = llm_pick_seat(
             ctx, seats, persons, img_w,
-            guest=self.guest, prior_seats=ctx.data.get("seats"),
+            guest=self.guest,
+            guest_name=_guest(ctx, self.guest)["name"],
+            host_name=os.getenv("HRI_HOST_NAME", "").strip() or None,
+            host_drink=os.getenv("HRI_HOST_DRINK", "").strip() or None,
+            host_appearance=host.get("appearance"),
+            prior_seats=ctx.data.get("seats"),
         )
         if seat is None:
             ctx.say(prompts.OFFER_SEAT_FALLBACK)
@@ -142,10 +158,14 @@ class OfferSeat(SubTask):
         faced = face_point(ctx, *world_xy) if world_xy else False
         if not faced:
             faced = face_pixel(ctx, seat.center_px[0], img_w)
-        # If the rotation lands, the seat is now centered ahead — the
-        # pre-rotation left/right phrase would be stale by the time it's said.
-        direction = prompts.OFFER_SEAT_FACING if faced else direction_phrase(seat.center_px[0], img_w)
-        ctx.say(prompts.OFFER_SEAT_TEMPLATE.format(seat_class=seat.class_name, direction=direction))
+        ctx.walkie.arm.go_to_pose_relative
+        if announcement:  # LLM-worded offer (may refer to the host)
+            ctx.say(announcement)
+        else:
+            # If the rotation landed, the seat is now centered ahead — the
+            # pre-rotation left/right phrase would be stale by the time it's said.
+            direction = prompts.OFFER_SEAT_FACING if faced else direction_phrase(seat.center_px[0], img_w)
+            ctx.say(prompts.OFFER_SEAT_TEMPLATE.format(seat_class=seat.class_name, direction=direction))
         return StepResult.DONE
 
 

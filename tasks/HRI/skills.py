@@ -11,6 +11,8 @@ import math
 import os
 from dataclasses import dataclass
 
+from PIL import Image
+
 from client.pose_estimation import PersonPose
 from tasks.base import TaskContext
 
@@ -69,16 +71,17 @@ def find_persons(ctx: TaskContext) -> list[PersonPose]:
         return []
 
 
-def scan_seats(ctx: TaskContext) -> tuple[list[SeatCandidate], list[PersonPose], int]:
+def scan_seats(ctx: TaskContext) -> tuple[list[SeatCandidate], list[PersonPose], Image.Image | None]:
     """One frame: detect seats (open-vocab) + people, mark occupancy.
 
-    Returns (seats, persons, image_width_px); ([], [], 0) on capture/detection
-    failure. A whole sofa counts as one seat for now. The persons come from the
-    same frame as the seats, so their pixel coordinates are comparable.
+    Returns (seats, persons, frame); ([], [], None) on capture failure and
+    ([], [], frame) on detection failure. A whole sofa counts as one seat for
+    now. Seats, persons, and frame all come from the same capture, so pixel
+    coordinates are comparable and crops line up.
     """
     img = ctx.capture()
     if img is None:
-        return [], [], 0
+        return [], [], None
     seat_classes = [
         c.strip()
         for c in os.getenv("HRI_SEAT_CLASSES", "chair,sofa,armchair,stool").split(",")
@@ -89,7 +92,7 @@ def scan_seats(ctx: TaskContext) -> tuple[list[SeatCandidate], list[PersonPose],
         detections = ctx.walkieAI.object_detection.detect(img, prompts=seat_classes)
     except Exception as exc:
         print(f"[skills] seat detection failed ({exc})")
-        return [], [], 0
+        return [], [], img
     try:
         persons = ctx.walkieAI.pose_estimation.estimate(img)
     except Exception as exc:
@@ -115,7 +118,7 @@ def scan_seats(ctx: TaskContext) -> tuple[list[SeatCandidate], list[PersonPose],
                 occupied=occupied,
             )
         )
-    return seats, persons, img.width
+    return seats, persons, img
 
 
 def pick_free_seat(seats: list[SeatCandidate]) -> SeatCandidate | None:
@@ -129,6 +132,44 @@ def pick_free_seat(seats: list[SeatCandidate]) -> SeatCandidate | None:
         return (x2 - x1) * (y2 - y1)
 
     return max(free, key=lambda s: (s.confidence, area(s)))
+
+
+def describe_seated_person(
+    ctx: TaskContext,
+    img: Image.Image,
+    persons: list[PersonPose],
+    seats: list[SeatCandidate],
+) -> str | None:
+    """Caption the appearance of the person sitting on a detected seat.
+
+    Crops to the person overlapping an occupied seat when pose detection found
+    one (a lone detected person is accepted too); otherwise captions the whole
+    frame and lets the prompt single out the seated person. None on failure.
+    """
+    occupied = [s.bbox_xyxy for s in seats if s.occupied]
+    target = None
+    for p in persons:
+        pb = cxcywh_to_xyxy(p.bbox)
+        if any(overlap_fraction(pb, sb) > 0 for sb in occupied):
+            target = pb
+            break
+    if target is None and len(persons) == 1:
+        target = cxcywh_to_xyxy(persons[0].bbox)
+    crop = img
+    if target is not None:
+        x1, y1, x2, y2 = target
+        m = 20  # px padding so clothing isn't clipped at the bbox edge
+        crop = img.crop((
+            max(0, int(x1 - m)), max(0, int(y1 - m)),
+            min(img.width, int(x2 + m)), min(img.height, int(y2 + m)),
+        ))
+    try:
+        return ctx.walkieAI.image_caption.caption(
+            crop, prompt=prompts.HOST_APPEARANCE_CAPTION_PROMPT
+        )
+    except Exception as exc:
+        print(f"[skills] seated-person appearance caption failed ({exc})")
+        return None
 
 
 def seat_world_position(ctx: TaskContext, seat: SeatCandidate) -> tuple[float, float] | None:
@@ -177,19 +218,35 @@ def describe_seating_scene(
     persons: list[PersonPose],
     img_w: int,
     guest: int,
+    guest_name: str | None = None,
+    host_name: str | None = None,
+    host_drink: str | None = None,
+    host_appearance: str | None = None,
     prior_seats: dict[int, tuple[SeatCandidate, int, tuple[float, float] | None]] | None = None,
 ) -> str:
     """Text rendering of one seat scan for the LLM seat picker.
 
-    Everything the model needs to decide: each seat's position in the frame
-    (pixels + spoken direction), size, confidence and occupancy, each person's
-    position, per-seat person overlap, and where an earlier guest was seated.
+    Everything the model needs to decide and to word the offer: each seat's
+    position in the frame (pixels + spoken direction), size, confidence and
+    occupancy, each person's position, per-seat person overlap, the host
+    (always present and seated, with drink/appearance when known), and where
+    an earlier guest was seated.
     """
+    guest_label = f"Guest {guest}" + (f", named {guest_name}," if guest_name else "")
+    host_line = (
+        f"The party host{f', {host_name},' if host_name else ''} is already "
+        f"in the room and seated — one of the seated people is the host."
+    )
+    if host_drink:
+        host_line += f" The host's favorite drink is {host_drink}."
+    if host_appearance:
+        host_line += f" The host's appearance: {host_appearance}"
     lines = [
         f"The camera frame is {img_w}px wide; x=0 is the robot's far left, "
         f"x={img_w} its far right.",
-        f"Guest {guest} has just arrived, is standing next to the robot, and "
+        f"{guest_label} has just arrived, is standing next to the robot, and "
         f"needs a seat.",
+        host_line,
         "",
         f"Detected seats ({len(seats)}):",
     ]
@@ -237,32 +294,43 @@ def llm_pick_seat(
     persons: list[PersonPose],
     img_w: int,
     guest: int,
+    guest_name: str | None = None,
+    host_name: str | None = None,
+    host_drink: str | None = None,
+    host_appearance: str | None = None,
     prior_seats: dict[int, tuple[SeatCandidate, int, tuple[float, float] | None]] | None = None,
-) -> SeatCandidate | None:
-    """Let the LLM choose which seat to offer, with pick_free_seat as fallback.
+) -> tuple[SeatCandidate | None, str | None]:
+    """Let the LLM choose which seat to offer and word the spoken offer.
 
-    The model sees the whole frame (seats, people, the other guest's seat) so
-    it can avoid seats the overlap heuristic missed and seat guests near each
-    other. An explicit null from the model means "nothing suitable"; an
-    extraction failure or out-of-range index degrades to the deterministic pick.
+    Returns (seat, announcement). The model sees the whole frame (seats,
+    people, the host, the other guest's seat) so it can avoid seats the
+    overlap heuristic missed, seat guests near the host, and refer to the host
+    in the announcement. A null announcement means "use the default line". An
+    explicit null seat from the model means "nothing suitable"; an extraction
+    failure or out-of-range index degrades to the deterministic pick_free_seat.
     """
     if not seats:
-        return None
-    scene = describe_seating_scene(seats, persons, img_w, guest, prior_seats)
+        return None, None
+    scene = describe_seating_scene(
+        seats, persons, img_w, guest,
+        guest_name=guest_name, host_name=host_name,
+        host_drink=host_drink, host_appearance=host_appearance,
+        prior_seats=prior_seats,
+    )
     choice = ctx.extract(prompts.SeatChoice, prompts.PICK_SEAT_INSTRUCTIONS, scene)
     if choice is None:
         print("[skills] seat choice extraction failed; using heuristic pick")
-        return pick_free_seat(seats)
+        return pick_free_seat(seats), None
     if choice.seat_index is None:
         print(f"[skills] LLM declined to pick a seat ({choice.reason or 'no reason given'})")
-        return None
+        return None, None
     if not 0 <= choice.seat_index < len(seats):
         print(f"[skills] LLM seat index {choice.seat_index} out of range; using heuristic pick")
-        return pick_free_seat(seats)
+        return pick_free_seat(seats), None
     seat = seats[choice.seat_index]
     print(f"[skills] LLM picked seat [{choice.seat_index}] {seat.class_name}"
           f" ({choice.reason or 'no reason given'})")
-    return seat
+    return seat, (choice.announcement or "").strip() or None
 
 
 def direction_phrase(center_x: float, img_w: int) -> str:

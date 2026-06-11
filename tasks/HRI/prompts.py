@@ -37,6 +37,14 @@ class SeatChoice(BaseModel):
             "or null if no detected seat is suitable to offer"
         ),
     )
+    announcement: str | None = Field(
+        None,
+        description=(
+            "The exact sentence the robot should say to direct the guest to "
+            "the chosen seat — it is spoken verbatim. Null to use a default "
+            "line."
+        ),
+    )
     reason: str | None = Field(
         None, description="One short sentence explaining the choice"
     )
@@ -45,19 +53,30 @@ class SeatChoice(BaseModel):
 PICK_SEAT_INSTRUCTIONS = (
     "You are the seating planner for a receptionist robot at a party. The "
     "robot stands in the living room facing the seating area and must point a "
-    "newly arrived guest to one specific seat, then rotate to face it. You are "
-    "given a text description of the robot's current camera frame: every "
-    "detected seat (numbered, with class, position in the frame, size, "
-    "detection confidence, and occupancy) and every detected person. Choose "
-    "the seat to offer:\n"
+    "newly arrived guest to one specific seat. You are given a text "
+    "description of the robot's current camera frame: every detected seat "
+    "(numbered, with class, position in the frame, size, detection "
+    "confidence, and occupancy) and every detected person. The party host is "
+    "always in the room and already seated, so at least one seat is taken by "
+    "the host — even if occupancy detection missed them.\n"
+    "Choosing the seat:\n"
     "- Never pick an occupied seat. If a person's box overlaps a seat, treat "
-    "it as occupied even when it is listed as free — occupancy detection can "
-    "miss.\n"
+    "it as occupied even when it is listed as free.\n"
     "- A sofa counts as a single seat; skip it if anyone is on it.\n"
     "- Prefer confidently detected, larger seats over marginal detections.\n"
-    "- If an earlier guest is already seated, prefer a free seat near them so "
-    "the guests can later be introduced to each other — but never that same "
-    "seat.\n"
+    "- Prefer a free seat near the host (and near an earlier-seated guest) so "
+    "people can talk face to face — but never their own seats.\n"
+    "Composing the announcement:\n"
+    "- One short, warm spoken sentence telling the guest to take the chosen "
+    "seat, addressing the guest by name when known.\n"
+    "- The robot rotates to face the chosen seat BEFORE speaking, so never "
+    "say 'to my left' or 'to my right' — describe the seat as right in front, "
+    "and/or relative to the people already seated (e.g. 'the armchair next "
+    "to our host James').\n"
+    "- Referring to the host helps the guest find the seat; do so when it "
+    "reads naturally. The host's favorite drink and appearance may be given "
+    "and can be woven in when they help (e.g. 'next to our host James, in "
+    "the red sweater').\n"
     "Return null for seat_index only when every detected seat is unusable."
 )
 
@@ -74,6 +93,12 @@ APPEARANCE_CAPTION_PROMPT = (
     "Describe this person's visible appearance in one sentence for someone who "
     "must recognize them at a party: clothing and its colors, hair, glasses, "
     "and any other distinctive feature."
+)
+
+HOST_APPEARANCE_CAPTION_PROMPT = (
+    "Describe the visible appearance of the SEATED person in this image in one "
+    "sentence for someone who must recognize them at a party: clothing and its "
+    "colors, hair, glasses, and any other distinctive feature."
 )
 
 # --- Guiding ----------------------------------------------------------------
