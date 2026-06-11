@@ -139,3 +139,71 @@ def additive_similarity(
 ) -> float:
     """Combined association score ``w_geo·nnratio + w_sem·phi_sem(cos)`` (range ``[0, 2]``)."""
     return w_geo * float(nnratio) + w_sem * phi_sem(cos)
+
+
+def icp_align(
+    source: np.ndarray,
+    target: np.ndarray,
+    max_corr_dist: float,
+    *,
+    min_fitness: float = 0.6,
+    min_points: int = 150,
+) -> tuple[np.ndarray, float]:
+    """Rigidly align ``source`` onto ``target`` with Open3D ICP before fusing them.
+
+    The camera pose carries a few cm of error per sighting, so two clouds of the same
+    object land slightly offset and a naive union double-exposes the shape. ICP
+    (Iterative Closest Point — what object-level SLAM systems like Fusion++/MaskFusion
+    run per object) recovers that residual offset from the clouds' own geometry.
+
+    Returns ``(aligned_source, fitness)``. The alignment is applied only when ICP's
+    fitness (the fraction of source points that found a correspondence within
+    ``max_corr_dist``) reaches ``min_fitness`` — a low score means the clouds barely
+    overlap (e.g. a partial view showing a *new* part of the object), where ICP would
+    wrongly snap distinct surfaces together; the source is then returned unchanged.
+    Also unchanged when either cloud is below ``min_points`` (too little shape to
+    constrain alignment — a small cup can't anchor ICP), when disabled
+    (``max_corr_dist <= 0``), or when Open3D is unavailable (fitness 0.0).
+    """
+    src = np.asarray(source)
+    if (
+        max_corr_dist <= 0
+        or len(src) < min_points
+        or len(np.asarray(target)) < min_points
+    ):
+        return src, 0.0
+
+    from .dbscan import _open3d
+
+    o3d = _open3d()
+    if not o3d:
+        return src, 0.0
+
+    reg = o3d.pipelines.registration
+    # Estimate the transform on bounded subsamples (uniform stride — keeps coverage),
+    # then apply it to the FULL source: rigid-transform accuracy barely depends on
+    # density past ~2000 points, while ICP cost is superlinear in it.
+    cap = 2000
+    src_est = src if len(src) <= cap else src[np.linspace(0, len(src) - 1, cap).astype(int)]
+    tgt = np.asarray(target, dtype=np.float64)
+    tgt_est = tgt if len(tgt) <= cap else tgt[np.linspace(0, len(tgt) - 1, cap).astype(int)]
+    src_pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(src_est.astype(np.float64)))
+    tgt_pc = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(tgt_est))
+    result = reg.registration_icp(
+        src_pc,
+        tgt_pc,
+        float(max_corr_dist),
+        np.eye(4),
+        reg.TransformationEstimationPointToPoint(),
+        # Defaults stop after 30 iterations / loose epsilons; a few-cm offset on a
+        # dense cloud needs the extra headroom (still ~ms at our cloud sizes).
+        reg.ICPConvergenceCriteria(
+            max_iteration=100, relative_fitness=1e-9, relative_rmse=1e-9
+        ),
+    )
+    fitness = float(result.fitness)
+    if fitness < min_fitness:
+        return src, fitness
+    T = np.asarray(result.transformation)
+    aligned = src.astype(np.float64) @ T[:3, :3].T + T[:3, 3]
+    return aligned.astype(np.float32), fitness

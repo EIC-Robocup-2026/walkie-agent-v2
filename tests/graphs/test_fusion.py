@@ -8,6 +8,7 @@ import pytest
 from services.walkie_graphs.fusion import (
     aabb_overlap,
     additive_similarity,
+    icp_align,
     nn_ratio,
     nn_ratio_symmetric,
     pairs_within,
@@ -132,3 +133,59 @@ def test_pairs_within():
     assert pairs_within(pts, 0.5) == [(0, 1)]
     assert pairs_within(pts, 10.0) == [(0, 1), (0, 2), (1, 2)]
     assert pairs_within([(0, 0, 0)], 1.0) == []
+
+
+# ---------------------------------------------------------------------------
+# icp_align — cancel residual camera-pose error before fusing clouds
+# ---------------------------------------------------------------------------
+def _corner_cloud(n=400, seed=3):
+    """An L-shaped corner (two perpendicular planes) of APERIODIC points.
+
+    A single flat plane could slide in-plane (the corner pins all translations), and
+    the points must be irregular like a real depth scan — a perfect lattice would let
+    ICP lock into a lattice-shifted local minimum that real clouds don't have.
+    """
+    rng = np.random.default_rng(seed)
+    floor = np.stack([rng.uniform(0, 0.25, n), rng.uniform(0, 0.25, n), np.zeros(n)], axis=1)
+    wall = np.stack([rng.uniform(0, 0.25, n), np.zeros(n), rng.uniform(0, 0.25, n)], axis=1)
+    return np.vstack([floor, wall]).astype(np.float32)
+
+
+def test_icp_recovers_pose_offset():
+    pytest.importorskip("open3d")
+    target = _corner_cloud()
+    offset = np.array([0.05, 0.03, 0.02], dtype=np.float32)  # typical pose error
+    source = target + offset
+    aligned, fitness = icp_align(source, target, max_corr_dist=0.1, min_points=50)
+    assert fitness > 0.9
+    residual = np.abs(aligned - target).max()
+    assert residual < 0.005  # 5cm offset reduced to < 5mm
+
+
+def test_icp_skips_barely_overlapping_clouds():
+    pytest.importorskip("open3d")
+    target = _corner_cloud()
+    source = target + np.array([5.0, 0, 0], dtype=np.float32)  # no overlap at all
+    aligned, fitness = icp_align(source, target, max_corr_dist=0.1, min_points=50)
+    assert fitness < 0.6
+    assert np.array_equal(aligned, source)  # unchanged — never snapped together
+
+
+def test_icp_disabled_and_small_cloud_passthrough():
+    target = _corner_cloud()
+    source = target + 0.05
+    out, fit = icp_align(source, target, max_corr_dist=0.0)  # disabled
+    assert np.array_equal(out, source) and fit == 0.0
+    small = source[:20]
+    out, fit = icp_align(small, target, max_corr_dist=0.1, min_points=150)
+    assert np.array_equal(out, small) and fit == 0.0
+
+
+def test_icp_passthrough_without_open3d(monkeypatch):
+    import services.walkie_graphs.dbscan as dbscan_mod
+
+    monkeypatch.setattr(dbscan_mod, "_O3D", False)
+    target = _corner_cloud()
+    source = target + 0.05
+    out, fit = icp_align(source, target, max_corr_dist=0.1, min_points=50)
+    assert np.array_equal(out, source) and fit == 0.0

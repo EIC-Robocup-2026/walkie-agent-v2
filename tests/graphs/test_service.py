@@ -179,6 +179,56 @@ def test_camera_pose_none_when_lookup_fails():
     assert s._camera_pose() is None
 
 
+# ---------------------------------------------------------------------------
+# Motion gate: skip frames captured while the robot/head was moving
+# ---------------------------------------------------------------------------
+def _tf(x=0.0, y=0.0, z=0.0, qz=0.0, qw=1.0):
+    return {
+        "position": {"x": x, "y": y, "z": z},
+        "quaternion": {"x": 0.0, "y": 0.0, "z": qz, "w": qw},
+    }
+
+
+def _frame_with_cam(svc):
+    from services.walkie_graphs.service import FrameSnapshot
+
+    cam = svc._camera_pose()
+    return FrameSnapshot(ts=0.0, img=None, depth=None, cam=cam, intr=None, robot_pose=None)
+
+
+def test_motion_gate_disabled_by_default():
+    s, w = _svc_with_walkie(_tf())
+    frame = _frame_with_cam(s)
+    w.robot.transform.tf = _tf(x=1.0)  # robot drove a metre — but gate is off
+    assert s.motion_max_trans_m == 0.0 and s.motion_max_rot_deg == 0.0
+    assert s._moved_during(frame) is False
+
+
+def test_motion_gate_trips_on_translation_and_rotation():
+    s, w = _svc_with_walkie(_tf())
+    s.motion_max_trans_m, s.motion_max_rot_deg = 0.03, 2.0
+    frame = _frame_with_cam(s)
+    # still → clean
+    assert s._moved_during(frame) is False
+    # drove 10 cm during the capture→detect window → gated
+    w.robot.transform.tf = _tf(x=0.10)
+    assert s._moved_during(frame) is True
+    # rotated ~11.5° (qz=sin(θ/2)≈0.1) → gated
+    w.robot.transform.tf = _tf(qz=0.1, qw=0.995)
+    assert s._moved_during(frame) is True
+    # tiny jitter (5 mm) stays under the bound → clean
+    w.robot.transform.tf = _tf(x=0.005)
+    assert s._moved_during(frame) is False
+
+
+def test_motion_gate_trips_when_pose_vanishes():
+    s, w = _svc_with_walkie(_tf())
+    s.motion_max_trans_m = 0.03
+    frame = _frame_with_cam(s)
+    w.robot.transform.tf = None  # TF lookup starts failing mid-tick
+    assert s._moved_during(frame) is True
+
+
 def test_default_camera_frame_is_optical():
     s, _ = _svc_with_walkie(None)
     assert s._tf_cam_frame == "zed_head_left_camera_frame_optical"

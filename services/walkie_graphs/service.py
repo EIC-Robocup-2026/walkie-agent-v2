@@ -19,7 +19,7 @@ import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -171,6 +171,13 @@ class WalkieGraphsService(threading.Thread):
             "WALKIE_GRAPHS_TF_CAMERA_FRAME", "zed_head_left_camera_frame_optical"
         )
         self._tf_timeout = float(os.getenv("WALKIE_GRAPHS_TF_TIMEOUT_SEC", "1.0"))
+        # Motion gate: a frame captured while the robot/head moves carries a smeared,
+        # mis-posed cloud (the streamed depth + TF can't be perfectly synchronized), so
+        # don't fold it into the graph. The camera pose is sampled again after detection
+        # and compared with the capture-time pose — the detection round-trip provides the
+        # bracketing window for free. 0 disables either bound.
+        self.motion_max_trans_m = float(os.getenv("WALKIE_GRAPHS_MOTION_MAX_TRANS_M", "0.0"))
+        self.motion_max_rot_deg = float(os.getenv("WALKIE_GRAPHS_MOTION_MAX_ROT_DEG", "0.0"))
         self._debug = os.getenv("WALKIE_GRAPHS_DEBUG", "0").lower() in ("1", "true", "yes")
         # Per-stage timing breakdown printed each tick (set WALKIE_GRAPHS_PERF=0 to mute).
         self._perf = os.getenv("WALKIE_GRAPHS_PERF", "1").strip().lower() in ("1", "true", "yes")
@@ -252,10 +259,48 @@ class WalkieGraphsService(threading.Thread):
         )
         d_det = time.perf_counter() - t_det
         self._perf_log(f"detect: {d_det * 1000:.0f}ms ({len(detections)} detections)")
+        if self._moved_during(frame):
+            # The robot/head moved across the capture→now window: the frame's cloud
+            # would land mis-posed and smear the graph. Blank the geometry so the
+            # existing no-geometry path reports unknown positions and upserts nothing
+            # (the snapshot still gets written; the next still frame is one tick away).
+            frame = replace(frame, cam=None)
         result = self.ingest_frame(frame, detections, tick=True)
         if self.snapshot_path is not None:
             self._write_snapshot(frame, detections, result)
         return self._last_touched
+
+    def _moved_during(self, frame: FrameSnapshot) -> bool:
+        """Did the camera move between the frame's capture and now (post-detection)?
+
+        Compares the capture-time camera pose with a fresh lookup. The detection
+        round-trip (~0.5 s) provides the bracketing window: if the two poses agree
+        within ``motion_max_trans_m`` / ``motion_max_rot_deg``, the robot was still for
+        the whole window covering the frame's exposure, so the cloud is trustworthy.
+        Over-rejects a frame where motion started only after capture — acceptable, the
+        next clean frame is one tick away. Gate disabled (False) when both bounds are 0
+        or either pose is unavailable.
+        """
+        if self.motion_max_trans_m <= 0 and self.motion_max_rot_deg <= 0:
+            return False
+        if frame.cam is None:
+            return False  # no geometry anyway; ingest_frame handles it
+        cam_now = self._camera_pose()
+        if cam_now is None:
+            return True  # pose just vanished mid-tick: don't trust the frame
+        d_trans = float(np.linalg.norm(cam_now.t - frame.cam.t))
+        # Rotation angle between the two orientations: angle(Ra^T @ Rb).
+        cos_ang = (np.trace(frame.cam.R.T @ cam_now.R) - 1.0) / 2.0
+        d_rot_deg = float(np.degrees(np.arccos(np.clip(cos_ang, -1.0, 1.0))))
+        moved = (self.motion_max_trans_m > 0 and d_trans > self.motion_max_trans_m) or (
+            self.motion_max_rot_deg > 0 and d_rot_deg > self.motion_max_rot_deg
+        )
+        if moved:
+            self._perf_log(
+                f"motion gate: moved {d_trans * 100:.1f}cm / {d_rot_deg:.1f}deg during "
+                f"capture window — skipping graph ingest for this frame"
+            )
+        return moved
 
     def _capture_frame(self) -> FrameSnapshot | None:
         """Read depth, RGB, camera pose, intrinsics, and robot pose as one atomic frame.

@@ -100,6 +100,18 @@ service feeds it real calibration and pose straight from the **walkie-sdk**.
   `MAX_POINTS_PER_OBJ` (2000).
 - **Config**: just the two TF frame names (`TF_MAP_FRAME`, `TF_CAMERA_FRAME`) and a lookup timeout —
   the calibration and mounts come from the robot, not config.
+
+Pose error is further contained by three defenses:
+
+- **Pose-at-capture** (`_capture_frame`): depth, image, camera pose, and intrinsics are read
+  back-to-back *before* the slow detection round-trip, so the pose that lifts the depth describes
+  the same instant as the frame — not where the robot ended up half a second later.
+- **Motion gate** (`_moved_during`, `MOTION_MAX_TRANS_M` / `MOTION_MAX_ROT_DEG`): the pose is
+  sampled again after detection; if the camera moved across that window, the frame is *not*
+  folded into the graph (its cloud would land mis-posed and smear the object). The live snapshot
+  is still written, and the next still frame is one tick away.
+- **ICP on merge** (see "what merge actually updates" below): the few cm of *residual* pose error
+  is cancelled by aligning clouds on their own shape before fusing.
 </details>
 
 ### 3. Clean it up
@@ -217,6 +229,13 @@ When a detection merges into an existing object (`_merge`):
   near it), the two clouds are **unioned**, voxel-downsampled, and capped — so a *partial* view
   of a large object (one end of the bed) adds to the accumulated cloud rather than replacing it,
   and the object fills in across sightings. Old points are never discarded by a re-sighting.
+- **ICP alignment first** (`icp_align`, Open3D `registration_icp` — what object-level SLAM
+  systems like Fusion++/MaskFusion run per object): before the union, the new cloud is rigidly
+  aligned onto the stored one using the clouds' own shape, cancelling the few cm of residual
+  camera-pose error that would otherwise double-expose the object. Applied only on confident
+  alignments — both clouds ≥ `ICP_MIN_POINTS` (a small cup can't anchor ICP) and fitness ≥
+  `ICP_MIN_FITNESS` (a barely-overlapping new view is unioned raw rather than wrongly snapped).
+  The same alignment runs when the periodic pass fuses two split nodes (`_merge_nodes`).
 - **CLIP embedding**: blended as a running average weighted by how many times the object's been
   seen (so one bad frame can't hijack it).
 - **Captions**: accumulated; the longest is kept as `best_caption` (until the optional LLM step

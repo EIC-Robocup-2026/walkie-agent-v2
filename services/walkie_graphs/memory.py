@@ -45,6 +45,7 @@ from .dbscan import (
 from .fusion import (
     aabb_overlap,
     additive_similarity,
+    icp_align,
     nn_ratio,
     nn_ratio_symmetric,
     pairs_within,
@@ -199,6 +200,9 @@ class GraphMemory:
         dbscan_min_points: int = 10,
         sor_k: int = 0,
         sor_std_ratio: float = 2.0,
+        icp_max_dist_m: float = 0.0,
+        icp_min_fitness: float = 0.6,
+        icp_min_points: int = 150,
         denoise_keep_min_frac: float = 0.5,
         merge_overlap_thresh: float = 0.7,
         merge_visual_sim_thresh: float = 0.7,
@@ -242,6 +246,9 @@ class GraphMemory:
         self.dbscan_min_points = dbscan_min_points
         self.sor_k = sor_k
         self.sor_std_ratio = sor_std_ratio
+        self.icp_max_dist_m = icp_max_dist_m
+        self.icp_min_fitness = icp_min_fitness
+        self.icp_min_points = icp_min_points
         self.denoise_keep_min_frac = denoise_keep_min_frac
         self.merge_overlap_thresh = merge_overlap_thresh
         self.merge_visual_sim_thresh = merge_visual_sim_thresh
@@ -327,6 +334,9 @@ class GraphMemory:
             dbscan_min_points=_i("WALKIE_GRAPHS_DBSCAN_MIN_POINTS", "10"),
             sor_k=_i("WALKIE_GRAPHS_SOR_K", "16"),
             sor_std_ratio=_f("WALKIE_GRAPHS_SOR_STD_RATIO", "2.0"),
+            icp_max_dist_m=_f("WALKIE_GRAPHS_ICP_MAX_DIST_M", "0.1"),
+            icp_min_fitness=_f("WALKIE_GRAPHS_ICP_MIN_FITNESS", "0.6"),
+            icp_min_points=_i("WALKIE_GRAPHS_ICP_MIN_POINTS", "150"),
             denoise_keep_min_frac=_f("WALKIE_GRAPHS_DENOISE_KEEP_MIN_FRAC", "0.5"),
             merge_overlap_thresh=_f("WALKIE_GRAPHS_MERGE_OVERLAP_THRESH", "0.7"),
             merge_visual_sim_thresh=_f("WALKIE_GRAPHS_MERGE_VISUAL_SIM_THRESH", "0.7"),
@@ -669,7 +679,20 @@ class GraphMemory:
         )
 
         if union:
-            merged = np.vstack([self.load_pcd(node.id), det_pts])
+            stored = self.load_pcd(node.id)
+            if self.icp_max_dist_m > 0:
+                # Residual camera-pose error lands each sighting a few cm off; ICP-align
+                # the new cloud to the stored one so the union sharpens the shape
+                # instead of double-exposing it. Applied only on confident alignments
+                # (enough points on both sides + fitness gate inside icp_align).
+                det_pts, _fit = icp_align(
+                    det_pts,
+                    stored,
+                    self.icp_max_dist_m,
+                    min_fitness=self.icp_min_fitness,
+                    min_points=self.icp_min_points,
+                )
+            merged = np.vstack([stored, det_pts])
             merged = _voxel(merged, self.voxel_m)
             if len(merged) > self.max_points_per_obj:
                 idx = np.linspace(0, len(merged) - 1, self.max_points_per_obj).astype(int)
@@ -1057,6 +1080,16 @@ class GraphMemory:
     def _merge_nodes(self, keep: ObjectNode, drop: ObjectNode) -> None:
         """Fold node ``drop`` into ``keep`` in place (clouds, CLIP, captions), delete ``drop``."""
         kp, dp = self.load_pcd(keep.id), self.load_pcd(drop.id)
+        if self.icp_max_dist_m > 0 and len(kp) and len(dp):
+            # Two nodes of one object usually split *because* of pose error; align the
+            # dropped cloud onto the kept one so the fusion doesn't double-expose.
+            dp, _fit = icp_align(
+                dp,
+                kp,
+                self.icp_max_dist_m,
+                min_fitness=self.icp_min_fitness,
+                min_points=self.icp_min_points,
+            )
         clouds = [c for c in (kp, dp) if len(c)]
         merged = np.vstack(clouds) if clouds else np.zeros((0, 3), dtype=np.float32)
         merged = _voxel(merged, self.voxel_m)

@@ -119,6 +119,39 @@ def test_partial_view_unions_into_fuller_cloud(mem):
     assert pts[:, 0].min() < 0.2 and pts[:, 0].max() > 2.3  # both ends present
 
 
+def test_merge_with_icp_cancels_pose_offset(mem):
+    # The same L-shaped object seen twice, the second sighting mis-posed by 5 cm
+    # (camera pose error). With ICP on, the union must stay TIGHT — the new cloud is
+    # aligned onto the stored one instead of double-exposing the shape.
+    pytest.importorskip("open3d")
+    from tests.graphs.conftest import make_det as _make_det
+
+    def corner(offset=(0.0, 0.0, 0.0)):
+        # aperiodic points on two perpendicular planes (like a real depth scan)
+        rng = np.random.default_rng(3)
+        n = 400
+        floor = np.stack([rng.uniform(0, 0.25, n), rng.uniform(0, 0.25, n), np.zeros(n)], axis=1)
+        wall = np.stack([rng.uniform(0, 0.25, n), np.zeros(n), rng.uniform(0, 0.25, n)], axis=1)
+        return (np.vstack([floor, wall]) + np.asarray(offset)).astype(np.float32)
+
+    mem.icp_max_dist_m = 0.1
+    mem.icp_min_points = 50
+    base = replace(_make_det(class_name="box", emb=unit(1, 0, 0), conf=0.9),
+                   points_world=corner())
+    node = mem.upsert(base)
+    ext_before = node.extent
+
+    shifted = replace(
+        _make_det(class_name="box", emb=unit(1, 0, 0), conf=0.9, ts=2.0),
+        points_world=corner(offset=(0.05, 0.03, 0.02)),
+    )
+    node = mem.upsert(shifted)
+    assert mem.count() == 1
+    # without ICP the extent would grow by ~5 cm; with it the shape stays sharp
+    assert node.extent[0] < ext_before[0] + 0.01
+    assert node.extent[2] < ext_before[2] + 0.01
+
+
 def test_moved_object_replaces_without_smearing(mem):
     # Companion to the union test: a far re-sighting with NO overlap (the object moved
     # or its estimate drifted) must NOT union — the cloud lives only at the new spot.
