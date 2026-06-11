@@ -141,7 +141,7 @@ WALKIE_GRAPHS_MOTION_MAX_ROT_DEG = "2.0"
 # else it INSERTs. Candidates = same-class nodes within RADIUS_M plus the top
 # DEDUP_VISUAL_K nearest by image-emb regardless of position (drift-proof).
 # RADIUS/TIGHT must stay above per-object 3D jitter (~5-15cm) or objects re-insert.
-WALKIE_GRAPHS_DEDUP_RADIUS_M = "0.4"
+WALKIE_GRAPHS_DEDUP_RADIUS_M = "0.2"
 WALKIE_GRAPHS_DEDUP_TIGHT_M = "0.2"
 WALKIE_GRAPHS_SIM_HIGH = "0.85"
 WALKIE_GRAPHS_SIM_LOW = "0.65"
