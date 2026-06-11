@@ -124,21 +124,27 @@ finished 3D cloud:
 </details>
 
 <details>
-<summary>Details — DBSCAN denoising (the 3D backstop)</summary>
+<summary>Details — 3D denoising (SOR + DBSCAN, the backstops)</summary>
 
-- [services/walkie_graphs/dbscan.py](services/walkie_graphs/dbscan.py) implements DBSCAN clustering,
-  using scikit-learn's battle-tested C implementation when installed (the fast path), with a
-  pure `scipy.spatial.cKDTree` + union-find fallback so a partial install still works.
-- **Per detection** (`GraphMemory._denoise`, controlled by `DBSCAN_EPS`, `DBSCAN_MIN_POINTS`):
-  keeps only the **largest cluster** — exactly ConceptGraphs' `pcd_denoise_dbscan`. A single
-  view of one object is one blob, so anything else is mask bleed. The edge filters above remove
-  most of it before it ever becomes a point; this catches the residue.
-- **Periodically over stored objects** (`denoise_nodes`): drops only **noise points** (isolated
-  scatter, no cluster), keeping *every* real cluster — a cloud accumulated from disjoint partial
-  views (the two ends of a bed, middle never seen) is legitimately multi-cluster and must never
-  be truncated to its newest view.
-- A safety rule: if denoising would throw away most of the points, it's skipped
-  (`DENOISE_KEEP_MIN_FRAC`).
+Two complementary 3D filters live in [services/walkie_graphs/dbscan.py](services/walkie_graphs/dbscan.py),
+each with a library fast path and a pure scipy fallback:
+
+- **Statistical outlier removal** (`statistical_outlier_removal`, Open3D's C++
+  `remove_statistical_outlier` — the library ConceptGraphs builds on): drops points sitting in
+  anomalously sparse space (large mean distance to their `SOR_K` nearest neighbours). It runs on
+  every lifted cloud at deprojection AND periodically over each stored object's **accumulated**
+  cloud — the second pass is what erases the fuzzy halo that builds up across sightings (each
+  frame's few surviving edge artifacts) and stops neighbouring objects' inflated clouds from
+  bleeding into each other. Density-based, so disjoint multi-view clusters survive.
+- **DBSCAN clustering** (scikit-learn fast path, cKDTree + union-find fallback):
+  - *per detection* (`GraphMemory._denoise`): keeps only the **largest cluster** — exactly
+    ConceptGraphs' `pcd_denoise_dbscan`; a single view of one object is one blob.
+  - *periodically* (`denoise_nodes`, after SOR): drops remaining **noise points** (isolated
+    scatter, no cluster), keeping *every* real cluster — a cloud accumulated from disjoint
+    partial views (the two ends of a bed) is legitimately multi-cluster and must never be
+    truncated to its newest view.
+- A safety rule: if the combined cleanup would throw away most of the points, the node is
+  skipped (`DENOISE_KEEP_MIN_FRAC`).
 </details>
 
 ### 4. Describe it
@@ -405,7 +411,7 @@ background-box rejection, DBSCAN on). See the comments in `config.toml` for each
 | [services/walkie_graphs/memory.py](services/walkie_graphs/memory.py) | `GraphMemory` — the store: association, merging, relations, queries, maintenance, persistence |
 | [services/walkie_graphs/geometry.py](services/walkie_graphs/geometry.py) | camera math — intrinsics, pose, depth→world deprojection |
 | [services/walkie_graphs/fusion.py](services/walkie_graphs/fusion.py) | association math — `nn_ratio` overlap, AABB prefilter, additive score |
-| [services/walkie_graphs/dbscan.py](services/walkie_graphs/dbscan.py) | point-cloud denoising (DBSCAN: largest-cluster per detection, noise-only for stored objects) |
+| [services/walkie_graphs/dbscan.py](services/walkie_graphs/dbscan.py) | point-cloud denoising (Open3D statistical outlier removal + DBSCAN clustering, with scipy fallbacks) |
 | [services/walkie_graphs/viz.py](services/walkie_graphs/viz.py) | optional real-time 3D visualization via Rerun |
 | [services/walkie_graphs/tools/reset.py](services/walkie_graphs/tools/reset.py) | CLI to wipe the store |
 

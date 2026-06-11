@@ -126,6 +126,36 @@ def test_denoise_only_touches_dirty(mem):
     assert mem.denoise_nodes() == 0
 
 
+def test_denoise_sor_erases_accumulated_halo(mem):
+    # Simulate fuzz accumulation: a dense object cloud plus a sparse halo built up from
+    # many sightings' leftover edge artifacts. SOR in the periodic pass must strip the
+    # halo (which inflates the AABB until neighbours falsely overlap) while keeping the
+    # dense structure — including a second disjoint view cluster.
+    mem.sor_k = 16
+    mem.sor_std_ratio = 1.5
+    rng = np.random.default_rng(7)
+    view_a = make_cloud((0, 0, 0), n=150, spread=0.02, seed=1)
+    view_b = make_cloud((1.0, 0, 0), n=150, spread=0.02, seed=2)  # other end, disjoint
+    # halo: 20 points scattered well off the surfaces (accumulated flying pixels)
+    halo = np.vstack(
+        [
+            rng.normal((0.5, 0.0, 0.4), 0.3, (10, 3)),
+            rng.normal((0.5, 0.4, 0.0), 0.3, (10, 3)),
+        ]
+    ).astype(np.float32)
+    node = put_object(mem, "bed", "bed", np.vstack([view_a, view_b, halo]), emb=unit(1, 0, 0))
+    ext_before = node.extent
+    mem._dirty.add("bed")
+    assert mem.denoise_nodes() == 1
+    pts = mem.load_pcd("bed")
+    n = mem.get("bed")
+    # both dense view clusters survive...
+    assert (pts[:, 0] < 0.5).sum() > 100 and (pts[:, 0] > 0.5).sum() > 100
+    # ...the halo is (mostly) gone and the AABB tightened back around the object
+    assert len(pts) < 300 + 10
+    assert n.extent[1] < ext_before[1] and n.extent[2] < ext_before[2]
+
+
 # ---------------------------------------------------------------------------
 # Confirmation gate (node precision)
 # ---------------------------------------------------------------------------

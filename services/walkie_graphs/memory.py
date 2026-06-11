@@ -37,7 +37,11 @@ except Exception:  # pragma: no cover
 
 import chromadb
 
-from .dbscan import dbscan_largest_cluster, dbscan_remove_noise
+from .dbscan import (
+    dbscan_largest_cluster,
+    dbscan_remove_noise,
+    statistical_outlier_removal,
+)
 from .fusion import (
     aabb_overlap,
     additive_similarity,
@@ -193,6 +197,8 @@ class GraphMemory:
         dbscan_enabled: bool = True,
         dbscan_eps: float = 0.05,
         dbscan_min_points: int = 10,
+        sor_k: int = 0,
+        sor_std_ratio: float = 2.0,
         denoise_keep_min_frac: float = 0.5,
         merge_overlap_thresh: float = 0.7,
         merge_visual_sim_thresh: float = 0.7,
@@ -234,6 +240,8 @@ class GraphMemory:
         self.dbscan_enabled = dbscan_enabled
         self.dbscan_eps = dbscan_eps
         self.dbscan_min_points = dbscan_min_points
+        self.sor_k = sor_k
+        self.sor_std_ratio = sor_std_ratio
         self.denoise_keep_min_frac = denoise_keep_min_frac
         self.merge_overlap_thresh = merge_overlap_thresh
         self.merge_visual_sim_thresh = merge_visual_sim_thresh
@@ -317,6 +325,8 @@ class GraphMemory:
             dbscan_enabled=_b("WALKIE_GRAPHS_DBSCAN_ENABLED", "1"),
             dbscan_eps=_f("WALKIE_GRAPHS_DBSCAN_EPS", "0.05"),
             dbscan_min_points=_i("WALKIE_GRAPHS_DBSCAN_MIN_POINTS", "10"),
+            sor_k=_i("WALKIE_GRAPHS_SOR_K", "16"),
+            sor_std_ratio=_f("WALKIE_GRAPHS_SOR_STD_RATIO", "2.0"),
             denoise_keep_min_frac=_f("WALKIE_GRAPHS_DENOISE_KEEP_MIN_FRAC", "0.5"),
             merge_overlap_thresh=_f("WALKIE_GRAPHS_MERGE_OVERLAP_THRESH", "0.7"),
             merge_visual_sim_thresh=_f("WALKIE_GRAPHS_MERGE_VISUAL_SIM_THRESH", "0.7"),
@@ -534,7 +544,12 @@ class GraphMemory:
             return self._merge(target, det)
 
     def _denoise(self, points: np.ndarray) -> np.ndarray:
-        """DBSCAN-denoise a detection cloud to its largest cluster (no-op if disabled)."""
+        """DBSCAN-denoise a detection cloud to its largest cluster (no-op if disabled).
+
+        Per-frame SOR already ran at deprojection (``deproject_mask(sor_k=...)``), so
+        this only adds the single-view cluster cut; the periodic :meth:`denoise_nodes`
+        SOR handles what *accumulates* across sightings.
+        """
         if not self.dbscan_enabled or len(points) == 0:
             return points
         return dbscan_largest_cluster(points, self.dbscan_eps, self.dbscan_min_points)
@@ -923,19 +938,23 @@ class GraphMemory:
     # Maintenance (ConceptGraphs periodic post-processing analogs)
     # ------------------------------------------------------------------
     def denoise_nodes(self) -> int:
-        """DBSCAN-denoise the clouds of nodes that changed since the last pass.
+        """Clean the accumulated clouds of nodes that changed since the last pass.
 
         ConceptGraphs' ``denoise_objects`` analog, adapted for accumulated multi-view
-        clouds: drop only **noise** points (isolated scatter, DBSCAN label ``-1``) and
-        keep every real cluster — a cloud built from disjoint partial views (the two
-        ends of a bed) is legitimately multi-cluster, and the largest-cluster keep CG
-        uses would truncate it. (Per-detection denoise in ``upsert`` still keeps the
-        largest cluster — a single view of one object is one blob.) Only *dirty* nodes
-        (changed since the last call) are touched, and a node is skipped when denoising
-        would drop more than ``denoise_keep_min_frac`` of its points (a big drop means
-        real structure, not noise). Returns the number changed.
+        clouds. Two stages, both cluster-preserving (a cloud built from disjoint
+        partial views — the two ends of a bed — is legitimately multi-cluster, and the
+        largest-cluster keep CG uses would truncate it):
+
+        1. **Statistical outlier removal** — erases the fuzzy halo accumulation
+           collects (each frame's few surviving edge artifacts); local-density based,
+           so dense view clusters survive.
+        2. **Noise-only DBSCAN** — drops isolated scatter that forms no cluster.
+
+        Only *dirty* nodes (changed since the last call) are touched, and a node is
+        skipped when denoising would drop more than ``denoise_keep_min_frac`` of its
+        points (a big drop means real structure, not noise). Returns the number changed.
         """
-        if not self.dbscan_enabled:
+        if not (self.dbscan_enabled or self.sor_k > 0):
             return 0
         with self._lock:
             dirty = [nid for nid in self._dirty if nid in self._nodes]
@@ -948,7 +967,11 @@ class GraphMemory:
                 pts = self.load_pcd(nid)
             if len(pts) < self.dbscan_min_points:
                 continue
-            kept = dbscan_remove_noise(pts, self.dbscan_eps, self.dbscan_min_points)
+            kept = pts
+            if self.sor_k > 0:
+                kept = statistical_outlier_removal(kept, self.sor_k, self.sor_std_ratio)
+            if self.dbscan_enabled:
+                kept = dbscan_remove_noise(kept, self.dbscan_eps, self.dbscan_min_points)
             if len(kept) >= len(pts):  # nothing removed
                 continue
             if len(kept) < self.denoise_keep_min_frac * len(pts):

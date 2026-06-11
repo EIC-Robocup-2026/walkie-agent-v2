@@ -14,6 +14,7 @@ from services.walkie_graphs.dbscan import (
     dbscan_labels,
     dbscan_largest_cluster,
     dbscan_remove_noise,
+    statistical_outlier_removal,
 )
 
 
@@ -118,3 +119,54 @@ def test_remove_noise_clean_cloud_unchanged():
     pts = _blob((1, 1, 1), 50, seed=5)
     kept = dbscan_remove_noise(pts, eps=0.05, min_points=10)
     assert len(kept) == 50
+
+
+# ---------------------------------------------------------------------------
+# statistical_outlier_removal — Open3D fast path AND scipy fallback
+# ---------------------------------------------------------------------------
+@pytest.fixture(params=["open3d", "scipy-fallback"])
+def sor_backend(request, monkeypatch):
+    if request.param == "scipy-fallback":
+        monkeypatch.setattr(dbscan_mod, "_O3D", False)  # force the cKDTree path
+    elif not dbscan_mod._open3d():
+        pytest.skip("open3d not installed")
+    return request.param
+
+
+def _grid(n=20, step=0.01):
+    gx, gy = np.meshgrid(np.arange(n) * step, np.arange(n) * step)
+    return np.stack([gx.ravel(), gy.ravel(), np.zeros(gx.size)], axis=1).astype(np.float32)
+
+
+def test_sor_strips_halo_keeps_dense_blob(sor_backend):
+    surface = _grid()
+    rng = np.random.default_rng(1)
+    # sparse halo floating clearly OFF the surface (z >= 0.2, scattered)
+    halo = surface[::20].copy()
+    halo[:, 2] = 0.2 + rng.uniform(0, 0.3, len(halo)).astype(np.float32)
+    kept = statistical_outlier_removal(np.vstack([surface, halo]), k=8, std_ratio=1.0)
+    # the sparse halo is gone, the dense surface survives (allow a few edge points out)
+    assert len(surface) * 0.9 <= len(kept) <= len(surface)
+    assert kept[:, 2].max() < 0.05  # no halo point remains
+
+
+def test_sor_keeps_disjoint_dense_clusters(sor_backend):
+    # Two dense clusters far apart (two partial views of one object) + strays: both
+    # clusters must survive — the property a largest-cluster keep cannot provide.
+    a = _grid()
+    b = _grid() + np.array([3.0, 0, 0], dtype=np.float32)
+    strays = np.array([[1.5, 1.5, 1.0], [-1.0, 2.0, 0.7]], dtype=np.float32)
+    kept = statistical_outlier_removal(np.vstack([a, b, strays]), k=8, std_ratio=1.0)
+    assert (kept[:, 0] < 1.0).sum() >= len(a) * 0.9  # cluster A intact
+    assert (kept[:, 0] > 2.0).sum() >= len(b) * 0.9  # cluster B intact
+    assert np.abs(kept[:, 2]).max() < 0.05  # strays gone
+
+
+def test_sor_disabled_and_small_cloud_passthrough(sor_backend):
+    pts = _blob((0, 0, 0), 30, seed=6)
+    assert np.array_equal(statistical_outlier_removal(pts, k=0, std_ratio=2.0), pts)
+    assert np.array_equal(statistical_outlier_removal(pts, k=16, std_ratio=0.0), pts)
+    few = _blob((0, 0, 0), 10, seed=7)
+    assert np.array_equal(statistical_outlier_removal(few, k=16, std_ratio=2.0), few)
+    empty = np.zeros((0, 3), np.float32)
+    assert len(statistical_outlier_removal(empty, k=16, std_ratio=2.0)) == 0

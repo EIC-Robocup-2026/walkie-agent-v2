@@ -183,12 +183,15 @@ WALKIE_GRAPHS_CROSS_CLASS_SIM_THRESHOLD = "1.5"
 WALKIE_GRAPHS_MASK_ERODE_PX = "1"
 WALKIE_GRAPHS_DEPTH_EDGE_THRESH_M = "0.05"
 WALKIE_GRAPHS_DEPTH_EDGE_REL = "0.02"
-# Statistical outlier removal on each lifted cloud (Open3D remove_statistical_outlier,
-# what ConceptGraphs uses): drop points whose mean distance to their SOR_K nearest
-# neighbours exceeds mean + SOR_STD_RATIO * std. A 3D DENSITY filter — it removes the
-# flying pixels the per-pixel edge filter misses, and unlike a fixed depth threshold it
-# never erases a grazing surface (the dense bed stays; the sparse shadow trail goes),
-# which is the robust fix for the "bed = only a corner" failure. SOR_K = 0 disables.
+# Statistical outlier removal (Open3D remove_statistical_outlier — C++ fast path with a
+# scipy fallback): drop points whose mean distance to their SOR_K nearest neighbours
+# exceeds mean + SOR_STD_RATIO * std. A 3D DENSITY filter — it removes the flying pixels
+# the per-pixel edge filter misses, and unlike a fixed depth threshold it never erases a
+# grazing surface (the dense bed stays; the sparse shadow trail goes), which is the
+# robust fix for the "bed = only a corner" failure. Applied twice with these same knobs:
+# per lifted cloud at deprojection, and periodically over each stored node's ACCUMULATED
+# cloud (see [graphs.maintenance] denoise) to erase cross-sighting fuzz buildup.
+# SOR_K = 0 disables both. Lower SOR_STD_RATIO toward 1.5 for stricter cleanup.
 WALKIE_GRAPHS_SOR_K = "16"
 WALKIE_GRAPHS_SOR_STD_RATIO = "2.0"
 # DBSCAN denoising of each detection's cloud (largest cluster) before it enters the
@@ -216,10 +219,15 @@ WALKIE_GRAPHS_EMBED_WORKERS = "8"
 [graphs.maintenance]
 # Periodic ConceptGraphs post-processing, each on its own cadence (in ingest ticks,
 # staggered so no two collide). 0 disables a pass.
-# denoise_nodes: re-DBSCAN nodes whose cloud changed, dropping only NOISE points
-#   (isolated scatter) — every real cluster is kept, so a cloud accumulated from
-#   disjoint partial views (two ends of a bed) is never truncated. Skipped entirely
-#   if it would drop more than 1 - DENOISE_KEEP_MIN_FRAC of the points (safety net).
+# denoise_nodes: clean nodes whose cloud changed, in two cluster-preserving stages —
+#   (1) statistical outlier removal (same SOR_K / SOR_STD_RATIO knobs as the per-frame
+#       pass above): erases the fuzzy halo that ACCUMULATES across sightings (each
+#       frame's few surviving edge artifacts), the fix for objects bleeding into each
+#       other; dense view clusters survive because SOR is local-density based;
+#   (2) noise-only DBSCAN: drops isolated scatter that forms no cluster.
+#   Every real cluster is kept, so a cloud accumulated from disjoint partial views
+#   (two ends of a bed) is never truncated. Skipped entirely if the combination would
+#   drop more than 1 - DENOISE_KEEP_MIN_FRAC of the points (safety net).
 WALKIE_GRAPHS_DENOISE_EVERY_N = "20"
 WALKIE_GRAPHS_DENOISE_KEEP_MIN_FRAC = "0.5"
 # merge_overlapping_nodes: fuse two nodes within MERGE_RADIUS_M whose clouds overlap

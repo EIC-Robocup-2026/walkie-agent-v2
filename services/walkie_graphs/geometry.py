@@ -26,10 +26,9 @@ try:  # cv2 is a hard dep of the app; guard only so unit tests can run headless
 except Exception:  # pragma: no cover - cv2 always present in this project
     cv2 = None
 
-try:  # scipy is a hard dep (pyproject); guard only so a partial install imports
-    from scipy.spatial import cKDTree
-except Exception:  # pragma: no cover
-    cKDTree = None
+# One SOR implementation for the whole package (Open3D fast path + scipy fallback);
+# re-exported here because deprojection applies it to every lifted cloud.
+from .dbscan import statistical_outlier_removal  # noqa: E402, F401
 
 
 # ---------------------------------------------------------------------------
@@ -153,40 +152,6 @@ def depth_discontinuity_mask(
     edge[:, :-1] |= hj
     edge[:, 1:] |= hj
     return edge
-
-
-def statistical_outlier_removal(
-    points: np.ndarray, k: int = 16, std_ratio: float = 2.0
-) -> np.ndarray:
-    """Drop points whose mean distance to their ``k`` nearest neighbours is an outlier.
-
-    Open3D's ``remove_statistical_outlier`` (the filter ConceptGraphs applies to lifted
-    clouds): for each point take the mean distance to its ``k`` nearest neighbours, then
-    keep only the points whose mean is within ``std_ratio`` standard deviations of the
-    cloud-wide mean. Unlike the per-pixel :func:`depth_discontinuity_mask`, this is a 3D
-    *density* test, so it removes flying pixels — which spray off a silhouette into empty
-    space and are therefore locally sparse (large mean NN distance) — **regardless of how
-    far the real surface spreads in depth**. A grazing bed or table stays dense and
-    survives whole, which a fixed depth-edge threshold cannot guarantee.
-
-    No-op (returns the input unchanged) when disabled (``k <= 0`` / ``std_ratio <= 0``),
-    scipy is unavailable, or there are too few points (``n <= k``) to estimate the spread.
-    """
-    pts = np.asarray(points)
-    n = len(pts)
-    if k <= 0 or std_ratio <= 0 or n <= k or cKDTree is None:
-        return pts
-    p64 = pts.astype(np.float64)
-    tree = cKDTree(p64)
-    # k+1 neighbours: the nearest is the point itself (distance 0), so drop column 0.
-    dists, _ = tree.query(p64, k=k + 1)
-    mean_dists = dists[:, 1:].mean(axis=1)
-    mu = float(mean_dists.mean())
-    sigma = float(mean_dists.std())
-    keep = mean_dists <= mu + std_ratio * sigma
-    if not keep.any():  # degenerate spread → keep everything rather than wipe the cloud
-        return pts
-    return pts[keep]
 
 
 def deproject_mask(
