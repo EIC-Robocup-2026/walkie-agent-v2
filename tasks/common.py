@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
+
 from langchain.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 from walkie_sdk import WalkieRobot
@@ -13,9 +15,21 @@ from agents.walkie_agent import create_walkie_main_agent
 from client import WalkieAIClient
 from interfaces.walkie_interface import WalkieInterface
 from services.walkie_graphs import WalkieGraphs
+from walkie_config import load_config  # noqa: F401 — re-exported for task entrypoints
 
 
 ZENOH_PORT = 7447
+
+
+def load_task_config(task_dir: str | os.PathLike) -> None:
+    """Load a task's local ``config.toml`` (if any), then the global one.
+
+    Both loads use setdefault semantics, so first writer wins among the files:
+    shell env > .env > <task_dir>/config.toml > root config.toml > code default.
+    Call once at startup, after ``load_dotenv()``, instead of ``load_config()``.
+    """
+    load_config(Path(task_dir) / "config.toml")
+    load_config()
 
 
 def initialize_robot() -> WalkieRobot:
@@ -60,6 +74,7 @@ def initialize_llm_model():
 
 class WalkieBrain:
     def __init__(self, walkieAI: WalkieAIClient, walkie_interface: WalkieInterface, model: ChatOpenAI, disable_listening: bool = False):
+        self.walkieAI = walkieAI
         self.walkie_interface = walkie_interface
         self.disable_listening = disable_listening
         

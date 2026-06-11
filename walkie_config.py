@@ -10,6 +10,10 @@ Precedence ends up being: shell env > .env > config.toml > code default.
 
 Call :func:`load_config` once at startup, *after* ``load_dotenv()``, in every
 entrypoint (main.py, tools/chroma_viewer.py, tools/scene_explore.py).
+
+Competition tasks may layer a task-local ``tasks/<NAME>/config.toml`` on top by
+loading it first (``tasks.common.load_task_config``) — same setdefault
+semantics, so the task file overrides this one but env/.env still win.
 """
 
 from __future__ import annotations

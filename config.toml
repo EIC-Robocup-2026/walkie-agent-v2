@@ -14,6 +14,10 @@
 # So you can still override any of these from .env or the shell for a one-off
 # run without editing this file. Values are written as the same strings the
 # code's os.getenv() calls expect (e.g. "1"/"0" for flags, "" to disable).
+#
+# Competition tasks keep their own config in tasks/<NAME>/config.toml, loaded
+# BEFORE this file (tasks.common.load_task_config) — so a task file both holds
+# its task-specific keys and may override any global key here for that task.
 
 [llm]
 # 1 = use a local OpenAI-compatible LLM (LOCAL_BASE_URL/LOCAL_MODEL) instead of

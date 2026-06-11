@@ -1,0 +1,21 @@
+# HRI (receptionist) task config — loaded by tasks/HRI/run.py via
+# tasks.common.load_task_config BEFORE the root config.toml, so any key here
+# (including keys that also exist in the root file, e.g. WALKIE_MODEL) wins
+# over the global value. Real shell env vars and .env still override both.
+#
+# Precedence: shell env > .env > this file > root config.toml > code default.
+
+[hri]
+# Waypoints are map-frame poses "x,y,heading_deg" (set after mapping the arena).
+HRI_DOOR_POSE = "0.8,-0.95,2.97"
+HRI_LIVING_ROOM_POSE = "4.45,0.96,-0.40"   # scan pose facing the seating area
+# Open-vocab detector prompts used to find seats.
+HRI_SEAT_CLASSES = "chair,sofa,armchair,stool"
+# A seat is occupied when (person bbox ∩ seat bbox) / seat area >= this.
+HRI_SEAT_OCCUPIED_OVERLAP = "0.25"
+# Horizontal field of view (deg) for pixel->heading conversion (tune for ZED).
+HRI_CAMERA_HFOV_DEG = "90"
+# 1 = enable the timed gripper bag-handover steps (no torque sensing yet).
+HRI_ENABLE_BAG = "0"
+# Seconds the gripper stays open for the guest to hang the bag.
+HRI_BAG_HANDOVER_WAIT_SEC = "8"
