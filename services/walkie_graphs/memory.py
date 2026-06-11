@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -190,6 +191,7 @@ class GraphMemory:
         sim_high: float = 0.85,
         sim_low: float = 0.65,
         dedup_visual_k: int = 5,
+        visual_merge_max_dist_m: float = 0.0,
         sim_threshold: float = 1.1,
         cross_class_sim_threshold: float = 0.0,
         w_geo: float = 1.0,
@@ -203,6 +205,8 @@ class GraphMemory:
         icp_max_dist_m: float = 0.0,
         icp_min_fitness: float = 0.6,
         icp_min_points: int = 150,
+        icp_skip_overlap: float = 0.75,
+        defer_pcd_writes: bool = False,
         denoise_keep_min_frac: float = 0.5,
         merge_overlap_thresh: float = 0.7,
         merge_visual_sim_thresh: float = 0.7,
@@ -236,6 +240,7 @@ class GraphMemory:
         self.sim_high = sim_high
         self.sim_low = sim_low
         self.dedup_visual_k = dedup_visual_k
+        self.visual_merge_max_dist_m = visual_merge_max_dist_m
         self.sim_threshold = sim_threshold
         self.cross_class_sim_threshold = cross_class_sim_threshold
         self.w_geo = w_geo
@@ -249,6 +254,8 @@ class GraphMemory:
         self.icp_max_dist_m = icp_max_dist_m
         self.icp_min_fitness = icp_min_fitness
         self.icp_min_points = icp_min_points
+        self.icp_skip_overlap = icp_skip_overlap
+        self.defer_pcd_writes = defer_pcd_writes
         self.denoise_keep_min_frac = denoise_keep_min_frac
         self.merge_overlap_thresh = merge_overlap_thresh
         self.merge_visual_sim_thresh = merge_visual_sim_thresh
@@ -296,9 +303,24 @@ class GraphMemory:
         # sqlite/HNSW write per frame instead of one per object.
         self._batching = False
         self._chroma_pending: dict[str, ObjectNode] = {}
+        # Per-stage wall-time accumulators for the perf log (read+reset by the service
+        # each tick via pop_perf_stats) — pinpoints where slow upserts spend their time.
+        self._perf_stats: dict[str, float] = {}
+        # Node ids whose cloud changed in memory but hasn't hit its .npz yet (only
+        # used when defer_pcd_writes is on; flushed by flush_pcds on a cadence).
+        self._pcd_unflushed: set[str] = set()
         self._graph = nx.MultiDiGraph() if nx is not None else None
         self._load_nodes()
         self._load_edges()
+
+    def _perf_add(self, key: str, t0: float) -> None:
+        self._perf_stats[key] = self._perf_stats.get(key, 0.0) + (time.perf_counter() - t0)
+
+    def pop_perf_stats(self) -> dict[str, float]:
+        """Return and reset the per-stage upsert timing accumulators (seconds)."""
+        with self._lock:
+            stats, self._perf_stats = self._perf_stats, {}
+            return stats
 
     @classmethod
     def from_env(cls, *, embed_text=None) -> "GraphMemory":
@@ -323,7 +345,8 @@ class GraphMemory:
             dedup_tight_m=_f("WALKIE_GRAPHS_DEDUP_TIGHT_M", "0.2"),
             sim_high=_f("WALKIE_GRAPHS_SIM_HIGH", "0.85"),
             sim_low=_f("WALKIE_GRAPHS_SIM_LOW", "0.65"),
-            dedup_visual_k=_i("WALKIE_GRAPHS_DEDUP_VISUAL_K", "5"),
+            dedup_visual_k=_i("WALKIE_GRAPHS_DEDUP_VISUAL_K", "0"),
+            visual_merge_max_dist_m=_f("WALKIE_GRAPHS_VISUAL_MERGE_MAX_DIST_M", "0.4"),
             sim_threshold=_f("WALKIE_GRAPHS_SIM_THRESHOLD", "1.1"),
             cross_class_sim_threshold=_f("WALKIE_GRAPHS_CROSS_CLASS_SIM_THRESHOLD", "1.5"),
             w_geo=_f("WALKIE_GRAPHS_W_GEO", "1.0"),
@@ -337,6 +360,8 @@ class GraphMemory:
             icp_max_dist_m=_f("WALKIE_GRAPHS_ICP_MAX_DIST_M", "0.1"),
             icp_min_fitness=_f("WALKIE_GRAPHS_ICP_MIN_FITNESS", "0.6"),
             icp_min_points=_i("WALKIE_GRAPHS_ICP_MIN_POINTS", "150"),
+            icp_skip_overlap=_f("WALKIE_GRAPHS_ICP_SKIP_OVERLAP", "0.75"),
+            defer_pcd_writes=_b("WALKIE_GRAPHS_DEFER_PCD_WRITES", "1"),
             denoise_keep_min_frac=_f("WALKIE_GRAPHS_DENOISE_KEEP_MIN_FRAC", "0.5"),
             merge_overlap_thresh=_f("WALKIE_GRAPHS_MERGE_OVERLAP_THRESH", "0.7"),
             merge_visual_sim_thresh=_f("WALKIE_GRAPHS_MERGE_VISUAL_SIM_THRESH", "0.7"),
@@ -435,7 +460,9 @@ class GraphMemory:
             pending = list(self._chroma_pending.values())
             self._chroma_pending.clear()
         if pending:
+            t0 = time.perf_counter()
             self._chroma_upsert(pending)
+            self._perf_add("chroma_flush", t0)
 
     @contextmanager
     def batch_writes(self):
@@ -459,11 +486,35 @@ class GraphMemory:
     def _save_pcd(self, node_id: str, points: np.ndarray) -> str:
         pts = points.astype(np.float32)
         path = self._pcd_path(node_id)
-        # Uncompressed: these clouds are small and rewritten every sighting, so the
-        # zlib cost per save outweighs the disk saved (the cache serves reads anyway).
-        np.savez(path, points=pts)
         self._pcd_cache[node_id] = pts
+        if self.defer_pcd_writes:
+            # On slow robot storage the per-sighting .npz rewrite dominates upsert
+            # time, so just mark it pending — all reads come from the cache, and
+            # flush_pcds persists the latest cloud once per flush cadence instead of
+            # once per sighting. Crash window: clouds newer than the last flush.
+            self._pcd_unflushed.add(node_id)
+        else:
+            # Uncompressed: clouds are small and rewritten often, so the zlib cost
+            # per save outweighs the disk saved (the cache serves reads anyway).
+            np.savez(path, points=pts)
         return str(path)
+
+    def flush_pcds(self) -> int:
+        """Write every pending (deferred) point cloud to its ``.npz``; returns count.
+
+        Only the *latest* cloud per node is written no matter how many sightings
+        accumulated since the last flush — that's the entire point of deferring.
+        """
+        with self._lock:
+            pending = [
+                (nid, self._pcd_cache[nid])
+                for nid in self._pcd_unflushed
+                if nid in self._nodes and nid in self._pcd_cache
+            ]
+            self._pcd_unflushed.clear()
+        for nid, pts in pending:
+            np.savez(self._pcd_path(nid), points=pts)
+        return len(pending)
 
     def load_pcd(self, node_id: str) -> np.ndarray:
         """The node's world cloud — from the write-through cache, disk on a cold start."""
@@ -541,17 +592,24 @@ class GraphMemory:
         walkie's recovery of drifted-position re-sightings that pure overlap misses.
         """
         with self._lock:
+            t0 = time.perf_counter()
             pts = self._denoise(det.points_world.astype(np.float32))
             if len(pts) == 0:
                 pts = det.points_world.astype(np.float32)
             det = replace(det, points_world=pts)
+            self._perf_add("denoise", t0)
 
-            target = self._associate(det)
+            t0 = time.perf_counter()
+            target, overlap = self._associate(det)
+            self._perf_add("assoc", t0)
             if target is None:
+                t0 = time.perf_counter()
                 target = self._classify(det, self._candidates(det))
+                overlap = 0.0  # matched on appearance only; alignment state unknown
+                self._perf_add("classify", t0)
             if target is None:
                 return self._insert(det)
-            return self._merge(target, det)
+            return self._merge(target, det, assoc_overlap=overlap)
 
     def _denoise(self, points: np.ndarray) -> np.ndarray:
         """DBSCAN-denoise a detection cloud to its largest cluster (no-op if disabled).
@@ -562,10 +620,14 @@ class GraphMemory:
         """
         if not self.dbscan_enabled or len(points) == 0:
             return points
-        return dbscan_largest_cluster(points, self.dbscan_eps, self.dbscan_min_points)
+        # subsample bounds DBSCAN's superlinear cost on dense (12k-pt) clouds — the
+        # cluster verdict is computed on ≤4000 points and mapped back to full res.
+        return dbscan_largest_cluster(
+            points, self.dbscan_eps, self.dbscan_min_points, subsample=4000
+        )
 
-    def _associate(self, det: Detection3D) -> Optional[ObjectNode]:
-        """ConceptGraphs additive-greedy match, or None if nothing overlaps enough.
+    def _associate(self, det: Detection3D) -> tuple[Optional[ObjectNode], float]:
+        """ConceptGraphs additive-greedy match → ``(node, overlap)`` or ``(None, 0.0)``.
 
         Over nodes that pass a cheap prefilter (AABB intersection padded by the NN
         radius, OR within ``dedup_radius_m``), score
@@ -579,12 +641,17 @@ class GraphMemory:
         With the default thresholds this path can only fire on real geometric overlap
         (pure visual tops out at ``w_sem`` = 1.0 < 1.1), so a re-sighting whose 3D
         estimate drifted produces no match here and flows to ``_classify`` unchanged.
+
+        The returned ``overlap`` is the winner's ``nn_ratio`` — the fraction of the
+        detection already coinciding with the stored cloud — which the merge uses to
+        skip ICP when the clouds are pre-aligned.
         """
         if len(det.points_world) == 0:
-            return None
+            return None, 0.0
         det_c, det_mn, det_mx, _ = aabb_of(det.points_world.astype(np.float32))
         best: Optional[ObjectNode] = None
         best_sim = -1.0
+        best_overlap = 0.0
         for n in self._nodes.values():
             same_class = n.class_name == det.class_name
             if not same_class and self.cross_class_sim_threshold <= 0:
@@ -599,8 +666,8 @@ class GraphMemory:
             sim = additive_similarity(ratio, cos, w_geo=self.w_geo, w_sem=self.w_sem)
             gate = self.sim_threshold if same_class else self.cross_class_sim_threshold
             if sim >= gate and sim > best_sim:
-                best, best_sim = n, sim
-        return best
+                best, best_sim, best_overlap = n, sim, ratio
+        return best, (best_overlap if best is not None else 0.0)
 
     def _candidates(self, det: Detection3D) -> list[ObjectNode]:
         same = [n for n in self._nodes.values() if n.class_name == det.class_name]
@@ -624,10 +691,20 @@ class GraphMemory:
         return out
 
     def _classify(self, det: Detection3D, candidates: list[ObjectNode]):
+        """Visual-similarity merge cascade (the fallback when clouds don't overlap).
+
+        The pure-visual rule is distance-capped by ``visual_merge_max_dist_m``:
+        identical twin objects (two matching chairs side by side) exceed any workable
+        CLIP threshold, so high cosine alone must never bridge more distance than
+        plausible pose drift — beyond the cap they are distinct objects. 0 = uncapped
+        (legacy behavior, from when 3D estimates could drift by metres).
+        """
         for n in candidates:
             cos = cosine(det.clip_emb, n.clip_emb)
             dist = l2(det.centroid, n.centroid)
-            if cos >= self.sim_high:
+            if cos >= self.sim_high and (
+                self.visual_merge_max_dist_m <= 0 or dist <= self.visual_merge_max_dist_m
+            ):
                 return n
             if cos >= self.sim_low and dist <= self.dedup_tight_m:
                 return n
@@ -659,7 +736,9 @@ class GraphMemory:
         self._dirty.add(node_id)
         return node
 
-    def _merge(self, node: ObjectNode, det: Detection3D) -> ObjectNode:
+    def _merge(
+        self, node: ObjectNode, det: Detection3D, *, assoc_overlap: float = 0.0
+    ) -> ObjectNode:
         """Fold a matched detection into ``node``, growing its cloud whenever possible.
 
         **Union** (vstack old + new, voxel, cap) whenever the detection's points
@@ -669,6 +748,11 @@ class GraphMemory:
         detection that is far AND non-overlapping (a pure-visual re-sighting whose 3D
         estimate drifted into empty space, or an object that physically moved) takes the
         **replace** branch — unioning there would smear one object across two places.
+
+        ``assoc_overlap`` is the association step's nn_ratio for this match: when most
+        of the detection already coincides with the stored cloud (≥ ``icp_skip_overlap``)
+        the clouds are pre-aligned and the ICP step is skipped — with a good pose that
+        is the common case, so ICP only pays for itself on actually-misaligned frames.
         """
         n = node.n_obs
         det_pts = det.points_world.astype(np.float32)
@@ -680,11 +764,12 @@ class GraphMemory:
 
         if union:
             stored = self.load_pcd(node.id)
-            if self.icp_max_dist_m > 0:
+            if self.icp_max_dist_m > 0 and assoc_overlap < self.icp_skip_overlap:
                 # Residual camera-pose error lands each sighting a few cm off; ICP-align
                 # the new cloud to the stored one so the union sharpens the shape
                 # instead of double-exposing it. Applied only on confident alignments
                 # (enough points on both sides + fitness gate inside icp_align).
+                t0 = time.perf_counter()
                 det_pts, _fit = icp_align(
                     det_pts,
                     stored,
@@ -692,6 +777,8 @@ class GraphMemory:
                     min_fitness=self.icp_min_fitness,
                     min_points=self.icp_min_points,
                 )
+                self._perf_add("icp", t0)
+            t0 = time.perf_counter()
             merged = np.vstack([stored, det_pts])
             merged = _voxel(merged, self.voxel_m)
             if len(merged) > self.max_points_per_obj:
@@ -701,7 +788,10 @@ class GraphMemory:
             node.centroid, node.aabb_min, node.aabb_max, node.extent = (
                 centroid, mn, mx, ext
             )
+            self._perf_add("fuse", t0)
+            t0 = time.perf_counter()
             node.pcd_ref = self._save_pcd(node.id, merged)
+            self._perf_add("save_pcd", t0)
             node.conf = (node.conf * n + float(det.confidence)) / (n + 1)
         else:
             # Drifted/moved re-sighting: don't average two far positions into empty
@@ -727,8 +817,10 @@ class GraphMemory:
         node.n_obs = n + 1
         node.last_seen_ts = det.ts
         if det.crop is not None:
+            t0 = time.perf_counter()
             node.frame_ref = self._save_thumb(node.id, det.crop)
             self._record_view(node, det.confidence, det.crop)
+            self._perf_add("thumb", t0)
         self._write_node(node)
         if union:
             self._dirty.add(node.id)  # cloud grew; the replace branch swaps, never accretes
@@ -1065,22 +1157,26 @@ class GraphMemory:
         merged = 0
         gone: set[str] = set()
         with self._lock:
-            for _overlap, aid, bid in pairs:
+            for overlap, aid, bid in pairs:
                 if aid in gone or bid in gone:
                     continue
                 a, b = self._nodes.get(aid), self._nodes.get(bid)
                 if a is None or b is None:
                     continue
                 keep, drop = (a, b) if a.n_obs >= b.n_obs else (b, a)
-                self._merge_nodes(keep, drop)
+                self._merge_nodes(keep, drop, overlap=overlap)
                 gone.add(drop.id)
                 merged += 1
         return merged
 
-    def _merge_nodes(self, keep: ObjectNode, drop: ObjectNode) -> None:
-        """Fold node ``drop`` into ``keep`` in place (clouds, CLIP, captions), delete ``drop``."""
+    def _merge_nodes(self, keep: ObjectNode, drop: ObjectNode, *, overlap: float = 0.0) -> None:
+        """Fold node ``drop`` into ``keep`` in place (clouds, CLIP, captions), delete ``drop``.
+
+        ``overlap`` is the caller's symmetric nn_ratio for the pair; when the clouds
+        already coincide (≥ ``icp_skip_overlap``) the ICP step is skipped.
+        """
         kp, dp = self.load_pcd(keep.id), self.load_pcd(drop.id)
-        if self.icp_max_dist_m > 0 and len(kp) and len(dp):
+        if self.icp_max_dist_m > 0 and overlap < self.icp_skip_overlap and len(kp) and len(dp):
             # Two nodes of one object usually split *because* of pose error; align the
             # dropped cloud onto the kept one so the fusion doesn't double-expose.
             dp, _fit = icp_align(
@@ -1307,6 +1403,7 @@ class GraphMemory:
             Path(p).unlink(missing_ok=True)
         self._pcd_cache.pop(node_id, None)
         self._chroma_pending.pop(node_id, None)
+        self._pcd_unflushed.discard(node_id)
         self._dirty.discard(node_id)
         if self._graph is not None and node_id in self._graph:
             self._graph.remove_node(node_id)
@@ -1318,6 +1415,7 @@ class GraphMemory:
             self._dirty.clear()
             self._pcd_cache.clear()
             self._chroma_pending.clear()
+            self._pcd_unflushed.clear()
             if self._graph is not None:
                 self._graph.clear()
             self._persist_edges()

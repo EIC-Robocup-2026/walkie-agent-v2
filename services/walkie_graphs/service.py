@@ -152,6 +152,9 @@ class WalkieGraphsService(threading.Thread):
         self.denoise_every_n = int(os.getenv("WALKIE_GRAPHS_DENOISE_EVERY_N", "20"))
         self.merge_every_n = int(os.getenv("WALKIE_GRAPHS_MERGE_EVERY_N", "20"))
         self.ghost_every_n = int(os.getenv("WALKIE_GRAPHS_GHOST_EVERY_N", "20"))
+        # Deferred point-cloud persistence: flush pending .npz writes every N ticks
+        # (memory.defer_pcd_writes batches them; reads always come from the cache).
+        self.pcd_flush_every_n = int(os.getenv("WALKIE_GRAPHS_PCD_FLUSH_EVERY_N", "5"))
         # Tier 3 (optional LLM): caption refinement + LLM edge inference. 0 = off, and
         # both require self.model. They only ever run on these cadences when enabled.
         self.caption_refine_every_n = int(os.getenv("WALKIE_GRAPHS_CAPTION_REFINE_EVERY_N", "0"))
@@ -193,6 +196,10 @@ class WalkieGraphsService(threading.Thread):
         self._stop_event.set()
         if self.is_alive():
             self.join(timeout)
+        try:  # persist any deferred point clouds before the process exits
+            self.memory.flush_pcds()
+        except Exception as e:  # noqa: BLE001 — shutdown must not raise
+            self._log(f"final pcd flush failed: {e}")
 
     def _log(self, msg: str) -> None:
         if self.verbose:
@@ -499,13 +506,16 @@ class WalkieGraphsService(threading.Thread):
 
         total = time.perf_counter() - t_frame
         n_cap = len(captions)
+        stats = self.memory.pop_perf_stats()
+        breakdown = " ".join(f"{k}={v * 1000:.0f}ms" for k, v in sorted(stats.items()))
         self._perf_log(
             f"ingest tick #{self._tick}: TOTAL={total:.2f}s | "
             f"masksub={d_masksub * 1000:.0f}ms edge={d_edge * 1000:.0f}ms "
             f"deproject={d_deproject * 1000:.0f}ms ({len(detections)} det) | "
             f"caption={d_caption * 1000:.0f}ms ({n_cap}) "
             f"embed={d_embed * 1000:.0f}ms ({len(pending)}) "
-            f"upsert={d_upsert * 1000:.0f}ms | maint+viz={d_tick * 1000:.0f}ms"
+            f"upsert={d_upsert * 1000:.0f}ms [{breakdown}] | "
+            f"maint+viz={d_tick * 1000:.0f}ms"
         )
         return result
 
@@ -553,6 +563,8 @@ class WalkieGraphsService(threading.Thread):
             _timed("merge", self.memory.merge_overlapping_nodes)
         if self.ghost_every_n > 0 and t >= self.ghost_every_n and t % self.ghost_every_n == 2:
             _timed("evict", lambda: self.memory.evict_stale_provisional(time.time()))
+        if self.pcd_flush_every_n > 0 and t % self.pcd_flush_every_n == 0:
+            _timed("pcd_flush", self.memory.flush_pcds)
         # Tier 3 LLM passes (only when a model is wired and the cadence is enabled).
         if (
             self.model is not None

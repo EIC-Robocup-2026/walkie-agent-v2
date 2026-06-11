@@ -195,11 +195,11 @@ def icp_align(
         float(max_corr_dist),
         np.eye(4),
         reg.TransformationEstimationPointToPoint(),
-        # Defaults stop after 30 iterations / loose epsilons; a few-cm offset on a
-        # dense cloud needs the extra headroom (still ~ms at our cloud sizes).
-        reg.ICPConvergenceCriteria(
-            max_iteration=100, relative_fitness=1e-9, relative_rmse=1e-9
-        ),
+        # 50 iterations of headroom (default 30 can stop short on a few-cm offset),
+        # but KEEP the default 1e-6 relative epsilons: they early-stop converged runs
+        # after ~10-30 iterations. Tighter epsilons force every merge to burn the full
+        # budget — seconds per frame on the robot's CPU for no extra accuracy.
+        reg.ICPConvergenceCriteria(max_iteration=50),
     )
     fitness = float(result.fitness)
     if fitness < min_fitness:

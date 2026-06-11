@@ -136,7 +136,12 @@ def dbscan_labels(points: np.ndarray, eps: float, min_points: int) -> np.ndarray
 
 
 def dbscan_largest_cluster(
-    points: np.ndarray, eps: float, min_points: int, *, min_cluster_size: int = 5
+    points: np.ndarray,
+    eps: float,
+    min_points: int,
+    *,
+    min_cluster_size: int = 5,
+    subsample: int = 0,
 ) -> np.ndarray:
     """Keep only the largest DBSCAN cluster of ``points`` (an ``(N, 3)`` cloud).
 
@@ -144,10 +149,31 @@ def dbscan_largest_cluster(
     keep the most populous cluster. Falls back to the **original** cloud when there
     are too few points to cluster or the largest cluster is smaller than
     ``min_cluster_size`` (so a sparse-but-real detection is never thrown away).
+
+    ``subsample`` > 0 bounds the DBSCAN cost on dense clouds: the clustering runs on
+    a uniform-stride subset of at most that many points, then every original point
+    within ``eps`` of the winning cluster is kept — same verdict, a fraction of the
+    cost (DBSCAN's neighbour queries scale superlinearly with density).
     """
     pts = np.asarray(points)
     if len(pts) < max(min_points, min_cluster_size):
         return pts
+
+    if subsample and len(pts) > subsample and cKDTree is not None:
+        idx = np.linspace(0, len(pts) - 1, int(subsample)).astype(np.int64)
+        sub = pts[idx]
+        labels = dbscan_labels(sub, eps, min_points)
+        valid = labels[labels >= 0]
+        if valid.size == 0:
+            return pts
+        counts = np.bincount(valid)
+        best = int(counts.argmax())
+        if counts[best] < min_cluster_size:
+            return pts
+        cluster = sub[labels == best]
+        # Map the verdict back: keep every full-res point within eps of the cluster.
+        d, _ = cKDTree(cluster).query(pts, k=1)
+        return pts[np.asarray(d) <= eps]
 
     labels = dbscan_labels(pts, eps, min_points)
     valid = labels[labels >= 0]

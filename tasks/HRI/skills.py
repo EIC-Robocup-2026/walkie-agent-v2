@@ -18,12 +18,12 @@ BBox = tuple[float, float, float, float]
 
 
 def parse_pose(s: str) -> tuple[float, float, float]:
-    """Parse a waypoint string "x,y,heading_deg" -> (x, y, heading_rad)."""
+    """Parse a waypoint string "x,y,heading_rad" -> (x, y, heading_rad)."""
     parts = [p.strip() for p in s.split(",")]
     if len(parts) != 3:
-        raise ValueError(f"expected 'x,y,heading_deg', got {s!r}")
-    x, y, heading_deg = (float(p) for p in parts)
-    return x, y, math.radians(heading_deg)
+        raise ValueError(f"expected 'x,y,heading_rad', got {s!r}")
+    x, y, heading_rad = (float(p) for p in parts)
+    return x, y, heading_rad
 
 
 def cxcywh_to_xyxy(bbox: BBox) -> BBox:

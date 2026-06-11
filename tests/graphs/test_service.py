@@ -31,6 +31,9 @@ class _StubMemory:
     def evict_stale_provisional(self, now_ts):
         self.calls.append("evict")
 
+    def flush_pcds(self):
+        self.calls.append("pcd_flush")
+
 
 @pytest.fixture
 def svc():

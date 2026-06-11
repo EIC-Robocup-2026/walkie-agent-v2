@@ -139,20 +139,30 @@ WALKIE_GRAPHS_MOTION_MAX_ROT_DEG = "2.0"
 # Incremental dedup. A detection MERGES into an existing same-class node when its
 # CLIP image-emb cosine >= SIM_HIGH, or (>= SIM_LOW and centroid within TIGHT_M);
 # else it INSERTs. Candidates = same-class nodes within RADIUS_M plus the top
-# DEDUP_VISUAL_K nearest by image-emb regardless of position (drift-proof).
+# DEDUP_VISUAL_K nearest by image-emb regardless of position.
 # RADIUS/TIGHT must stay above per-object 3D jitter (~5-15cm) or objects re-insert.
+#
+# TWIN SAFETY — two identical objects (matching chairs side by side) exceed any
+# workable SIM_HIGH, so a pure-visual merge must never reach further than plausible
+# pose drift or the twins fuse into one node:
+#   VISUAL_MERGE_MAX_DIST_M — hard distance cap on the SIM_HIGH merge (0 = uncapped).
+#     With pose-at-capture + motion gate + ICP, residual drift is a few cm, so 0.4 m
+#     comfortably covers real re-sightings while keeping twins >0.4 m apart distinct.
+#   DEDUP_VISUAL_K = 0 — don't pull far-away visual lookalikes into the candidate set
+#     at all (its purpose was metre-scale drift recovery, which no longer exists).
+WALKIE_GRAPHS_VISUAL_MERGE_MAX_DIST_M = "0.4"
 WALKIE_GRAPHS_DEDUP_RADIUS_M = "0.2"
 WALKIE_GRAPHS_DEDUP_TIGHT_M = "0.2"
 WALKIE_GRAPHS_SIM_HIGH = "0.85"
 WALKIE_GRAPHS_SIM_LOW = "0.65"
-WALKIE_GRAPHS_DEDUP_VISUAL_K = "5"
+WALKIE_GRAPHS_DEDUP_VISUAL_K = "0"
 # Point-cloud handling: voxel size for downsampling merged clouds (m), hard cap
 # on points per object, and the minimum valid depth points to accept a detection.
 # MIN_POINTS gates graph entry only (the live snapshot still gets a centroid below it):
 # keep it low or small/thin/flat objects (a fork) never enter the catalogue.
 # REQUIRE_CONFIRMATION + MIN_OBS_CONFIRM backstop the false-positive risk of a low value.
 WALKIE_GRAPHS_VOXEL_M = "0.02"
-WALKIE_GRAPHS_MAX_POINTS_PER_OBJ = "12000"
+WALKIE_GRAPHS_MAX_POINTS_PER_OBJ = "5000"
 WALKIE_GRAPHS_MIN_POINTS = "15"
 # Minimum detector confidence to accept a detection. Dropped early (before
 # lift/embed/caption), alongside the class scope and MIN_POINTS checks. 0.0 = keep all.
@@ -212,6 +222,16 @@ WALKIE_GRAPHS_SOR_STD_RATIO = "2.0"
 WALKIE_GRAPHS_ICP_MAX_DIST_M = "0.1"
 WALKIE_GRAPHS_ICP_MIN_FITNESS = "0.6"
 WALKIE_GRAPHS_ICP_MIN_POINTS = "150"
+# Skip ICP when the association already found the clouds coinciding (its nn_ratio >=
+# this): with a good pose most frames are pre-aligned, so ICP only runs (and only
+# costs CPU) on the frames that are actually misaligned.
+WALKIE_GRAPHS_ICP_SKIP_OVERLAP = "0.75"
+# Defer per-sighting point-cloud .npz writes: reads always come from the in-memory
+# cache, so the disk write only needs to happen on a cadence (PCD_FLUSH_EVERY_N ticks,
+# in [graphs.maintenance]) instead of once per object per frame — on slow robot
+# storage that rewrite is the single biggest upsert cost. Crash window: clouds newer
+# than the last flush (the map self-heals on re-sighting). 0 = write through.
+WALKIE_GRAPHS_DEFER_PCD_WRITES = "1"
 # DBSCAN denoising of each detection's cloud (largest cluster) before it enters the
 # graph — strips any residual mask-edge depth bleed that would inflate AABBs. The edge
 # filters above remove most of it at the source; DBSCAN is the 3D backstop. 1 = on.
@@ -268,6 +288,9 @@ WALKIE_GRAPHS_MERGE_RADIUS_M = "0.2"
 WALKIE_GRAPHS_MIN_OBS_CONFIRM = "2"
 WALKIE_GRAPHS_REQUIRE_CONFIRMATION = "1"
 WALKIE_GRAPHS_GHOST_EVERY_N = "20"
+# Flush deferred point-cloud writes (DEFER_PCD_WRITES) every N ticks. ~10 s of cloud
+# updates at risk on a hard crash; reads are unaffected (served from memory).
+WALKIE_GRAPHS_PCD_FLUSH_EVERY_N = "5"
 WALKIE_GRAPHS_GHOST_GRACE_SEC = "0"
 
 [graphs.semantic]

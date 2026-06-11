@@ -219,6 +219,14 @@ would be missed by overlap alone. So when `_associate` finds no geometric match,
 walkie matcher takes over (`_classify`): it merges on high CLIP similarity within a tight distance,
 which recovers drifted re-sightings without fusing two genuinely-different look-alikes. Tuning knobs:
 `SIM_HIGH`, `SIM_LOW`, `DEDUP_TIGHT_M`, `DEDUP_RADIUS_M`, `DEDUP_VISUAL_K`.
+
+**Why the visual merge is distance-capped.** Two *identical* objects — matching chairs around a
+table — exceed any workable CLIP threshold, so high cosine alone must never bridge more distance
+than plausible pose drift, or the twins fuse into one node. `VISUAL_MERGE_MAX_DIST_M` (0.4 m in
+production) caps the pure-visual rule: re-sightings within the cap still merge, identical twins
+beyond it stay distinct. (`DEDUP_VISUAL_K=0` likewise stops far-away lookalikes from even entering
+the candidate set — its metre-scale drift-recovery purpose disappeared with pose-at-capture, the
+motion gate, and ICP.)
 </details>
 
 <details>

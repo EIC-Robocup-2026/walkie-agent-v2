@@ -78,11 +78,34 @@ def test_merge_unions_cloud_and_grows_aabb(mem):
 
 def test_far_visual_merge_keeps_higher_conf_geometry(mem):
     # Identical embedding (cos 1.0 → merge) but far apart: must NOT average into the
-    # midpoint; the higher-confidence detection's position wins.
+    # midpoint; the higher-confidence detection's position wins. (Constructor default
+    # visual_merge_max_dist_m=0 keeps the legacy uncapped-visual-merge behavior.)
     mem.upsert(make_det(center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), conf=0.6))
     node = mem.upsert(make_det(center=(4.0, 0.0, 0.5), emb=unit(1, 0, 0), conf=0.95, ts=2.0))
     assert mem.count() == 1
     assert node.centroid[0] == pytest.approx(4.0, abs=0.1)  # not ~2.5
+
+
+def test_visual_merge_cap_keeps_identical_twins_separate(mem):
+    # Two identical chairs (~70 cm, 20 cm apart → centroids ~0.9 m): CLIP cosine is
+    # near 1.0 for both, so without a distance cap the pure-visual rule fuses them.
+    # With the production cap (0.4 m) they stay two nodes.
+    mem.visual_merge_max_dist_m = 0.4
+    mem.upsert(make_det(class_name="chair", center=(1.0, 0.0, 0.4), emb=unit(1, 0, 0)))
+    mem.upsert(make_det(class_name="chair", center=(1.9, 0.0, 0.4), emb=unit(1, 0, 0), ts=2.0))
+    assert mem.count() == 2
+
+
+def test_visual_merge_within_cap_still_recovers_drift(mem):
+    # A drifted re-sighting (same chair, pose error ~0.3 m, no cloud overlap) is
+    # inside the cap → still merges via the visual rule.
+    mem.visual_merge_max_dist_m = 0.4
+    mem.dedup_radius_m = 0.35  # candidate net must reach the drifted sighting
+    mem.upsert(make_det(class_name="chair", center=(1.0, 0.0, 0.4), emb=unit(1, 0, 0), spread=0.005))
+    mem.upsert(
+        make_det(class_name="chair", center=(1.3, 0.0, 0.4), emb=unit(1, 0, 0), spread=0.005, ts=2.0)
+    )
+    assert mem.count() == 1
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +175,31 @@ def test_merge_with_icp_cancels_pose_offset(mem):
     assert node.extent[2] < ext_before[2] + 0.01
 
 
+def test_icp_skipped_when_clouds_already_aligned(mem, monkeypatch):
+    # When the association's nn_ratio says the detection already coincides with the
+    # stored cloud (>= icp_skip_overlap), the merge must NOT spend time on ICP.
+    import services.walkie_graphs.memory as memory_mod
+
+    calls = []
+
+    def spy_icp(source, target, *a, **k):
+        calls.append(1)
+        return np.asarray(source), 1.0
+
+    monkeypatch.setattr(memory_mod, "icp_align", spy_icp)
+    mem.icp_max_dist_m = 0.1
+    mem.icp_skip_overlap = 0.75
+    # Identical clouds → association overlap ≈ 1.0 → ICP skipped.
+    mem.upsert(make_det(center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01))
+    mem.upsert(make_det(center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01, ts=2.0))
+    assert mem.count() == 1
+    assert calls == []  # pre-aligned → no ICP
+    # A visually-matched but non-overlapping-in-fine-detail sighting (classify path,
+    # overlap unknown=0) → ICP runs.
+    mem.upsert(make_det(center=(1.15, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01, ts=3.0))
+    assert calls  # misaligned/unknown → ICP attempted
+
+
 def test_moved_object_replaces_without_smearing(mem):
     # Companion to the union test: a far re-sighting with NO overlap (the object moved
     # or its estimate drifted) must NOT union — the cloud lives only at the new spot.
@@ -183,7 +231,8 @@ def test_associate_is_geometry_gated_on_pure_visual(mem):
     mem.upsert(make_det(center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01))
     far = make_det(center=(1.3, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01, ts=2.0)
     far = replace(far, points_world=mem._denoise(far.points_world))
-    assert mem._associate(far) is None
+    node, overlap = mem._associate(far)
+    assert node is None and overlap == 0.0
 
 
 def test_associate_geometry_only_merge_without_embedding(mem):
@@ -353,6 +402,27 @@ def test_thumbnails_disabled_skips_jpeg(tmp_path):
     node = m.upsert(det)
     assert node.frame_ref is None
     assert not list(thumbs.glob("*.jpg"))  # no thumbnail written
+
+
+def test_deferred_pcd_writes_flush_on_demand(tmp_path):
+    pcds = tmp_path / "pcds"
+    m = GraphMemory(chroma_dir=None, pcds_dir=str(pcds), thumbs_dir=str(tmp_path / "t"),
+                    edges_path=None, defer_pcd_writes=True)
+    node = m.upsert(make_det(center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0)))
+    # nothing on disk yet, but reads work (cache)
+    assert not list(pcds.glob("*.npz"))
+    assert len(m.load_pcd(node.id)) > 0
+    # a second sighting still defers; one flush writes ONLY the latest cloud
+    m.upsert(make_det(center=(1.01, 0.0, 0.5), emb=unit(1, 0, 0), ts=2.0))
+    assert m.flush_pcds() == 1
+    assert len(list(pcds.glob("*.npz"))) == 1
+    on_disk = np.load(m._pcd_path(node.id))["points"]
+    assert np.array_equal(on_disk, m._pcd_cache[node.id])  # latest state persisted
+    # nothing pending after flush; deleting a pending node cancels its write
+    assert m.flush_pcds() == 0
+    m.upsert(make_det(center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), ts=3.0))
+    m._delete(node.id)
+    assert m.flush_pcds() == 0
 
 
 def test_pcd_cache_write_through_and_invalidation(mem):
