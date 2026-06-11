@@ -38,6 +38,11 @@ except Exception:  # pragma: no cover
 
 import chromadb
 
+try:  # scipy is a hard dep; guard mirrors fusion/dbscan so partial installs degrade
+    from scipy.spatial import cKDTree as _cKDTree
+except Exception:  # pragma: no cover
+    _cKDTree = None
+
 from .dbscan import (
     dbscan_largest_cluster,
     dbscan_remove_noise,
@@ -206,6 +211,7 @@ class GraphMemory:
         icp_min_fitness: float = 0.6,
         icp_min_points: int = 150,
         icp_skip_overlap: float = 0.75,
+        icp_cooldown_sec: float = 0.0,
         defer_pcd_writes: bool = False,
         denoise_keep_min_frac: float = 0.5,
         merge_overlap_thresh: float = 0.7,
@@ -255,6 +261,7 @@ class GraphMemory:
         self.icp_min_fitness = icp_min_fitness
         self.icp_min_points = icp_min_points
         self.icp_skip_overlap = icp_skip_overlap
+        self.icp_cooldown_sec = icp_cooldown_sec
         self.defer_pcd_writes = defer_pcd_writes
         self.denoise_keep_min_frac = denoise_keep_min_frac
         self.merge_overlap_thresh = merge_overlap_thresh
@@ -309,6 +316,13 @@ class GraphMemory:
         # Node ids whose cloud changed in memory but hasn't hit its .npz yet (only
         # used when defer_pcd_writes is on; flushed by flush_pcds on a cadence).
         self._pcd_unflushed: set[str] = set()
+        # Per-node cKDTree over the stored cloud, for the overlap checks that run on
+        # every association/merge — built once per cloud version (invalidated on save).
+        self._tree_cache: dict[str, object] = {}
+        # When each node last had ICP considered (ran or was skipped-as-aligned);
+        # within icp_cooldown_sec it isn't reconsidered — pose error varies slowly,
+        # so realigning the same object every tick is pure cost (ephemeral, not persisted).
+        self._icp_last: dict[str, float] = {}
         self._graph = nx.MultiDiGraph() if nx is not None else None
         self._load_nodes()
         self._load_edges()
@@ -361,6 +375,7 @@ class GraphMemory:
             icp_min_fitness=_f("WALKIE_GRAPHS_ICP_MIN_FITNESS", "0.6"),
             icp_min_points=_i("WALKIE_GRAPHS_ICP_MIN_POINTS", "150"),
             icp_skip_overlap=_f("WALKIE_GRAPHS_ICP_SKIP_OVERLAP", "0.75"),
+            icp_cooldown_sec=_f("WALKIE_GRAPHS_ICP_COOLDOWN_SEC", "10"),
             defer_pcd_writes=_b("WALKIE_GRAPHS_DEFER_PCD_WRITES", "1"),
             denoise_keep_min_frac=_f("WALKIE_GRAPHS_DENOISE_KEEP_MIN_FRAC", "0.5"),
             merge_overlap_thresh=_f("WALKIE_GRAPHS_MERGE_OVERLAP_THRESH", "0.7"),
@@ -487,6 +502,7 @@ class GraphMemory:
         pts = points.astype(np.float32)
         path = self._pcd_path(node_id)
         self._pcd_cache[node_id] = pts
+        self._tree_cache.pop(node_id, None)  # cloud changed → KD-tree is stale
         if self.defer_pcd_writes:
             # On slow robot storage the per-sighting .npz rewrite dominates upsert
             # time, so just mark it pending — all reads come from the cache, and
@@ -515,6 +531,16 @@ class GraphMemory:
         for nid, pts in pending:
             np.savez(self._pcd_path(nid), points=pts)
         return len(pending)
+
+    def _stored_tree(self, node_id: str):
+        """Cached ``cKDTree`` over the node's stored cloud (None when scipy/cloud absent)."""
+        tree = self._tree_cache.get(node_id)
+        if tree is None and _cKDTree is not None:
+            pts = self.load_pcd(node_id)
+            if len(pts):
+                tree = _cKDTree(pts.astype(np.float64))
+                self._tree_cache[node_id] = tree
+        return tree
 
     def load_pcd(self, node_id: str) -> np.ndarray:
         """The node's world cloud — from the write-through cache, disk on a cold start."""
@@ -661,7 +687,13 @@ class GraphMemory:
                 or (same_class and l2(det_c, n.centroid) <= self.dedup_radius_m)
             ):
                 continue
-            ratio = nn_ratio(self.load_pcd(n.id), det.points_world, self.nn_voxel_m)
+            ratio = nn_ratio(
+                self.load_pcd(n.id),
+                det.points_world,
+                self.nn_voxel_m,
+                obj_tree=self._stored_tree(n.id),  # cached per cloud version
+                max_query=1024,  # a fraction is stable on ~1k samples
+            )
             cos = cosine(det.clip_emb, n.clip_emb)
             sim = additive_similarity(ratio, cos, w_geo=self.w_geo, w_sem=self.w_sem)
             gate = self.sim_threshold if same_class else self.cross_class_sim_threshold
@@ -764,18 +796,28 @@ class GraphMemory:
 
         if union:
             stored = self.load_pcd(node.id)
-            if self.icp_max_dist_m > 0:
-                # Residual camera-pose error lands each sighting a few cm off; ICP-align
-                # the new cloud to the stored one so the union sharpens the shape
-                # instead of double-exposing it. But ICP is the most expensive step in
-                # the whole upsert, so first establish the clouds are actually
-                # misaligned: reuse the association's overlap ratio, or measure it now
-                # (a ~ms nn_ratio) when the match came through the visual cascade.
-                # Pre-aligned clouds (ratio >= icp_skip_overlap) skip ICP outright.
+            # Residual camera-pose error lands each sighting a few cm off; ICP-align
+            # the new cloud to the stored one so the union sharpens the shape instead
+            # of double-exposing it. ICP is the most expensive step in the whole
+            # upsert, so it's doubly gated: a per-node COOLDOWN (pose error varies
+            # slowly — realigning the same object every tick is pure cost), and an
+            # overlap check (reuse the association's ratio, or measure it with the
+            # cached tree) so pre-aligned clouds never pay at all.
+            on_cooldown = (
+                self.icp_cooldown_sec > 0
+                and (det.ts - self._icp_last.get(node.id, -1e18)) < self.icp_cooldown_sec
+            )
+            if self.icp_max_dist_m > 0 and not on_cooldown:
                 t0 = time.perf_counter()
                 ratio = assoc_overlap
                 if ratio <= 0.0:
-                    ratio = nn_ratio(stored, det_pts, self.nn_voxel_m)
+                    ratio = nn_ratio(
+                        stored,
+                        det_pts,
+                        self.nn_voxel_m,
+                        obj_tree=self._stored_tree(node.id),
+                        max_query=1024,
+                    )
                 if ratio < self.icp_skip_overlap:
                     det_pts, _fit = icp_align(
                         det_pts,
@@ -784,6 +826,7 @@ class GraphMemory:
                         min_fitness=self.icp_min_fitness,
                         min_points=self.icp_min_points,
                     )
+                self._icp_last[node.id] = det.ts
                 self._perf_add("icp", t0)
             t0 = time.perf_counter()
             merged = np.vstack([stored, det_pts])
@@ -1411,6 +1454,8 @@ class GraphMemory:
         self._pcd_cache.pop(node_id, None)
         self._chroma_pending.pop(node_id, None)
         self._pcd_unflushed.discard(node_id)
+        self._tree_cache.pop(node_id, None)
+        self._icp_last.pop(node_id, None)
         self._dirty.discard(node_id)
         if self._graph is not None and node_id in self._graph:
             self._graph.remove_node(node_id)
@@ -1423,6 +1468,8 @@ class GraphMemory:
             self._pcd_cache.clear()
             self._chroma_pending.clear()
             self._pcd_unflushed.clear()
+            self._tree_cache.clear()
+            self._icp_last.clear()
             if self._graph is not None:
                 self._graph.clear()
             self._persist_edges()

@@ -223,11 +223,16 @@ WALKIE_GRAPHS_ICP_MAX_DIST_M = "0.1"
 WALKIE_GRAPHS_ICP_MIN_FITNESS = "0.6"
 WALKIE_GRAPHS_ICP_MIN_POINTS = "150"
 # Skip ICP when the clouds already coincide (overlap nn_ratio >= this — reused from
-# association, or measured cheaply at merge time): with a good pose most frames are
-# pre-aligned, so the expensive ICP only runs on actually-misaligned frames. At 0.6,
-# "most of the detection already within 2.5cm" counts as aligned — raise toward 0.8
-# for stricter (more frequent, costlier) alignment.
-WALKIE_GRAPHS_ICP_SKIP_OVERLAP = "0.6"
+# association, or measured cheaply with the cached per-node KD-tree): pre-aligned
+# frames never pay for ICP at all.
+WALKIE_GRAPHS_ICP_SKIP_OVERLAP = "0.75"
+# Per-node ICP cooldown: once a node has been ICP-considered (aligned or verified
+# pre-aligned), don't reconsider it for this many seconds — camera-pose error varies
+# slowly, so realigning the same object every tick is pure CPU cost (and per-tick
+# realignment churn adds visual wobble). This is the main ICP cost control: with ~7
+# visible objects on 2 s ticks, ICP runs on at most ~1-2 objects per tick instead of
+# all of them. 0 = consider every merge.
+WALKIE_GRAPHS_ICP_COOLDOWN_SEC = "10"
 # Defer per-sighting point-cloud .npz writes: reads always come from the in-memory
 # cache, so the disk write only needs to happen on a cadence (PCD_FLUSH_EVERY_N ticks,
 # in [graphs.maintenance]) instead of once per object per frame — on slow robot

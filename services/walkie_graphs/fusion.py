@@ -28,19 +28,33 @@ except Exception:  # pragma: no cover
     cKDTree = None
 
 
-def nn_ratio(obj_points: np.ndarray, det_points: np.ndarray, voxel_m: float) -> float:
+def nn_ratio(
+    obj_points: np.ndarray,
+    det_points: np.ndarray,
+    voxel_m: float,
+    *,
+    obj_tree=None,
+    max_query: int = 0,
+) -> float:
     """Fraction of ``det_points`` with a nearest neighbour in ``obj_points`` ≤ ``voxel_m``.
 
     This is ConceptGraphs' ``compute_overlap_matrix_2set`` overlap (one map object vs
     one detection): build a KD-tree on the object cloud, query each detection point's
     nearest neighbour, count those within ``voxel_m``, divide by the detection size.
     Returns 0.0 when either cloud is empty. Result is in ``[0, 1]``.
+
+    Hot-path levers: pass a prebuilt ``obj_tree`` (a ``cKDTree`` over ``obj_points``)
+    to skip the per-call tree build, and ``max_query`` > 0 to estimate the ratio on a
+    uniform-stride sample of the detection — a fraction is statistically stable on
+    ~1k samples (±3%), while query cost is linear in the count.
     """
     obj = np.asarray(obj_points, dtype=np.float64)
     det = np.asarray(det_points, dtype=np.float64)
-    if len(obj) == 0 or len(det) == 0 or cKDTree is None:
+    if (len(obj) == 0 and obj_tree is None) or len(det) == 0 or cKDTree is None:
         return 0.0
-    tree = cKDTree(obj)
+    if max_query and len(det) > max_query:
+        det = det[np.linspace(0, len(det) - 1, int(max_query)).astype(np.int64)]
+    tree = obj_tree if obj_tree is not None else cKDTree(obj)
     dists, _ = tree.query(det, k=1)
     within = int(np.count_nonzero(np.asarray(dists) <= voxel_m))
     return within / len(det)

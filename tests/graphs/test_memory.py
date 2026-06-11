@@ -200,6 +200,27 @@ def test_icp_skipped_when_clouds_already_aligned(mem, monkeypatch):
     assert calls  # misaligned/unknown → ICP attempted
 
 
+def test_icp_cooldown_limits_realignment_rate(mem, monkeypatch):
+    # Once a node has been ICP-considered, further merges within the cooldown window
+    # must not even evaluate ICP (the per-tick realignment was the dominant cost).
+    import services.walkie_graphs.memory as memory_mod
+
+    calls = []
+    monkeypatch.setattr(
+        memory_mod, "icp_align", lambda s, t, *a, **k: (calls.append(1) or np.asarray(s), 1.0)
+    )
+    mem.icp_max_dist_m = 0.1
+    mem.icp_skip_overlap = 2.0  # ratio can never reach this → ICP always wanted
+    mem.icp_cooldown_sec = 10.0
+    mem.upsert(make_det(center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01, ts=100.0))
+    mem.upsert(make_det(center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01, ts=102.0))
+    assert len(calls) == 1  # first merge ran ICP...
+    mem.upsert(make_det(center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01, ts=104.0))
+    assert len(calls) == 1  # ...still inside the cooldown → no new ICP
+    mem.upsert(make_det(center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01, ts=113.0))
+    assert len(calls) == 2  # window expired → reconsidered
+
+
 def test_moved_object_replaces_without_smearing(mem):
     # Companion to the union test: a far re-sighting with NO overlap (the object moved
     # or its estimate drifted) must NOT union — the cloud lives only at the new spot.
