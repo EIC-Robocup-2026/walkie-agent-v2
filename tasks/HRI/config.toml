@@ -8,7 +8,7 @@
 [hri]
 # Waypoints are map-frame poses "x,y,heading_rad" (set after mapping the arena).
 HRI_DOOR_POSE = "0.8,-0.95,2.97"
-HRI_LIVING_ROOM_POSE = "4.45,0.96,-0.40"   # scan pose facing the seating area
+HRI_LIVING_ROOM_POSE = "4.64,1.09,-0.40"   # scan pose facing the seating area
 # Open-vocab detector prompts used to find seats.
 HRI_SEAT_CLASSES = "chair,sofa,armchair,stool"
 # A seat is occupied when (person bbox ∩ seat bbox) / seat area >= this.
