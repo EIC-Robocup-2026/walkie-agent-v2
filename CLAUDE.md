@@ -105,9 +105,9 @@ The two are passed side-by-side everywhere (typically as `walkie, walkieAI`).
 
 `build_model()` in `main.py` uses `ChatOpenAI` pointed at OpenRouter (`OPENROUTER_BASE_URL`, defaults to `anthropic/claude-sonnet-4.5`). Switching providers means swapping the `ChatOpenAI` construction; the agent code is provider-agnostic as long as the model supports tool calls.
 
-### Configuration: `config.toml` + `.env`
+### Configuration: `config.toml` + module configs + `.env`
 
-Tuning knobs live in **`config.toml`** (version-controlled), secrets/endpoints/transport in **`.env`** (gitignored). `walkie_config.py::load_config()` reads `config.toml` and `os.environ.setdefault`s every leaf — so the code still reads everything via `os.getenv(NAME, default)` unchanged, and precedence is **shell env > `.env` > `config.toml` > code default**. Every entrypoint calls `load_dotenv()` then `load_config()` (main.py, tools/chroma_viewer.py, tools/scene_explore.py, tools/reset_db.py). The TOML keys *are* the exact env-var names; tables are just for grouping. When you add a new tunable, give it a sensible `os.getenv` default in code AND an entry in `config.toml` — don't put it back in `.env`.
+Tuning knobs live in **`config.toml`** (version-controlled) plus **module-local `services/*/config.toml`** files (e.g. `services/walkie_graphs/config.toml` holds every `WALKIE_GRAPHS_*` knob); secrets/endpoints/transport stay in **`.env`** (gitignored). `walkie_config.py::load_config()` reads the root `config.toml` first, then every `services/*/config.toml`, and `os.environ.setdefault`s every leaf — so the code still reads everything via `os.getenv(NAME, default)` unchanged, and precedence is **shell env > `.env` > root `config.toml` > module `config.toml` > code default** (first-set wins, so the root can override a module knob). Every entrypoint calls `load_dotenv()` then `load_config()`. The TOML keys *are* the exact env-var names; tables are just for grouping. When you add a new tunable, give it a sensible `os.getenv` default in code AND an entry in the owning module's `config.toml` (root `config.toml` for cross-cutting knobs) — don't put it back in `.env`.
 
 ### Scene memory specifics (`perception/store.py`)
 

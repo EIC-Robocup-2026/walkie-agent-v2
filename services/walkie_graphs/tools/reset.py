@@ -1,8 +1,9 @@
 """Wipe the walkie_graphs store for a clean slate.
 
-Removes the Chroma node DB, the per-object point-cloud sidecars, the thumbnails,
-and the edge file (paths come from the WALKIE_GRAPHS_* config). Run with the robot
-and any viewer stopped — ChromaDB's persistent client is single-process.
+Removes the Chroma node DB, the per-object point-cloud sidecars, the capture
+segments, the background cloud, the thumbnails, and the edge file (paths come
+from the WALKIE_GRAPHS_* config). Run with the robot and any viewer stopped —
+ChromaDB's persistent client is single-process.
 
     uv run python -m walkie_graphs.tools.reset       # asks for confirmation
     uv run python -m walkie_graphs.tools.reset -y     # no confirmation
@@ -32,10 +33,14 @@ def main() -> None:
         Path(os.getenv("WALKIE_GRAPHS_CHROMA_DIR", "chroma_db_graph")),
         Path(os.getenv("WALKIE_GRAPHS_PCDS_DIR", "graph_pcds")),
         Path(os.getenv("WALKIE_GRAPHS_THUMBS_DIR", "graph_thumbs")),
+        Path(os.getenv("WALKIE_GRAPHS_CAPTURES_DIR", "graph_captures")),
     ]
-    edges = Path(os.getenv("WALKIE_GRAPHS_EDGES_PATH", "graph_edges.json"))
+    files = [
+        Path(os.getenv("WALKIE_GRAPHS_EDGES_PATH", "graph_edges.json")),
+        Path(os.getenv("WALKIE_GRAPHS_BG_PATH", "graph_background.npz")),
+    ]
 
-    targets = [d for d in dirs if d.exists()] + ([edges] if edges.exists() else [])
+    targets = [d for d in dirs if d.exists()] + [f for f in files if f.exists()]
     if not targets:
         print("Nothing to remove — the walkie_graphs store is already empty.")
         return
@@ -51,8 +56,9 @@ def main() -> None:
     for d in dirs:
         if d.exists():
             shutil.rmtree(d)
-    if edges.exists():
-        edges.unlink()
+    for f in files:
+        if f.exists():
+            f.unlink()
     print("Done.")
 
 

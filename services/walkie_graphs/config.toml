@@ -1,0 +1,319 @@
+# walkie_graphs module config — loaded by walkie_config.load_config() AFTER the
+# root config.toml (same setdefault walk), so precedence is:
+#   shell env > .env > root config.toml > THIS FILE > code default.
+# The keys ARE the exact env-var names; tables are just grouping.
+
+[graphs]
+# walkie_graphs: open-vocabulary 3D scene-graph spatial memory AND the robot's perception
+# loop. Each tick becomes one CAPTURE: masked detections lift to per-detection world-point
+# segments plus a classless background remainder (walls/floor), the capture is registered
+# against the map with ONE rigid ICP correction (see [graphs.capture]), and the corrected
+# segments fuse into object nodes. The database sub-agent queries this store.
+# Self-contained: its own Chroma dir, point-cloud/segment sidecars, and edge file. ENABLED
+# gates whether the perception loop runs at all (off => no new objects ingested and no
+# perception.json written; the graph is still built so the database agent can read
+# existing memory).
+WALKIE_GRAPHS_ENABLED = "1"
+WALKIE_GRAPHS_PERF="0"
+# The perception loop's tick cadence (seconds): detect → ingest → write perception.json,
+# once per interval. This is the active cadence in production.
+WALKIE_GRAPHS_INTERVAL_SEC = "2.0"
+# "Interested classes": one comma-separated list that drives the whole module —
+# passed as open-vocab prompts to the detection server, and the scope of what
+# enters the graph. Empty = detect/keep everything the detector emits. Class names
+# may contain spaces (split on commas). Grouped here by category for readability.
+
+
+WALKIE_GRAPHS_INTERESTED_CLASSES = "door,chair,table,stool,shirt,sponge,bowl,cup,fork,knife,plate,spoon,coffee creamer,coke,ice tea,milk,orange juice,red bull,water bottle,bread,cornflakes,instant noodles,potato,tomato soup,apple,avocado,lemon,orange,chips,cookies,gum,mixed nuts,pringles,hand cream,soap,toothpaste,dish rack,shelf,monitor,bed,pillow"
+
+
+# Classes to always drop before lift/embed/store — moving objects (people) can't be
+# position-deduped, so they'd spawn a node every tick. They are still ADDED TO THE
+# DETECT PROMPTS in a masking-only role: their masks carve their pixels out of the
+# background cloud (no ghost people in the walls), but they never become a node, a
+# segment, or a perception.json record.
+WALKIE_GRAPHS_EXCLUDE_CLASSES = "person"
+# Classes to caption (server image-caption). Empty = same as interested classes.
+WALKIE_GRAPHS_CAPTION_CLASSES = "shirt"
+# Live 3D visualization backend: none | rerun. rerun needs `uv sync --extra graphs`.
+WALKIE_GRAPHS_VIZ = "rerun"
+# What to draw in the Rerun viewer. Point clouds are always shown.
+WALKIE_GRAPHS_VIZ_BOXES = "0"   # 0 = hide per-object bounding boxes
+# Per-object class-name labels, independent of boxes. With boxes ON the label
+# rides on the box; with boxes OFF the label is anchored to the object centroid.
+WALKIE_GRAPHS_VIZ_LABELS = "1"  # 0 = hide per-object class-name labels
+WALKIE_GRAPHS_VIZ_ROBOT = "1"   # 0 = hide the robot position + heading marker
+WALKIE_GRAPHS_VIZ_CAMERA = "1"  # 0 = hide the camera position + look-direction marker
+WALKIE_GRAPHS_VIZ_BACKGROUND = "1"  # 0 = hide the grey classless background cloud
+# Rerun viewer reachability. 0 = spawn a native window ON THE ROBOT (needs a
+# display, local only). 1 = serve a browser viewer + gRPC data stream bound to
+# 0.0.0.0 so any computer on the LAN can watch (prints the URL on startup).
+#
+# IMPORTANT: serving binds 0.0.0.0, but the robot's HOST FIREWALL (ufw/iptables,
+# usually default-deny incoming — which is why only SSH gets through) will silently
+# DROP these ports, so a remote machine sees a connection *timeout*. Open BOTH ports
+# on the robot (the browser loads the page on WEB_PORT and streams data on
+# GRPC_PORT — both are required):
+#     sudo ufw allow 9090/tcp && sudo ufw allow 9876/tcp
+# (use the actual WEB_PORT/GRPC_PORT below if you change them).
+WALKIE_GRAPHS_RERUN_SERVE = "1"
+WALKIE_GRAPHS_RERUN_WEB_PORT = "8008"
+WALKIE_GRAPHS_RERUN_GRPC_PORT = "9876"
+# Host/IP that REMOTE browsers use to reach the robot (blank = auto-detect LAN IP).
+WALKIE_GRAPHS_RERUN_HOST = ""
+# CORS origins allowed to reach the gRPC data server (the browser page is served on
+# a different port). "*" = allow any — fine on a trusted LAN.
+WALKIE_GRAPHS_RERUN_CORS = "*"
+
+[graphs.camera]
+# Camera calibration + pose come straight from the walkie-sdk — no manual tuning.
+# Intrinsics: camera.get_intrinsics() reads the ZED's CameraInfo (cached; applies to
+#   the registered depth too), scaled to the depth resolution if they differ.
+# Pose: transform.lookup(MAP_FRAME, CAMERA_FRAME) with the camera OPTICAL frame returns
+#   a pose whose rotation maps camera-optical points straight into the map (lift, head
+#   tilt, and every mount offset already baked in by the TF tree). The optical frame's
+#   axes (x right, y down, z forward) match the pinhole back-projection, so no axis
+#   conversion or manual composition is needed.
+WALKIE_GRAPHS_TF_MAP_FRAME = "map"
+WALKIE_GRAPHS_TF_CAMERA_FRAME = "zed_head_left_camera_frame_optical"
+WALKIE_GRAPHS_TF_TIMEOUT_SEC = "1.0"
+# Motion gate: skip folding a frame into the graph when the camera pose moved more than
+# this between capture and post-detection (the detection round-trip brackets the window
+# for free). Frames taken while driving/turning carry mis-posed, smeared clouds — the
+# main source of "double exposure" fuzz; the snapshot is still written, and the next
+# still frame is one tick away. 0 disables either bound.
+WALKIE_GRAPHS_MOTION_MAX_TRANS_M = "0"
+WALKIE_GRAPHS_MOTION_MAX_ROT_DEG = "0"
+
+[graphs.capture]
+# Capture-level registration: ONE rigid ICP correction per frame, solved against the
+# existing map (background crop + nearby object clouds, ~75/25 budget split) and applied
+# to every lifted segment + the background remainder. Pose error belongs to the capture
+# — the robot's pose estimate at that instant — not to individual objects, so this
+# replaces the old per-object merge ICP (and its slide-cap workaround) entirely.
+# The solver is point-to-plane (walls/floors are smooth voxelized surfaces where
+# point-to-point lattice-locks and recovers almost nothing).
+# MAX_CORR_M is the correspondence radius — just above the worst expected pose error;
+# 0 disables registration (frames ingest raw).
+WALKIE_GRAPHS_CAPTURE_ICP_MAX_CORR_M = "0.25"
+# Accept gates: solve fitness (fraction of capture points with a map correspondence —
+# background-anchored, so naturally high when revisiting mapped space), and hard caps
+# on how far a correction may move/rotate the capture. Anything beyond plausible pose
+# error is a degenerate solve (a corridor sliding along itself) → identity, ingest raw.
+WALKIE_GRAPHS_CAPTURE_ICP_MIN_FITNESS = "0.5"
+WALKIE_GRAPHS_CAPTURE_ICP_MAX_TRANS_M = "0.3"
+WALKIE_GRAPHS_CAPTURE_ICP_MAX_ROT_DEG = "5"
+# Point budgets for the solve (uniform-stride subsampled source / assembled target).
+WALKIE_GRAPHS_CAPTURE_ICP_SRC_BUDGET = "20000"
+WALKIE_GRAPHS_CAPTURE_ICP_TGT_BUDGET = "40000"
+# Open3D compute device for registration / large voxel ops: auto | cpu | cuda.
+# auto takes the GPU iff the installed Open3D build sees a CUDA device.
+WALKIE_GRAPHS_O3D_DEVICE = "auto"
+# Per-node capture history: an object keeps its K most recent segments individually
+# (rebuildable via rebuild_pcd); older ones bake into the node's base cloud and their
+# capture files become collectable.
+WALKIE_GRAPHS_SEGMENTS_PER_NODE = "12"
+# Background remainder (every valid-depth pixel under no detection mask): lift voxel,
+# store cap (fixed-origin voxel dedup + FIFO eviction), how many px to dilate the mask
+# union before inverting (mask rims are exactly where depth is least reliable, and a
+# person's mask tends to underestimate their silhouette), and the save cadence (ticks).
+WALKIE_GRAPHS_BG_VOXEL_M = "0.05"
+WALKIE_GRAPHS_BG_MAX_POINTS = "300000"
+WALKIE_GRAPHS_BG_MASK_DILATE_PX = "4"
+WALKIE_GRAPHS_BG_SAVE_EVERY_N = "20"
+
+[graphs.fusion]
+# Incremental dedup. A detection MERGES into an existing same-class node when its
+# CLIP image-emb cosine >= SIM_HIGH, or (>= SIM_LOW and centroid within TIGHT_M);
+# else it INSERTs. Candidates = same-class nodes within RADIUS_M plus the top
+# DEDUP_VISUAL_K nearest by image-emb regardless of position.
+# RADIUS/TIGHT must stay above per-object 3D jitter (~5-15cm) or objects re-insert.
+#
+# TWIN SAFETY — two identical objects (matching chairs side by side) exceed any
+# workable SIM_HIGH, so a pure-visual merge must never reach further than plausible
+# pose drift or the twins fuse into one node:
+#   VISUAL_MERGE_MAX_DIST_M — hard distance cap on the SIM_HIGH merge (0 = uncapped).
+#     With pose-at-capture + motion gate + capture registration, residual drift is a
+#     few cm, so 0.4 m comfortably covers real re-sightings while keeping twins
+#     >0.4 m apart distinct.
+#   DEDUP_VISUAL_K = 0 — don't pull far-away visual lookalikes into the candidate set
+#     at all (its purpose was metre-scale drift recovery, which no longer exists).
+WALKIE_GRAPHS_VISUAL_MERGE_MAX_DIST_M = "0.4"
+WALKIE_GRAPHS_DEDUP_RADIUS_M = "0.3"
+WALKIE_GRAPHS_DEDUP_TIGHT_M = "0.2"
+WALKIE_GRAPHS_SIM_HIGH = "0.85"
+WALKIE_GRAPHS_SIM_LOW = "0.65"
+WALKIE_GRAPHS_DEDUP_VISUAL_K = "0"
+# Point-cloud handling: voxel size for downsampling merged clouds (m), hard cap
+# on points per object, and the minimum valid depth points to accept a detection.
+# MIN_POINTS gates graph entry only (the live snapshot still gets a centroid below it):
+# keep it low or small/thin/flat objects (a fork) never enter the catalogue.
+# REQUIRE_CONFIRMATION + MIN_OBS_CONFIRM backstop the false-positive risk of a low value.
+WALKIE_GRAPHS_VOXEL_M = "0.02"
+WALKIE_GRAPHS_MAX_POINTS_PER_OBJ = "15000"
+WALKIE_GRAPHS_MIN_POINTS = "15"
+# Minimum detector confidence to accept a detection. Dropped early (before
+# lift/embed/caption), alongside the class scope and MIN_POINTS checks. 0.0 = keep all.
+WALKIE_GRAPHS_CONFIDENCE_THRESHOLD = "0.3"
+# --- ConceptGraphs-style association (primary path; the SIM_HIGH/LOW cascade above
+# is now the fallback used only when point clouds don't overlap). A detection MERGES
+# into the highest-scoring same-class node whose score
+#   phi = W_GEO * nn_ratio + W_SEM * (0.5*cos + 0.5)
+# clears SIM_THRESHOLD. nn_ratio = fraction of the detection's points within NN_VOXEL_M
+# of the node's cloud (CG's delta_nn = 2.5cm); both terms are in [0,1] so SIM_THRESHOLD
+# lives in [0,2] (1.1 ~ strong geometric overlap + agreeing CLIP). With weights 1/1 a
+# pure-visual match tops out at 1.0 < 1.1, so this path only fires on real overlap.
+WALKIE_GRAPHS_SIM_THRESHOLD = "1.1"
+WALKIE_GRAPHS_W_GEO = "1.0"
+WALKIE_GRAPHS_W_SEM = "1.0"
+WALKIE_GRAPHS_NN_VOXEL_M = "0.025"
+# Cross-class association (ConceptGraphs matches with NO class constraint). The
+# detector's labels flip-flop ("cup" one frame, "mug" the next), so a same-class-only
+# matcher stores one object twice. A different-class candidate may merge when its
+# score clears this STRICTER gate (needs ~full overlap AND agreeing CLIP — with
+# weights 1/1, 1.5 means nn_ratio + phi_sem >= 1.5). 0 = same-class only.
+WALKIE_GRAPHS_CROSS_CLASS_SIM_THRESHOLD = "1.5"
+# Depth "flying pixel" cleanup — the points that smear off an object's silhouette into
+# a shadow because a boundary depth pixel mixes the object with the background behind it.
+# Removed at the source (before back-projection), where the discontinuity is visible:
+#   MASK_ERODE_PX     — shrink each mask inward this many px, dropping the unreliable rim.
+#                       Kept at 1: 2 px obliterates thin masks (a fork's tines/handle).
+#   DEPTH_EDGE_THRESH — drop pixels next to a depth jump bigger than this (metres); the
+#                       flying pixels sit exactly on these jumps. 0 disables either.
+#   DEPTH_EDGE_REL    — grow that threshold with depth (effective = THRESH + REL * depth).
+#                       A FIXED threshold erases grazing surfaces: a bed/table seen
+#                       edge-on has far-region per-pixel steps over 5 cm, so only its near
+#                       corner survives. 0.02 lets a slanted surface through while still
+#                       catching the abrupt fg/bg step at a real silhouette. 0 = fixed.
+WALKIE_GRAPHS_MASK_ERODE_PX = "1"
+WALKIE_GRAPHS_DEPTH_EDGE_THRESH_M = "0.05"
+WALKIE_GRAPHS_DEPTH_EDGE_REL = "0.02"
+# Statistical outlier removal (Open3D remove_statistical_outlier — C++ fast path with a
+# scipy fallback): drop points whose mean distance to their SOR_K nearest neighbours
+# exceeds mean + SOR_STD_RATIO * std. A 3D DENSITY filter — it removes the flying pixels
+# the per-pixel edge filter misses, and unlike a fixed depth threshold it never erases a
+# grazing surface (the dense bed stays; the sparse shadow trail goes), which is the
+# robust fix for the "bed = only a corner" failure. Applied twice with these same knobs:
+# per lifted cloud at deprojection, and periodically over each stored node's ACCUMULATED
+# cloud (see [graphs.maintenance] denoise) to erase cross-sighting fuzz buildup.
+# SOR_K = 0 disables both. Lower SOR_STD_RATIO toward 1.5 for stricter cleanup.
+WALKIE_GRAPHS_SOR_K = "16"
+WALKIE_GRAPHS_SOR_STD_RATIO = "2.0"
+# Defer per-sighting point-cloud .npz writes: reads always come from the in-memory
+# cache, so the disk write only needs to happen on a cadence (PCD_FLUSH_EVERY_N ticks,
+# in [graphs.maintenance]) instead of once per object per frame — on slow robot
+# storage that rewrite is the single biggest upsert cost. Crash window: clouds newer
+# than the last flush (the map self-heals on re-sighting). 0 = write through.
+WALKIE_GRAPHS_DEFER_PCD_WRITES = "1"
+# DBSCAN denoising of each detection's cloud (largest cluster) before it enters the
+# graph — strips any residual mask-edge depth bleed that would inflate AABBs. The edge
+# filters above remove most of it at the source; DBSCAN is the 3D backstop. 1 = on.
+WALKIE_GRAPHS_DBSCAN_ENABLED = "1"
+WALKIE_GRAPHS_DBSCAN_EPS = "0.05"
+WALKIE_GRAPHS_DBSCAN_MIN_POINTS = "10"
+# Detection-time rejects (CG filter_gobs): drop a box covering more than this fraction
+# of the frame (walls/floor/background), and masks smaller than this many pixels.
+# 1.0 / 0 disable each. 0.9 keeps real objects while dropping whole-frame misfires.
+WALKIE_GRAPHS_MAX_BBOX_AREA_RATIO = "0.9"
+WALKIE_GRAPHS_MIN_MASK_AREA_PX = "64"
+# Subtract a contained detection's mask from its container's before deprojection
+# (CG mask_subtract_contained): keeps the mug's pixels out of the table's cloud and
+# crop, so containers don't absorb the objects resting on/in them. 1 = on.
+WALKIE_GRAPHS_MASK_SUBTRACT = "1"
+# Context margin (px) around the bbox for the CLIP/caption crop (CG pads 20).
+WALKIE_GRAPHS_CROP_MARGIN_PX = "20"
+# Per-object CLIP embeds have no batch endpoint, so the round-trips are fanned out
+# across this many threads (I/O-bound). 1 = sequential. Raise toward the object count
+# if the embed server handles concurrent requests well.
+WALKIE_GRAPHS_EMBED_WORKERS = "8"
+
+[graphs.maintenance]
+# Periodic ConceptGraphs post-processing, each on its own cadence (in ingest ticks,
+# staggered so no two collide). 0 disables a pass.
+# denoise_nodes: clean nodes whose cloud changed, in two cluster-preserving stages —
+#   (1) statistical outlier removal (same SOR_K / SOR_STD_RATIO knobs as the per-frame
+#       pass above): erases the fuzzy halo that ACCUMULATES across sightings (each
+#       frame's few surviving edge artifacts), the fix for objects bleeding into each
+#       other; dense view clusters survive because SOR is local-density based;
+#   (2) noise-only DBSCAN: drops isolated scatter that forms no cluster.
+#   Every real cluster is kept, so a cloud accumulated from disjoint partial views
+#   (two ends of a bed) is never truncated. Skipped entirely if the combination would
+#   drop more than 1 - DENOISE_KEEP_MIN_FRAC of the points (safety net).
+WALKIE_GRAPHS_DENOISE_EVERY_N = "20"
+WALKIE_GRAPHS_DENOISE_KEEP_MIN_FRAC = "0.5"
+# merge_overlapping_nodes: fuse two nodes within MERGE_RADIUS_M whose clouds overlap
+# above MERGE_OVERLAP_THRESH (symmetric nn_ratio) and whose CLIP embeddings agree
+# above MERGE_VISUAL_SIM_THRESH — recovers an object first mapped from two sides as
+# two nodes. Same-class pairs always considered; different-class pairs only when
+# CROSS_CLASS_SIM_THRESHOLD > 0 (and they additionally REQUIRE the CLIP gate — pure
+# geometry never overrides the labels). (TEXT_SIM kept for parity; unused without
+# stored caption embeddings.) Pose-offset duplicates needed an ICP rescue here when
+# sightings were lifted raw; with capture-level registration correcting each frame
+# before ingest, clouds of one object land aligned and plain overlap suffices.
+WALKIE_GRAPHS_MERGE_EVERY_N = "20"
+WALKIE_GRAPHS_MERGE_OVERLAP_THRESH = "0.7"
+WALKIE_GRAPHS_MERGE_VISUAL_SIM_THRESH = "0.7"
+WALKIE_GRAPHS_MERGE_TEXT_SIM_THRESH = "0.7"
+WALKIE_GRAPHS_MERGE_RADIUS_M = "0.4"
+# Node precision (CG obj_min_detections): an object must be seen MIN_OBS_CONFIRM times
+# before it counts. With REQUIRE_CONFIRMATION=1, provisional (under-seen) nodes are
+# HIDDEN from queries/description (non-destructive — a re-sighting promotes them; the
+# viewer and count() still see them). GHOST_GRACE_SEC>0 additionally DELETES provisional
+# nodes unseen that long (0 = never delete, just hide).
+WALKIE_GRAPHS_MIN_OBS_CONFIRM = "2"
+WALKIE_GRAPHS_REQUIRE_CONFIRMATION = "1"
+WALKIE_GRAPHS_GHOST_EVERY_N = "20"
+# Flush deferred point-cloud writes (DEFER_PCD_WRITES) every N ticks. ~10 s of cloud
+# updates at risk on a hard crash; reads are unaffected (served from memory).
+# Capture-segment flushes + the capture-file GC piggyback this same cadence.
+WALKIE_GRAPHS_PCD_FLUSH_EVERY_N = "5"
+WALKIE_GRAPHS_GHOST_GRACE_SEC = "0"
+
+[graphs.semantic]
+# Optional LLM layer (ConceptGraphs node captions + scene-graph edges). OFF by default
+# (the EVERY_N cadences are 0); enable by setting them > 0. All run on the wired chat
+# model, best-effort, never blocking the perception loop.
+# BEST_VIEWS: keep this many highest-confidence crops per object — ONLY consumed by
+# image-grounded caption refinement (CAPTION_REFINE_USE_IMAGES=1). Saving them is a
+# JPEG encode per object per frame, so it's OFF (0) unless that feature is enabled.
+WALKIE_GRAPHS_BEST_VIEWS = "0"
+# Save an object-crop thumbnail JPEG per node (for the chroma_viewer debug tool). It's
+# a disk write per object per sighting; set 0 on slow storage if you don't view them.
+WALKIE_GRAPHS_THUMBNAILS = "1"
+# refine_captions: every N ticks, summarize a node's accumulated view captions into one
+# coherent caption (LIMIT nodes/pass, most-recently-changed first). USE_IMAGES=1 also
+# sends the best crops to a multimodal model (costs more); 0 = text-only summary.
+WALKIE_GRAPHS_CAPTION_REFINE_EVERY_N = "0"
+WALKIE_GRAPHS_CAPTION_REFINE_LIMIT = "8"
+WALKIE_GRAPHS_CAPTION_REFINE_USE_IMAGES = "0"
+# infer_edges_llm: every N ticks, label spatial relations over an MST of nearby objects
+# and store them as separate "llm:<label>" edges (geometric edges stay primary).
+WALKIE_GRAPHS_LLM_EDGES_EVERY_N = "0"
+
+[graphs.relations]
+# Geometric (distance-based) edges, recomputed every RELATION_EVERY_N ingest ticks
+# (a tick is one perception frame, so ~RELATION_EVERY_N * WALKIE_GRAPHS_INTERVAL_SEC
+# seconds) over pairs whose centroids are within RELATION_MAX_DIST. near: centroid <= NEAR_M.
+# on/above: XY-AABB-IoU >= XY_OVERLAP_MIN and a.zmin ~ b.zmax within Z_TOL (gap
+# <= ON_GAP => "on", else "above"). inside: 3D AABB containment within CONTAIN_TOL.
+WALKIE_GRAPHS_RELATION_MAX_DIST = "1.0"
+WALKIE_GRAPHS_NEAR_M = "0.6"
+WALKIE_GRAPHS_XY_OVERLAP_MIN = "0.15"
+WALKIE_GRAPHS_Z_TOL = "0.05"
+WALKIE_GRAPHS_ON_GAP = "0.08"
+WALKIE_GRAPHS_CONTAIN_TOL = "0.02"
+WALKIE_GRAPHS_RELATION_EVERY_N = "5"
+
+[graphs.store]
+# Self-contained storage (kept OUT of CHROMA_VIEWER_DIRS on purpose). Nodes in a
+# Chroma collection; per-object fused clouds (+ baked base) as .npz sidecars; capture
+# segments as one refcounted .npz per capture; the classless background as one .npz;
+# edges as JSON; thumbnails as object-crop JPEGs. Capacity cap evicts the oldest by
+# last_seen.
+WALKIE_GRAPHS_CHROMA_DIR = "chroma_db_graph"
+WALKIE_GRAPHS_PCDS_DIR = "graph_pcds"
+WALKIE_GRAPHS_THUMBS_DIR = "graph_thumbs"
+WALKIE_GRAPHS_EDGES_PATH = "graph_edges.json"
+WALKIE_GRAPHS_CAPTURES_DIR = "graph_captures"
+WALKIE_GRAPHS_BG_PATH = "graph_background.npz"
+WALKIE_GRAPHS_PRUNE_MAX_RECORDS = "500"

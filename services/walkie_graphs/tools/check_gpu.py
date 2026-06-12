@@ -154,9 +154,9 @@ def main() -> None:
     # Verdict
     # ------------------------------------------------------------------
     print("\nVerdict:")
-    print("  - walkie_graphs' ICP runs on the LEGACY pipeline → always CPU, no matter")
-    print("    what the GPU supports. Using the GPU means porting fusion.icp_align to")
-    print("    the tensor API (o3d.t.pipelines.registration.icp on CUDA tensors).")
+    print("  - walkie_graphs' capture registration (pcd_ops.icp) uses the tensor API")
+    print("    on CUDA when WALKIE_GRAPHS_O3D_DEVICE resolves to cuda, with a legacy")
+    print("    CPU fallback — the timings above show what each engine costs here.")
     if gpu_works:
         print("  - This machine CAN run Open3D tensor ops on the GPU — compare the CUDA")
         print("    vs CPU timings above: at our small cloud sizes (≤ a few thousand")
