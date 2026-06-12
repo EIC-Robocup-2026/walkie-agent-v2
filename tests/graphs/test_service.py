@@ -350,7 +350,7 @@ def _svc_with_walkie(tf):
 
 
 def test_intrinsics_from_sdk_scaled_to_depth():
-    from services.walkie_graphs.camera_snapshot import intrinsics_for
+    from interfaces.devices.camera import intrinsics_for
 
     _, w = _svc_with_walkie(None)
     intr = intrinsics_for(w, 640, 480)
@@ -361,7 +361,7 @@ def test_intrinsics_from_sdk_scaled_to_depth():
 
 
 def test_camera_pose_from_optical_tf():
-    from services.walkie_graphs.camera_snapshot import camera_pose
+    from interfaces.devices.camera import camera_pose
 
     tf = {
         "position": {"x": 1.0, "y": 2.0, "z": 3.0},
@@ -376,7 +376,7 @@ def test_camera_pose_from_optical_tf():
 
 
 def test_camera_pose_none_when_lookup_fails():
-    from services.walkie_graphs.camera_snapshot import camera_pose
+    from interfaces.devices.camera import camera_pose
 
     _, w = _svc_with_walkie(None)  # lookup returns None
     assert camera_pose(w) is None
@@ -393,7 +393,7 @@ def _tf(x=0.0, y=0.0, z=0.0, qz=0.0, qw=1.0):
 
 
 def _frame_with_cam(walkie):
-    from services.walkie_graphs.camera_snapshot import camera_pose
+    from interfaces.devices.camera import camera_pose
     from services.walkie_graphs.service import FrameSnapshot
 
     cam = camera_pose(walkie)
@@ -434,7 +434,7 @@ def test_motion_gate_trips_when_pose_vanishes():
 
 
 def test_default_camera_frame_is_optical():
-    from services.walkie_graphs.camera_snapshot import camera_pose
+    from interfaces.devices.camera import camera_pose
 
     _, w = _svc_with_walkie(None)
     camera_pose(w)  # lookup fails (tf None) but records the requested frames
@@ -515,7 +515,7 @@ def test_robot_pose_swallows_status_failure():
     # snapshot is still built, with robot_pose=None (heading degrades downstream)
     import numpy as _np
 
-    from services.walkie_graphs.camera_snapshot import CameraSnapshot
+    from interfaces.devices.camera import CameraSnapshot
 
     def _boom():
         raise RuntimeError("no pose")

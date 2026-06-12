@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import math
 import os
+import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from PIL import Image
@@ -123,6 +125,43 @@ def scan_seats(ctx: TaskContext):
             )
         )
     return seats, persons, snap
+
+
+def sweep_snapshots(
+    ctx: TaskContext, offsets_deg: Sequence[float] = (10.0, 0.0, -10.0)
+) -> list:
+    """Capture a snapshot at each base-heading offset, then face forward again.
+
+    The head servo only tilts (no pan), so looking left/right is a small in-place
+    base rotation around the heading at entry. *offsets_deg* are degrees relative
+    to that heading (positive = left/CCW, e.g. the default sweeps left, center,
+    right). Returns the successful CameraSnapshots in the given order; each
+    carries its own capture-time depth/pose geometry, so a bbox found in any of
+    them lifts to the correct map-frame point regardless of where the robot was
+    pointing when it was taken. With no odometry fix the base heading is unknown,
+    so a rotation would aim arbitrarily — it falls back to a single forward
+    snapshot. Best-effort: a failed capture is dropped, never raised.
+    """
+    try:
+        pose = ctx.walkie.status.get_position()
+    except Exception as exc:
+        print(f"[skills] sweep_snapshots: odometry unavailable ({exc}); single frame")
+        pose = None
+    if not pose:
+        snap = ctx.snapshot()
+        return [snap] if snap is not None else []
+    center = pose["heading"]
+    settle = float(os.getenv("HRI_SWEEP_SETTLE_SEC", "1.0"))
+    snaps = []
+    for off in offsets_deg:
+        ctx.rotate_to(center + math.radians(off))
+        if settle > 0:
+            time.sleep(settle)  # let the base + depth settle before capturing
+        snap = ctx.snapshot()
+        if snap is not None:
+            snaps.append(snap)
+    ctx.rotate_to(center)  # leave the robot facing forward again
+    return snaps
 
 
 def pick_free_seat(seats: list[SeatCandidate]) -> SeatCandidate | None:
@@ -252,6 +291,64 @@ def face_point(ctx: TaskContext, x: float, y: float) -> bool:
     return ctx.rotate_to(heading) if heading is not None else False
 
 
+def match_people_to_seats(
+    located: dict[str, tuple[int, BBox]],
+    seats: list[SeatCandidate],
+    *,
+    frame_index: int = 0,
+    min_overlap: float | None = None,
+) -> tuple[dict[int, str], dict[str, BBox]]:
+    """Tie each recognized person to the detected seat they occupy.
+
+    *located* is :func:`identity.locate_people`'s output
+    (``{id: (frame_index, person_bbox)}``); only entries from *frame_index* are
+    used, since the seats come from one frame and a person seen in another sweep
+    view can't be lined up against them. A person claims the seat their box
+    overlaps most (at least *min_overlap*, default ``HRI_SEAT_OCCUPIED_OVERLAP``
+    — the same floor :func:`scan_seats` uses for occupancy), strongest overlap
+    first so a confident match isn't blocked by a weak one; one person per seat.
+
+    Returns ``(seat_occupants, seatless)``: *seat_occupants* maps a seat index
+    to the id sitting in it; *seatless* maps the id of every person recognized
+    in the frame whose box overlapped NO detected seat to that box — the
+    detector missed their chair, or they're on something off-vocabulary (a couch
+    arm, a stool, the floor). The caller still knows those people are present
+    and roughly where, so the spot isn't wrongly offered as free.
+    """
+    if min_overlap is None:
+        min_overlap = float(os.getenv("HRI_SEAT_OCCUPIED_OVERLAP", "0.25"))
+    present: dict[str, BBox] = {
+        pid: box for pid, (fi, box) in located.items() if fi == frame_index
+    }
+    pairs = [
+        (overlap_fraction(box, seat.bbox_xyxy), pid, i)
+        for pid, box in present.items()
+        for i, seat in enumerate(seats)
+    ]
+    seat_occupants: dict[int, str] = {}
+    claimed_seats: set[int] = set()
+    claimed_pids: set[str] = set()
+    for ov, pid, i in sorted(pairs, key=lambda p: p[0], reverse=True):
+        if ov < min_overlap or pid in claimed_pids or i in claimed_seats:
+            continue
+        seat_occupants[i] = pid
+        claimed_seats.add(i)
+        claimed_pids.add(pid)
+    seatless = {pid: box for pid, box in present.items() if pid not in claimed_pids}
+    return seat_occupants, seatless
+
+
+def _person_label(pid: str, names: dict[str, str | None] | None = None) -> str:
+    """Human-readable label for an enrolled-person id, with name when known."""
+    name = (names or {}).get(pid)
+    if pid == "host":
+        return f"the host ({name})" if name else "the host"
+    if pid.startswith("guest-"):
+        n = pid.removeprefix("guest-")
+        return f"Guest {n} ({name})" if name else f"Guest {n}"
+    return name or pid
+
+
 def describe_seating_scene(
     seats: list[SeatCandidate],
     persons: list[PersonPose],
@@ -262,6 +359,9 @@ def describe_seating_scene(
     host_drink: str | None = None,
     host_appearance: str | None = None,
     prior_seats: dict[int, tuple[SeatCandidate, int, tuple[float, float] | None]] | None = None,
+    seat_occupants: dict[int, str] | None = None,
+    seatless_people: dict[str, BBox] | None = None,
+    person_names: dict[str, str | None] | None = None,
 ) -> str:
     """Text rendering of one seat scan for the LLM seat picker.
 
@@ -270,6 +370,12 @@ def describe_seating_scene(
     occupancy, each person's position, per-seat person overlap, the host
     (always present and seated, with drink/appearance when known), and where
     an earlier guest was seated.
+
+    When *seat_occupants* (seat index -> recognized person id, from
+    :func:`match_people_to_seats`) is given, each named seat says WHO is sitting
+    in it; *seatless_people* (id -> box) flags people recognized in the frame
+    that no detected seat lined up with, so the model neither offers their spot
+    nor double-seats them. *person_names* supplies display names for the ids.
     """
     guest_label = f"Guest {guest}" + (f", named {guest_name}," if guest_name else "")
     host_line = (
@@ -290,15 +396,19 @@ def describe_seating_scene(
         f"Detected seats ({len(seats)}):",
     ]
     person_boxes = [cxcywh_to_xyxy(p.bbox) for p in persons]
+    occupants = seat_occupants or {}
     for i, seat in enumerate(seats):
         x1, y1, x2, y2 = seat.bbox_xyxy
         overlap = max(
             (overlap_fraction(pb, seat.bbox_xyxy) for pb in person_boxes),
             default=0.0,
         )
-        status = "OCCUPIED" if seat.occupied else "free"
-        if overlap > 0:
-            status += f" (a person's box covers {overlap:.0%} of it)"
+        if i in occupants:
+            status = f"OCCUPIED — {_person_label(occupants[i], person_names)} is sitting here"
+        else:
+            status = "OCCUPIED" if seat.occupied else "free"
+            if overlap > 0:
+                status += f" (a person's box covers {overlap:.0%} of it)"
         lines.append(
             f"  [{i}] {seat.class_name} — center x={seat.center_px[0]:.0f}px, "
             f"{x2 - x1:.0f}x{y2 - y1:.0f}px, "
@@ -314,6 +424,14 @@ def describe_seating_scene(
             )
     else:
         lines.append("No people detected in the frame.")
+    for pid, box in (seatless_people or {}).items():
+        cx = (box[0] + box[2]) / 2
+        lines.append(
+            f"{_person_label(pid, person_names)} is seated around x={cx:.0f}px, "
+            f"but no detected seat lines up with them — their seat is likely one "
+            f"the detector missed (a couch, stool, or surface). They are there: "
+            f"don't offer that spot, and don't seat the new guest on top of them."
+        )
     for n, (seat, _w, _xy) in (prior_seats or {}).items():
         if n == guest:
             continue
@@ -336,15 +454,19 @@ def llm_pick_seat(
     host_drink: str | None = None,
     host_appearance: str | None = None,
     prior_seats: dict[int, tuple[SeatCandidate, int, tuple[float, float] | None]] | None = None,
+    seat_occupants: dict[int, str] | None = None,
+    seatless_people: dict[str, BBox] | None = None,
+    person_names: dict[str, str | None] | None = None,
 ) -> tuple[SeatCandidate | None, str | None]:
     """Let the LLM choose which seat to offer and word the spoken offer.
 
     Returns (seat, announcement). The model sees the whole frame (seats,
-    people, the host, the other guest's seat) so it can avoid seats the
-    overlap heuristic missed, seat guests near the host, and refer to the host
-    in the announcement. A null announcement means "use the default line". An
-    explicit null seat from the model means "nothing suitable"; an extraction
-    failure or out-of-range index degrades to the deterministic pick_free_seat.
+    people, who is recognized in which seat, the host, the other guest's seat)
+    so it can avoid seats the overlap heuristic missed, seat guests near the
+    host, and refer to the host in the announcement. A null announcement means
+    "use the default line". An explicit null seat from the model means "nothing
+    suitable"; an extraction failure or out-of-range index degrades to the
+    deterministic pick_free_seat.
     """
     if not seats:
         return None, None
@@ -353,6 +475,9 @@ def llm_pick_seat(
         guest_name=guest_name, host_name=host_name,
         host_drink=host_drink, host_appearance=host_appearance,
         prior_seats=prior_seats,
+        seat_occupants=seat_occupants,
+        seatless_people=seatless_people,
+        person_names=person_names,
     )
     choice = ctx.extract(prompts.SeatChoice, prompts.PICK_SEAT_INSTRUCTIONS, scene)
     if choice is None:

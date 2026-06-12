@@ -35,8 +35,9 @@ from __future__ import annotations
 import os
 from typing import Optional
 
+from interfaces.devices.camera import CameraSnapshot
+
 from . import geometry
-from .camera_snapshot import CameraSnapshot
 from .capture import Capture, CaptureStore, Segment
 from .memory import Detection3D, GraphMemory, ObjectNode, Relation
 from .service import WalkieGraphsService

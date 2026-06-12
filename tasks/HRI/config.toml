@@ -19,6 +19,11 @@ HRI_SEAT_CLASSES = "chair,sofa,armchair,stool"
 HRI_SEAT_OCCUPIED_OVERLAP = "0.25"
 # Horizontal field of view (deg) for pixel->heading conversion (tune for ZED).
 HRI_CAMERA_HFOV_DEG = "110"
+# IntroduceEveryone sweeps left/center/right by this many degrees (base rotation,
+# positive = left) to find people who drifted off-center before introducing them.
+HRI_INTRO_SWEEP_DEG = "10"
+# Seconds to let the base + depth settle after each sweep rotation before capturing.
+HRI_SWEEP_SETTLE_SEC = "1.0"
 # 1 = forget all remembered people at task start (guests differ every run).
 HRI_PEOPLE_RESET = "1"
 # 1 = enable the timed gripper bag-handover steps (no torque sensing yet).

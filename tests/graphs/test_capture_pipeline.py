@@ -14,8 +14,9 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from interfaces.devices.camera import CameraSnapshot
+
 from services.walkie_graphs.background import BackgroundStore
-from services.walkie_graphs.camera_snapshot import CameraSnapshot
 from services.walkie_graphs.capture import CaptureStore
 from services.walkie_graphs.geometry import CameraPose, Intrinsics
 from services.walkie_graphs.memory import GraphMemory

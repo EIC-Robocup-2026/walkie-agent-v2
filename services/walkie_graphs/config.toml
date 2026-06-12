@@ -120,7 +120,7 @@ WALKIE_GRAPHS_SEGMENTS_PER_NODE = "12"
 WALKIE_GRAPHS_BG_VOXEL_M = "0.05"
 WALKIE_GRAPHS_BG_MAX_POINTS = "300000"
 WALKIE_GRAPHS_BG_MASK_DILATE_PX = "4"
-WALKIE_GRAPHS_BG_SAVE_EVERY_N = "20"
+WALKIE_GRAPHS_BG_SAVE_EVERY_N = "7"
 
 [graphs.fusion]
 # Incremental dedup. A detection MERGES into an existing same-class node when its
@@ -239,7 +239,7 @@ WALKIE_GRAPHS_EMBED_WORKERS = "8"
 #   Every real cluster is kept, so a cloud accumulated from disjoint partial views
 #   (two ends of a bed) is never truncated. Skipped entirely if the combination would
 #   drop more than 1 - DENOISE_KEEP_MIN_FRAC of the points (safety net).
-WALKIE_GRAPHS_DENOISE_EVERY_N = "20"
+WALKIE_GRAPHS_DENOISE_EVERY_N = "7"
 WALKIE_GRAPHS_DENOISE_KEEP_MIN_FRAC = "0.5"
 # merge_overlapping_nodes: fuse two nodes within MERGE_RADIUS_M whose clouds overlap
 # above MERGE_OVERLAP_THRESH (symmetric nn_ratio) and whose CLIP embeddings agree
@@ -257,7 +257,7 @@ WALKIE_GRAPHS_DENOISE_KEEP_MIN_FRAC = "0.5"
 # segments so rebuilds can't resurrect the offset. The merged node is flagged for
 # the per-object refine pass (Phase 4) to sharpen the fused cloud further.
 # RESCUE_CORR_M = 0 (code default) keeps the code path off and test-suite-clean.
-WALKIE_GRAPHS_MERGE_EVERY_N = "20"
+WALKIE_GRAPHS_MERGE_EVERY_N = "7"
 WALKIE_GRAPHS_MERGE_OVERLAP_THRESH = "0.7"
 WALKIE_GRAPHS_MERGE_VISUAL_SIM_THRESH = "0.7"
 WALKIE_GRAPHS_MERGE_TEXT_SIM_THRESH = "0.7"
@@ -275,7 +275,7 @@ WALKIE_GRAPHS_MERGE_RESCUE_MAX_ROT_DEG = "10"
 # Shadow/edge trails: the post-alignment voxel+SOR+DBSCAN chain erases sparse halos.
 # REFINE_CORR_M = 0 (code default) disables — enable in config.toml or temporarily
 # via env. REFINE_EVERY_N = 0 (code default) keeps the cadence off for tests.
-WALKIE_GRAPHS_REFINE_EVERY_N = "20"
+WALKIE_GRAPHS_REFINE_EVERY_N = "7"
 WALKIE_GRAPHS_REFINE_LIMIT = "3"
 WALKIE_GRAPHS_REFINE_CORR_M = "0.08"
 WALKIE_GRAPHS_REFINE_MIN_FITNESS = "0.6"
@@ -288,7 +288,7 @@ WALKIE_GRAPHS_REFINE_MAX_ROT_DEG = "5"
 # nodes unseen that long (0 = never delete, just hide).
 WALKIE_GRAPHS_MIN_OBS_CONFIRM = "2"
 WALKIE_GRAPHS_REQUIRE_CONFIRMATION = "1"
-WALKIE_GRAPHS_GHOST_EVERY_N = "20"
+WALKIE_GRAPHS_GHOST_EVERY_N = "7"
 # Flush deferred point-cloud writes (DEFER_PCD_WRITES) every N ticks. ~10 s of cloud
 # updates at risk on a hard crash; reads are unaffected (served from memory).
 # Capture-segment flushes + the capture-file GC piggyback this same cadence.

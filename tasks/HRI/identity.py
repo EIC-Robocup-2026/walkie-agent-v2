@@ -181,62 +181,74 @@ def enroll_person_in_box(
 
 
 def locate_people(
-    ctx: TaskContext, img: Image.Image, person_ids: list[str]
-) -> dict[str, BBox]:
-    """Find enrolled people in one frame: {person_id: person bbox_xyxy}.
+    ctx: TaskContext, frames: list[Image.Image], person_ids: list[str]
+) -> dict[str, tuple[int, BBox]]:
+    """Find enrolled people across one or more frames: {id: (frame_index, bbox)}.
 
-    Every detected face is scored against the whole store with
-    ``recognize_fused`` (face + attire of the same person crop), then faces
-    are greedily assigned to identities by similarity — so the host (also
-    enrolled) acts as a distractor a guest match must beat. Ids still missing
-    get an appearance-only pass over the remaining pose-detected persons
-    (covers a guest facing away). Partial results on any failure.
+    Face FIRST, across every frame: each detected face is scored against the
+    whole store with ``recognize_fused`` (face + attire of the same person
+    crop), then matches from all frames are greedily assigned to identities by
+    similarity — so a guest whose face shows in any view wins, and the host
+    (also enrolled) acts as a distractor a guest match must beat. Only the ids
+    still missing then get an appearance-only fallback pass over the remaining
+    pose-detected persons in every frame (covers a guest turned away in all
+    views). The returned frame index ties each match to the snapshot it came
+    from, so the caller can lift the bbox against that frame's capture-time
+    geometry. Partial results on any failure.
     """
     if ctx.people is None or ctx.people.count() == 0:
         return {}
     wanted = set(person_ids)
-    faces = _detect_faces(ctx, img)
-    persons_xyxy = _detect_persons_xyxy(ctx, img)
-
     min_score = ctx.people.fused_min_score()
-    # Score every face against the store, remembering its person box.
-    candidates: list[tuple[float, str, BBox]] = []  # (similarity, id, person box)
-    used_boxes: list[BBox] = []
-    for face in faces:
-        person_box = _person_bbox_for_face(face, persons_xyxy, img.width, img.height)
-        app_emb = _appearance_embedding(ctx, img, person_box)
-        rec = ctx.people.recognize_fused(
-            face.embedding,
-            app_emb,
-            face_confidence=face.det_score,
-            min_score=min_score,
-        )
-        if rec is not None and rec.similarity is not None:
-            candidates.append((rec.similarity, rec.id, person_box))
 
-    located: dict[str, BBox] = {}
-    for sim, rid, box in sorted(candidates, key=lambda c: c[0], reverse=True):
-        if rid in located or any(b == box for b in used_boxes):
+    # Per-frame pose boxes, computed once and reused by both passes; face
+    # candidates tagged with the frame they were seen in.
+    persons_by_frame: list[list[BBox]] = []
+    candidates: list[tuple[float, str, int, BBox]] = []  # (sim, id, frame, box)
+    for fi, img in enumerate(frames):
+        faces = _detect_faces(ctx, img)
+        persons_xyxy = _detect_persons_xyxy(ctx, img)
+        persons_by_frame.append(persons_xyxy)
+        for face in faces:
+            person_box = _person_bbox_for_face(face, persons_xyxy, img.width, img.height)
+            app_emb = _appearance_embedding(ctx, img, person_box)
+            rec = ctx.people.recognize_fused(
+                face.embedding,
+                app_emb,
+                face_confidence=face.det_score,
+                min_score=min_score,
+            )
+            if rec is not None and rec.similarity is not None:
+                candidates.append((rec.similarity, rec.id, fi, person_box))
+
+    located: dict[str, tuple[int, BBox]] = {}
+    used: set[tuple[int, BBox]] = set()  # (frame, box) claimed by a match
+    for sim, rid, fi, box in sorted(candidates, key=lambda c: c[0], reverse=True):
+        if rid in located or (fi, box) in used:
             continue
-        located[rid] = box
-        used_boxes.append(box)
-        print(f"[identity] located {rid} (similarity {sim:.2f})")
+        located[rid] = (fi, box)
+        used.add((fi, box))
+        print(f"[identity] located {rid} by face (frame {fi}, similarity {sim:.2f})")
 
-    # Appearance-only pass for ids still missing (face turned away).
+    # Appearance-only fallback for ids still missing (face turned away in every
+    # frame) — scan the unclaimed pose boxes across all frames.
     missing = wanted - set(located)
-    if missing:
-        free_boxes = [b for b in persons_xyxy if not any(b == u for u in used_boxes)]
-        for box in free_boxes:
-            app_emb = _appearance_embedding(ctx, img, box)
+    for fi, persons_xyxy in enumerate(persons_by_frame):
+        if not missing:
+            break
+        for box in persons_xyxy:
+            if (fi, box) in used:
+                continue
+            app_emb = _appearance_embedding(ctx, frames[fi], box)
             if app_emb is None:
                 continue
             rec = ctx.people.recognize_fused(None, app_emb, min_score=min_score)
             if rec is not None and rec.id in missing:
-                located[rec.id] = box
-                used_boxes.append(box)
+                located[rec.id] = (fi, box)
+                used.add((fi, box))
                 missing.discard(rec.id)
-                print(f"[identity] located {rec.id} by appearance only")
+                print(f"[identity] located {rec.id} by appearance only (frame {fi})")
             if not missing:
                 break
 
-    return {rid: box for rid, box in located.items() if rid in wanted}
+    return {rid: v for rid, v in located.items() if rid in wanted}

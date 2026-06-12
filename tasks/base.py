@@ -143,9 +143,7 @@ class TaskContext:
         even after slow detection/LLM round-trips. None on any failure.
         """
         try:
-            from services.walkie_graphs.camera_snapshot import CameraSnapshot
-
-            return CameraSnapshot.capture(self.walkie)
+            return self.walkie.capture_snapshot()
         except Exception as exc:
             _log("ctx", f"snapshot failed ({exc})")
             return None

@@ -39,8 +39,10 @@ from .skills import (
     lift_bbox_world_xy,
     llm_intro_speeches,
     llm_pick_seat,
+    match_people_to_seats,
     parse_pose,
     scan_seats,
+    sweep_snapshots,
 )
 
 
@@ -153,6 +155,23 @@ class OfferSeat(SubTask):
                     drink=os.getenv("HRI_HOST_DRINK", "").strip(),
                     attributes=host["appearance"] or "",
                 )
+        # Recognize who is already seated (everyone enrolled except the guest
+        # standing next to the robot) and tie each to the seat they hold, so the
+        # picker seats the new guest near the host and steers clear of taken
+        # seats. A recognized person the seat detector found no chair under is
+        # surfaced too (match_people_to_seats' seatless map), so that spot still
+        # isn't offered as free.
+        seated_ids = [
+            pid for pid in ("host", "guest-1", "guest-2")
+            if pid != f"guest-{self.guest}"
+        ]
+        located = locate_people(ctx, [img], seated_ids) if img is not None else {}
+        seat_occupants, seatless = match_people_to_seats(located, seats)
+        person_names = {
+            "host": os.getenv("HRI_HOST_NAME", "").strip() or None,
+            "guest-1": _guest(ctx, 1)["name"],
+            "guest-2": _guest(ctx, 2)["name"],
+        }
         seat, announcement = llm_pick_seat(
             ctx, seats, persons, img_w,
             guest=self.guest,
@@ -161,6 +180,9 @@ class OfferSeat(SubTask):
             host_drink=os.getenv("HRI_HOST_DRINK", "").strip() or None,
             host_appearance=host.get("appearance"),
             prior_seats=ctx.data.get("seats"),
+            seat_occupants=seat_occupants,
+            seatless_people=seatless,
+            person_names=person_names,
         )
         if seat is None:
             ctx.say(prompts.OFFER_SEAT_FALLBACK)
@@ -227,26 +249,33 @@ class IntroduceEveryone(SubTask):
             "guest-2": _guest(ctx, 2),
         }
 
-        # Anchor each person to where they actually ARE: recognize the
-        # enrolled faces/attire in one snapshot (guests may have switched
-        # seats — the rulebook allows it) and lift each matched person's bbox
-        # against the snapshot's frozen capture-time geometry, so the slow
-        # face/attire recognition round-trips can't skew the positions.
-        # A guest who isn't recognized falls back to their offered seat's
-        # stored world point. World-point headings survive the robot's own
-        # rotations, so they stay valid across all three turns; a person with
-        # no anchor is introduced without rotating.
-        snap = ctx.snapshot()
+        # Anchor each person to where they actually ARE. Guests may have
+        # switched seats (the rulebook allows it), and a single forward frame
+        # can miss someone off to the side, so sweep three snapshots — left
+        # 10°, center, right 10° — and recognize the enrolled people across all
+        # of them. Faces are matched FIRST over the whole sweep; only people
+        # still missing fall back to an attire-only pass (covers a guest turned
+        # away in every view). Each match is lifted against the geometry of the
+        # very snapshot it was found in, so the slow recognition round-trips and
+        # the robot's own sweep rotations can't skew the map-frame positions. A
+        # guest still not found falls back to their offered seat's stored world
+        # point. World-point headings survive the robot's own rotations, so they
+        # stay valid across all three turns; a person with no anchor is
+        # introduced without rotating.
+        sweep = float(os.getenv("HRI_INTRO_SWEEP_DEG", "10"))
+        snaps = sweep_snapshots(ctx, (sweep, 0.0, -sweep))
         located = (
-            locate_people(ctx, snap.img, list(self.ORDER)) if snap is not None else {}
+            locate_people(ctx, [s.img for s in snaps], list(self.ORDER))
+            if snaps else {}
         )
         seats: dict = ctx.data.get("seats", {})
         headings: dict[str, float] = {}
         for pid in self.ORDER:
             world_xy = None
-            box = located.get(pid)
-            if box is not None:
-                world_xy = lift_bbox_world_xy(ctx, snap, box)
+            found = located.get(pid)
+            if found is not None:
+                fi, box = found
+                world_xy = lift_bbox_world_xy(ctx, snaps[fi], box)
             if world_xy is None and pid.startswith("guest-"):
                 stored = seats.get(int(pid.removeprefix("guest-")))
                 if stored is not None:

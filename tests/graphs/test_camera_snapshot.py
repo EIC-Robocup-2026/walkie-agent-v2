@@ -1,4 +1,4 @@
-"""Unit tests for services.walkie_graphs.camera_snapshot — synthetic geometry, no robot."""
+"""Unit tests for interfaces.devices.camera.CameraSnapshot — synthetic geometry, no robot."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from services.walkie_graphs.camera_snapshot import CameraSnapshot
+from interfaces.devices.camera import CameraSnapshot
 from services.walkie_graphs.geometry import CameraPose, Intrinsics
 
 

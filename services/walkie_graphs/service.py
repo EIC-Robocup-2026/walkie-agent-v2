@@ -35,7 +35,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .camera_snapshot import CameraSnapshot, camera_pose
+from interfaces.devices.camera import CameraSnapshot, camera_pose
+
 from .capture import lift_capture, register_capture
 from .fusion import subtract_contained_masks
 from .geometry import depth_discontinuity_mask, deproject_mask
@@ -43,7 +44,7 @@ from .memory import Detection3D, GraphMemory
 from .snapshot import build_object_records, write_atomic
 
 # Back-compat: the per-tick frame snapshot is now the shared CameraSnapshot
-# (services.walkie_graphs.camera_snapshot); old name kept for existing callers.
+# (interfaces.devices.camera); old name kept for existing callers.
 FrameSnapshot = CameraSnapshot
 
 
@@ -203,7 +204,7 @@ class WalkieGraphsService(threading.Thread):
         ).strip().lower() in ("1", "true", "yes")
         self.llm_edges_every_n = int(os.getenv("WALKIE_GRAPHS_LLM_EDGES_EVERY_N", "0"))
 
-        # Camera calibration + pose come from camera_snapshot.py (CameraSnapshot.capture
+        # Camera calibration + pose come from interfaces.devices.camera (CameraSnapshot.capture
         # reads them straight from the walkie-sdk, configured by WALKIE_GRAPHS_TF_*).
         # Motion gate: a frame captured while the robot/head moves carries a smeared,
         # mis-posed cloud (the streamed depth + TF can't be perfectly synchronized), so
@@ -368,14 +369,14 @@ class WalkieGraphsService(threading.Thread):
     def _capture_frame(self) -> FrameSnapshot | None:
         """Read depth, RGB, camera pose, intrinsics, and robot pose as one atomic frame.
 
-        Delegates to :meth:`CameraSnapshot.capture` — everything the rest of the tick
-        consumes is read back-to-back and *before* detection, so it all describes the
-        same instant. Returns ``None`` (skip the tick) when depth or the image is
+        Delegates to :meth:`WalkieInterface.capture_snapshot` — everything the rest of
+        the tick consumes is read back-to-back and *before* detection, so it all
+        describes the same instant. Returns ``None`` (skip the tick) when depth or the image is
         unavailable; ``cam``/``intr`` may be ``None`` and are handled downstream as
         "no geometry".
         """
         t0 = time.perf_counter()
-        frame = CameraSnapshot.capture(self.walkie, log=self._log)
+        frame = self.walkie.capture_snapshot(log=self._log)
         self._perf_log(
             f"capture stage: {(time.perf_counter() - t0) * 1000:.0f}ms"
             + ("" if frame is not None else " (no frame — skipping tick)")

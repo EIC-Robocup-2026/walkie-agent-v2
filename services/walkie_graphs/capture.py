@@ -1,7 +1,7 @@
 """Capture — one frame's detections, lifted segments, and pose correction.
 
 The capture is the pipeline's first-class unit (ConceptGraphs-style): a
-:class:`~services.walkie_graphs.camera_snapshot.CameraSnapshot` plus the
+:class:`~interfaces.devices.camera.CameraSnapshot` plus the
 detector's segmentations, lifted into per-detection world-frame point
 **segments** and a classless **background remainder** (every valid-depth pixel
 under no mask). Pose error is a property of the capture — the robot's pose
