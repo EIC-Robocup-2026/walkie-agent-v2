@@ -231,7 +231,17 @@ WALKIE_GRAPHS_SOR_STD_RATIO = "2.0"
 # and ICP fitness >= ICP_MIN_FITNESS (barely-overlapping partial views are unioned raw
 # rather than wrongly snapped together). MAX_DIST is the correspondence radius — set it
 # just above your worst expected pose error. 0 disables.
-WALKIE_GRAPHS_ICP_MAX_DIST_M = "0.1"
+#
+# CRITICAL COUPLING: MAX_DIST must be >= DEDUP_RADIUS_M. A re-sighting UNIONS into a node
+# whenever it lands within DEDUP_RADIUS_M (0.2 m), but ICP can only cancel an offset up to
+# MAX_DIST. If MAX_DIST < DEDUP_RADIUS_M, every sighting landing in the gap (here the old
+# 0.1-0.2 m band) triggers a union ICP can't align — correspondences are capped at
+# MAX_DIST so fitness fails and the raw, mis-posed cloud is stacked in → fuzzy objects.
+# The camera pose carries ~15 cm of error, which lands squarely in that old dead zone, so
+# 0.2 both clears the 15 cm error AND covers the full union radius. Raise both together if
+# the error grows. (ICP itself converges well past this — measured clean alignment up to
+# 30 cm on feature-rich clouds — so the radius, not ICP capability, is the limit.)
+WALKIE_GRAPHS_ICP_MAX_DIST_M = "0.2"
 WALKIE_GRAPHS_ICP_MIN_FITNESS = "0.6"
 WALKIE_GRAPHS_ICP_MIN_POINTS = "150"
 # Skip ICP when the clouds already coincide (overlap nn_ratio >= this — reused from

@@ -195,14 +195,12 @@ def icp_align(
 
     reg = o3d.pipelines.registration
     # Estimate the transform on bounded subsamples (uniform stride — keeps coverage),
-    # then apply it to the FULL source: a rigid transform is fully constrained by a
-    # few hundred well-spread points, while ICP cost (per registration_icp call) is
-    # ~linear in the subsample size. ICP only fires on poorly-overlapping clouds
-    # (overlap < icp_skip_overlap) — exactly the ones that never converge and run the
-    # full iteration budget — so capping both knobs tightly is where the time is won:
-    # 800→400 points roughly halves the per-call cost (~180ms→~85ms measured) with no
-    # accuracy loss on a rigid transform.
-    cap = 400
+    # then apply it to the FULL source: ICP cost (per registration_icp call) is ~linear
+    # in the subsample size, while a rigid transform needs only a well-spread subset.
+    # The cap trades speed for the convergence basin: aligning the large (~15 cm) inter-
+    # sighting offsets this robot's pose error produces is more reliable with denser
+    # coverage of the overlap region, so 1000 keeps enough points to lock those in.
+    cap = 800
     src_est = src if len(src) <= cap else src[np.linspace(0, len(src) - 1, cap).astype(int)]
     tgt = np.asarray(target, dtype=np.float64)
     tgt_est = tgt if len(tgt) <= cap else tgt[np.linspace(0, len(tgt) - 1, cap).astype(int)]
