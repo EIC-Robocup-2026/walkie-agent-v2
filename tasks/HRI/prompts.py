@@ -110,13 +110,49 @@ OFFER_SEAT_FALLBACK = "Please take any free seat you like."
 
 # --- Introductions ------------------------------------------------------------
 
-GENERIC_GUEST = "our other guest"
 GENERIC_DRINK = "an unknown drink"
 
-INTRO_TEMPLATE = "{listener_name}, this is {other_name}. Their favorite drink is {other_drink}."
-DESCRIBE_GUEST1_TEMPLATE = (
-    "Inside, you will meet our first guest, {name}. {appearance}"
+
+class IntroSpeeches(BaseModel):
+    """One spoken introduction per person, generated in a single LLM call."""
+
+    host: str = Field(
+        description="The sentence(s) spoken while facing the host, presenting them to the guests"
+    )
+    guest_1: str = Field(
+        description="The sentence(s) spoken while facing the first guest, presenting them to the others"
+    )
+    guest_2: str = Field(
+        description="The sentence(s) spoken while facing the second guest, presenting them to the others"
+    )
+
+
+INTRO_SPEECHES_INSTRUCTIONS = (
+    "You are the receptionist robot at a party, about to introduce everyone in "
+    "the living room to each other. You are given the host and the two newly "
+    "arrived guests, each with a name, favorite drink, and sometimes an "
+    "appearance note (any field may be unknown). Write the exact words to "
+    "speak for each person, in the order host, first guest, second guest. The "
+    "robot turns to FACE each person right before speaking their part, so "
+    "address the others and present the faced person (e.g. 'Alice, Bob — this "
+    "is our host Tokyo. His favorite drink is pepsi.').\n"
+    "Rules:\n"
+    "- Each part: generate some warm, natural spoken sentences. No stage "
+    "directions, no emoji, nothing that cannot be said aloud.\n"
+    "- ALWAYS state the faced person's name and favorite drink explicitly — "
+    "both are scored. For an unknown name say something natural like 'our "
+    "first guest'; for an unknown drink omit the drink sentence rather than "
+    "inventing one.\n"
+    "- Never invent facts; use only what is given.\n"
+    "- Do not repeat the same sentence shape three times in a row — vary the "
+    "phrasing so the sequence sounds human."
 )
+
+# Per-person fallback when the LLM call fails ({name}/{drink} pre-resolved).
+PERSON_INTRO_TEMPLATE = "Everyone, this is {name}. Their favorite drink is {drink}."
+GENERIC_HOST = "our host"
+GENERIC_FIRST_GUEST = "our first guest"
+GENERIC_SECOND_GUEST = "our second guest"
 
 # --- Bag handover (gated by HRI_ENABLE_BAG) ----------------------------------
 

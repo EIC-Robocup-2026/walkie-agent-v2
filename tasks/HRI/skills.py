@@ -342,3 +342,45 @@ def llm_pick_seat(
     print(f"[skills] LLM picked seat [{choice.seat_index}] {seat.class_name}"
           f" ({choice.reason or 'no reason given'})")
     return seat, (choice.announcement or "").strip() or None
+
+
+def llm_intro_speeches(ctx: TaskContext, people: dict[str, dict]) -> dict[str, str]:
+    """Word every introduction in ONE LLM call: {person_id: spoken sentence(s)}.
+
+    *people* maps "host"/"guest-1"/"guest-2" to {"name", "drink", "appearance"}
+    records (fields may be None). Always returns a speech for all three —
+    on extraction failure each falls back to the per-person template.
+    """
+    generic = {
+        "host": prompts.GENERIC_HOST,
+        "guest-1": prompts.GENERIC_FIRST_GUEST,
+        "guest-2": prompts.GENERIC_SECOND_GUEST,
+    }
+
+    def fallback(pid: str) -> str:
+        p = people.get(pid, {})
+        return prompts.PERSON_INTRO_TEMPLATE.format(
+            name=p.get("name") or generic[pid],
+            drink=p.get("drink") or prompts.GENERIC_DRINK,
+        )
+
+    lines = []
+    for pid, label in (("host", "Host"), ("guest-1", "First guest"), ("guest-2", "Second guest")):
+        p = people.get(pid, {})
+        lines.append(
+            f"{label}: name={p.get('name') or 'unknown'}; "
+            f"favorite drink={p.get('drink') or 'unknown'}; "
+            f"appearance={p.get('appearance') or 'unknown'}"
+        )
+    speeches = ctx.extract(
+        prompts.IntroSpeeches, prompts.INTRO_SPEECHES_INSTRUCTIONS, "\n".join(lines)
+    )
+    if speeches is None:
+        print("[skills] intro speech extraction failed; using template lines")
+        return {pid: fallback(pid) for pid in generic}
+    by_id = {
+        "host": (speeches.host or "").strip(),
+        "guest-1": (speeches.guest_1 or "").strip(),
+        "guest-2": (speeches.guest_2 or "").strip(),
+    }
+    return {pid: text or fallback(pid) for pid, text in by_id.items()}

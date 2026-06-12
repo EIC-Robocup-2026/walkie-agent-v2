@@ -3,8 +3,9 @@
 Flow (rulebook ch. 5.1, doorbell + torque sensing intentionally out of scope):
 two guests arrive separately at the door; for each: greet, learn name +
 favorite drink (no confirmation questions), guide to the living room, offer a
-free seat; describe guest 1 to guest 2; introduce the seated guests to each
-other while facing them. Bag handover / follow-host are gated stubs.
+free seat; then introduce everyone — host first, then both guests — facing
+each person while speaking their LLM-worded introduction (one LLM call words
+all three). Bag handover / follow-host are gated stubs.
 
 Blackboard layout (ctx.data):
     guests: {1: {"name", "drink", "appearance"}, 2: {...}}
@@ -35,6 +36,7 @@ from .skills import (
     face_point,
     find_seated_person_bbox,
     heading_to_point,
+    llm_intro_speeches,
     llm_pick_seat,
     parse_pose,
     scan_seats,
@@ -128,7 +130,7 @@ class OfferSeat(SubTask):
         self.guest = guest
 
     def run(self, ctx: TaskContext) -> StepResult:
-        time.sleep(2) # wait for navigation to settle
+        time.sleep(5) # wait for navigation to settle
         seats, persons, img = scan_seats(ctx)
         img_w = img.width if img is not None else 0
         host = ctx.data.setdefault("host", {})
@@ -199,50 +201,61 @@ class ReceiveBag(SubTask):
         return StepResult.DONE
 
 
-class IntroduceGuests(SubTask):
-    """Face each seated guest while stating the other guest's name + drink."""
+class IntroduceEveryone(SubTask):
+    """Introduce each person — host first, then both guests — facing each one.
+
+    All three introductions are worded by ONE LLM call (llm_intro_speeches);
+    the robot then turns to the person being introduced and speaks their part.
+    """
+
+    ORDER = ("host", "guest-1", "guest-2")
 
     def run(self, ctx: TaskContext) -> StepResult:
-        g1, g2 = _guest(ctx, 1), _guest(ctx, 2)
-        seats: dict = ctx.data.get("seats", {})
+        host = ctx.data.setdefault("host", {})
+        people = {
+            "host": {
+                "name": os.getenv("HRI_HOST_NAME", "").strip() or None,
+                "drink": os.getenv("HRI_HOST_DRINK", "").strip() or None,
+                "appearance": host.get("appearance"),
+            },
+            "guest-1": _guest(ctx, 1),
+            "guest-2": _guest(ctx, 2),
+        }
 
-        # Anchor each guest to where they actually ARE: recognize the enrolled
-        # faces/attire in one scan frame (guests may have switched seats — the
-        # rulebook allows it) and lift each matched person's bbox to a
-        # map-frame point while the camera still sees the scanned scene. A
-        # guest who isn't recognized falls back to their offered seat's stored
-        # world point. World-point headings survive the robot's own rotations,
-        # so both stay valid across both turns; a guest with neither anchor is
-        # addressed without rotating.
+        # Anchor each person to where they actually ARE: recognize the
+        # enrolled faces/attire in one scan frame (guests may have switched
+        # seats — the rulebook allows it) and lift each matched person's bbox
+        # to a map-frame point while the camera still sees the scanned scene.
+        # A guest who isn't recognized falls back to their offered seat's
+        # stored world point. World-point headings survive the robot's own
+        # rotations, so they stay valid across all three turns; a person with
+        # no anchor is introduced without rotating.
         img = ctx.capture()
         located = (
-            locate_people(ctx, img, ["guest-1", "guest-2"]) if img is not None else {}
+            locate_people(ctx, img, list(self.ORDER)) if img is not None else {}
         )
-        headings: dict[int, float] = {}
-        for n in (1, 2):
+        seats: dict = ctx.data.get("seats", {})
+        headings: dict[str, float] = {}
+        for pid in self.ORDER:
             world_xy = None
-            box = located.get(f"guest-{n}")
+            box = located.get(pid)
             if box is not None:
                 world_xy = bboxes_world_position(ctx, box)
-            if world_xy is None and n in seats:
-                _seat, _img_w, world_xy = seats[n]
+            if world_xy is None and pid.startswith("guest-"):
+                stored = seats.get(int(pid.removeprefix("guest-")))
+                if stored is not None:
+                    _seat, _img_w, world_xy = stored
             if world_xy is None:
                 continue
             heading = heading_to_point(ctx, *world_xy)
             if heading is not None:
-                headings[n] = heading
+                headings[pid] = heading
 
-        def intro_line(listener: dict, other: dict) -> str:
-            return prompts.INTRO_TEMPLATE.format(
-                listener_name=listener["name"] or prompts.GENERIC_GUEST,
-                other_name=other["name"] or prompts.GENERIC_GUEST,
-                other_drink=other["drink"] or prompts.GENERIC_DRINK,
-            )
-
-        for listener_n, listener, other in ((1, g1, g2), (2, g2, g1)):
-            if listener_n in headings:
-                ctx.rotate_to(headings[listener_n])
-            ctx.say(intro_line(listener, other))
+        speeches = llm_intro_speeches(ctx, people)
+        for pid in self.ORDER:
+            if pid in headings:
+                ctx.rotate_to(headings[pid])
+            ctx.say(speeches[pid])
         return StepResult.DONE
 
 
@@ -281,7 +294,7 @@ def build_hri_task(ctx: TaskContext) -> Task:
             ReceiveBag(),
             GuideToLivingRoom(2),
             OfferSeat(2),
-            IntroduceGuests(),
+            IntroduceEveryone(),
             FollowHostAndDropBag(),
         ],
         ctx,

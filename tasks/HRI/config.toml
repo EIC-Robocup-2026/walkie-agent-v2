@@ -11,7 +11,7 @@ HRI_DOOR_POSE = "0.8,-0.95,2.97"
 HRI_LIVING_ROOM_POSE = "4.64,1.09,-0.40"   # scan pose facing the seating area
 # Host's name and favorite drink (given in the competition briefing). Used in
 # the seat-offer wording ("next to our host James"); "" = unknown.
-HRI_HOST_NAME = "Tokyo"
+HRI_HOST_NAME = "Armmy"
 HRI_HOST_DRINK = "pepsi"
 # Open-vocab detector prompts used to find seats.
 HRI_SEAT_CLASSES = "chair,sofa,armchair,stool"
