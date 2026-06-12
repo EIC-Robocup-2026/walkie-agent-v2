@@ -5,9 +5,13 @@ detected segmentations lifted to per-detection world-point segments plus the
 classless background remainder (walls/floor) — registered against the map with
 ONE rigid ICP correction (pose error is per-capture, not per-object), then
 fused across views into object nodes whose clouds derive from their captures'
-segments. Distance-based relations are derived on a cadence; everything is
-stored (ChromaDB + .npz point clouds/segments + NetworkX edges), visualized
-(Rerun, background included), and exportable to text for the LLM.
+segments. The map is **self-correcting**: periodic maintenance rescues ghost
+duplicates (ICP-aligned re-merge), refines each object's shape (co-registering
+its segments), and carves free space (removing geometry a trusted later view
+sees straight through — moved-object ghosts, edge-shadow trails). Distance-based
+relations are derived on a cadence; everything is stored (ChromaDB + .npz point
+clouds/segments + NetworkX edges), visualized (Rerun, background included), and
+exportable to text for the LLM.
 
 Typical use (constructed with a LangChain model, the AI client, and the hardware
 interface — the same trio the agents take)::

@@ -41,6 +41,10 @@ class _StubMemory:
     def flag_for_refine(self, node_ids):
         self.flagged.append(list(node_ids))
 
+    def carve_free_space(self, depth, intr, pose, **kw):
+        self.calls.append("carve")
+        return {"bg_carved": 0, "nodes_carved": 0, "nodes_evicted": 0}
+
 
 @pytest.fixture
 def svc():
@@ -239,6 +243,75 @@ def test_flag_for_refine_called_on_rejected_registration(monkeypatch):
 
     svc.ingest_frame(frame, [det], tick=False)
     assert stub.flagged and stub.flagged[0] == ["node-a"]
+
+
+# ---------------------------------------------------------------------------
+# Free-space carving cadence + trusted-pose gating
+# ---------------------------------------------------------------------------
+def _carve_frame_and_capture(accepted=True, correction=None):
+    from types import SimpleNamespace
+
+    import numpy as _np
+
+    from services.walkie_graphs.geometry import CameraPose, Intrinsics
+
+    cam = CameraPose(R=_np.eye(3), t=_np.zeros(3))
+    frame = SimpleNamespace(
+        depth=_np.ones((8, 8), dtype=_np.float32),
+        intr=Intrinsics(fx=50.0, fy=50.0, cx=4.0, cy=4.0, width=8, height=8),
+        cam=cam,
+        robot_pose=None,
+    )
+    capture = SimpleNamespace(
+        cam=cam,
+        correction=_np.eye(4) if correction is None else correction,
+        icp_accepted=accepted,
+    )
+    return frame, capture
+
+
+def test_carve_cadence_fires_at_offset_3_when_accepted(svc):
+    svc.carve_every_n = 5
+    svc.capture_icp_max_corr_m = 0.25  # registration on; capture is accepted
+    frame, capture = _carve_frame_and_capture(accepted=True)
+    for _ in range(25):
+        svc._maybe_tick(True, touched=[], frame=frame, capture=capture)
+    # t>=5 and t%5==3 → ticks 8, 13, 18, 23
+    assert svc.memory.calls.count("carve") == 4
+
+
+def test_carve_skipped_on_rejected_registration(svc):
+    svc.carve_every_n = 5
+    svc.capture_icp_max_corr_m = 0.25  # registration on, but the solve was rejected
+    frame, capture = _carve_frame_and_capture(accepted=False)
+    for _ in range(25):
+        svc._maybe_tick(True, touched=[], frame=frame, capture=capture)
+    assert svc.memory.calls.count("carve") == 0
+
+
+def test_carve_runs_when_registration_disabled(svc):
+    svc.carve_every_n = 5
+    svc.capture_icp_max_corr_m = 0.0  # registration off → pose is raw but trusted
+    frame, capture = _carve_frame_and_capture(accepted=False)
+    for _ in range(25):
+        svc._maybe_tick(True, touched=[], frame=frame, capture=capture)
+    assert svc.memory.calls.count("carve") == 4
+
+
+def test_carve_off_by_default(svc):
+    frame, capture = _carve_frame_and_capture(accepted=True)
+    for _ in range(25):
+        svc._maybe_tick(True, touched=[], frame=frame, capture=capture)
+    assert svc.memory.calls.count("carve") == 0
+
+
+def test_carve_skipped_without_geometry(svc):
+    svc.carve_every_n = 5
+    svc.capture_icp_max_corr_m = 0.0
+    # No frame/capture (the no-geometry _maybe_tick path) → never carves.
+    for _ in range(25):
+        svc._maybe_tick(True, touched=[])
+    assert svc.memory.calls.count("carve") == 0
 
 
 # ---------------------------------------------------------------------------

@@ -295,6 +295,40 @@ WALKIE_GRAPHS_GHOST_EVERY_N = "20"
 WALKIE_GRAPHS_PCD_FLUSH_EVERY_N = "5"
 WALKIE_GRAPHS_GHOST_GRACE_SEC = "0"
 
+[graphs.carve]
+# Free-space carving: the only NEGATIVE evidence in the pipeline. A point cloud
+# otherwise just accumulates — nothing ever says "that spot is empty now" — so two
+# errors pile up: a physically MOVED object leaves its old node as a ghost, and a
+# silhouette's edge-shadow trail (occluded from the viewpoint that made it) sticks
+# out into space a LATERAL viewpoint sees straight through. Each carve tick projects
+# every nearby stored point back into the current depth image; a point the sensor
+# measured PAST (saw a surface farther than the point claims to be solid) is in free
+# space and removed — from the background store AND from object nodes (write-through
+# to their capture segments, so a rebuild can't bring it back). A node carved below
+# EVICT_MIN_POINTS is deleted (it moved/vanished); one that lost > REFINE_FRAC of its
+# points is flagged for the refine pass.
+#
+# SAFETY: carving only runs on a TRUSTED capture pose — registration off (CAPTURE_ICP
+# _MAX_CORR_M=0) or an ACCEPTED ICP solve. A rejected/cold solve would carve a
+# mis-posed hole through a good map, the worst failure mode; a cold map has nothing
+# to carve anyway. EVERY_N=0 (code default) keeps the whole pass off for the tests.
+# Fires at tick offset 3 — clear of denoise/merge/evict (0/1/2), refine (6),
+# pcd_flush (%5==0), and bg_save (19).
+WALKIE_GRAPHS_CARVE_EVERY_N = "5"
+# Depth tolerance before a point counts as "seen through": effective margin is
+# MARGIN_BASE_M + MARGIN_REL * z (grows with range, matching the ZED's error), so a
+# point that merely IS the measured surface is kept, not carved.
+WALKIE_GRAPHS_CARVE_MARGIN_BASE_M = "0.05"
+WALKIE_GRAPHS_CARVE_MARGIN_REL = "0.02"
+# Near clip (points closer than this aren't projected) and the trusted far range
+# (blank inherits MAX_DEPTH_M, else 4 m) — points beyond it are never carved.
+WALKIE_GRAPHS_CARVE_Z_MIN_M = "0.05"
+WALKIE_GRAPHS_CARVE_MAX_Z_M = "4.0"
+# A node carved below this many points is deleted; a node that lost more than this
+# fraction is flagged for the per-object refine pass to re-tighten what remains.
+WALKIE_GRAPHS_CARVE_EVICT_MIN_POINTS = "20"
+WALKIE_GRAPHS_CARVE_REFINE_FRAC = "0.5"
+
 [graphs.semantic]
 # Optional LLM layer (ConceptGraphs node captions + scene-graph edges). OFF by default
 # (the EVERY_N cadences are 0); enable by setting them > 0. All run on the wired chat

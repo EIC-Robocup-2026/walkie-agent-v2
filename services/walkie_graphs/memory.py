@@ -1118,6 +1118,149 @@ class GraphMemory:
             refined += 1
         return refined
 
+    def carve_free_space(
+        self,
+        depth: np.ndarray,
+        intr,
+        pose,
+        *,
+        margin_base: float = 0.05,
+        margin_rel: float = 0.02,
+        z_min: float = 0.05,
+        max_z: float = 4.0,
+        evict_min_points: int = 20,
+        refine_frac: float = 0.5,
+    ) -> dict:
+        """Remove map geometry this capture sees straight through (negative evidence).
+
+        The capture's ``pose`` (already corrected if registration was accepted —
+        see :func:`carve.corrected_pose`) defines a frustum; every background point
+        and every nearby object point that the depth image looks *past* (measured a
+        surface farther away than the point) is in free space and removed:
+
+        1. **Background** — :meth:`~background.BackgroundStore.crop_with_keys` over the
+           frustum AABB, mask, :meth:`~background.BackgroundStore.remove_keys` (carved
+           cells re-open for future adds — the world may change there again).
+        2. **Objects** — AABB-intersecting nodes are snapshotted under the lock and
+           pre-tested unlocked; a node with carved points is corrected through its
+           ground truth: the baked base and every capture segment are carved (via
+           :meth:`~capture.CaptureStore.update_segment`, so rebuilds can't bring the
+           geometry back), then the fused cloud is re-derived. A node carved below
+           ``evict_min_points`` is deleted (object moved/gone); one that lost more than
+           ``refine_frac`` of its points is flagged for the refine pass. The
+           write-through makes carving cumulative in the data itself — no bookkeeping.
+
+        Caller is responsible for the trust gate (only an accepted/registration-off
+        capture should carve — a rejected solve would carve a mis-posed hole).
+        Returns ``{"bg_carved", "nodes_carved", "nodes_evicted"}`` counts.
+        """
+        from .carve import free_space_mask, frustum_aabb
+
+        stats = {"bg_carved": 0, "nodes_carved": 0, "nodes_evicted": 0}
+        if depth is None or intr is None or pose is None:
+            return stats
+        aabb_min, aabb_max = frustum_aabb(
+            intr, pose, depth.shape[:2], z_min=z_min, z_max=max_z
+        )
+
+        def _carve(cloud: np.ndarray) -> np.ndarray:
+            return free_space_mask(
+                cloud, depth, intr, pose,
+                margin_base=margin_base, margin_rel=margin_rel, z_min=z_min, max_z=max_z,
+            )
+
+        # 1. Background — the store owns its lock; carve by stable grid keys.
+        if self.background is not None:
+            pts, keys = self.background.crop_with_keys(tuple(aabb_min), tuple(aabb_max))
+            if len(pts):
+                m = _carve(pts)
+                if m.any():
+                    stats["bg_carved"] = self.background.remove_keys(keys[m])
+
+        # 2. Objects — snapshot candidates under the lock, pre-test unlocked.
+        with self._lock:
+            cand = [
+                n.id
+                for n in self._nodes.values()
+                if aabb_overlap(tuple(aabb_min), tuple(aabb_max), n.aabb_min, n.aabb_max, pad=0.0)
+            ]
+            clouds = {nid: self.load_pcd(nid) for nid in cand}
+        hits = [nid for nid, c in clouds.items() if len(c) and _carve(c).any()]
+        if not hits:
+            return stats
+
+        for nid in hits:
+            with self._lock:
+                node = self._nodes.get(nid)
+                if node is None:
+                    continue
+                has_segments = bool(node.segments) and self.capture_store is not None
+                base = self.load_base(nid)
+                # Legacy node (no segment/base backing): the stored cloud is the only
+                # geometry — carve it directly and save the remainder.
+                if not has_segments and len(base) == 0:
+                    cloud = self.load_pcd(nid)
+                    if len(cloud) == 0:
+                        continue
+                    m = _carve(cloud)
+                    if not m.any():
+                        continue
+                    kept = cloud[~m]
+                    if len(kept) < evict_min_points:
+                        self._delete(nid)
+                        stats["nodes_evicted"] += 1
+                        continue
+                    centroid, mn, mx, ext = aabb_of(kept)
+                    node.centroid, node.aabb_min, node.aabb_max, node.extent = (
+                        centroid, mn, mx, ext
+                    )
+                    node.pcd_ref = self._save_pcd(nid, kept)
+                    self._write_node(node)
+                    stats["nodes_carved"] += 1
+                    continue
+
+                # Segment-backed node: carve base + each segment through the store.
+                orig_total = 0
+                carved_total = 0
+                kept_base = base
+                if len(base):
+                    orig_total += len(base)
+                    bm = _carve(base)
+                    if bm.any():
+                        carved_total += int(bm.sum())
+                        kept_base = base[~bm].astype(np.float32)
+                parts = [kept_base]
+                if has_segments:
+                    for ref in node.segments:
+                        seg = self.capture_store.load_segment(ref)
+                        if seg is None or len(seg) == 0:
+                            continue
+                        orig_total += len(seg)
+                        sm = _carve(seg)
+                        if sm.any():
+                            carved_total += int(sm.sum())
+                            seg = seg[~sm].astype(np.float32)
+                            self.capture_store.update_segment(ref, seg)
+                        if len(seg):
+                            parts.append(seg)
+                if carved_total == 0:
+                    continue
+                merged = self._fuse_clean([p for p in parts if len(p)])
+                if len(merged) < evict_min_points:
+                    self._delete(nid)
+                    stats["nodes_evicted"] += 1
+                    continue
+                centroid, mn, mx, ext = aabb_of(merged)
+                node.centroid, node.aabb_min, node.aabb_max, node.extent = (
+                    centroid, mn, mx, ext
+                )
+                node.pcd_ref = self._save_pcd(nid, merged, base=kept_base)
+                self._write_node(node)
+                stats["nodes_carved"] += 1
+                if orig_total > 0 and carved_total / orig_total > refine_frac:
+                    self._refine_pending.add(nid)
+        return stats
+
     def icp_target_near(self, aabb_min, aabb_max, *, pad: float = 0.5, budget: int = 40_000) -> np.ndarray:
         """Assemble the capture-registration target around a capture's AABB.
 
