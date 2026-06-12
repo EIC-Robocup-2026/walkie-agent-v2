@@ -50,6 +50,18 @@ WALKIE_ROBOT_IP = "127.0.0.1"
 # 1 = type instructions at a TTY instead of speaking (no mic).
 DISABLE_LISTENING = "0"
 
+[people]
+# Face/appearance person memory (perception.PeopleStore): two-modality re-ID
+# over InsightFace + OSNet embeddings from walkie-ai-server. Used by the HRI
+# task to remember guests; same single-process ChromaDB caveat as the other
+# stores. Wipe with: uv run python -m tools.reset_db --people
+PEOPLE_CHROMA_DIR = "chroma_db_people"
+PEOPLE_FRAMES_DIR = "people_frames"
+# Face-only match gate: max cosine DISTANCE (1 - similarity) to accept.
+FACE_MATCH_THRESHOLD = "0.4"
+# Fused (face+attire) match gate: min fused SIMILARITY score to accept.
+APPEARANCE_MATCH_THRESHOLD = "0.5"
+
 [agent]
 # History summarization (agents/core/agent.py middleware).
 WALKIE_SUMMARIZE_AT_TOKENS = "6000"
@@ -226,13 +238,19 @@ WALKIE_GRAPHS_ICP_MIN_POINTS = "150"
 # association, or measured cheaply with the cached per-node KD-tree): pre-aligned
 # frames never pay for ICP at all.
 WALKIE_GRAPHS_ICP_SKIP_OVERLAP = "0.75"
-# Per-node ICP cooldown: once a node has been ICP-considered (aligned or verified
-# pre-aligned), don't reconsider it for this many seconds — camera-pose error varies
-# slowly, so realigning the same object every tick is pure CPU cost (and per-tick
-# realignment churn adds visual wobble). This is the main ICP cost control: with ~7
-# visible objects on 2 s ticks, ICP runs on at most ~1-2 objects per tick instead of
-# all of them. 0 = consider every merge.
-WALKIE_GRAPHS_ICP_COOLDOWN_SEC = "10"
+# Per-node ICP cooldown: once a node has been ICP-considered, don't reconsider it for
+# this many seconds. 0 = consider every merge (the default now).
+#
+# WARNING — this is a cloud-QUALITY knob, not just a cost knob. During the cooldown
+# window ICP is suppressed but the new sighting is STILL unioned into the node, raw and
+# unaligned. Each detection carries its own independent few-cm pose error (it does NOT
+# "vary slowly per object" — that premise is wrong), so every tick inside a >0 window
+# vstacks a misaligned cloud and double-exposes the shape → fuzzy objects. Cost is
+# already bounded by ICP_SKIP_OVERLAP (a sound per-detection gate: pre-aligned frames
+# skip ICP for free), so the cooldown buys little and smears a lot. Keep it at 0 unless
+# the tick is over budget AND profiling shows ICP is the cause; even then prefer raising
+# ICP_SKIP_OVERLAP or lowering the ICP point cap over reintroducing the smear.
+WALKIE_GRAPHS_ICP_COOLDOWN_SEC = "0"
 # Defer per-sighting point-cloud .npz writes: reads always come from the in-memory
 # cache, so the disk write only needs to happen on a cadence (PCD_FLUSH_EVERY_N ticks,
 # in [graphs.maintenance]) instead of once per object per frame — on slow robot

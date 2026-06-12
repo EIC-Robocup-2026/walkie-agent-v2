@@ -214,13 +214,14 @@ def icp_align(
         float(max_corr_dist),
         np.eye(4),
         reg.TransformationEstimationPointToPoint(),
-        # 20 iterations: a few-cm pose offset converges by ~20 (measured ~5 mm
-        # residual; 15 leaves ~18 mm), and the default 1e-6 relative epsilons stop
-        # converged runs earlier — so for the good (low-offset) case the cap is never
-        # reached. It only bites on the poorly-overlapping clouds that never converge
-        # and whose result is discarded by min_fitness anyway, where running 30 vs 20
-        # is pure waste. This runs inside the perception tick on the robot's CPU.
-        reg.ICPConvergenceCriteria(max_iteration=20),
+        # 30 iterations: a few-cm pose offset fully converges by ~25 (measured 3 mm
+        # residual; 15 leaves ~18 mm, 20 ~10 mm — too close to the 2 cm voxel to risk
+        # now that ICP runs on every misaligned union, with no cooldown to mask a loose
+        # alignment). The default 1e-6 relative epsilons stop converged runs earlier, so
+        # the good low-offset case never reaches the cap; combined with the 400-point
+        # estimate cap each call is still ~85 ms (half the old 800-point cost). The cap
+        # only bites on poorly-overlapping clouds whose result min_fitness discards.
+        reg.ICPConvergenceCriteria(max_iteration=30),
     )
     fitness = float(result.fitness)
     if fitness < min_fitness:

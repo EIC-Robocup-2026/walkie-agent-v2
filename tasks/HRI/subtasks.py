@@ -14,6 +14,11 @@ Blackboard layout (ctx.data):
     host:   {"appearance": str | None}  # captured during OfferSeat(1) — the
             # only seated person then is the host; name/drink come from
             # HRI_HOST_NAME / HRI_HOST_DRINK (known from the briefing)
+
+Person identities (face + attire embeddings) live in ctx.people
+(perception.PeopleStore) under stable ids "guest-1"/"guest-2"/"host" —
+enrolled at the door (GreetAndLearn) and at the first seat scan (the host),
+recognized again in IntroduceGuests so seat switches can't mis-aim the robot.
 """
 
 from __future__ import annotations
@@ -24,9 +29,11 @@ import time
 from tasks.base import StepResult, SubTask, Task, TaskContext
 
 from . import prompts
+from .identity import enroll_guest, enroll_person_in_box, locate_people
 from .skills import (
     describe_seated_person,
     face_point,
+    find_seated_person_bbox,
     heading_to_point,
     llm_pick_seat,
     parse_pose,
@@ -80,16 +87,22 @@ class GreetAndLearn(SubTask):
             if info and getattr(info, field):
                 record[field] = getattr(info, field)
 
+        img = ctx.capture()
         # Visual description: only guest 1's is needed (told to guest 2 later).
-        if self.guest == 1:
-            img = ctx.capture()
-            if img is not None:
-                try:
-                    record["appearance"] = ctx.walkieAI.image_caption.caption(
-                        img, prompt=prompts.APPEARANCE_CAPTION_PROMPT
-                    )
-                except Exception as exc:
-                    print(f"[HRI] appearance caption failed ({exc})")
+        if self.guest == 1 and img is not None:
+            try:
+                record["appearance"] = ctx.walkieAI.image_caption.caption(
+                    img, prompt=prompts.APPEARANCE_CAPTION_PROMPT
+                )
+            except Exception as exc:
+                print(f"[HRI] appearance caption failed ({exc})")
+        # Remember this guest's face + attire under a stable id, so the
+        # introduction step can find them again even after a seat switch.
+        if img is not None:
+            enroll_guest(
+                ctx, img, f"guest-{self.guest}",
+                name=record["name"] or "", drink=record["drink"] or "",
+            )
 
         name = record["name"] or "there"
         ctx.say(f"Nice to meet you, {name}!")
@@ -120,9 +133,19 @@ class OfferSeat(SubTask):
         img_w = img.width if img is not None else 0
         host = ctx.data.setdefault("host", {})
         # First offer: the only seated person can be the host (guest 1 is
-        # still standing next to the robot) — remember what they look like.
+        # still standing next to the robot) — remember what they look like,
+        # and enroll their face/attire as a distractor identity so a guest
+        # match at introduction time must beat the host's.
         if self.guest == 1 and img is not None and not host.get("appearance"):
             host["appearance"] = describe_seated_person(ctx, img, persons, seats)
+            host_box = find_seated_person_bbox(persons, seats)
+            if host_box is not None:
+                enroll_person_in_box(
+                    ctx, img, host_box, "host",
+                    name=os.getenv("HRI_HOST_NAME", "").strip(),
+                    drink=os.getenv("HRI_HOST_DRINK", "").strip(),
+                    attributes=host["appearance"] or "",
+                )
         seat, announcement = llm_pick_seat(
             ctx, seats, persons, img_w,
             guest=self.guest,
@@ -141,7 +164,6 @@ class OfferSeat(SubTask):
         world_xy = bboxes_world_position(ctx, seat.bbox_xyxy)
         ctx.data.setdefault("seats", {})[self.guest] = (seat, img_w, world_xy)
         faced = face_point(ctx, *world_xy) if world_xy else False
-        ctx.walkie.arm.go_to_pose_relative
         if announcement:  # LLM-worded offer (may refer to the host)
             ctx.say(announcement)
         elif faced:
@@ -184,16 +206,26 @@ class IntroduceGuests(SubTask):
         g1, g2 = _guest(ctx, 1), _guest(ctx, 2)
         seats: dict = ctx.data.get("seats", {})
 
-        # Anchor each guest to their offered seat's stored map-frame point and
-        # face it with odometry + atan2. World-point headings survive the
-        # robot's own rotations, so they stay valid across both turns. A guest
-        # whose seat never lifted to 3D gets no heading and is addressed
-        # without rotating.
+        # Anchor each guest to where they actually ARE: recognize the enrolled
+        # faces/attire in one scan frame (guests may have switched seats — the
+        # rulebook allows it) and lift each matched person's bbox to a
+        # map-frame point while the camera still sees the scanned scene. A
+        # guest who isn't recognized falls back to their offered seat's stored
+        # world point. World-point headings survive the robot's own rotations,
+        # so both stay valid across both turns; a guest with neither anchor is
+        # addressed without rotating.
+        img = ctx.capture()
+        located = (
+            locate_people(ctx, img, ["guest-1", "guest-2"]) if img is not None else {}
+        )
         headings: dict[int, float] = {}
         for n in (1, 2):
-            if n not in seats:
-                continue
-            _seat, _img_w, world_xy = seats[n]
+            world_xy = None
+            box = located.get(f"guest-{n}")
+            if box is not None:
+                world_xy = bboxes_world_position(ctx, box)
+            if world_xy is None and n in seats:
+                _seat, _img_w, world_xy = seats[n]
             if world_xy is None:
                 continue
             heading = heading_to_point(ctx, *world_xy)
@@ -230,6 +262,13 @@ class FollowHostAndDropBag(SubTask):
 
 
 def build_hri_task(ctx: TaskContext) -> Task:
+    # Guests differ every run — stale identities must never match today's.
+    if ctx.people is not None and os.getenv("HRI_PEOPLE_RESET", "1").lower() in ("1", "true", "yes"):
+        try:
+            ctx.people.clear()
+            print("[HRI] people memory cleared for a fresh run")
+        except Exception as exc:
+            print(f"[HRI] people memory reset failed ({exc})")
     return Task(
         "HRI",
         [

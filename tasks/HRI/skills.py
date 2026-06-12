@@ -134,6 +134,20 @@ def pick_free_seat(seats: list[SeatCandidate]) -> SeatCandidate | None:
     return max(free, key=lambda s: (s.confidence, area(s)))
 
 
+def find_seated_person_bbox(
+    persons: list[PersonPose], seats: list[SeatCandidate]
+) -> BBox | None:
+    """The person overlapping an occupied seat (a lone person is accepted too)."""
+    occupied = [s.bbox_xyxy for s in seats if s.occupied]
+    for p in persons:
+        pb = cxcywh_to_xyxy(p.bbox)
+        if any(overlap_fraction(pb, sb) > 0 for sb in occupied):
+            return pb
+    if len(persons) == 1:
+        return cxcywh_to_xyxy(persons[0].bbox)
+    return None
+
+
 def describe_seated_person(
     ctx: TaskContext,
     img: Image.Image,
@@ -146,15 +160,7 @@ def describe_seated_person(
     one (a lone detected person is accepted too); otherwise captions the whole
     frame and lets the prompt single out the seated person. None on failure.
     """
-    occupied = [s.bbox_xyxy for s in seats if s.occupied]
-    target = None
-    for p in persons:
-        pb = cxcywh_to_xyxy(p.bbox)
-        if any(overlap_fraction(pb, sb) > 0 for sb in occupied):
-            target = pb
-            break
-    if target is None and len(persons) == 1:
-        target = cxcywh_to_xyxy(persons[0].bbox)
+    target = find_seated_person_bbox(persons, seats)
     crop = img
     if target is not None:
         x1, y1, x2, y2 = target
@@ -195,8 +201,7 @@ def bboxes_world_position(ctx: TaskContext, bboxes: BBox) -> tuple[float, float]
     """
     x1, y1, x2, y2 = bboxes
     cxcywh = [(x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1]
-    x, y = _cxcywh_to_world_position(ctx, cxcywh)
-    return x, y
+    return _cxcywh_to_world_position(ctx, cxcywh)
 
 
 def heading_to_point(ctx: TaskContext, x: float, y: float) -> float | None:

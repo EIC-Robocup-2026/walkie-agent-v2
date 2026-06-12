@@ -19,6 +19,8 @@ HRI_SEAT_CLASSES = "chair,sofa,armchair,stool"
 HRI_SEAT_OCCUPIED_OVERLAP = "0.25"
 # Horizontal field of view (deg) for pixel->heading conversion (tune for ZED).
 HRI_CAMERA_HFOV_DEG = "110"
+# 1 = forget all remembered people at task start (guests differ every run).
+HRI_PEOPLE_RESET = "1"
 # 1 = enable the timed gripper bag-handover steps (no torque sensing yet).
 HRI_ENABLE_BAG = "0"
 # Seconds the gripper stays open for the guest to hang the bag.

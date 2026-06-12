@@ -36,12 +36,12 @@ try:  # networkx is a core dep; guard only so a partial install fails loudly lat
 except Exception:  # pragma: no cover
     nx = None
 
-import chromadb
-
 try:  # scipy is a hard dep; guard mirrors fusion/dbscan so partial installs degrade
     from scipy.spatial import cKDTree as _cKDTree
 except Exception:  # pragma: no cover
     _cKDTree = None
+
+from perception.vector_db import get_collection, make_client
 
 from .dbscan import (
     dbscan_largest_cluster,
@@ -285,18 +285,10 @@ class GraphMemory:
         self.emb_dim = emb_dim
 
         self._lock = threading.RLock()
-        if chroma_dir:
-            Path(chroma_dir).mkdir(parents=True, exist_ok=True)
-            self._client = chromadb.PersistentClient(path=str(chroma_dir))
-            col_name = "objects"
-        else:
-            # EphemeralClient shares one in-memory DB process-wide, so give each
-            # in-memory store a unique collection to stay isolated (tests).
-            self._client = chromadb.EphemeralClient()
-            col_name = f"objects_{uuid.uuid4().hex[:8]}"
-        self._col = self._client.get_or_create_collection(
-            name=col_name, metadata={"hnsw:space": "cosine"}
-        )
+        self._client = make_client(chroma_dir or None)
+        # EphemeralClient shares one in-memory DB process-wide, so each
+        # in-memory store gets a unique collection to stay isolated (tests).
+        self._col = get_collection(self._client, "objects", unique_if_ephemeral=True)
 
         self._nodes: dict[str, ObjectNode] = {}
         self._dirty: set[str] = set()  # node ids whose cloud changed since last denoise

@@ -11,6 +11,7 @@ from ..common import (
 )
 from .subtasks import build_hri_task
 from client import WalkieAIClient
+from perception import PeopleStore
 
 
 def main() -> None:
@@ -27,6 +28,7 @@ def main() -> None:
         walkieAI=walkie_ai,
         model=model,
         disable_listening=os.getenv("DISABLE_LISTENING", "0").lower() in ("1", "true", "yes"),
+        people=PeopleStore.from_env(),
     )
 
     # Flow start here

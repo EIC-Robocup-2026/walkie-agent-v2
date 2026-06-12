@@ -20,7 +20,7 @@ import traceback
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 from langchain.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -29,6 +29,9 @@ from pydantic import BaseModel
 
 from client import WalkieAIClient
 from interfaces.walkie_interface import WalkieInterface
+
+if TYPE_CHECKING:  # import-time decoupling: tasks without people memory don't pay for it
+    from perception import PeopleStore
 
 
 class StepResult(Enum):
@@ -50,6 +53,7 @@ class TaskContext:
     model: ChatOpenAI
     data: dict[str, Any] = field(default_factory=dict)  # cross-step blackboard
     disable_listening: bool = False  # DISABLE_LISTENING: type at a TTY instead of mic
+    people: "PeopleStore | None" = None  # face/appearance person memory (optional)
 
     # --- conversation ---------------------------------------------------
 

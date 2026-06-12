@@ -56,14 +56,19 @@ class _WalkieAI:
     object_detection = _Failing()
     pose_estimation = _Failing()
     image_caption = _Failing()
+    face_recognition = _Failing()
+    appearance = _Failing()
 
 
 def test_hri_dryrun():
+    from perception import PeopleStore
+
     ctx = TaskContext(
         walkie=_Walkie(),
         walkieAI=_WalkieAI(),
         model=initialize_llm_model(),
         disable_listening=True,  # type answers at the prompt
+        people=PeopleStore(persist_dir=None),  # in-memory; enrollment will degrade
     )
     ok = build_hri_task(ctx).run()
     print("task returned:", ok)
