@@ -104,6 +104,7 @@ def lift_capture(
     bg_voxel_m: float = 0.05,
     bg_max_points: int = 60_000,
     bg_dilate_px: int = 4,
+    bg_max_depth_m: float = 0.0,
 ) -> Capture:
     """Build a Capture from a frame's already-lifted detections + the remainder.
 
@@ -140,6 +141,7 @@ def lift_capture(
             max_points=bg_max_points,
             erode_px=0,
             edge_mask=edge_mask,
+            max_depth=bg_max_depth_m,
         )
     return Capture(id=cid, ts=frame.ts, cam=frame.cam, segments=segments, background=background)
 

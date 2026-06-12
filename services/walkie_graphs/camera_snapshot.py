@@ -204,6 +204,7 @@ class CameraSnapshot:
         voxel: float | None = None,
         max_points: int | None = None,
         erode_px: int | None = None,
+        max_depth: float | None = None,
         sor_k: int | None = None,
         sor_std_ratio: float | None = None,
         use_edge_filter: bool = True,
@@ -228,6 +229,9 @@ class CameraSnapshot:
             else _envi("WALKIE_GRAPHS_MAX_POINTS_PER_OBJ", "2000"),
             erode_px=erode_px if erode_px is not None else _envi("WALKIE_GRAPHS_MASK_ERODE_PX", "2"),
             edge_mask=self._edges() if use_edge_filter else None,
+            max_depth=max_depth
+            if max_depth is not None
+            else _envf("WALKIE_GRAPHS_MAX_DEPTH_M", "0"),
             sor_k=sor_k if sor_k is not None else _envi("WALKIE_GRAPHS_SOR_K", "0"),
             sor_std_ratio=sor_std_ratio
             if sor_std_ratio is not None

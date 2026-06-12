@@ -98,6 +98,17 @@ def test_lift_without_geometry_has_empty_background():
     assert len(cap.segments) == 1  # caller-lifted points pass through regardless
 
 
+def test_lift_background_respects_max_depth():
+    depth = _flat(2.0)
+    depth[:, 320:] = 6.0  # far half beyond the trusted ZED range
+    snap = _snap(depth)
+    gated = lift_capture(snap, [], [], bg_voxel_m=0.0, bg_max_points=10**9, bg_max_depth_m=4.0)
+    full = lift_capture(snap, [], [], bg_voxel_m=0.0, bg_max_points=10**9)
+    assert len(gated.background) < len(full.background)
+    assert gated.background[:, 2].max() < 4.0
+    assert full.background[:, 2].max() == pytest.approx(6.0, abs=1e-4)
+
+
 # ---------------------------------------------------------------------------
 # register_capture — one rigid correction for the whole capture
 # ---------------------------------------------------------------------------

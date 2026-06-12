@@ -129,6 +129,13 @@ class WalkieGraphsService(threading.Thread):
         # Default off in code (tests), on via config.toml — the usual split.
         self.sor_k = int(os.getenv("WALKIE_GRAPHS_SOR_K", "0"))
         self.sor_std_ratio = float(os.getenv("WALKIE_GRAPHS_SOR_STD_RATIO", "2.0"))
+        # Trusted sensor range (ZED2i): depth error grows ~quadratically with
+        # distance, so pixels beyond this are dropped at deprojection — far-object
+        # artifacts and silhouette bleeding never enter the map. 0 = unbounded.
+        self.max_depth_m = float(os.getenv("WALKIE_GRAPHS_MAX_DEPTH_M", "0"))
+        self.bg_max_depth_m = float(
+            os.getenv("WALKIE_GRAPHS_BG_MAX_DEPTH_M", str(self.max_depth_m))
+        )
         # Detection-time filters (ConceptGraphs filter_gobs): reject whole-frame /
         # background boxes and degenerate masks before they cost a deproject. 1.0 / 0
         # are no-ops (keep everything); config.toml tightens them.
@@ -475,6 +482,7 @@ class WalkieGraphsService(threading.Thread):
                 max_points=self.max_points,
                 erode_px=self.mask_erode_px,
                 edge_mask=edge_mask,
+                max_depth=self.max_depth_m,
                 sor_k=self.sor_k,
                 sor_std_ratio=self.sor_std_ratio,
             )
@@ -501,6 +509,7 @@ class WalkieGraphsService(threading.Thread):
             edge_mask=edge_mask,
             bg_voxel_m=self.bg_voxel_m,
             bg_dilate_px=self.bg_mask_dilate_px,
+            bg_max_depth_m=self.bg_max_depth_m,
         )
         d_bg = time.perf_counter() - t
 

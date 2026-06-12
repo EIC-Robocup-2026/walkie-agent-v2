@@ -96,6 +96,32 @@ def test_deproject_drops_nan_and_zero():
     assert len(pts) == 2
 
 
+def test_deproject_max_depth_drops_far_pixels():
+    # Trusted-range gate (ZED2i): a plane split between 2 m and 6 m with
+    # max_depth=4 keeps only the near half; 0 keeps everything.
+    intr = _intr()
+    pose = CameraPose(R=np.eye(3), t=np.zeros(3))
+    depth = np.full((480, 640), 2.0, dtype=np.float32)
+    depth[:, 320:] = 6.0
+    mask = np.zeros((480, 640), dtype=np.uint8)
+    mask[100, 310:330] = 1  # 10 near + 10 far pixels
+    near_only = deproject_mask(mask, depth, intr, pose, max_depth=4.0)
+    assert len(near_only) == 10
+    assert near_only[:, 2].max() == pytest.approx(2.0, abs=1e-5)
+    assert len(deproject_mask(mask, depth, intr, pose, max_depth=0.0)) == 20
+
+
+def test_deproject_min_depth_drops_near_pixels():
+    intr = _intr()
+    pose = CameraPose(R=np.eye(3), t=np.zeros(3))
+    depth = np.full((480, 640), 2.0, dtype=np.float32)
+    depth[100, 310:315] = 0.1  # closer than any real surface (lens smudge etc.)
+    mask = np.zeros((480, 640), dtype=np.uint8)
+    mask[100, 310:330] = 1
+    pts = deproject_mask(mask, depth, intr, pose, min_depth=0.3)
+    assert len(pts) == 15
+
+
 def test_deproject_resizes_mask_to_depth():
     intr = _intr(1280, 720)
     pose = CameraPose(R=np.eye(3), t=np.zeros(3))

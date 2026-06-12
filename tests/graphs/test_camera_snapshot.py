@@ -81,6 +81,21 @@ def test_bbox_coords_scale_to_depth_resolution():
     assert p[1] == pytest.approx(0.0, abs=0.02)
 
 
+def test_mask_to_points_max_depth_env_default(monkeypatch):
+    depth = _flat(2.0)
+    depth[:, 320:] = 6.0
+    snap = _snap(depth, cam=_identity_pose(), intr=_intr())
+    mask = np.zeros((480, 640), dtype=np.uint8)
+    mask[200:280, 280:360] = 1  # straddles the near/far split
+    monkeypatch.setenv("WALKIE_GRAPHS_MAX_DEPTH_M", "4.0")
+    gated = snap.mask_to_points(mask, voxel=0, max_points=10**9, erode_px=0)
+    assert gated[:, 2].max() < 4.0
+    # explicit override beats the env default
+    full = snap.mask_to_points(mask, voxel=0, max_points=10**9, erode_px=0, max_depth=0.0,
+                               use_edge_filter=False)
+    assert full[:, 2].max() == pytest.approx(6.0, abs=1e-4)
+
+
 # ---------------------------------------------------------------------------
 # degraded snapshots
 # ---------------------------------------------------------------------------

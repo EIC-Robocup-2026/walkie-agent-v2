@@ -142,11 +142,24 @@ def test_flying_pixel_cleanup_defaults(svc):
 
 
 def test_density_cleanup_defaults_off_in_code(svc):
-    # The depth-relative edge allowance and SOR default OFF in code (config.toml turns
-    # them on), so the unit-test lift path keeps the original fixed-threshold behaviour.
+    # The depth-relative edge allowance, SOR, and the trusted-range gate default OFF
+    # in code (config.toml turns them on), so the unit-test lift path keeps the
+    # original behaviour.
     assert svc.depth_edge_rel == pytest.approx(0.0)
     assert svc.sor_k == 0
     assert svc.sor_std_ratio == pytest.approx(2.0)
+    assert svc.max_depth_m == 0.0
+    assert svc.bg_max_depth_m == 0.0
+
+
+def test_bg_max_depth_follows_max_depth(monkeypatch):
+    monkeypatch.setenv("WALKIE_GRAPHS_MAX_DEPTH_M", "4.0")
+    s = WalkieGraphsService(walkieAI=None, walkie=None, memory=_StubMemory(), verbose=False)
+    assert s.max_depth_m == 4.0
+    assert s.bg_max_depth_m == 4.0  # inherits unless overridden
+    monkeypatch.setenv("WALKIE_GRAPHS_BG_MAX_DEPTH_M", "5.0")
+    s = WalkieGraphsService(walkieAI=None, walkie=None, memory=_StubMemory(), verbose=False)
+    assert s.bg_max_depth_m == 5.0
 
 
 # ---------------------------------------------------------------------------

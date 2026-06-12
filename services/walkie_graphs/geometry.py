@@ -164,6 +164,8 @@ def deproject_mask(
     max_points: int | None = None,
     erode_px: int = 0,
     edge_mask: np.ndarray | None = None,
+    min_depth: float = 0.0,
+    max_depth: float = 0.0,
     sor_k: int = 0,
     sor_std_ratio: float = 2.0,
 ) -> np.ndarray:
@@ -174,6 +176,13 @@ def deproject_mask(
     back-projected into the camera optical frame and mapped into the world by the
     optical-frame pose (``P_map = P_optical @ R.T + t``). Optionally voxel-downsampled
     and capped at ``max_points`` (deterministic uniform stride).
+
+    ``min_depth``/``max_depth`` (metres, 0 = unbounded) gate the trusted sensor
+    range: stereo depth error grows ~quadratically with distance, so far pixels
+    carry both noise and wide silhouette bleed — dropping them at the source is
+    cheaper and cleaner than filtering the artifacts later. Pixels the sensor
+    already reports as out-of-range (NaN) are dropped by the validity filter
+    regardless, and the edge filter needs no adjustment (NaN never flags).
 
     Three cleanup options remove depth "flying pixels" (the shadow trailing off an
     object's silhouette):
@@ -227,6 +236,10 @@ def deproject_mask(
 
     d = sub_depth[ys, xs].astype(np.float64)
     valid = np.isfinite(d) & (d > 0)
+    if min_depth > 0:
+        valid &= d >= min_depth
+    if max_depth > 0:
+        valid &= d <= max_depth
     if sub_edge is not None:
         valid &= ~sub_edge[ys, xs]
     if not np.any(valid):
