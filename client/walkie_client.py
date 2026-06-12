@@ -59,7 +59,7 @@ class WalkieAIClient:
         timeout: int = 60,
     ) -> None:
         if base_url is None:
-            base_url = os.getenv("WALKIE_BASE_URL") or "http://localhost:5000"
+            base_url = os.getenv("WALKIE_AI_BASE_URL") or "http://localhost:5000"
         self.stt = STTClient(base_url=base_url, timeout=timeout)
         self.tts = TTSClient(base_url=base_url, timeout=timeout)
         self.object_detection = ObjectDetectionClient(base_url=base_url, timeout=timeout)
