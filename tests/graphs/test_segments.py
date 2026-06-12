@@ -159,6 +159,98 @@ def test_segments_roundtrip_chroma_metadata(smem, store):
     assert legacy.segments == []
 
 
+def test_refine_nodes_disabled_when_corr_m_zero(smem, store):
+    """Code default refine_corr_m=0: refine_nodes is a no-op regardless of segments."""
+    node = smem.upsert(seg_det(store, "c1-rf", (1.0, 0.0, 0.5), ts=1.0))
+    smem.upsert(seg_det(store, "c2-rf", (1.0, 0.0, 0.5), ts=2.0))
+    assert smem.refine_nodes() == 0  # corr_m=0 gates the whole method
+
+
+def test_refine_nodes_aligns_offset_segment(tmp_path, store):
+    """With refine_corr_m set and open3d available, an offset segment is corrected."""
+    pytest.importorskip("open3d")
+    from dataclasses import replace
+
+    from services.walkie_graphs.memory import GraphMemory
+
+    refine_mem = GraphMemory(
+        chroma_dir=None,
+        pcds_dir=str(tmp_path / "pcds2"),
+        thumbs_dir=str(tmp_path / "thumbs2"),
+        edges_path=str(tmp_path / "edges2.json"),
+        capture_store=store,
+        segments_per_node=8,
+        refine_corr_m=0.15,
+        refine_min_fitness=0.5,
+        refine_max_trans_m=0.3,
+        refine_max_rot_deg=15.0,
+        dbscan_enabled=False, sor_k=0,
+    )
+    rng = np.random.default_rng(7)
+    # Two L-shaped clouds (same geometry, one offset by 8 cm).
+    floor = np.stack([rng.uniform(0, 0.4, 400), rng.uniform(0, 0.4, 400), np.zeros(400)], 1)
+    wall = np.stack([rng.uniform(0, 0.4, 400), np.zeros(400), rng.uniform(0, 0.4, 400)], 1)
+    cloud_true = np.vstack([floor, wall]).astype(np.float32)
+    offset = np.array([0.08, 0.05, 0.03], dtype=np.float32)
+
+    def _seg_with_pts(cid, pts):
+        from services.walkie_graphs.capture import Capture, Segment
+        cap = Capture(id=cid, ts=1.0, cam=None,
+                      segments=[Segment(cid, 0, pts)])
+        store.save(cap)
+        det = make_det(class_name="chair", emb=unit(1, 0, 0), ts=1.0)
+        det = replace(det, points_world=pts)
+        return replace(det, segment_ref=f"{cid}:0")
+
+    n = refine_mem.upsert(_seg_with_pts("c1-rn", cloud_true))
+    refine_mem.upsert(_seg_with_pts("c2-rn", cloud_true + offset))
+    store.flush()
+
+    count = refine_mem.refine_nodes(limit=5)
+    assert count == 1
+
+    # After refine the segment on disk should be closer to cloud_true.
+    store.flush()
+    fresh = CaptureStore(str(tmp_path / "captures"))
+    corrected = fresh.load_segment("c2-rn:0")
+    assert corrected is not None
+    # The corrected segment must be closer to cloud_true than to the offset version.
+    err_after = np.abs(corrected - cloud_true).mean()
+    err_offset = np.abs((cloud_true + offset) - cloud_true).mean()
+    assert err_after < err_offset * 0.5
+
+    # Node was removed from _refine_pending and _dirty after refinement.
+    node_id = list(refine_mem._nodes.keys())[0]
+    assert node_id not in refine_mem._refine_pending
+    assert node_id not in refine_mem._dirty
+
+
+def test_refine_nodes_skips_single_segment_node(smem, store):
+    """A node with only one segment has nothing to align — skip gracefully."""
+    smem.refine_corr_m = 0.15
+    smem.upsert(seg_det(store, "c1-rs", (1.0, 0.0, 0.5), ts=1.0))
+    assert smem.refine_nodes() == 0
+
+
+def test_refine_nodes_clears_refine_pending(smem, store, monkeypatch):
+    """A node flagged but aligned < 2mm (noise) is still cleared from pending."""
+    import services.walkie_graphs.memory as mem_mod
+
+    smem.refine_corr_m = 0.15
+    smem.upsert(seg_det(store, "c1-rp", (1.0, 0.0, 0.5), ts=1.0))
+    node = smem.upsert(seg_det(store, "c2-rp", (1.0, 0.0, 0.5), ts=2.0))
+    nid = node.id
+    smem._refine_pending.add(nid)
+
+    # Stub icp to return near-zero shift (sub-2mm) → accepted=0, pending cleared.
+    tiny = np.eye(4)
+    tiny[:3, 3] = (0.0005, 0.0, 0.0)
+    monkeypatch.setattr(mem_mod, "icp", lambda *a, **k: (tiny, 0.95))
+
+    smem.refine_nodes()
+    assert nid not in smem._refine_pending
+
+
 def test_load_nodes_re_retains_refs(tmp_path, store):
     # Across a restart the loaded graph must re-retain its capture refs, so the
     # startup gc sweep removes only true orphans.

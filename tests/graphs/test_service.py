@@ -15,6 +15,7 @@ class _StubMemory:
 
     def __init__(self):
         self.calls = []
+        self.flagged: list[list[str]] = []
 
     def derive_relations(self):
         self.calls.append("relations")
@@ -33,6 +34,12 @@ class _StubMemory:
 
     def flush_pcds(self):
         self.calls.append("pcd_flush")
+
+    def refine_nodes(self, limit=3):
+        self.calls.append("refine_nodes")
+
+    def flag_for_refine(self, node_ids):
+        self.flagged.append(list(node_ids))
 
 
 @pytest.fixture
@@ -160,6 +167,78 @@ def test_bg_max_depth_follows_max_depth(monkeypatch):
     monkeypatch.setenv("WALKIE_GRAPHS_BG_MAX_DEPTH_M", "5.0")
     s = WalkieGraphsService(walkieAI=None, walkie=None, memory=_StubMemory(), verbose=False)
     assert s.bg_max_depth_m == 5.0
+
+
+def test_refine_cadence_fires_at_offset_6(svc):
+    svc.refine_every_n = 20
+    svc.refine_limit = 3
+    for _ in range(46):
+        svc._maybe_tick(True)
+    # offset 6 in period 20: fires at tick 26, 46
+    assert svc.memory.calls.count("refine_nodes") == 2
+
+
+def test_refine_cadence_off_by_default(svc):
+    for _ in range(100):
+        svc._maybe_tick(True)
+    assert svc.memory.calls.count("refine_nodes") == 0
+
+
+def test_flag_for_refine_called_on_rejected_registration(monkeypatch):
+    """When capture ICP is enabled but the registration is rejected, touched nodes are
+    flagged for the per-object refine pass."""
+    from types import SimpleNamespace
+
+    from services.walkie_graphs.capture import Capture
+    from services.walkie_graphs.service import WalkieGraphsService
+
+    stub = _StubMemory()
+    stub.pop_perf_stats = lambda: {}
+    stub.batch_writes = __import__("contextlib").contextmanager(lambda: (yield))
+    stub.upsert = lambda det: SimpleNamespace(id="node-a")
+    stub.background = SimpleNamespace(add=lambda pts: None)
+    stub.capture_store = SimpleNamespace(save=lambda c: None)
+
+    import numpy as _np
+
+    svc = WalkieGraphsService(walkieAI=None, walkie=None, memory=stub, verbose=False)
+    svc.capture_icp_max_corr_m = 0.25  # enabled
+    svc.refine_every_n = 0  # don't run refine in _maybe_tick
+    # Permissive lift filters so the synthetic detection survives to an upsert.
+    svc.mask_erode_px = 0
+    svc.min_points = 1
+    svc.min_confidence = 0.0
+    svc.depth_edge_thresh_m = 0.0
+    svc.sor_k = 0
+
+    # The capture passed downstream keeps the lifted segments but registration was
+    # rejected (icp_accepted False) — exactly the case that should flag for refine.
+    def _reject(cap):
+        cap.icp_accepted = False
+        cap.icp_fitness = 0.1
+        return cap
+
+    monkeypatch.setattr(svc, "_register_capture", _reject)
+
+    from services.walkie_graphs.service import FrameSnapshot
+
+    img = SimpleNamespace(size=(40, 40), crop=lambda box: SimpleNamespace(size=(20, 20)))
+    depth = _np.ones((40, 40), dtype=_np.float32)
+    from services.walkie_graphs.geometry import CameraPose, Intrinsics
+
+    cam = CameraPose(R=_np.eye(3), t=_np.zeros(3))
+    intr = Intrinsics(fx=50.0, fy=50.0, cx=20.0, cy=20.0, width=40, height=40)
+    frame = FrameSnapshot(ts=1.0, img=img, depth=depth, cam=cam, intr=intr, robot_pose=None)
+    det = SimpleNamespace(
+        class_name="cup", class_id=0, confidence=0.9,
+        bbox=(0, 0, 20, 20), mask=_np.ones((40, 40), dtype=bool),
+    )
+    monkeypatch.setattr(svc, "_embed_batch", lambda crops: [[0.1] * 3])
+    monkeypatch.setattr(svc, "_caption", lambda *a: {})
+    monkeypatch.setattr(svc, "_maybe_tick", lambda *a, **kw: None)
+
+    svc.ingest_frame(frame, [det], tick=False)
+    assert stub.flagged and stub.flagged[0] == ["node-a"]
 
 
 # ---------------------------------------------------------------------------

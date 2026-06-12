@@ -176,6 +176,11 @@ class WalkieGraphsService(threading.Thread):
         # Deferred point-cloud persistence: flush pending .npz writes every N ticks
         # (memory.defer_pcd_writes batches them; reads always come from the cache).
         self.pcd_flush_every_n = int(os.getenv("WALKIE_GRAPHS_PCD_FLUSH_EVERY_N", "5"))
+        # Per-object ICP refine pass: co-register a node's segments to fix smear from
+        # captures whose registration was rejected (code default 0 = off; config.toml
+        # enables it). refine_limit caps how many nodes are processed per tick.
+        self.refine_every_n = int(os.getenv("WALKIE_GRAPHS_REFINE_EVERY_N", "0"))
+        self.refine_limit = int(os.getenv("WALKIE_GRAPHS_REFINE_LIMIT", "3"))
         # Tier 3 (optional LLM): caption refinement + LLM edge inference. 0 = off, and
         # both require self.model. They only ever run on these cadences when enabled.
         self.caption_refine_every_n = int(os.getenv("WALKIE_GRAPHS_CAPTION_REFINE_EVERY_N", "0"))
@@ -567,6 +572,16 @@ class WalkieGraphsService(threading.Thread):
         d_upsert = time.perf_counter() - t
         self._last_touched = touched
 
+        # When capture registration was rejected (raw pose error still in the segments),
+        # flag the touched nodes so the refine pass can co-align their segments later.
+        if (
+            self.capture_icp_max_corr_m > 0
+            and not capture.icp_accepted
+            and touched
+            and hasattr(self.memory, "flag_for_refine")
+        ):
+            self.memory.flag_for_refine([n.id for n in touched])
+
         # The classless remainder joins the world background (viz + future ICP anchor).
         if getattr(self.memory, "background", None) is not None and len(capture.background):
             self.memory.background.add(capture.background)
@@ -671,6 +686,13 @@ class WalkieGraphsService(threading.Thread):
             _timed("merge", self.memory.merge_overlapping_nodes)
         if self.ghost_every_n > 0 and t >= self.ghost_every_n and t % self.ghost_every_n == 2:
             _timed("evict", lambda: self.memory.evict_stale_provisional(time.time()))
+        if (
+            self.refine_every_n > 0
+            and t >= self.refine_every_n
+            and t % self.refine_every_n == 6
+            and hasattr(self.memory, "refine_nodes")
+        ):
+            _timed("refine_nodes", lambda: self.memory.refine_nodes(self.refine_limit))
         if self.pcd_flush_every_n > 0 and t % self.pcd_flush_every_n == 0:
             _timed("pcd_flush", self.memory.flush_pcds)
             if getattr(self.memory, "capture_store", None) is not None:

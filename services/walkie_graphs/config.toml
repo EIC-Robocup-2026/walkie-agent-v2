@@ -266,6 +266,21 @@ WALKIE_GRAPHS_MERGE_RESCUE_CORR_M = "0.15"
 WALKIE_GRAPHS_MERGE_RESCUE_MIN_FITNESS = "0.6"
 WALKIE_GRAPHS_MERGE_RESCUE_MAX_TRANS_M = "0.3"
 WALKIE_GRAPHS_MERGE_RESCUE_MAX_ROT_DEG = "10"
+# refine_nodes: per-object ICP refinement pass — co-registers each node's capture
+# segments to fix smear accumulated from captures whose registration was rejected
+# (cold map, first exploration pass). The reference is the baked base (if ≥50 pts)
+# or the largest segment; each remaining segment is aligned onto the growing consensus.
+# Accepted corrections write through to the CaptureStore (so rebuild_pcd can't
+# resurrect stale geometry) and the fused cloud is re-derived via _fuse_clean.
+# Shadow/edge trails: the post-alignment voxel+SOR+DBSCAN chain erases sparse halos.
+# REFINE_CORR_M = 0 (code default) disables — enable in config.toml or temporarily
+# via env. REFINE_EVERY_N = 0 (code default) keeps the cadence off for tests.
+WALKIE_GRAPHS_REFINE_EVERY_N = "20"
+WALKIE_GRAPHS_REFINE_LIMIT = "3"
+WALKIE_GRAPHS_REFINE_CORR_M = "0.08"
+WALKIE_GRAPHS_REFINE_MIN_FITNESS = "0.6"
+WALKIE_GRAPHS_REFINE_MAX_TRANS_M = "0.12"
+WALKIE_GRAPHS_REFINE_MAX_ROT_DEG = "5"
 # Node precision (CG obj_min_detections): an object must be seen MIN_OBS_CONFIRM times
 # before it counts. With REQUIRE_CONFIRMATION=1, provisional (under-seen) nodes are
 # HIDDEN from queries/description (non-destructive — a re-sighting promotes them; the

@@ -232,6 +232,10 @@ class GraphMemory:
         merge_rescue_min_fitness: float = 0.6,
         merge_rescue_max_trans_m: float = 0.3,
         merge_rescue_max_rot_deg: float = 10.0,
+        refine_corr_m: float = 0.0,
+        refine_min_fitness: float = 0.6,
+        refine_max_trans_m: float = 0.12,
+        refine_max_rot_deg: float = 5.0,
         min_obs_confirm: int = 1,
         require_confirmation: bool = False,
         ghost_grace_sec: float = 0.0,
@@ -284,6 +288,10 @@ class GraphMemory:
         self.merge_rescue_min_fitness = merge_rescue_min_fitness
         self.merge_rescue_max_trans_m = merge_rescue_max_trans_m
         self.merge_rescue_max_rot_deg = merge_rescue_max_rot_deg
+        self.refine_corr_m = refine_corr_m
+        self.refine_min_fitness = refine_min_fitness
+        self.refine_max_trans_m = refine_max_trans_m
+        self.refine_max_rot_deg = refine_max_rot_deg
         self.min_obs_confirm = min_obs_confirm
         self.require_confirmation = require_confirmation
         self.ghost_grace_sec = ghost_grace_sec
@@ -402,6 +410,10 @@ class GraphMemory:
             merge_rescue_min_fitness=_f("WALKIE_GRAPHS_MERGE_RESCUE_MIN_FITNESS", "0.6"),
             merge_rescue_max_trans_m=_f("WALKIE_GRAPHS_MERGE_RESCUE_MAX_TRANS_M", "0.3"),
             merge_rescue_max_rot_deg=_f("WALKIE_GRAPHS_MERGE_RESCUE_MAX_ROT_DEG", "10"),
+            refine_corr_m=_f("WALKIE_GRAPHS_REFINE_CORR_M", "0"),
+            refine_min_fitness=_f("WALKIE_GRAPHS_REFINE_MIN_FITNESS", "0.6"),
+            refine_max_trans_m=_f("WALKIE_GRAPHS_REFINE_MAX_TRANS_M", "0.12"),
+            refine_max_rot_deg=_f("WALKIE_GRAPHS_REFINE_MAX_ROT_DEG", "5"),
             min_obs_confirm=_i("WALKIE_GRAPHS_MIN_OBS_CONFIRM", "3"),
             require_confirmation=_b("WALKIE_GRAPHS_REQUIRE_CONFIRMATION", "1"),
             ghost_grace_sec=_f("WALKIE_GRAPHS_GHOST_GRACE_SEC", "0"),
@@ -946,12 +958,31 @@ class GraphMemory:
             else:
                 self._write_pcd_file(node.id)
 
+    def _fuse_clean(self, parts: list[np.ndarray]) -> np.ndarray:
+        """Voxel-fuse + cap → SOR + noise-DBSCAN: the shared cloud cleanup chain.
+
+        Used by both :meth:`rebuild_pcd` and :meth:`refine_nodes` so both paths apply
+        the same cleanup guarantees. Guards on the keep-fraction so a legitimately
+        spread object (two ends of a bed) isn't truncated.
+        """
+        valid = [p for p in parts if len(p)]
+        if not valid:
+            return np.zeros((0, 3), dtype=np.float32)
+        merged = subsample(_voxel(np.vstack(valid), self.voxel_m), self.max_points_per_obj)
+        kept = merged
+        if self.sor_k > 0:
+            kept = statistical_outlier_removal(kept, self.sor_k, self.sor_std_ratio)
+        if self.dbscan_enabled:
+            kept = dbscan_remove_noise(kept, self.dbscan_eps, self.dbscan_min_points)
+        if len(kept) >= self.denoise_keep_min_frac * len(merged) and len(kept) >= 3:
+            merged = kept
+        return merged
+
     def rebuild_pcd(self, node_id: str) -> np.ndarray:
         """Re-derive a node's fused cloud from its base + live capture segments.
 
         The fused cloud is normally maintained incrementally; this recomputes it
-        from the ground truth (concat → voxel → cap → the same SOR + noise-only
-        DBSCAN cleanup the periodic denoise applies) — used after node-merges and
+        from the ground truth via :meth:`_fuse_clean` — used after node-merges and
         available for repair. A legacy node with neither segments nor base keeps
         its stored cloud unchanged.
         """
@@ -968,19 +999,124 @@ class GraphMemory:
             parts = [p for p in parts if len(p)]
             if not parts:
                 return self.load_pcd(node_id)
-            merged = subsample(_voxel(np.vstack(parts), self.voxel_m), self.max_points_per_obj)
-            kept = merged
-            if self.sor_k > 0:
-                kept = statistical_outlier_removal(kept, self.sor_k, self.sor_std_ratio)
-            if self.dbscan_enabled:
-                kept = dbscan_remove_noise(kept, self.dbscan_eps, self.dbscan_min_points)
-            if len(kept) >= self.denoise_keep_min_frac * len(merged) and len(kept) >= 3:
-                merged = kept
+            merged = self._fuse_clean(parts)
             centroid, mn, mx, ext = aabb_of(merged)
             node.centroid, node.aabb_min, node.aabb_max, node.extent = centroid, mn, mx, ext
             node.pcd_ref = self._save_pcd(node_id, merged)
             self._write_node(node)
             return merged
+
+    def refine_nodes(self, limit: int = 3) -> int:
+        """Per-object ICP refinement: co-register a node's capture segments.
+
+        Candidates are nodes in ``_refine_pending`` (flagged by rejected capture
+        registrations or merge rescues) topped up with any node that has ≥2 live
+        segments, sorted by ``n_obs`` descending. At most ``limit`` nodes are
+        processed per call (the rest roll to the next cadence tick).
+
+        For each candidate: the largest segment (or the baked base when ≥50 pts)
+        serves as the reference; the remaining segments are aligned onto the growing
+        consensus via point-to-plane ICP. An alignment is accepted when fitness ≥
+        ``refine_min_fitness``, the centroid shifts ≥ 2 mm (a smaller shift is just
+        noise) but ≤ ``refine_max_trans_m``, and rotation ≤ ``refine_max_rot_deg``.
+        Accepted transforms write through to the :class:`~capture.CaptureStore` so
+        rebuilds can't resurrect the stale geometry. The fused cloud is then
+        re-derived via :meth:`_fuse_clean`. Cleared from both ``_refine_pending``
+        and ``_dirty`` so the next denoise pass doesn't double-process.
+
+        Returns the number of nodes whose cloud changed.
+        """
+        if self.capture_store is None or self.refine_corr_m <= 0:
+            return 0
+        with self._lock:
+            pending = list(self._refine_pending)
+            extras = sorted(
+                [nid for nid, n in self._nodes.items()
+                 if nid not in self._refine_pending and len(n.segments) >= 2],
+                key=lambda nid: self._nodes[nid].n_obs, reverse=True,
+            )
+            candidates = (pending + extras)[:limit]
+        if not candidates:
+            return 0
+        refined = 0
+        for nid in candidates:
+            with self._lock:
+                node = self._nodes.get(nid)
+                if node is None:
+                    self._refine_pending.discard(nid)
+                    continue
+                seg_refs = list(node.segments)
+            if len(seg_refs) < 2:
+                with self._lock:
+                    self._refine_pending.discard(nid)
+                    self._dirty.discard(nid)
+                continue
+            segs: dict[str, np.ndarray] = {}
+            for ref in seg_refs:
+                pts = self.capture_store.load_segment(ref)
+                if pts is not None and len(pts) > 0:
+                    segs[ref] = pts
+            if len(segs) < 2:
+                with self._lock:
+                    self._refine_pending.discard(nid)
+                continue
+            base = self.load_base(nid)
+            if len(base) >= 50:
+                consensus = base
+                skip_ref: Optional[str] = None
+            else:
+                skip_ref = max(segs.keys(), key=lambda r: len(segs[r]))
+                consensus = segs[skip_ref]
+            any_changed = False
+            for ref in sorted(segs.keys(), key=lambda r: -len(segs[r])):
+                if ref == skip_ref:
+                    continue
+                pts = segs[ref]
+                T, fitness = icp(
+                    subsample(pts, 5000), subsample(consensus, 5000), self.refine_corr_m
+                )
+                if fitness < self.refine_min_fitness:
+                    continue
+                c = pts.mean(axis=0).astype(np.float64)
+                shift = float(np.linalg.norm(apply_transform(c[None], T)[0] - c))
+                if (
+                    shift < 0.002  # sub-mm: just noise
+                    or shift > self.refine_max_trans_m
+                    or rotation_angle_deg(T) > self.refine_max_rot_deg
+                ):
+                    continue
+                aligned = apply_transform(pts, T)
+                self.capture_store.update_segment(ref, aligned)
+                segs[ref] = aligned
+                combined = np.vstack([consensus, aligned])
+                consensus = subsample(_voxel(combined, self.voxel_m), self.max_points_per_obj)
+                any_changed = True
+            if not any_changed:
+                with self._lock:
+                    self._refine_pending.discard(nid)
+                continue
+            with self._lock:
+                node = self._nodes.get(nid)
+                if node is None:
+                    self._refine_pending.discard(nid)
+                    continue
+                parts = [self.load_base(nid)] + [
+                    segs.get(ref, p)
+                    for ref in node.segments
+                    if (p := self.capture_store.load_segment(ref)) is not None and len(p)
+                ]
+                merged = self._fuse_clean(parts)
+                if len(merged):
+                    centroid, mn, mx, ext = aabb_of(merged)
+                    node.centroid, node.aabb_min, node.aabb_max, node.extent = (
+                        centroid, mn, mx, ext
+                    )
+                    node.pcd_ref = self._save_pcd(nid, merged)
+                    self._write_node(node)
+                self._refine_pending.discard(nid)
+                self._dirty.discard(nid)
+            refined += 1
+        return refined
 
     def icp_target_near(self, aabb_min, aabb_max, *, pad: float = 0.5, budget: int = 40_000) -> np.ndarray:
         """Assemble the capture-registration target around a capture's AABB.
