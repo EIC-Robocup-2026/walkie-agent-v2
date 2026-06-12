@@ -214,23 +214,21 @@ class WalkieGraphsService(threading.Thread):
         self._log("stopped.")
 
     def _warmup_open3d(self) -> None:
-        """Pay Open3D's lazy ``import`` (~0.8s) + first-registration JIT once, up front.
+        """Pay Open3D's lazy ``import`` (~0.8s) + first-solve JIT/CUDA context up front.
 
-        ``fusion.icp_align`` imports open3d on first use, so without this the whole
-        cost lands inside the first real perception tick (observed as a ~0.5s spike in
-        the ``icp`` bucket on tick #16). Doing it here on the background thread before
-        the loop moves that one-off off the hot path. Best-effort: a missing wheel or
-        any failure is non-fatal — ICP just stays a no-op as before.
+        Without this the whole cost lands inside the first real perception tick
+        (observed as a ~0.5s spike). Doing it here on the background thread before
+        the loop moves that one-off off the hot path. Best-effort: a missing wheel
+        or any failure is non-fatal — registration just stays a no-op as before.
         """
         try:
-            from .fusion import icp_align
+            from . import pcd_ops
 
             t0 = time.perf_counter()
-            # min_points gate short-circuits before any real work, so force a real
-            # registration call with a small synthetic pair to trigger the JIT.
-            pts = np.random.default_rng(0).normal(size=(200, 3)).astype(np.float32) * 0.1
-            icp_align(pts, pts + 0.01, 0.1, min_points=10)
-            self._perf_log(f"open3d warmup: {(time.perf_counter() - t0) * 1000:.0f}ms")
+            device = pcd_ops.warmup()
+            self._perf_log(
+                f"open3d warmup ({device}): {(time.perf_counter() - t0) * 1000:.0f}ms"
+            )
         except Exception as e:  # noqa: BLE001 — warmup is best-effort
             self._log(f"open3d warmup skipped: {e}")
 
