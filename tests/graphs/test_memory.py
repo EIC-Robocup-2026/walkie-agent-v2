@@ -142,85 +142,6 @@ def test_partial_view_unions_into_fuller_cloud(mem):
     assert pts[:, 0].min() < 0.2 and pts[:, 0].max() > 2.3  # both ends present
 
 
-def test_merge_with_icp_cancels_pose_offset(mem):
-    # The same L-shaped object seen twice, the second sighting mis-posed by 5 cm
-    # (camera pose error). With ICP on, the union must stay TIGHT — the new cloud is
-    # aligned onto the stored one instead of double-exposing the shape.
-    pytest.importorskip("open3d")
-    from tests.graphs.conftest import make_det as _make_det
-
-    def corner(offset=(0.0, 0.0, 0.0)):
-        # aperiodic points on two perpendicular planes (like a real depth scan)
-        rng = np.random.default_rng(3)
-        n = 400
-        floor = np.stack([rng.uniform(0, 0.25, n), rng.uniform(0, 0.25, n), np.zeros(n)], axis=1)
-        wall = np.stack([rng.uniform(0, 0.25, n), np.zeros(n), rng.uniform(0, 0.25, n)], axis=1)
-        return (np.vstack([floor, wall]) + np.asarray(offset)).astype(np.float32)
-
-    mem.icp_max_dist_m = 0.1
-    mem.icp_min_points = 50
-    base = replace(_make_det(class_name="box", emb=unit(1, 0, 0), conf=0.9),
-                   points_world=corner())
-    node = mem.upsert(base)
-    ext_before = node.extent
-
-    shifted = replace(
-        _make_det(class_name="box", emb=unit(1, 0, 0), conf=0.9, ts=2.0),
-        points_world=corner(offset=(0.05, 0.03, 0.02)),
-    )
-    node = mem.upsert(shifted)
-    assert mem.count() == 1
-    # without ICP the extent would grow by ~5 cm; with it the shape stays sharp
-    assert node.extent[0] < ext_before[0] + 0.01
-    assert node.extent[2] < ext_before[2] + 0.01
-
-
-def test_icp_skipped_when_clouds_already_aligned(mem, monkeypatch):
-    # When the association's nn_ratio says the detection already coincides with the
-    # stored cloud (>= icp_skip_overlap), the merge must NOT spend time on ICP.
-    import services.walkie_graphs.memory as memory_mod
-
-    calls = []
-
-    def spy_icp(source, target, *a, **k):
-        calls.append(1)
-        return np.asarray(source), 1.0
-
-    monkeypatch.setattr(memory_mod, "icp_align", spy_icp)
-    mem.icp_max_dist_m = 0.1
-    mem.icp_skip_overlap = 0.75
-    # Identical clouds → association overlap ≈ 1.0 → ICP skipped.
-    mem.upsert(make_det(center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01))
-    mem.upsert(make_det(center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01, ts=2.0))
-    assert mem.count() == 1
-    assert calls == []  # pre-aligned → no ICP
-    # A visually-matched but non-overlapping-in-fine-detail sighting (classify path,
-    # overlap unknown=0) → ICP runs.
-    mem.upsert(make_det(center=(1.15, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01, ts=3.0))
-    assert calls  # misaligned/unknown → ICP attempted
-
-
-def test_icp_cooldown_limits_realignment_rate(mem, monkeypatch):
-    # Once a node has been ICP-considered, further merges within the cooldown window
-    # must not even evaluate ICP (the per-tick realignment was the dominant cost).
-    import services.walkie_graphs.memory as memory_mod
-
-    calls = []
-    monkeypatch.setattr(
-        memory_mod, "icp_align", lambda s, t, *a, **k: (calls.append(1) or np.asarray(s), 1.0)
-    )
-    mem.icp_max_dist_m = 0.1
-    mem.icp_skip_overlap = 2.0  # ratio can never reach this → ICP always wanted
-    mem.icp_cooldown_sec = 10.0
-    mem.upsert(make_det(center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01, ts=100.0))
-    mem.upsert(make_det(center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01, ts=102.0))
-    assert len(calls) == 1  # first merge ran ICP...
-    mem.upsert(make_det(center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01, ts=104.0))
-    assert len(calls) == 1  # ...still inside the cooldown → no new ICP
-    mem.upsert(make_det(center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01, ts=113.0))
-    assert len(calls) == 2  # window expired → reconsidered
-
-
 def test_moved_object_replaces_without_smearing(mem):
     # Companion to the union test: a far re-sighting with NO overlap (the object moved
     # or its estimate drifted) must NOT union — the cloud lives only at the new spot.
@@ -252,8 +173,7 @@ def test_associate_is_geometry_gated_on_pure_visual(mem):
     mem.upsert(make_det(center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01))
     far = make_det(center=(1.3, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01, ts=2.0)
     far = replace(far, points_world=mem._denoise(far.points_world))
-    node, overlap = mem._associate(far)
-    assert node is None and overlap == 0.0
+    assert mem._associate(far) is None
 
 
 def test_associate_geometry_only_merge_without_embedding(mem):

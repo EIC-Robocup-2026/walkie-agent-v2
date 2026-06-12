@@ -73,58 +73,21 @@ def _o3d_available() -> bool:
     return bool(_open3d())
 
 
-@pytest.mark.skipif(not _o3d_available(), reason="open3d not installed")
-def test_merge_fuses_shifted_duplicate_via_icp(mem):
-    # One object mapped twice with a few-cm pose offset between the sightings: the
-    # raw overlap (measured at NN_VOXEL_M = 2.5 cm) is ~0 because the clouds are
-    # shifted apart, so the pre-alignment gate would reject the pair. The ICP rescue
-    # aligns them and re-tests overlap → they fuse. Needs >= icp_min_points points.
-    mem.icp_max_dist_m = 0.1  # fixture default is 0 (ICP off); config.toml ships 0.1
-    rng = np.random.default_rng(7)
-    base = rng.normal((0, 0, 0), 0.005, size=(300, 3)).astype(np.float32)
-    shifted = base + np.array([0.06, 0.0, 0.0], dtype=np.float32)  # 6 cm > 2.5 cm voxel
-    put_object(mem, "a", "chair", base, emb=unit(1, 0, 0), n_obs=4)
-    put_object(mem, "b", "chair", shifted, emb=unit(1, 0, 0), n_obs=2)
-    # Pre-condition: raw symmetric overlap really is below the merge threshold.
-    from services.walkie_graphs.fusion import nn_ratio_symmetric
-
-    assert nn_ratio_symmetric(base, shifted, mem.nn_voxel_m) <= mem.merge_overlap_thresh
-    assert mem.merge_overlapping_nodes() == 1
-    assert mem.count() == 1
-    assert mem.all_objects()[0].id == "a"  # higher n_obs kept
-
-
-@pytest.mark.skipif(not _o3d_available(), reason="open3d not installed")
-def test_icp_rescue_bounded_by_max_dist(mem):
-    # The rescue is bounded by icp_max_dist_m: when the shift exceeds the correspondence
-    # distance, ICP finds no matches (fitness < min_fitness) and the pair must NOT fuse.
-    # AABBs still overlap (wide clouds, 6 cm shift) so the pair *reaches* the ICP step —
-    # this exercises the fitness gate, not the cheap AABB prefilter.
-    mem.icp_max_dist_m = 0.02  # 2 cm < the 6 cm shift → no correspondences
-    rng = np.random.default_rng(8)
-    base = rng.normal((0, 0, 0), 0.005, size=(300, 3)).astype(np.float32)
-    shifted = base + np.array([0.06, 0.0, 0.0], dtype=np.float32)
-    put_object(mem, "a", "chair", base, emb=unit(1, 0, 0))
-    put_object(mem, "b", "chair", shifted, emb=unit(1, 0, 0))
-    assert mem.merge_overlapping_nodes() == 0
-    assert mem.count() == 2
-
-
-@pytest.mark.skipif(not _o3d_available(), reason="open3d not installed")
 def test_big_object_fills_across_overlapping_sweep(tmp_path):
     """A large object scanned as overlapping partial strips accretes into ONE full node.
 
-    Each strip overlaps the previous by ~50% and extends past it. Without the ICP
-    translation cap, ICP slides each extension back onto the stored cloud (flat surfaces
-    are translation-degenerate), so the object never grows past the first strip and
-    fragments. With the cap the extensions are preserved and the union fills the object.
+    Each strip overlaps the previous by ~50% and extends past it; the union must
+    preserve every extension so the object fills in. (This is the case the old
+    per-object ICP mishandled — flat surfaces are translation-degenerate, so ICP
+    slid extensions back onto the stored cloud. With registration done per capture
+    against the whole map, no per-object alignment ever touches the strips.)
     """
     from services.walkie_graphs.memory import Detection3D, GraphMemory, aabb_of
 
     mem = GraphMemory(
         chroma_dir=None, pcds_dir=str(tmp_path / "p"), thumbs_dir=str(tmp_path / "t"),
         edges_path=str(tmp_path / "e.json"),
-        icp_max_dist_m=0.2, icp_cooldown_sec=0.0, dedup_radius_m=0.3, dedup_visual_k=0,
+        dedup_radius_m=0.3, dedup_visual_k=0,
         visual_merge_max_dist_m=0.4, dbscan_enabled=False, sor_k=0, voxel_m=0.02,
         max_points_per_obj=20000,
     )

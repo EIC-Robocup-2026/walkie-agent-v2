@@ -5,7 +5,10 @@ embedding + captions + class, with an axis-aligned bounding box. Nodes are:
 
 - **stored** in a ChromaDB collection (CLIP image embedding + scalar metadata) for
   durable persistence and cross-modal text search,
-- their **point clouds** saved as ``.npz`` sidecars (one per node),
+- their **point clouds** saved as ``.npz`` sidecars (one per node) — the fused
+  cloud is a *derived view* of the node's capture **segments** (refs into the
+  :class:`~services.walkie_graphs.capture.CaptureStore`) plus a baked ``base``
+  cloud holding history beyond the last ``segments_per_node`` sightings,
 - their **relations** held in a NetworkX ``MultiDiGraph`` and mirrored to JSON.
 
 Incremental fusion (``upsert``) decides insert-vs-merge from CLIP cosine + 3D
@@ -14,7 +17,9 @@ inside). All mutating ops and queries take a lock — the background service wri
 while the database agent reads, in the same process.
 
 Detection/caption/embedding are NOT done here; the caller (service) provides a
-:class:`Detection3D` with the embedding/caption already computed via the AI client.
+:class:`Detection3D` with the embedding/caption already computed via the AI
+client, and its points already pose-corrected by the capture-level registration
+(``capture.register_capture``) — there is no per-object ICP in the store.
 """
 
 from __future__ import annotations
@@ -51,12 +56,12 @@ from .dbscan import (
 from .fusion import (
     aabb_overlap,
     additive_similarity,
-    icp_align,
     nn_ratio,
     nn_ratio_symmetric,
     pairs_within,
 )
 from .geometry import voxel_downsample
+from .pcd_ops import subsample
 
 DEFAULT_EMB_DIM = 512  # CLIP ViT-B/16
 
@@ -77,6 +82,9 @@ class Detection3D:
     caption: str
     ts: float
     crop: object = None  # PIL.Image or None, for the archived thumbnail
+    # "<capture_id>:<det_idx>" into the CaptureStore — the persisted copy of
+    # points_world. None for callers without capture provenance (tests, tools).
+    segment_ref: Optional[str] = None
 
     @property
     def centroid(self) -> tuple[float, float, float]:
@@ -107,6 +115,10 @@ class ObjectNode:
     # Tier 3: up to N highest-confidence crop paths [(conf, path), ...], for the
     # multi-view LLM caption refinement. Empty unless best_views_n > 0.
     best_views: list = field(default_factory=list)
+    # Capture-segment refs backing this node's cloud, oldest first. The fused
+    # cloud at pcd_ref derives from these + the baked ``base`` array; a legacy
+    # node (no refs) just treats its stored cloud as already-baked history.
+    segments: list = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -207,11 +219,9 @@ class GraphMemory:
         dbscan_min_points: int = 10,
         sor_k: int = 0,
         sor_std_ratio: float = 2.0,
-        icp_max_dist_m: float = 0.0,
-        icp_min_fitness: float = 0.6,
-        icp_min_points: int = 150,
-        icp_skip_overlap: float = 0.75,
-        icp_cooldown_sec: float = 0.0,
+        segments_per_node: int = 12,
+        capture_store=None,
+        background=None,
         defer_pcd_writes: bool = False,
         denoise_keep_min_frac: float = 0.5,
         merge_overlap_thresh: float = 0.7,
@@ -257,11 +267,9 @@ class GraphMemory:
         self.dbscan_min_points = dbscan_min_points
         self.sor_k = sor_k
         self.sor_std_ratio = sor_std_ratio
-        self.icp_max_dist_m = icp_max_dist_m
-        self.icp_min_fitness = icp_min_fitness
-        self.icp_min_points = icp_min_points
-        self.icp_skip_overlap = icp_skip_overlap
-        self.icp_cooldown_sec = icp_cooldown_sec
+        self.segments_per_node = segments_per_node
+        self.capture_store = capture_store
+        self.background = background
         self.defer_pcd_writes = defer_pcd_writes
         self.denoise_keep_min_frac = denoise_keep_min_frac
         self.merge_overlap_thresh = merge_overlap_thresh
@@ -311,10 +319,9 @@ class GraphMemory:
         # Per-node cKDTree over the stored cloud, for the overlap checks that run on
         # every association/merge — built once per cloud version (invalidated on save).
         self._tree_cache: dict[str, object] = {}
-        # When each node last had ICP considered (ran or was skipped-as-aligned);
-        # within icp_cooldown_sec it isn't reconsidered — pose error varies slowly,
-        # so realigning the same object every tick is pure cost (ephemeral, not persisted).
-        self._icp_last: dict[str, float] = {}
+        # Baked base clouds (history older than the last segments_per_node sightings),
+        # persisted as the ``base`` array inside the node's npz alongside ``points``.
+        self._base_cache: dict[str, np.ndarray] = {}
         self._graph = nx.MultiDiGraph() if nx is not None else None
         self._load_nodes()
         self._load_edges()
@@ -341,6 +348,16 @@ class GraphMemory:
         def _b(name, default):
             return os.getenv(name, default).strip().lower() in ("1", "true", "yes")
 
+        def _capture_store():
+            from .capture import CaptureStore  # local: keep module import light
+
+            return CaptureStore.from_env()
+
+        def _background():
+            from .background import BackgroundStore
+
+            return BackgroundStore.from_env()
+
         return cls(
             chroma_dir=os.getenv("WALKIE_GRAPHS_CHROMA_DIR", "chroma_db_graph"),
             pcds_dir=os.getenv("WALKIE_GRAPHS_PCDS_DIR", "graph_pcds"),
@@ -363,11 +380,9 @@ class GraphMemory:
             dbscan_min_points=_i("WALKIE_GRAPHS_DBSCAN_MIN_POINTS", "10"),
             sor_k=_i("WALKIE_GRAPHS_SOR_K", "16"),
             sor_std_ratio=_f("WALKIE_GRAPHS_SOR_STD_RATIO", "2.0"),
-            icp_max_dist_m=_f("WALKIE_GRAPHS_ICP_MAX_DIST_M", "0.1"),
-            icp_min_fitness=_f("WALKIE_GRAPHS_ICP_MIN_FITNESS", "0.6"),
-            icp_min_points=_i("WALKIE_GRAPHS_ICP_MIN_POINTS", "150"),
-            icp_skip_overlap=_f("WALKIE_GRAPHS_ICP_SKIP_OVERLAP", "0.75"),
-            icp_cooldown_sec=_f("WALKIE_GRAPHS_ICP_COOLDOWN_SEC", "10"),
+            segments_per_node=_i("WALKIE_GRAPHS_SEGMENTS_PER_NODE", "12"),
+            capture_store=_capture_store(),
+            background=_background(),
             defer_pcd_writes=_b("WALKIE_GRAPHS_DEFER_PCD_WRITES", "1"),
             denoise_keep_min_frac=_f("WALKIE_GRAPHS_DENOISE_KEEP_MIN_FRAC", "0.5"),
             merge_overlap_thresh=_f("WALKIE_GRAPHS_MERGE_OVERLAP_THRESH", "0.7"),
@@ -410,6 +425,7 @@ class GraphMemory:
             "pcd_ref": n.pcd_ref or "",
             "frame_ref": n.frame_ref or "",
             "best_views_json": json.dumps(n.best_views),
+            "segments_json": json.dumps(n.segments),
         }
 
     @staticmethod
@@ -433,6 +449,9 @@ class GraphMemory:
             pcd_ref=md.get("pcd_ref") or None,
             frame_ref=md.get("frame_ref") or None,
             best_views=json.loads(md.get("best_views_json", "[]")),
+            # Legacy nodes (pre-segment store) load as [] — their stored cloud
+            # then simply acts as already-baked history.
+            segments=json.loads(md.get("segments_json", "[]")),
         )
 
     def _load_nodes(self) -> None:
@@ -443,6 +462,12 @@ class GraphMemory:
         for i, node_id in enumerate(ids):
             emb = embs[i] if embs is not None and i < len(embs) else None
             self._nodes[node_id] = self._node_from_chroma(node_id, emb, mds[i])
+        # Re-establish capture-file refcounts from the loaded graph, so gc() can
+        # tell crash orphans (a capture no node references) from live history.
+        if self.capture_store is not None:
+            for node in self._nodes.values():
+                for ref in node.segments:
+                    self.capture_store.retain(ref)
 
     def _write_node(self, n: ObjectNode) -> None:
         self._nodes[n.id] = n
@@ -490,10 +515,17 @@ class GraphMemory:
     def _pcd_path(self, node_id: str) -> Path:
         return self.pcds_dir / f"{node_id}.npz"
 
-    def _save_pcd(self, node_id: str, points: np.ndarray) -> str:
+    def _save_pcd(self, node_id: str, points: np.ndarray, *, base: np.ndarray | None = None) -> str:
+        """Cache (and persist) the node's fused cloud; ``base`` updates the baked history.
+
+        ``base=None`` leaves the existing base untouched; pass an empty array to
+        reset it (the replace branch / a rebuild that re-baked everything).
+        """
         pts = points.astype(np.float32)
         path = self._pcd_path(node_id)
         self._pcd_cache[node_id] = pts
+        if base is not None:
+            self._base_cache[node_id] = base.astype(np.float32)
         self._tree_cache.pop(node_id, None)  # cloud changed → KD-tree is stale
         if self.defer_pcd_writes:
             # On slow robot storage the per-sighting .npz rewrite dominates upsert
@@ -502,10 +534,24 @@ class GraphMemory:
             # once per sighting. Crash window: clouds newer than the last flush.
             self._pcd_unflushed.add(node_id)
         else:
-            # Uncompressed: clouds are small and rewritten often, so the zlib cost
-            # per save outweighs the disk saved (the cache serves reads anyway).
-            np.savez(path, points=pts)
+            self._write_pcd_file(node_id)
         return str(path)
+
+    def _write_pcd_file(self, node_id: str) -> None:
+        """Write the node's npz: the fused ``points`` plus the baked ``base`` (if any).
+
+        Uncompressed: clouds are small and rewritten often, so the zlib cost per
+        save outweighs the disk saved (the cache serves reads anyway). The base is
+        read back first when not cached, so a partial rewrite can't drop it.
+        """
+        pts = self._pcd_cache.get(node_id)
+        if pts is None:
+            return
+        base = self.load_base(node_id)
+        if len(base):
+            np.savez(self._pcd_path(node_id), points=pts, base=base)
+        else:
+            np.savez(self._pcd_path(node_id), points=pts)
 
     def flush_pcds(self) -> int:
         """Write every pending (deferred) point cloud to its ``.npz``; returns count.
@@ -515,14 +561,31 @@ class GraphMemory:
         """
         with self._lock:
             pending = [
-                (nid, self._pcd_cache[nid])
+                nid
                 for nid in self._pcd_unflushed
                 if nid in self._nodes and nid in self._pcd_cache
             ]
             self._pcd_unflushed.clear()
-        for nid, pts in pending:
-            np.savez(self._pcd_path(nid), points=pts)
+        for nid in pending:
+            self._write_pcd_file(nid)
         return len(pending)
+
+    def load_base(self, node_id: str) -> np.ndarray:
+        """The node's baked base cloud (history older than its live segments)."""
+        cached = self._base_cache.get(node_id)
+        if cached is not None:
+            return cached
+        base = np.zeros((0, 3), dtype=np.float32)
+        path = self._pcd_path(node_id)
+        if path.exists():
+            try:
+                with np.load(path) as data:
+                    if "base" in data.files:
+                        base = np.asarray(data["base"], dtype=np.float32)
+            except Exception:  # noqa: BLE001 — a corrupt sidecar reads as no base
+                pass
+        self._base_cache[node_id] = base
+        return base
 
     def _stored_tree(self, node_id: str):
         """Cached ``cKDTree`` over the node's stored cloud (None when scipy/cloud absent)."""
@@ -618,16 +681,15 @@ class GraphMemory:
             self._perf_add("denoise", t0)
 
             t0 = time.perf_counter()
-            target, overlap = self._associate(det)
+            target = self._associate(det)
             self._perf_add("assoc", t0)
             if target is None:
                 t0 = time.perf_counter()
                 target = self._classify(det, self._candidates(det))
-                overlap = 0.0  # matched on appearance only; alignment state unknown
                 self._perf_add("classify", t0)
             if target is None:
                 return self._insert(det)
-            return self._merge(target, det, assoc_overlap=overlap)
+            return self._merge(target, det)
 
     def _denoise(self, points: np.ndarray) -> np.ndarray:
         """DBSCAN-denoise a detection cloud to its largest cluster (no-op if disabled).
@@ -644,8 +706,8 @@ class GraphMemory:
             points, self.dbscan_eps, self.dbscan_min_points, subsample=4000
         )
 
-    def _associate(self, det: Detection3D) -> tuple[Optional[ObjectNode], float]:
-        """ConceptGraphs additive-greedy match → ``(node, overlap)`` or ``(None, 0.0)``.
+    def _associate(self, det: Detection3D) -> Optional[ObjectNode]:
+        """ConceptGraphs additive-greedy match → the best node or ``None``.
 
         Over nodes that pass a cheap prefilter (AABB intersection padded by the NN
         radius, OR within ``dedup_radius_m``), score
@@ -659,17 +721,12 @@ class GraphMemory:
         With the default thresholds this path can only fire on real geometric overlap
         (pure visual tops out at ``w_sem`` = 1.0 < 1.1), so a re-sighting whose 3D
         estimate drifted produces no match here and flows to ``_classify`` unchanged.
-
-        The returned ``overlap`` is the winner's ``nn_ratio`` — the fraction of the
-        detection already coinciding with the stored cloud — which the merge uses to
-        skip ICP when the clouds are pre-aligned.
         """
         if len(det.points_world) == 0:
-            return None, 0.0
+            return None
         det_c, det_mn, det_mx, _ = aabb_of(det.points_world.astype(np.float32))
         best: Optional[ObjectNode] = None
         best_sim = -1.0
-        best_overlap = 0.0
         for n in self._nodes.values():
             same_class = n.class_name == det.class_name
             if not same_class and self.cross_class_sim_threshold <= 0:
@@ -690,8 +747,8 @@ class GraphMemory:
             sim = additive_similarity(ratio, cos, w_geo=self.w_geo, w_sem=self.w_sem)
             gate = self.sim_threshold if same_class else self.cross_class_sim_threshold
             if sim >= gate and sim > best_sim:
-                best, best_sim, best_overlap = n, sim, ratio
-        return best, (best_overlap if best is not None else 0.0)
+                best, best_sim = n, sim
+        return best
 
     def _candidates(self, det: Detection3D) -> list[ObjectNode]:
         same = [n for n in self._nodes.values() if n.class_name == det.class_name]
@@ -753,6 +810,10 @@ class GraphMemory:
             first_seen_ts=det.ts,
             last_seen_ts=det.ts,
         )
+        if det.segment_ref:
+            node.segments = [det.segment_ref]
+            if self.capture_store is not None:
+                self.capture_store.retain(det.segment_ref)
         node.pcd_ref = self._save_pcd(node_id, pts)
         node.frame_ref = self._save_thumb(node_id, det.crop)
         self._record_view(node, det.confidence, det.crop)
@@ -760,9 +821,7 @@ class GraphMemory:
         self._dirty.add(node_id)
         return node
 
-    def _merge(
-        self, node: ObjectNode, det: Detection3D, *, assoc_overlap: float = 0.0
-    ) -> ObjectNode:
+    def _merge(self, node: ObjectNode, det: Detection3D) -> ObjectNode:
         """Fold a matched detection into ``node``, growing its cloud whenever possible.
 
         **Union** (vstack old + new, voxel, cap) whenever the detection's points
@@ -773,10 +832,9 @@ class GraphMemory:
         estimate drifted into empty space, or an object that physically moved) takes the
         **replace** branch — unioning there would smear one object across two places.
 
-        ``assoc_overlap`` is the association step's nn_ratio for this match: when most
-        of the detection already coincides with the stored cloud (≥ ``icp_skip_overlap``)
-        the clouds are pre-aligned and the ICP step is skipped — with a good pose that
-        is the common case, so ICP only pays for itself on actually-misaligned frames.
+        No per-object alignment happens here: the detection's points were already
+        corrected by the capture-level registration, which solves the (per-capture)
+        pose error once against the whole map instead of per object.
         """
         n = node.n_obs
         det_pts = det.points_world.astype(np.float32)
@@ -788,50 +846,20 @@ class GraphMemory:
 
         if union:
             stored = self.load_pcd(node.id)
-            # Residual camera-pose error lands each sighting a few cm off; ICP-align
-            # the new cloud to the stored one so the union sharpens the shape instead
-            # of double-exposing it. ICP is the most expensive step in the whole
-            # upsert, so it's doubly gated: a per-node COOLDOWN (pose error varies
-            # slowly — realigning the same object every tick is pure cost), and an
-            # overlap check (reuse the association's ratio, or measure it with the
-            # cached tree) so pre-aligned clouds never pay at all.
-            on_cooldown = (
-                self.icp_cooldown_sec > 0
-                and (det.ts - self._icp_last.get(node.id, -1e18)) < self.icp_cooldown_sec
-            )
-            if self.icp_max_dist_m > 0 and not on_cooldown:
-                t0 = time.perf_counter()
-                ratio = assoc_overlap
-                if ratio <= 0.0:
-                    ratio = nn_ratio(
-                        stored,
-                        det_pts,
-                        self.nn_voxel_m,
-                        obj_tree=self._stored_tree(node.id),
-                        max_query=1024,
-                    )
-                if ratio < self.icp_skip_overlap:
-                    det_pts, _fit = icp_align(
-                        det_pts,
-                        stored,
-                        self.icp_max_dist_m,
-                        min_fitness=self.icp_min_fitness,
-                        min_points=self.icp_min_points,
-                        max_translation=self.icp_max_dist_m,
-                    )
-                self._icp_last[node.id] = det.ts
-                self._perf_add("icp", t0)
             t0 = time.perf_counter()
             merged = np.vstack([stored, det_pts])
             merged = _voxel(merged, self.voxel_m)
-            if len(merged) > self.max_points_per_obj:
-                idx = np.linspace(0, len(merged) - 1, self.max_points_per_obj).astype(int)
-                merged = merged[idx]
+            merged = subsample(merged, self.max_points_per_obj)
             centroid, mn, mx, ext = aabb_of(merged)
             node.centroid, node.aabb_min, node.aabb_max, node.extent = (
                 centroid, mn, mx, ext
             )
             self._perf_add("fuse", t0)
+            if det.segment_ref:
+                node.segments.append(det.segment_ref)
+                if self.capture_store is not None:
+                    self.capture_store.retain(det.segment_ref)
+                self._bake_excess_segments(node)
             t0 = time.perf_counter()
             node.pcd_ref = self._save_pcd(node.id, merged)
             self._perf_add("save_pcd", t0)
@@ -844,7 +872,19 @@ class GraphMemory:
                 node.centroid, node.aabb_min, node.aabb_max, node.extent = (
                     centroid, mn, mx, ext
                 )
-                node.pcd_ref = self._save_pcd(node.id, det_pts)
+                # The old location's history (segments + base) describes geometry
+                # that no longer holds — drop it with the swap.
+                if self.capture_store is not None:
+                    for ref in node.segments:
+                        self.capture_store.release(ref)
+                node.segments = []
+                if det.segment_ref:
+                    node.segments = [det.segment_ref]
+                    if self.capture_store is not None:
+                        self.capture_store.retain(det.segment_ref)
+                node.pcd_ref = self._save_pcd(
+                    node.id, det_pts, base=np.zeros((0, 3), dtype=np.float32)
+                )
             node.conf = max(node.conf, float(det.confidence))
 
         if det.clip_emb:
@@ -868,6 +908,93 @@ class GraphMemory:
         if union:
             self._dirty.add(node.id)  # cloud grew; the replace branch swaps, never accretes
         return node
+
+    def _bake_excess_segments(self, node: ObjectNode) -> None:
+        """Fold segments beyond ``segments_per_node`` (oldest first) into the base cloud.
+
+        Keeps per-node history bounded: the K most recent sightings stay
+        individually rebuildable, everything older lives on as one voxelized
+        ``base`` array, and the released capture files become collectable.
+        """
+        if self.capture_store is None or self.segments_per_node <= 0:
+            return
+        while len(node.segments) > self.segments_per_node:
+            ref = node.segments.pop(0)
+            pts = self.capture_store.load_segment(ref)
+            self.capture_store.release(ref)
+            if pts is None or len(pts) == 0:
+                continue
+            base = self.load_base(node.id)
+            base = np.vstack([base, pts]) if len(base) else pts
+            base = subsample(_voxel(base, self.voxel_m), self.max_points_per_obj)
+            self._base_cache[node.id] = base.astype(np.float32)
+            if self.defer_pcd_writes:
+                self._pcd_unflushed.add(node.id)
+            else:
+                self._write_pcd_file(node.id)
+
+    def rebuild_pcd(self, node_id: str) -> np.ndarray:
+        """Re-derive a node's fused cloud from its base + live capture segments.
+
+        The fused cloud is normally maintained incrementally; this recomputes it
+        from the ground truth (concat → voxel → cap → the same SOR + noise-only
+        DBSCAN cleanup the periodic denoise applies) — used after node-merges and
+        available for repair. A legacy node with neither segments nor base keeps
+        its stored cloud unchanged.
+        """
+        with self._lock:
+            node = self._nodes.get(node_id)
+            if node is None:
+                return np.zeros((0, 3), dtype=np.float32)
+            parts = [self.load_base(node_id)]
+            if self.capture_store is not None:
+                for ref in node.segments:
+                    pts = self.capture_store.load_segment(ref)
+                    if pts is not None and len(pts):
+                        parts.append(pts)
+            parts = [p for p in parts if len(p)]
+            if not parts:
+                return self.load_pcd(node_id)
+            merged = subsample(_voxel(np.vstack(parts), self.voxel_m), self.max_points_per_obj)
+            kept = merged
+            if self.sor_k > 0:
+                kept = statistical_outlier_removal(kept, self.sor_k, self.sor_std_ratio)
+            if self.dbscan_enabled:
+                kept = dbscan_remove_noise(kept, self.dbscan_eps, self.dbscan_min_points)
+            if len(kept) >= self.denoise_keep_min_frac * len(merged) and len(kept) >= 3:
+                merged = kept
+            centroid, mn, mx, ext = aabb_of(merged)
+            node.centroid, node.aabb_min, node.aabb_max, node.extent = centroid, mn, mx, ext
+            node.pcd_ref = self._save_pcd(node_id, merged)
+            self._write_node(node)
+            return merged
+
+    def icp_target_near(self, aabb_min, aabb_max, *, pad: float = 0.5, budget: int = 40_000) -> np.ndarray:
+        """Assemble the capture-registration target around a capture's AABB.
+
+        Background crop (the anchor — walls pin translations a lone object can't)
+        plus the fused clouds of every node whose AABB intersects the padded box,
+        budget-split ~75/25 in the background's favor. Cloud loads happen outside
+        the lock (the same pattern as merge_overlapping_nodes).
+        """
+        bg_budget = int(budget * 0.75)
+        parts: list[np.ndarray] = []
+        if self.background is not None:
+            bg = self.background.crop(aabb_min, aabb_max, pad=pad, budget=bg_budget)
+            if len(bg):
+                parts.append(bg)
+        with self._lock:
+            ids = [
+                n.id
+                for n in self._nodes.values()
+                if aabb_overlap(aabb_min, aabb_max, n.aabb_min, n.aabb_max, pad=pad)
+            ]
+        obj_parts = [p for nid in ids if len(p := self.load_pcd(nid))]
+        if obj_parts:
+            parts.append(subsample(np.vstack(obj_parts), budget - bg_budget))
+        if not parts:
+            return np.zeros((0, 3), dtype=np.float32)
+        return np.vstack(parts).astype(np.float32)
 
     # ------------------------------------------------------------------
     # Relations (geometric / distance-based)
@@ -1157,10 +1284,9 @@ class GraphMemory:
         sides as two nodes, later seen to physically coincide. The expensive overlap math
         runs on a cloud snapshot taken outside the short mutation critical section.
 
-        When two clouds clear the identity guard (class + CLIP) but their raw overlap is
-        low purely because a few-cm pose offset has shifted one off the other, the pair
-        is ICP-aligned and the overlap re-tested on the aligned clouds — so duplicates
-        that drifted slightly apart still fuse instead of accumulating as ghosts.
+        (Pose-offset duplicates needed an ICP rescue here when sightings were lifted
+        raw; with the capture-level registration correcting each capture before
+        ingest, clouds of one object land aligned and plain overlap suffices.)
         """
         # Lightweight snapshot under the lock (no disk I/O): the candidate prefilter
         # needs only centroids/AABBs/embeddings, so the lock is held for microseconds.
@@ -1202,24 +1328,6 @@ class GraphMemory:
                 continue
             ca, cb = clouds[a[0]], clouds[b[0]]
             overlap = nn_ratio_symmetric(ca, cb, self.nn_voxel_m)
-            if overlap <= self.merge_overlap_thresh and self.icp_max_dist_m > 0:
-                # Raw overlap is measured pre-alignment at NN_VOXEL_M (2.5 cm), so a
-                # mere few-cm pose offset between two sightings of ONE object reads as
-                # near-zero overlap and the pair never reaches _merge_nodes (the only
-                # place ICP runs) — the classic "shifted-but-not-fused" duplicate.
-                # Identity is already vouched for by class+CLIP above, so align the pair
-                # and re-test overlap on the aligned clouds; if they truly are one
-                # surface the offset collapses and the test now passes. Distinct objects
-                # don't snap together (ICP fitness stays low / surfaces stay apart), so
-                # this rescues drift without loosening the threshold. _merge_nodes
-                # re-aligns when it actually fuses, so the stored cloud is corrected too.
-                aligned, fit = icp_align(
-                    cb, ca, self.icp_max_dist_m,
-                    min_fitness=self.icp_min_fitness, min_points=self.icp_min_points,
-                    max_translation=self.icp_max_dist_m,
-                )
-                if fit >= self.icp_min_fitness:
-                    overlap = nn_ratio_symmetric(ca, aligned, self.nn_voxel_m)
             if overlap <= self.merge_overlap_thresh:
                 continue
             pairs.append((overlap, a[0], b[0]))
@@ -1234,35 +1342,53 @@ class GraphMemory:
                 if a is None or b is None:
                     continue
                 keep, drop = (a, b) if a.n_obs >= b.n_obs else (b, a)
-                self._merge_nodes(keep, drop, overlap=overlap)
+                self._merge_nodes(keep, drop)
                 gone.add(drop.id)
                 merged += 1
         return merged
 
-    def _merge_nodes(self, keep: ObjectNode, drop: ObjectNode, *, overlap: float = 0.0) -> None:
-        """Fold node ``drop`` into ``keep`` in place (clouds, CLIP, captions), delete ``drop``.
+    def _merge_nodes(self, keep: ObjectNode, drop: ObjectNode) -> None:
+        """Fold node ``drop`` into ``keep`` in place (clouds, segments, CLIP, captions),
+        then delete ``drop``.
 
-        ``overlap`` is the caller's symmetric nn_ratio for the pair; when the clouds
-        already coincide (≥ ``icp_skip_overlap``) the ICP step is skipped.
+        ``drop``'s segment refs transfer to ``keep`` (counts carry over — no
+        retain/release churn) and the two baked bases union; a node whose history
+        predates the segment store (no refs, no base) contributes its stored cloud
+        as base instead. The fused cloud is then re-derived from that ground truth.
         """
-        kp, dp = self.load_pcd(keep.id), self.load_pcd(drop.id)
-        if self.icp_max_dist_m > 0 and overlap < self.icp_skip_overlap and len(kp) and len(dp):
-            # Two nodes of one object usually split *because* of pose error; align the
-            # dropped cloud onto the kept one so the fusion doesn't double-expose.
-            dp, _fit = icp_align(
-                dp,
-                kp,
-                self.icp_max_dist_m,
-                min_fitness=self.icp_min_fitness,
-                min_points=self.icp_min_points,
-                max_translation=self.icp_max_dist_m,
-            )
-        clouds = [c for c in (kp, dp) if len(c)]
-        merged = np.vstack(clouds) if clouds else np.zeros((0, 3), dtype=np.float32)
-        merged = _voxel(merged, self.voxel_m)
-        if len(merged) > self.max_points_per_obj:
-            idx = np.linspace(0, len(merged) - 1, self.max_points_per_obj).astype(int)
-            merged = merged[idx]
+        # History union: base + (the stored cloud, for nodes with no segment backing).
+        def history(node: ObjectNode) -> np.ndarray:
+            base = self.load_base(node.id)
+            if len(base) or (node.segments and self.capture_store is not None):
+                return base
+            return self.load_pcd(node.id)
+
+        bases = [b for b in (history(keep), history(drop)) if len(b)]
+        merged_base = (
+            subsample(_voxel(np.vstack(bases), self.voxel_m), self.max_points_per_obj)
+            if bases
+            else np.zeros((0, 3), dtype=np.float32)
+        )
+        keep.segments = keep.segments + drop.segments
+        drop.segments = []  # transferred — _delete must not release them
+        self._base_cache[keep.id] = merged_base.astype(np.float32)
+        self._bake_excess_segments(keep)
+
+        # Re-derive keep's fused cloud from base + segments; legacy pairs (no
+        # segments anywhere) get it straight from the merged base.
+        parts = [self.load_base(keep.id)]
+        if self.capture_store is not None:
+            parts += [
+                p
+                for ref in keep.segments
+                if (p := self.capture_store.load_segment(ref)) is not None and len(p)
+            ]
+        parts = [p for p in parts if len(p)]
+        merged = (
+            subsample(_voxel(np.vstack(parts), self.voxel_m), self.max_points_per_obj)
+            if parts
+            else np.zeros((0, 3), dtype=np.float32)
+        )
         if len(merged):
             centroid, mn, mx, ext = aabb_of(merged)
             keep.centroid, keep.aabb_min, keep.aabb_max, keep.extent = centroid, mn, mx, ext
@@ -1472,11 +1598,14 @@ class GraphMemory:
         (self.thumbs_dir / f"{node_id}.jpg").unlink(missing_ok=True)
         for _conf, p in (node.best_views if node else []):
             Path(p).unlink(missing_ok=True)
+        if node is not None and self.capture_store is not None:
+            for ref in node.segments:
+                self.capture_store.release(ref)
         self._pcd_cache.pop(node_id, None)
+        self._base_cache.pop(node_id, None)
         self._chroma_pending.pop(node_id, None)
         self._pcd_unflushed.discard(node_id)
         self._tree_cache.pop(node_id, None)
-        self._icp_last.pop(node_id, None)
         self._dirty.discard(node_id)
         if self._graph is not None and node_id in self._graph:
             self._graph.remove_node(node_id)
@@ -1487,10 +1616,10 @@ class GraphMemory:
                 self._delete(node_id)
             self._dirty.clear()
             self._pcd_cache.clear()
+            self._base_cache.clear()
             self._chroma_pending.clear()
             self._pcd_unflushed.clear()
             self._tree_cache.clear()
-            self._icp_last.clear()
             if self._graph is not None:
                 self._graph.clear()
             self._persist_edges()
