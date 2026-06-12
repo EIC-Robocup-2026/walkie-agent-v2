@@ -73,6 +73,7 @@ class GreetAndLearn(SubTask):
 
     def run(self, ctx: TaskContext) -> StepResult:
         record = _guest(ctx, self.guest)
+        time.sleep(5) # wait for navigation to settle
 
         original_head_tilt = ctx.walkie.robot.head.get_angle()
         ctx.walkie.robot.head.tilt(0)
