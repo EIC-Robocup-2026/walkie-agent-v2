@@ -74,6 +74,8 @@ class GreetAndLearn(SubTask):
     def run(self, ctx: TaskContext) -> StepResult:
         record = _guest(ctx, self.guest)
 
+        original_head_tilt = ctx.walkie.robot.head.get_angle()
+        ctx.walkie.robot.head.tilt(0)
         answer = ctx.ask(prompts.GREET_ASK_BOTH)
         info = ctx.extract(prompts.GuestInfo, prompts.EXTRACT_GUEST_INFO_INSTRUCTIONS, answer) if answer else None
         if info:
@@ -108,6 +110,7 @@ class GreetAndLearn(SubTask):
 
         name = record["name"] or "there"
         ctx.say(f"Nice to meet you, {name}!")
+        ctx.walkie.robot.head.tilt(original_head_tilt)  # restore the head tilt for better nav
         return StepResult.DONE  # partial info still scores — never block here
 
 
