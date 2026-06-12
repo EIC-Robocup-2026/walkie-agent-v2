@@ -132,8 +132,8 @@ WALKIE_GRAPHS_TF_TIMEOUT_SEC = "1.0"
 # for free). Frames taken while driving/turning carry mis-posed, smeared clouds — the
 # main source of "double exposure" fuzz; the snapshot is still written, and the next
 # still frame is one tick away. 0 disables either bound.
-WALKIE_GRAPHS_MOTION_MAX_TRANS_M = "0.03"
-WALKIE_GRAPHS_MOTION_MAX_ROT_DEG = "2.0"
+WALKIE_GRAPHS_MOTION_MAX_TRANS_M = "0"
+WALKIE_GRAPHS_MOTION_MAX_ROT_DEG = "0"
 
 [graphs.fusion]
 # Incremental dedup. A detection MERGES into an existing same-class node when its
