@@ -96,17 +96,6 @@ class GreetAndLearn(SubTask):
         return StepResult.DONE  # partial info still scores — never block here
 
 
-class DescribeGuestOneToGuestTwo(SubTask):
-    """At the door, tell guest 2 who they will meet inside."""
-
-    def run(self, ctx: TaskContext) -> StepResult:
-        g1 = _guest(ctx, 1)
-        name = g1["name"] or prompts.GENERIC_GUEST
-        appearance = g1["appearance"] or ""
-        ctx.say(prompts.DESCRIBE_GUEST1_TEMPLATE.format(name=name, appearance=appearance).strip())
-        return StepResult.DONE
-
-
 class GuideToLivingRoom(SubTask):
     def __init__(self, guest: int):
         super().__init__(f"GuideToLivingRoom(guest {guest})")
@@ -251,7 +240,6 @@ def build_hri_task(ctx: TaskContext) -> Task:
             GoToDoor(2),
             GreetAndLearn(2),
             ReceiveBag(),
-            DescribeGuestOneToGuestTwo(),
             GuideToLivingRoom(2),
             OfferSeat(2),
             IntroduceGuests(),
