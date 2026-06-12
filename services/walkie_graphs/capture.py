@@ -280,6 +280,42 @@ class CaptureStore:
             self._cache_put(ref, pts)
         return pts
 
+    def update_segment(self, ref: str, points: np.ndarray) -> bool:
+        """Replace a segment's stored points in place (maintenance write-back).
+
+        Used by the ICP rescue, the refine pass, and free-space carving — the
+        store is the ground truth object clouds rebuild from, so any correction
+        of a segment MUST land here or the next rebuild resurrects the stale
+        geometry. Refcounts are untouched. A capture file may hold OTHER nodes'
+        segments too, so the on-disk path copies every array and only swaps this
+        one, then queues the rewrite through the normal pending→flush route
+        (atomic tmp+replace). Returns ``False`` when the segment no longer
+        exists anywhere.
+        """
+        cid, idx = parse_ref(ref)
+        key = f"seg_{idx}"
+        pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+        with self._lock:
+            pending = self._pending.get(cid)
+            if pending is not None:
+                if key not in pending:
+                    return False
+                pending[key] = pts
+                self._cache_put(ref, pts)
+                return True
+        try:
+            with np.load(self._path(cid)) as data:
+                arrays = {k: np.asarray(data[k]) for k in data.files}
+        except Exception:  # noqa: BLE001 — file gone
+            return False
+        if key not in arrays:
+            return False
+        arrays[key] = pts
+        with self._lock:
+            self._pending[cid] = arrays
+            self._cache_put(ref, pts)
+        return True
+
     # ------------------------------------------------------------------
     # Reference counting + GC
     # ------------------------------------------------------------------

@@ -120,6 +120,45 @@ class BackgroundStore:
             out = pts[inside]
         return subsample(out, budget) if budget else out
 
+    def crop_with_keys(
+        self, aabb_min, aabb_max, *, pad: float = 0.0
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """(points, grid keys) inside the padded box — the carve query.
+
+        Keys identify cells stably across concurrent ``add``/eviction (indices
+        wouldn't), so a carve verdict computed outside the lock can be applied
+        later with :meth:`remove_keys`.
+        """
+        with self._lock:
+            pts = self._points
+            if len(pts) == 0:
+                return pts, self._keys
+            lo = np.asarray(aabb_min, dtype=np.float32) - pad
+            hi = np.asarray(aabb_max, dtype=np.float32) + pad
+            inside = np.all((pts >= lo) & (pts <= hi), axis=1)
+            return pts[inside].copy(), self._keys[inside].copy()
+
+    def remove_keys(self, keys: np.ndarray) -> int:
+        """Delete the cells with these grid keys (free-space carving).
+
+        Order-preserving (FIFO eviction stays oldest-first) and the cells
+        RE-OPEN: a later ``add`` in a carved cell is accepted again — the world
+        changed there, so new evidence must be able to repopulate it.
+        """
+        keys = np.asarray(keys, dtype=np.int64)
+        if keys.size == 0:
+            return 0
+        with self._lock:
+            doomed = np.isin(self._keys, keys)
+            n = int(doomed.sum())
+            if n == 0:
+                return 0
+            self._key_set.difference_update(self._keys[doomed].tolist())
+            keep = ~doomed
+            self._points = self._points[keep]
+            self._keys = self._keys[keep]
+            return n
+
     def points(self) -> np.ndarray:
         """A snapshot copy of the whole cloud (for viz)."""
         with self._lock:

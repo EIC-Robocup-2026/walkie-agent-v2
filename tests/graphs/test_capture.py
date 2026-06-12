@@ -261,3 +261,37 @@ def test_gc_drops_unreferenced_pending_writes(tmp_path):
     store.gc()
     assert store.flush() == 0
     assert not (tmp_path / "c3-pend.npz").exists()
+
+
+def test_update_segment_pending(tmp_path):
+    store = CaptureStore(str(tmp_path))
+    cap = _stored_capture("c4-up")
+    store.save(cap)  # still pending
+    new_pts = np.full((7, 3), 9.0, np.float32)
+    assert store.update_segment("c4-up:1", new_pts)
+    assert np.array_equal(store.load_segment("c4-up:1"), new_pts)
+    store.flush()
+    fresh = CaptureStore(str(tmp_path))
+    assert np.array_equal(fresh.load_segment("c4-up:1"), new_pts)
+
+
+def test_update_segment_on_disk_preserves_siblings(tmp_path):
+    store = CaptureStore(str(tmp_path))
+    cap = _stored_capture("c5-up", n_segs=2)
+    store.save(cap)
+    store.flush()
+    new_pts = np.full((4, 3), 7.0, np.float32)
+    assert store.update_segment("c5-up:0", new_pts)
+    store.flush()
+    fresh = CaptureStore(str(tmp_path))
+    assert np.array_equal(fresh.load_segment("c5-up:0"), new_pts)
+    # The sibling segment in the same capture file survived the rewrite.
+    assert np.array_equal(fresh.load_segment("c5-up:1"), cap.segments[1].points)
+
+
+def test_update_segment_missing_returns_false(tmp_path):
+    store = CaptureStore(str(tmp_path))
+    assert not store.update_segment("c0-gone:0", np.ones((3, 3), np.float32))
+    cap = _stored_capture("c6-up")
+    store.save(cap)
+    assert not store.update_segment("c6-up:9", np.ones((3, 3), np.float32))

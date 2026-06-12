@@ -77,6 +77,33 @@ def test_corrupt_or_missing_file_starts_empty(tmp_path):
     assert len(BackgroundStore(str(tmp_path / "absent.npz"))) == 0
 
 
+def test_crop_with_keys_matches_crop(tmp_path):
+    bg = BackgroundStore(str(tmp_path / "bg.npz"), voxel_m=0.05)
+    bg.add(_grid(0, 1))
+    pts, keys = bg.crop_with_keys((0, 0, -1), (0.5, 0.5, 1))
+    assert len(pts) == len(keys) > 0
+    assert np.array_equal(pts, bg.crop((0, 0, -1), (0.5, 0.5, 1), pad=0.0))
+
+
+def test_remove_keys_preserves_fifo_and_reopens_cells(tmp_path):
+    bg = BackgroundStore(str(tmp_path / "bg.npz"), voxel_m=0.05, max_points=150)
+    first, second = _grid(0, 0.5), _grid(1, 1.5)  # 25 cells each
+    bg.add(first)
+    bg.add(second)
+    # Carve a sub-box of the FIRST batch.
+    pts, keys = bg.crop_with_keys((0, 0, -1), (0.2, 0.2, 1))
+    assert bg.remove_keys(keys) == len(keys) > 0
+    assert len(bg) == 50 - len(keys)
+    # Carved cells re-open: the same region can be re-learned.
+    assert bg.add(first) == len(keys)
+    # FIFO order intact: overflow still evicts the oldest surviving cells first.
+    survivors_first = bg.points()[0]
+    bg.max_points = len(bg) - 5
+    bg.add(_grid(3, 3.5)[:5])  # push 5 over → evict 10 oldest... cap delta
+    assert not (bg.points() == survivors_first).all(axis=1).any()
+    assert bg.remove_keys(np.array([], dtype=np.int64)) == 0
+
+
 def test_clear_wipes_memory_and_disk(tmp_path):
     path = tmp_path / "bg.npz"
     bg = BackgroundStore(str(path))
