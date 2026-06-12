@@ -61,7 +61,7 @@ from .fusion import (
     pairs_within,
 )
 from .geometry import voxel_downsample
-from .pcd_ops import subsample
+from .pcd_ops import apply_transform, icp, rotation_angle_deg, subsample
 
 DEFAULT_EMB_DIM = 512  # CLIP ViT-B/16
 
@@ -228,6 +228,10 @@ class GraphMemory:
         merge_visual_sim_thresh: float = 0.7,
         merge_text_sim_thresh: float = 0.7,
         merge_radius_m: float = 0.5,
+        merge_rescue_corr_m: float = 0.0,
+        merge_rescue_min_fitness: float = 0.6,
+        merge_rescue_max_trans_m: float = 0.3,
+        merge_rescue_max_rot_deg: float = 10.0,
         min_obs_confirm: int = 1,
         require_confirmation: bool = False,
         ghost_grace_sec: float = 0.0,
@@ -276,6 +280,10 @@ class GraphMemory:
         self.merge_visual_sim_thresh = merge_visual_sim_thresh
         self.merge_text_sim_thresh = merge_text_sim_thresh
         self.merge_radius_m = merge_radius_m
+        self.merge_rescue_corr_m = merge_rescue_corr_m
+        self.merge_rescue_min_fitness = merge_rescue_min_fitness
+        self.merge_rescue_max_trans_m = merge_rescue_max_trans_m
+        self.merge_rescue_max_rot_deg = merge_rescue_max_rot_deg
         self.min_obs_confirm = min_obs_confirm
         self.require_confirmation = require_confirmation
         self.ghost_grace_sec = ghost_grace_sec
@@ -300,6 +308,7 @@ class GraphMemory:
 
         self._nodes: dict[str, ObjectNode] = {}
         self._dirty: set[str] = set()  # node ids whose cloud changed since last denoise
+        self._refine_pending: set[str] = set()  # flagged for the per-object refine pass
         # Write-through cloud cache: association reads every candidate's cloud (under
         # the lock), so serve those from memory instead of re-reading .npz from disk.
         # Bounded by the prune cap (500 nodes x 2000 pts x 12 B ~ 12 MB).
@@ -389,6 +398,10 @@ class GraphMemory:
             merge_visual_sim_thresh=_f("WALKIE_GRAPHS_MERGE_VISUAL_SIM_THRESH", "0.7"),
             merge_text_sim_thresh=_f("WALKIE_GRAPHS_MERGE_TEXT_SIM_THRESH", "0.7"),
             merge_radius_m=_f("WALKIE_GRAPHS_MERGE_RADIUS_M", "0.5"),
+            merge_rescue_corr_m=_f("WALKIE_GRAPHS_MERGE_RESCUE_CORR_M", "0"),
+            merge_rescue_min_fitness=_f("WALKIE_GRAPHS_MERGE_RESCUE_MIN_FITNESS", "0.6"),
+            merge_rescue_max_trans_m=_f("WALKIE_GRAPHS_MERGE_RESCUE_MAX_TRANS_M", "0.3"),
+            merge_rescue_max_rot_deg=_f("WALKIE_GRAPHS_MERGE_RESCUE_MAX_ROT_DEG", "10"),
             min_obs_confirm=_i("WALKIE_GRAPHS_MIN_OBS_CONFIRM", "3"),
             require_confirmation=_b("WALKIE_GRAPHS_REQUIRE_CONFIRMATION", "1"),
             ghost_grace_sec=_f("WALKIE_GRAPHS_GHOST_GRACE_SEC", "0"),
@@ -996,6 +1009,19 @@ class GraphMemory:
             return np.zeros((0, 3), dtype=np.float32)
         return np.vstack(parts).astype(np.float32)
 
+    def flag_for_refine(self, node_ids: list[str]) -> None:
+        """Mark nodes for the next per-object refine pass.
+
+        Called by the service after a rejected capture registration (the
+        capture's segments landed raw, so their node clouds may be smeared)
+        and by merge rescue (the fused node benefits from a point-level ICP
+        re-alignment across all its segments). Discarded on node deletion.
+        """
+        with self._lock:
+            self._refine_pending.update(
+                nid for nid in node_ids if nid in self._nodes
+            )
+
     # ------------------------------------------------------------------
     # Relations (geometric / distance-based)
     # ------------------------------------------------------------------
@@ -1284,9 +1310,13 @@ class GraphMemory:
         sides as two nodes, later seen to physically coincide. The expensive overlap math
         runs on a cloud snapshot taken outside the short mutation critical section.
 
-        (Pose-offset duplicates needed an ICP rescue here when sightings were lifted
-        raw; with the capture-level registration correcting each capture before
-        ingest, clouds of one object land aligned and plain overlap suffices.)
+        **ICP rescue** (``merge_rescue_corr_m > 0``): when the identity gate passes but
+        overlap is insufficient (stacked ghost duplicates from captures whose registration
+        was rejected), point-to-plane ICP aligns the candidate pair outside the lock.
+        Accepted iff fitness ≥ min AND centroid-shift ≤ trans cap AND rotation ≤ rot cap;
+        re-tested overlap must clear the threshold. Rescue writes the transform through to
+        all of the dropped node's capture segments (so rebuilds don't resurface stale
+        geometry) and flags the merged node for the per-object refine pass.
         """
         # Lightweight snapshot under the lock (no disk I/O): the candidate prefilter
         # needs only centroids/AABBs/embeddings, so the lock is held for microseconds.
@@ -1314,7 +1344,10 @@ class GraphMemory:
         # Load only the clouds that survived the prefilter (outside the lock).
         need = {nid for a, b in cand for nid in (a[0], b[0])}
         clouds = {nid: self.load_pcd(nid) for nid in need}
-        pairs: list[tuple[float, str, str]] = []
+        # pairs: (overlap, aid, bid, T_or_None) — T maps bid cloud → aid cloud frame.
+        # sort key is p[0] because T is an ndarray and tuple compare would crash.
+        pairs: list[tuple[float, str, str, object]] = []
+        rescue_cands: list[tuple[str, str, np.ndarray, np.ndarray]] = []
         for a, b in cand:
             # Identity guard FIRST (cheap, and it decides whether the ICP rescue below
             # is even allowed): same-class pairs may merge on geometry alone, but any
@@ -1328,26 +1361,51 @@ class GraphMemory:
                 continue
             ca, cb = clouds[a[0]], clouds[b[0]]
             overlap = nn_ratio_symmetric(ca, cb, self.nn_voxel_m)
-            if overlap <= self.merge_overlap_thresh:
+            if overlap > self.merge_overlap_thresh:
+                pairs.append((overlap, a[0], b[0], None))
+            elif self.merge_rescue_corr_m > 0 and len(ca) >= 3 and len(cb) >= 3:
+                rescue_cands.append((a[0], b[0], ca, cb))
+        # ICP rescue: run outside the lock (expensive but no shared-state mutation).
+        # Source = cb (bid's cloud), target = ca (aid's cloud) → T maps bid → aid.
+        for aid, bid, ca, cb in rescue_cands:
+            T, fitness = icp(subsample(cb, 5000), subsample(ca, 5000), self.merge_rescue_corr_m)
+            if fitness < self.merge_rescue_min_fitness:
                 continue
-            pairs.append((overlap, a[0], b[0]))
-        pairs.sort(reverse=True)  # strongest overlap first
+            centroid_b = cb.mean(axis=0).astype(np.float64)
+            shift = float(
+                np.linalg.norm(apply_transform(centroid_b[None], T)[0] - centroid_b)
+            )
+            if shift > self.merge_rescue_max_trans_m or rotation_angle_deg(T) > self.merge_rescue_max_rot_deg:
+                continue
+            rescued_overlap = nn_ratio_symmetric(ca, apply_transform(cb, T), self.nn_voxel_m)
+            if rescued_overlap > self.merge_overlap_thresh:
+                pairs.append((rescued_overlap, aid, bid, T))
+        pairs.sort(key=lambda p: p[0], reverse=True)  # strongest overlap first
         merged = 0
         gone: set[str] = set()
         with self._lock:
-            for overlap, aid, bid in pairs:
+            for overlap, aid, bid, T in pairs:
                 if aid in gone or bid in gone:
                     continue
                 a, b = self._nodes.get(aid), self._nodes.get(bid)
                 if a is None or b is None:
                     continue
                 keep, drop = (a, b) if a.n_obs >= b.n_obs else (b, a)
-                self._merge_nodes(keep, drop)
+                # T was solved as icp(cb=bid, ca=aid): maps bid→aid. Pass directly when
+                # drop is bid; invert when keep/drop were swapped (drop is aid).
+                T_for_drop = None
+                if T is not None:
+                    T_for_drop = T if drop.id == bid else np.linalg.inv(np.asarray(T))
+                self._merge_nodes(keep, drop, transform=T_for_drop)
+                if T is not None:
+                    self._refine_pending.add(keep.id)
                 gone.add(drop.id)
                 merged += 1
         return merged
 
-    def _merge_nodes(self, keep: ObjectNode, drop: ObjectNode) -> None:
+    def _merge_nodes(
+        self, keep: ObjectNode, drop: ObjectNode, *, transform: Optional[np.ndarray] = None
+    ) -> None:
         """Fold node ``drop`` into ``keep`` in place (clouds, segments, CLIP, captions),
         then delete ``drop``.
 
@@ -1355,7 +1413,25 @@ class GraphMemory:
         retain/release churn) and the two baked bases union; a node whose history
         predates the segment store (no refs, no base) contributes its stored cloud
         as base instead. The fused cloud is then re-derived from that ground truth.
+
+        ``transform`` (4×4, maps drop's coordinate frame → keep's): when supplied by
+        the ICP rescue path, every one of drop's capture segments is corrected via
+        :meth:`~capture.CaptureStore.update_segment` and the baked base (if any) is
+        corrected in ``_base_cache`` — both BEFORE the geometry union, so neither a
+        later :meth:`rebuild_pcd` nor a segment-flush can resurface the offset geometry.
         """
+        # Apply rescue transform to drop's geometry BEFORE history() reads any of it.
+        if transform is not None:
+            T = np.asarray(transform, dtype=np.float64)
+            if self.capture_store is not None:
+                for ref in drop.segments:
+                    pts = self.capture_store.load_segment(ref)
+                    if pts is not None and len(pts):
+                        self.capture_store.update_segment(ref, apply_transform(pts, T))
+            base = self.load_base(drop.id)
+            if len(base):
+                self._base_cache[drop.id] = apply_transform(base, T).astype(np.float32)
+
         # History union: base + (the stored cloud, for nodes with no segment backing).
         def history(node: ObjectNode) -> np.ndarray:
             base = self.load_base(node.id)
@@ -1607,6 +1683,7 @@ class GraphMemory:
         self._pcd_unflushed.discard(node_id)
         self._tree_cache.pop(node_id, None)
         self._dirty.discard(node_id)
+        self._refine_pending.discard(node_id)
         if self._graph is not None and node_id in self._graph:
             self._graph.remove_node(node_id)
 
@@ -1615,6 +1692,7 @@ class GraphMemory:
             for node_id in list(self._nodes.keys()):
                 self._delete(node_id)
             self._dirty.clear()
+            self._refine_pending.clear()
             self._pcd_cache.clear()
             self._base_cache.clear()
             self._chroma_pending.clear()

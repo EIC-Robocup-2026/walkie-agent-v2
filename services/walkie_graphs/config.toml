@@ -247,14 +247,25 @@ WALKIE_GRAPHS_DENOISE_KEEP_MIN_FRAC = "0.5"
 # two nodes. Same-class pairs always considered; different-class pairs only when
 # CROSS_CLASS_SIM_THRESHOLD > 0 (and they additionally REQUIRE the CLIP gate — pure
 # geometry never overrides the labels). (TEXT_SIM kept for parity; unused without
-# stored caption embeddings.) Pose-offset duplicates needed an ICP rescue here when
-# sightings were lifted raw; with capture-level registration correcting each frame
-# before ingest, clouds of one object land aligned and plain overlap suffices.
+# stored caption embeddings.)
+# ICP RESCUE (MERGE_RESCUE_CORR_M > 0): when the identity gate passes but overlap
+# is insufficient — the classic ghost-duplicate symptom from captures whose
+# registration was rejected or the map was cold — point-to-plane ICP aligns the
+# candidate pair. Accept if fitness >= RESCUE_MIN_FITNESS AND centroid-shift <=
+# RESCUE_MAX_TRANS_M AND rotation <= RESCUE_MAX_ROT_DEG; re-test overlap after
+# alignment. The transform is written through to the dropped node's CaptureStore
+# segments so rebuilds can't resurrect the offset. The merged node is flagged for
+# the per-object refine pass (Phase 4) to sharpen the fused cloud further.
+# RESCUE_CORR_M = 0 (code default) keeps the code path off and test-suite-clean.
 WALKIE_GRAPHS_MERGE_EVERY_N = "20"
 WALKIE_GRAPHS_MERGE_OVERLAP_THRESH = "0.7"
 WALKIE_GRAPHS_MERGE_VISUAL_SIM_THRESH = "0.7"
 WALKIE_GRAPHS_MERGE_TEXT_SIM_THRESH = "0.7"
 WALKIE_GRAPHS_MERGE_RADIUS_M = "0.4"
+WALKIE_GRAPHS_MERGE_RESCUE_CORR_M = "0.15"
+WALKIE_GRAPHS_MERGE_RESCUE_MIN_FITNESS = "0.6"
+WALKIE_GRAPHS_MERGE_RESCUE_MAX_TRANS_M = "0.3"
+WALKIE_GRAPHS_MERGE_RESCUE_MAX_ROT_DEG = "10"
 # Node precision (CG obj_min_detections): an object must be seen MIN_OBS_CONFIRM times
 # before it counts. With REQUIRE_CONFIRMATION=1, provisional (under-seen) nodes are
 # HIDDEN from queries/description (non-destructive — a re-sighting promotes them; the

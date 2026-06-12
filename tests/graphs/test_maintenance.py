@@ -243,3 +243,126 @@ def test_evict_disabled_by_default(mem):
     put_object(mem, "ghost", "x", make_cloud((0, 0, 0), seed=1), n_obs=1, ts=0.0)
     assert mem.evict_stale_provisional(now_ts=1e9) == 0
     assert mem.count() == 1
+
+
+# ---------------------------------------------------------------------------
+# ICP rescue in merge_overlapping_nodes
+# ---------------------------------------------------------------------------
+def _corner_cloud(n=600, seed=3):
+    """L-shaped corner cloud: floor + wall, good for point-to-plane ICP."""
+    rng = np.random.default_rng(seed)
+    floor = np.stack([rng.uniform(0, 0.5, n), rng.uniform(0, 0.5, n), np.zeros(n)], axis=1)
+    wall = np.stack([rng.uniform(0, 0.5, n), np.zeros(n), rng.uniform(0, 0.5, n)], axis=1)
+    return np.vstack([floor, wall]).astype(np.float32)
+
+
+def test_rescue_off_by_default(tmp_path):
+    """merge_rescue_corr_m=0 (code default): offset duplicates are NOT fused."""
+    from services.walkie_graphs.memory import GraphMemory
+
+    mem = GraphMemory(
+        chroma_dir=None, pcds_dir=str(tmp_path / "p"), thumbs_dir=str(tmp_path / "t"),
+        edges_path=str(tmp_path / "e.json"), merge_radius_m=0.5, merge_rescue_corr_m=0.0,
+    )
+    offset = np.array([0.08, 0.06, 0.04], dtype=np.float32)
+    cloud = _corner_cloud()
+    put_object(mem, "a", "chair", cloud, emb=unit(1, 0, 0), n_obs=4)
+    put_object(mem, "b", "chair", cloud + offset, emb=unit(1, 0, 0), n_obs=2)
+    # Clouds are offset — nn_ratio_symmetric is low; without rescue they stay separate.
+    assert mem.merge_overlapping_nodes() == 0
+    assert mem.count() == 2
+
+
+def test_rescue_fuses_offset_duplicates(tmp_path):
+    """With rescue on and open3d available, stacked ghost duplicates fuse."""
+    pytest.importorskip("open3d")
+    from services.walkie_graphs.memory import GraphMemory
+
+    mem = GraphMemory(
+        chroma_dir=None, pcds_dir=str(tmp_path / "p"), thumbs_dir=str(tmp_path / "t"),
+        edges_path=str(tmp_path / "e.json"),
+        merge_radius_m=0.5, merge_overlap_thresh=0.7,
+        merge_rescue_corr_m=0.15, merge_rescue_min_fitness=0.5,
+        merge_rescue_max_trans_m=0.3, merge_rescue_max_rot_deg=15.0,
+    )
+    cloud = _corner_cloud()
+    offset = np.array([0.08, 0.06, 0.04], dtype=np.float32)
+    put_object(mem, "a", "chair", cloud, emb=unit(1, 0, 0), n_obs=4)
+    put_object(mem, "b", "chair", cloud + offset, emb=unit(1, 0, 0), n_obs=2)
+    fused = mem.merge_overlapping_nodes()
+    assert fused == 1
+    assert mem.count() == 1
+    kept = mem.all_objects()[0]
+    assert kept.id == "a"  # higher n_obs kept
+    assert kept.n_obs == 6
+    # The kept node was flagged for refinement.
+    assert "a" in mem._refine_pending
+
+
+def test_rescue_caps_reject_oversized(tmp_path, monkeypatch):
+    """Caps gate works deterministically via a stubbed icp (no open3d needed)."""
+    import services.walkie_graphs.memory as mem_mod
+
+    from services.walkie_graphs.memory import GraphMemory
+
+    cloud = _corner_cloud()
+    offset = np.array([0.08, 0.06, 0.04], dtype=np.float32)
+
+    big_t = np.eye(4)
+    big_t[:3, 3] = (0.5, 0.0, 0.0)  # 50 cm shift — exceeds max_trans_m=0.3
+    big_r = np.eye(4)
+    a = np.radians(15.0)  # 15° — exceeds max_rot_deg=10
+    big_r[:2, :2] = [[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]]
+
+    for bad_T in (big_t, big_r):
+        monkeypatch.setattr(mem_mod, "icp", lambda *a, T=bad_T, **k: (T, 0.95))
+        mem = GraphMemory(
+            chroma_dir=None, pcds_dir=str(tmp_path / "p"), thumbs_dir=str(tmp_path / "t"),
+            edges_path=str(tmp_path / "e.json"),
+            merge_radius_m=0.5, merge_rescue_corr_m=0.15,
+            merge_rescue_max_trans_m=0.3, merge_rescue_max_rot_deg=10.0,
+        )
+        put_object(mem, "a", "chair", cloud, emb=unit(1, 0, 0), n_obs=2)
+        put_object(mem, "b", "chair", cloud + offset, emb=unit(1, 0, 0), n_obs=2)
+        assert mem.merge_overlapping_nodes() == 0  # rejected by caps
+        assert mem.count() == 2
+
+
+def test_rescue_transforms_drop_segments(tmp_path):
+    """After a rescue merge, the dropped node's capture segments are corrected on disk."""
+    pytest.importorskip("open3d")
+    from services.walkie_graphs.capture import Capture, CaptureStore, Segment
+    from services.walkie_graphs.memory import GraphMemory
+
+    store = CaptureStore(str(tmp_path / "captures"))
+    mem = GraphMemory(
+        chroma_dir=None, pcds_dir=str(tmp_path / "p"), thumbs_dir=str(tmp_path / "t"),
+        edges_path=str(tmp_path / "e.json"),
+        capture_store=store, merge_radius_m=0.5, merge_overlap_thresh=0.7,
+        merge_rescue_corr_m=0.15, merge_rescue_min_fitness=0.5,
+        merge_rescue_max_trans_m=0.3, merge_rescue_max_rot_deg=15.0,
+    )
+    cloud_a = _corner_cloud(seed=3)
+    offset = np.array([0.08, 0.06, 0.04], dtype=np.float32)
+    cloud_b = cloud_a + offset
+
+    # Give node b a capture segment so we can check it was corrected.
+    cap_b = Capture(id="c1-resc", ts=1.0, cam=None,
+                    segments=[Segment("c1-resc", 0, cloud_b)])
+    store.save(cap_b)
+    store.flush()
+
+    a_node = put_object(mem, "a", "chair", cloud_a, emb=unit(1, 0, 0), n_obs=4)
+    b_node = put_object(mem, "b", "chair", cloud_b, emb=unit(1, 0, 0), n_obs=2)
+    b_node.segments = ["c1-resc:0"]
+    store.retain("c1-resc:0")
+
+    fused = mem.merge_overlapping_nodes()
+    assert fused == 1
+
+    store.flush()
+    fresh = CaptureStore(str(tmp_path / "captures"))
+    corrected = fresh.load_segment("c1-resc:0")
+    assert corrected is not None
+    # The segment should now be aligned close to cloud_a (original b + correction).
+    assert np.abs(corrected - cloud_a).max() < 0.02
