@@ -282,6 +282,12 @@ WALKIE_GRAPHS_DENOISE_KEEP_MIN_FRAC = "0.5"
 # CROSS_CLASS_SIM_THRESHOLD > 0 (and they additionally REQUIRE the CLIP gate — pure
 # geometry never overrides the labels). (TEXT_SIM kept for parity; unused without
 # stored caption embeddings.)
+# ICP rescue: when a pair clears the CLIP/class gate but its raw overlap is low only
+# because a few-cm pose offset shifted one cloud off the other, the pair is ICP-aligned
+# (reusing ICP_MAX_DIST_M / ICP_MIN_FITNESS / ICP_MIN_POINTS) and the overlap re-tested
+# on the aligned clouds — so slightly-drifted duplicates fuse instead of piling up as
+# ghosts. Bounded by ICP_MAX_DIST_M (offsets beyond it find no correspondences and are
+# left alone), and skipped entirely when ICP is off (ICP_MAX_DIST_M = 0).
 WALKIE_GRAPHS_MERGE_EVERY_N = "20"
 WALKIE_GRAPHS_MERGE_OVERLAP_THRESH = "0.7"
 WALKIE_GRAPHS_MERGE_VISUAL_SIM_THRESH = "0.7"

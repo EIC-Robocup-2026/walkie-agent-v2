@@ -1163,6 +1163,11 @@ class GraphMemory:
         recovers the case the incremental matcher can't: one object first mapped from two
         sides as two nodes, later seen to physically coincide. The expensive overlap math
         runs on a cloud snapshot taken outside the short mutation critical section.
+
+        When two clouds clear the identity guard (class + CLIP) but their raw overlap is
+        low purely because a few-cm pose offset has shifted one off the other, the pair
+        is ICP-aligned and the overlap re-tested on the aligned clouds — so duplicates
+        that drifted slightly apart still fuse instead of accumulating as ghosts.
         """
         # Lightweight snapshot under the lock (no disk I/O): the candidate prefilter
         # needs only centroids/AABBs/embeddings, so the lock is held for microseconds.
@@ -1192,15 +1197,36 @@ class GraphMemory:
         clouds = {nid: self.load_pcd(nid) for nid in need}
         pairs: list[tuple[float, str, str]] = []
         for a, b in cand:
-            overlap = nn_ratio_symmetric(clouds[a[0]], clouds[b[0]], self.nn_voxel_m)
-            if overlap <= self.merge_overlap_thresh:
-                continue
+            # Identity guard FIRST (cheap, and it decides whether the ICP rescue below
+            # is even allowed): same-class pairs may merge on geometry alone, but any
+            # pair with embeddings — and every cross-class pair — must clear the CLIP
+            # gate, since the only thing overriding two different class labels is strong
+            # visual agreement.
             if a[5] and b[5]:
                 if cosine(a[5], b[5]) < self.merge_visual_sim_thresh:
                     continue
             elif a[1] != b[1]:
-                # Cross-class merge needs visual agreement; without embeddings the
-                # only evidence is geometry, not enough to override the class labels.
+                continue
+            ca, cb = clouds[a[0]], clouds[b[0]]
+            overlap = nn_ratio_symmetric(ca, cb, self.nn_voxel_m)
+            if overlap <= self.merge_overlap_thresh and self.icp_max_dist_m > 0:
+                # Raw overlap is measured pre-alignment at NN_VOXEL_M (2.5 cm), so a
+                # mere few-cm pose offset between two sightings of ONE object reads as
+                # near-zero overlap and the pair never reaches _merge_nodes (the only
+                # place ICP runs) — the classic "shifted-but-not-fused" duplicate.
+                # Identity is already vouched for by class+CLIP above, so align the pair
+                # and re-test overlap on the aligned clouds; if they truly are one
+                # surface the offset collapses and the test now passes. Distinct objects
+                # don't snap together (ICP fitness stays low / surfaces stay apart), so
+                # this rescues drift without loosening the threshold. _merge_nodes
+                # re-aligns when it actually fuses, so the stored cloud is corrected too.
+                aligned, fit = icp_align(
+                    cb, ca, self.icp_max_dist_m,
+                    min_fitness=self.icp_min_fitness, min_points=self.icp_min_points,
+                )
+                if fit >= self.icp_min_fitness:
+                    overlap = nn_ratio_symmetric(ca, aligned, self.nn_voxel_m)
+            if overlap <= self.merge_overlap_thresh:
                 continue
             pairs.append((overlap, a[0], b[0]))
         pairs.sort(reverse=True)  # strongest overlap first
