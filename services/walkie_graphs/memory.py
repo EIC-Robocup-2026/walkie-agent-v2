@@ -817,6 +817,7 @@ class GraphMemory:
                         self.icp_max_dist_m,
                         min_fitness=self.icp_min_fitness,
                         min_points=self.icp_min_points,
+                        max_translation=self.icp_max_dist_m,
                     )
                 self._icp_last[node.id] = det.ts
                 self._perf_add("icp", t0)
@@ -1215,6 +1216,7 @@ class GraphMemory:
                 aligned, fit = icp_align(
                     cb, ca, self.icp_max_dist_m,
                     min_fitness=self.icp_min_fitness, min_points=self.icp_min_points,
+                    max_translation=self.icp_max_dist_m,
                 )
                 if fit >= self.icp_min_fitness:
                     overlap = nn_ratio_symmetric(ca, aligned, self.nn_voxel_m)
@@ -1253,6 +1255,7 @@ class GraphMemory:
                 self.icp_max_dist_m,
                 min_fitness=self.icp_min_fitness,
                 min_points=self.icp_min_points,
+                max_translation=self.icp_max_dist_m,
             )
         clouds = [c for c in (kp, dp) if len(c)]
         merged = np.vstack(clouds) if clouds else np.zeros((0, 3), dtype=np.float32)

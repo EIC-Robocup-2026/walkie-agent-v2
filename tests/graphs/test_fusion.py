@@ -181,6 +181,38 @@ def test_icp_disabled_and_small_cloud_passthrough():
     assert np.array_equal(out, small) and fit == 0.0
 
 
+def test_icp_max_translation_rejects_extension_slide():
+    """A degenerate slide of a partial extension view is rejected; a real offset isn't.
+
+    A flat strip is translation-degenerate along its length, so when a new sighting
+    overlaps the stored cloud at one end and extends past it, ICP slides the whole view
+    bodily onto the overlap (high fitness, but it CRUSHES the new region — why big
+    objects don't fill in). max_translation caps the accepted slide to a plausible
+    pose-error correction, so the extension is kept raw for the union to preserve.
+    """
+    pytest.importorskip("open3d")
+    rng = np.random.default_rng(4)
+
+    def strip(x0, x1, n=600):
+        return np.stack(
+            [rng.uniform(x0, x1, n), rng.uniform(0, 0.25, n), rng.normal(0, 0.002, n)],
+            axis=1,
+        ).astype(np.float32)
+
+    target = strip(0.0, 0.4)
+    source = strip(0.3, 0.9)  # overlaps [0.3,0.4], NEW area [0.4,0.9]
+    # Uncapped: ICP slides the strip far onto the target.
+    slid, _ = icp_align(source, target, max_corr_dist=0.2, min_points=50)
+    assert slid.mean(axis=0)[0] < source.mean(axis=0)[0] - 0.1
+    # Capped: the big slide is rejected, raw source returned so the union keeps the new part.
+    kept, _ = icp_align(source, target, max_corr_dist=0.2, min_points=50, max_translation=0.1)
+    assert np.array_equal(kept, source)
+    # A genuine small pose offset is still corrected with the cap on.
+    src2 = target + np.array([0.05, 0.03, 0.02], dtype=np.float32)
+    aligned, _ = icp_align(src2, target, max_corr_dist=0.2, min_points=50, max_translation=0.2)
+    assert not np.array_equal(aligned, src2)
+
+
 def test_icp_passthrough_without_open3d(monkeypatch):
     import services.walkie_graphs.dbscan as dbscan_mod
 

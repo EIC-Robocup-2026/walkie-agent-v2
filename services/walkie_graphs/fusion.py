@@ -162,6 +162,7 @@ def icp_align(
     *,
     min_fitness: float = 0.6,
     min_points: int = 150,
+    max_translation: float = 0.0,
 ) -> tuple[np.ndarray, float]:
     """Rigidly align ``source`` onto ``target`` with Open3D ICP before fusing them.
 
@@ -178,6 +179,17 @@ def icp_align(
     Also unchanged when either cloud is below ``min_points`` (too little shape to
     constrain alignment — a small cup can't anchor ICP), when disabled
     (``max_corr_dist <= 0``), or when Open3D is unavailable (fitness 0.0).
+
+    ``max_translation`` (> 0) rejects an alignment that *slides* the cloud farther than
+    a plausible pose-error correction. This is the safeguard for filling LARGE objects:
+    a flat/elongated surface (bed, table, shelf, wall) is translation-degenerate along
+    its extent, so when a new sighting is "half overlap + half NEW area" ICP slides the
+    whole view bodily onto the stored cloud to maximize overlap — reaching high fitness
+    while *crushing the new region*, which is precisely what stops a big object filling
+    in across partial views. A genuine pose correction is bounded by the correspondence
+    radius; a slide is much larger, so a centroid-shift cap (pass ``max_corr_dist``)
+    separates the two: re-sightings still sharpen, extensions are kept raw so the union
+    preserves them (the next overlapping sighting sharpens them once they coincide).
     """
     src = np.asarray(source)
     if (
@@ -226,4 +238,11 @@ def icp_align(
         return src, fitness
     T = np.asarray(result.transformation)
     aligned = src.astype(np.float64) @ T[:3, :3].T + T[:3, 3]
+    if max_translation > 0:
+        # Reject a degenerate "slide the extension onto the stored cloud" solution:
+        # its net displacement of the cloud far exceeds a pose-error correction. The
+        # raw source is kept so the union preserves the new region (see docstring).
+        shift = float(np.linalg.norm(aligned.mean(axis=0) - src.astype(np.float64).mean(axis=0)))
+        if shift > max_translation:
+            return src, fitness
     return aligned.astype(np.float32), fitness

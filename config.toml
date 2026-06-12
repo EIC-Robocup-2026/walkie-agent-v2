@@ -163,7 +163,7 @@ WALKIE_GRAPHS_MOTION_MAX_ROT_DEG = "0"
 #   DEDUP_VISUAL_K = 0 — don't pull far-away visual lookalikes into the candidate set
 #     at all (its purpose was metre-scale drift recovery, which no longer exists).
 WALKIE_GRAPHS_VISUAL_MERGE_MAX_DIST_M = "0.4"
-WALKIE_GRAPHS_DEDUP_RADIUS_M = "0.2"
+WALKIE_GRAPHS_DEDUP_RADIUS_M = "0.3"
 WALKIE_GRAPHS_DEDUP_TIGHT_M = "0.2"
 WALKIE_GRAPHS_SIM_HIGH = "0.85"
 WALKIE_GRAPHS_SIM_LOW = "0.65"
@@ -241,9 +241,19 @@ WALKIE_GRAPHS_SOR_STD_RATIO = "2.0"
 # 0.2 both clears the 15 cm error AND covers the full union radius. Raise both together if
 # the error grows. (ICP itself converges well past this — measured clean alignment up to
 # 30 cm on feature-rich clouds — so the radius, not ICP capability, is the limit.)
-WALKIE_GRAPHS_ICP_MAX_DIST_M = "0.2"
+#
+# SECOND ROLE — MAX_DIST also caps the accepted ICP slide (fusion.icp_align max_translation).
+# A flat/elongated surface (bed, table, shelf, wall) is translation-degenerate along its
+# extent, so a partial "half-overlap + half-new-area" sighting tempts ICP to slide the whole
+# view onto the stored cloud to maximize overlap — high fitness, but it CRUSHES the new
+# region, which is why a big object scanned as overlapping strips wouldn't fill in. Any ICP
+# solution that displaces the cloud farther than MAX_DIST is treated as such a slide and
+# rejected (the raw view is kept so the union preserves the new part; the next overlapping
+# sighting sharpens it). Tradeoff: a LARGER MAX_DIST loosens this cap, so keep it only as
+# large as the real pose error needs — over-raising it lets extensions collapse again.
+WALKIE_GRAPHS_ICP_MAX_DIST_M = "0.3"
 WALKIE_GRAPHS_ICP_MIN_FITNESS = "0.6"
-WALKIE_GRAPHS_ICP_MIN_POINTS = "150"
+WALKIE_GRAPHS_ICP_MIN_POINTS = "250"
 # Skip ICP when the clouds already coincide (overlap nn_ratio >= this — reused from
 # association, or measured cheaply with the cached per-node KD-tree): pre-aligned
 # frames never pay for ICP at all.

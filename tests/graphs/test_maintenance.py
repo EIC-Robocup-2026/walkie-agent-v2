@@ -110,6 +110,42 @@ def test_icp_rescue_bounded_by_max_dist(mem):
     assert mem.count() == 2
 
 
+@pytest.mark.skipif(not _o3d_available(), reason="open3d not installed")
+def test_big_object_fills_across_overlapping_sweep(tmp_path):
+    """A large object scanned as overlapping partial strips accretes into ONE full node.
+
+    Each strip overlaps the previous by ~50% and extends past it. Without the ICP
+    translation cap, ICP slides each extension back onto the stored cloud (flat surfaces
+    are translation-degenerate), so the object never grows past the first strip and
+    fragments. With the cap the extensions are preserved and the union fills the object.
+    """
+    from services.walkie_graphs.memory import Detection3D, GraphMemory, aabb_of
+
+    mem = GraphMemory(
+        chroma_dir=None, pcds_dir=str(tmp_path / "p"), thumbs_dir=str(tmp_path / "t"),
+        edges_path=str(tmp_path / "e.json"),
+        icp_max_dist_m=0.2, icp_cooldown_sec=0.0, dedup_radius_m=0.3, dedup_visual_k=0,
+        visual_merge_max_dist_m=0.4, dbscan_enabled=False, sor_k=0, voxel_m=0.02,
+        max_points_per_obj=20000,
+    )
+    rng = np.random.default_rng(0)
+    emb = unit(1, 0, 0)
+
+    def strip(x0, x1):
+        n = int(4000 * (x1 - x0))
+        pts = np.stack(
+            [rng.uniform(x0, x1, n), rng.uniform(0, 1.6, n), rng.normal(0, 0.01, n)], axis=1
+        ).astype(np.float32)
+        return Detection3D("bed", 0, 0.9, (0, 0, 10, 10), pts, emb, "a bed", 1.0)
+
+    for x0, x1 in [(0.0, 0.8), (0.4, 1.2), (0.8, 1.6), (1.2, 2.0)]:
+        mem.upsert(strip(x0, x1))
+
+    assert mem.count() == 1
+    x_extent = aabb_of(mem.load_pcd(mem.all_objects()[0].id))[3][0]
+    assert x_extent > 1.8  # filled the whole ~2 m object, not stuck near one 0.8 m strip
+
+
 # ---------------------------------------------------------------------------
 # denoise_nodes (ConceptGraphs denoise_objects analog)
 # ---------------------------------------------------------------------------
