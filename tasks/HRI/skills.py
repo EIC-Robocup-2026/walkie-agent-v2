@@ -71,17 +71,21 @@ def find_persons(ctx: TaskContext) -> list[PersonPose]:
         return []
 
 
-def scan_seats(ctx: TaskContext) -> tuple[list[SeatCandidate], list[PersonPose], Image.Image | None]:
+def scan_seats(ctx: TaskContext):
     """One frame: detect seats (open-vocab) + people, mark occupancy.
 
-    Returns (seats, persons, frame); ([], [], None) on capture failure and
-    ([], [], frame) on detection failure. A whole sofa counts as one seat for
-    now. Seats, persons, and frame all come from the same capture, so pixel
-    coordinates are comparable and crops line up.
+    Returns (seats, persons, snap) where ``snap`` is the CameraSnapshot the
+    frame came from — its frozen depth/pose geometry lifts seat/person bboxes
+    to map-frame points later (lift_bbox_world_xy), immune to the LLM/detection
+    latency that follows. ([], [], None) on capture failure and ([], [], snap)
+    on detection failure. A whole sofa counts as one seat for now. Seats,
+    persons, and snap.img all come from the same capture, so pixel coordinates
+    are comparable and crops line up.
     """
-    img = ctx.capture()
-    if img is None:
+    snap = ctx.snapshot()
+    if snap is None:
         return [], [], None
+    img = snap.img
     seat_classes = [
         c.strip()
         for c in os.getenv("HRI_SEAT_CLASSES", "chair,sofa,armchair,stool").split(",")
@@ -92,7 +96,7 @@ def scan_seats(ctx: TaskContext) -> tuple[list[SeatCandidate], list[PersonPose],
         detections = ctx.walkieAI.object_detection.detect(img, prompts=seat_classes)
     except Exception as exc:
         print(f"[skills] seat detection failed ({exc})")
-        return [], [], img
+        return [], [], snap
     try:
         persons = ctx.walkieAI.pose_estimation.estimate(img)
     except Exception as exc:
@@ -118,7 +122,7 @@ def scan_seats(ctx: TaskContext) -> tuple[list[SeatCandidate], list[PersonPose],
                 occupied=occupied,
             )
         )
-    return seats, persons, img
+    return seats, persons, snap
 
 
 def pick_free_seat(seats: list[SeatCandidate]) -> SeatCandidate | None:
@@ -194,14 +198,36 @@ def _cxcywh_to_world_position(ctx: TaskContext, bbox: BBox) -> tuple[float, floa
 
 
 def bboxes_world_position(ctx: TaskContext, bboxes: BBox) -> tuple[float, float] | None:
-    """Lift a seat's bbox to a map-frame (x, y) via the perception service.
+    """FALLBACK lift: bbox to map-frame (x, y) via the ROS perception service.
 
-    Call right after the scan, before the robot moves — the service deprojects
-    against the camera's *current* depth frame, not the scanned image.
+    The service deprojects against the camera's *current* depth frame, not the
+    scanned image — only accurate when called immediately after the scan with
+    the robot still. Prefer lift_bbox_world_xy, which lifts against the
+    snapshot's frozen capture-time geometry.
     """
     x1, y1, x2, y2 = bboxes
     cxcywh = [(x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1]
     return _cxcywh_to_world_position(ctx, cxcywh)
+
+
+def lift_bbox_world_xy(ctx: TaskContext, snap, bbox_xyxy: BBox) -> tuple[float, float] | None:
+    """Lift a bbox to a map-frame (x, y): snapshot geometry first, service fallback.
+
+    The snapshot lift (CameraSnapshot.bbox_world_xy) deprojects the bbox's
+    pixels against the depth + camera pose frozen at capture time — exact no
+    matter how much detection/LLM latency has elapsed since the scan. Only when
+    the snapshot is missing or carries no geometry does this fall back to the
+    legacy live-depth service lift.
+    """
+    if snap is not None and getattr(snap, "has_geometry", False):
+        try:
+            xy = snap.bbox_world_xy(bbox_xyxy)
+            if xy is not None:
+                return xy
+            print("[skills] snapshot lift returned no points; trying service fallback")
+        except Exception as exc:
+            print(f"[skills] snapshot lift failed ({exc}); trying service fallback")
+    return bboxes_world_position(ctx, bbox_xyxy)
 
 
 def heading_to_point(ctx: TaskContext, x: float, y: float) -> float | None:

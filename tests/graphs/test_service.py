@@ -156,21 +156,25 @@ def _svc_with_walkie(tf):
 
 
 def test_intrinsics_from_sdk_scaled_to_depth():
-    s, _ = _svc_with_walkie(None)
-    intr = s._intrinsics(640, 480)
+    from services.walkie_graphs.camera_snapshot import intrinsics_for
+
+    _, w = _svc_with_walkie(None)
+    intr = intrinsics_for(w, 640, 480)
     assert (intr.fx, intr.cx, intr.cy) == pytest.approx((500.0, 320.0, 240.0))
     # different depth resolution → intrinsics rescaled
-    half = s._intrinsics(320, 240)
+    half = intrinsics_for(w, 320, 240)
     assert (half.fx, half.cx) == pytest.approx((250.0, 160.0))
 
 
 def test_camera_pose_from_optical_tf():
+    from services.walkie_graphs.camera_snapshot import camera_pose
+
     tf = {
         "position": {"x": 1.0, "y": 2.0, "z": 3.0},
         "quaternion": {"x": 0.0, "y": 0.0, "z": 0.0, "w": 1.0},  # identity
     }
-    s, w = _svc_with_walkie(tf)
-    pose = s._camera_pose()
+    _, w = _svc_with_walkie(tf)
+    pose = camera_pose(w)
     assert np.allclose(pose.R, np.eye(3))
     assert np.allclose(pose.t, [1.0, 2.0, 3.0])
     # it looked up MAP_FRAME -> the optical camera frame
@@ -178,8 +182,10 @@ def test_camera_pose_from_optical_tf():
 
 
 def test_camera_pose_none_when_lookup_fails():
-    s, _ = _svc_with_walkie(None)  # lookup returns None
-    assert s._camera_pose() is None
+    from services.walkie_graphs.camera_snapshot import camera_pose
+
+    _, w = _svc_with_walkie(None)  # lookup returns None
+    assert camera_pose(w) is None
 
 
 # ---------------------------------------------------------------------------
@@ -192,16 +198,17 @@ def _tf(x=0.0, y=0.0, z=0.0, qz=0.0, qw=1.0):
     }
 
 
-def _frame_with_cam(svc):
+def _frame_with_cam(walkie):
+    from services.walkie_graphs.camera_snapshot import camera_pose
     from services.walkie_graphs.service import FrameSnapshot
 
-    cam = svc._camera_pose()
+    cam = camera_pose(walkie)
     return FrameSnapshot(ts=0.0, img=None, depth=None, cam=cam, intr=None, robot_pose=None)
 
 
 def test_motion_gate_disabled_by_default():
     s, w = _svc_with_walkie(_tf())
-    frame = _frame_with_cam(s)
+    frame = _frame_with_cam(w)
     w.robot.transform.tf = _tf(x=1.0)  # robot drove a metre — but gate is off
     assert s.motion_max_trans_m == 0.0 and s.motion_max_rot_deg == 0.0
     assert s._moved_during(frame) is False
@@ -210,7 +217,7 @@ def test_motion_gate_disabled_by_default():
 def test_motion_gate_trips_on_translation_and_rotation():
     s, w = _svc_with_walkie(_tf())
     s.motion_max_trans_m, s.motion_max_rot_deg = 0.03, 2.0
-    frame = _frame_with_cam(s)
+    frame = _frame_with_cam(w)
     # still → clean
     assert s._moved_during(frame) is False
     # drove 10 cm during the capture→detect window → gated
@@ -227,14 +234,17 @@ def test_motion_gate_trips_on_translation_and_rotation():
 def test_motion_gate_trips_when_pose_vanishes():
     s, w = _svc_with_walkie(_tf())
     s.motion_max_trans_m = 0.03
-    frame = _frame_with_cam(s)
+    frame = _frame_with_cam(w)
     w.robot.transform.tf = None  # TF lookup starts failing mid-tick
     assert s._moved_during(frame) is True
 
 
 def test_default_camera_frame_is_optical():
-    s, _ = _svc_with_walkie(None)
-    assert s._tf_cam_frame == "zed_head_left_camera_frame_optical"
+    from services.walkie_graphs.camera_snapshot import camera_pose
+
+    _, w = _svc_with_walkie(None)
+    camera_pose(w)  # lookup fails (tf None) but records the requested frames
+    assert w.robot.transform.calls == [("map", "zed_head_left_camera_frame_optical")]
 
 
 def test_embed_batch_preserves_order_and_runs_concurrently():
@@ -307,13 +317,28 @@ def test_write_snapshot_uses_frame_time_pose_and_ts(tmp_path):
 
 
 def test_robot_pose_swallows_status_failure():
-    # a status read that raises must not propagate out of the loop — _robot_pose returns None
+    # a status read that raises must not propagate out of the capture — the
+    # snapshot is still built, with robot_pose=None (heading degrades downstream)
+    import numpy as _np
+
+    from services.walkie_graphs.camera_snapshot import CameraSnapshot
+
     def _boom():
         raise RuntimeError("no pose")
 
-    walkie = SimpleNamespace(status=SimpleNamespace(get_position=_boom))
-    s = WalkieGraphsService(walkieAI=None, walkie=walkie, memory=_StubMemory(), verbose=False)
-    assert s._robot_pose() is None
+    walkie = SimpleNamespace(
+        robot=SimpleNamespace(
+            camera=SimpleNamespace(
+                get_depth=lambda: _np.ones((4, 4), dtype=_np.float32),
+                get_intrinsics=lambda: None,
+            ),
+            transform=SimpleNamespace(lookup=lambda *a, **k: None),
+        ),
+        camera=SimpleNamespace(capture_pil=lambda: SimpleNamespace(size=(4, 4))),
+        status=SimpleNamespace(get_position=_boom),
+    )
+    snap = CameraSnapshot.capture(walkie)
+    assert snap is not None and snap.robot_pose is None
 
 
 def test_write_snapshot_degrades_when_robot_pose_none(tmp_path):

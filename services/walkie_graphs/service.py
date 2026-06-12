@@ -24,15 +24,15 @@ from pathlib import Path
 
 import numpy as np
 
+from .camera_snapshot import CameraSnapshot, camera_pose
 from .fusion import subtract_contained_masks
-from .geometry import (
-    CameraPose,
-    Intrinsics,
-    depth_discontinuity_mask,
-    deproject_mask,
-)
+from .geometry import depth_discontinuity_mask, deproject_mask
 from .memory import Detection3D, GraphMemory
 from .snapshot import build_object_records, write_atomic
+
+# Back-compat: the per-tick frame snapshot is now the shared CameraSnapshot
+# (services.walkie_graphs.camera_snapshot); old name kept for existing callers.
+FrameSnapshot = CameraSnapshot
 
 
 def _csv(value: str) -> list[str]:
@@ -54,27 +54,6 @@ def _crop_pil(img, bbox, margin: int = 20):
     if x2 <= x1 or y2 <= y1:
         return img
     return img.crop((x1, y1, x2, y2))
-
-
-@dataclass
-class FrameSnapshot:
-    """Every sensor + pose read for one tick, taken together at the capture instant.
-
-    The detection round-trip that follows is slow and the robot keeps moving through it,
-    so reading the camera/robot pose *after* detection would describe a different instant
-    than the depth/image it lifts. Capturing it all here pins the lift pose, intrinsics,
-    and snapshot heading to the moment the frame was actually taken. ``cam``/``intr`` may
-    be ``None`` (pose or camera-info unavailable) and are handled downstream as "no
-    geometry this frame"; ``depth`` and ``img`` are always present (a missing one skips
-    the tick before a snapshot is built).
-    """
-
-    ts: float
-    img: object  # PIL RGB frame
-    depth: np.ndarray  # aligned depth, H×W metres (NaN invalid)
-    cam: CameraPose | None  # camera optical-frame pose in the map frame
-    intr: Intrinsics | None  # pinhole intrinsics at the depth resolution
-    robot_pose: dict | None  # status.get_position() — snapshot heading + viz marker
 
 
 class WalkieGraphsService(threading.Thread):
@@ -164,16 +143,8 @@ class WalkieGraphsService(threading.Thread):
         ).strip().lower() in ("1", "true", "yes")
         self.llm_edges_every_n = int(os.getenv("WALKIE_GRAPHS_LLM_EDGES_EVERY_N", "0"))
 
-        # Camera calibration + pose come straight from the walkie-sdk: real pinhole
-        # intrinsics from camera.get_intrinsics(), and the camera OPTICAL frame's pose
-        # in the map frame from transform.lookup(MAP_FRAME, CAMERA_FRAME) — the optical
-        # frame already bakes in lift, head tilt, and every mount offset, and its axes
-        # match the pinhole math, so no manual composition or axis conversion is needed.
-        self._tf_map_frame = os.getenv("WALKIE_GRAPHS_TF_MAP_FRAME", "map")
-        self._tf_cam_frame = os.getenv(
-            "WALKIE_GRAPHS_TF_CAMERA_FRAME", "zed_head_left_camera_frame_optical"
-        )
-        self._tf_timeout = float(os.getenv("WALKIE_GRAPHS_TF_TIMEOUT_SEC", "1.0"))
+        # Camera calibration + pose come from camera_snapshot.py (CameraSnapshot.capture
+        # reads them straight from the walkie-sdk, configured by WALKIE_GRAPHS_TF_*).
         # Motion gate: a frame captured while the robot/head moves carries a smeared,
         # mis-posed cloud (the streamed depth + TF can't be perfectly synchronized), so
         # don't fold it into the graph. The camera pose is sampled again after detection
@@ -184,7 +155,6 @@ class WalkieGraphsService(threading.Thread):
         self._debug = os.getenv("WALKIE_GRAPHS_DEBUG", "0").lower() in ("1", "true", "yes")
         # Per-stage timing breakdown printed each tick (set WALKIE_GRAPHS_PERF=0 to mute).
         self._perf = os.getenv("WALKIE_GRAPHS_PERF", "1").strip().lower() in ("1", "true", "yes")
-        self._intr_cache: dict[tuple[int, int], Intrinsics] = {}
         self._last_cam = None  # latest CameraPose, for the visualizer
         self._tick = 0  # ingest_frame call counter, drives the relation/prune/viz cadence
         self._last_touched: list = []  # nodes upserted by the last ingest_frame (for observe())
@@ -314,7 +284,7 @@ class WalkieGraphsService(threading.Thread):
             return False
         if frame.cam is None:
             return False  # no geometry anyway; ingest_frame handles it
-        cam_now = self._camera_pose()
+        cam_now = camera_pose(self.walkie, log=self._log)
         if cam_now is None:
             return True  # pose just vanished mid-tick: don't trust the frame
         d_trans = float(np.linalg.norm(cam_now.t - frame.cam.t))
@@ -334,42 +304,19 @@ class WalkieGraphsService(threading.Thread):
     def _capture_frame(self) -> FrameSnapshot | None:
         """Read depth, RGB, camera pose, intrinsics, and robot pose as one atomic frame.
 
-        Everything the rest of the tick consumes is read here, back-to-back and *before*
-        detection, so it all describes the same instant — the camera pose that lifts the
-        depth isn't skewed by the detection round-trip the robot drives through. Returns
-        ``None`` (skip the tick) when depth or the image is unavailable (both mandatory);
-        ``cam``/``intr`` may be ``None`` and are handled downstream as "no geometry".
+        Delegates to :meth:`CameraSnapshot.capture` — everything the rest of the tick
+        consumes is read back-to-back and *before* detection, so it all describes the
+        same instant. Returns ``None`` (skip the tick) when depth or the image is
+        unavailable; ``cam``/``intr`` may be ``None`` and are handled downstream as
+        "no geometry".
         """
-        t_depth = time.perf_counter()
-        depth = self._depth()
-        d_depth = time.perf_counter() - t_depth
-        if depth is None:
-            self._perf_log(f"depth=None ({d_depth * 1000:.0f}ms) — skipping tick")
-            return None
-        try:
-            t_cap = time.perf_counter()
-            img = self.walkie.camera.capture_pil()  # PIL RGB
-            d_cap = time.perf_counter() - t_cap
-        except Exception as e:  # noqa: BLE001
-            self._log(f"capture failed: {e}")
-            return None
-        # Pose, intrinsics, and robot pose: read NOW, still at the capture instant, so the
-        # lift pose matches the depth/image instead of trailing the detection round-trip.
-        ts = time.time()
-        t_pose = time.perf_counter()
-        cam = self._camera_pose()
-        d_pose = time.perf_counter() - t_pose
-        t_intr = time.perf_counter()
-        intr = self._intrinsics(depth.shape[1], depth.shape[0]) if cam is not None else None
-        d_intr = time.perf_counter() - t_intr
-        robot_pose = self._robot_pose()
+        t0 = time.perf_counter()
+        frame = CameraSnapshot.capture(self.walkie, log=self._log)
         self._perf_log(
-            f"capture stage: depth={d_depth * 1000:.0f}ms capture={d_cap * 1000:.0f}ms "
-            f"pose={d_pose * 1000:.0f}ms intr={d_intr * 1000:.0f}ms"
+            f"capture stage: {(time.perf_counter() - t0) * 1000:.0f}ms"
+            + ("" if frame is not None else " (no frame — skipping tick)")
         )
-        return FrameSnapshot(
-            ts=ts, img=img, depth=depth, cam=cam, intr=intr, robot_pose=robot_pose
-        )
+        return frame
 
     def _write_snapshot(
         self, frame: FrameSnapshot, detections, ingest_result: dict[int, dict]
@@ -665,88 +612,3 @@ class WalkieGraphsService(threading.Thread):
         with ThreadPoolExecutor(max_workers=workers) as ex:
             return list(ex.map(self._embed, crops))
 
-    # ------------------------------------------------------------------
-    # Sensor reads
-    # ------------------------------------------------------------------
-    def _intrinsics(self, width: int, height: int):
-        """Real pinhole intrinsics from the SDK, scaled to the depth resolution.
-
-        ``camera.get_intrinsics()`` reads the ZED's ``CameraInfo`` (cached by the SDK —
-        intrinsics are static) and applies to the registered depth too. Returns
-        ``None`` (skip the tick) when no camera info is available yet."""
-        key = (width, height)
-        cached = self._intr_cache.get(key)
-        if cached is not None:
-            return cached
-        try:
-            raw = self.walkie.robot.camera.get_intrinsics()
-        except Exception as e:  # noqa: BLE001
-            self._log(f"intrinsics unavailable: {e}")
-            return None
-        if not raw:
-            self._log("intrinsics unavailable (camera_info not published yet)")
-            return None
-        intr = Intrinsics(
-            fx=float(raw["fx"]),
-            fy=float(raw["fy"]),
-            cx=float(raw["cx"]),
-            cy=float(raw["cy"]),
-            width=int(raw.get("width") or width),
-            height=int(raw.get("height") or height),
-        ).scaled_to(width, height)
-        self._intr_cache[key] = intr
-        return intr
-
-    def _camera_pose(self):
-        """Camera optical-frame pose in the map frame, from the SDK transform tree.
-
-        ``transform.lookup(MAP_FRAME, CAMERA_FRAME)`` with the camera *optical* frame
-        returns a pose whose rotation maps camera-optical points straight into the map
-        (lift, head tilt, and mount offsets already baked in), so deprojection needs no
-        further composition. Returns ``None`` (skip the tick) when the lookup fails."""
-        try:
-            tf = self.walkie.robot.transform.lookup(
-                self._tf_map_frame, self._tf_cam_frame, timeout=self._tf_timeout
-            )
-        except Exception as e:  # noqa: BLE001
-            self._log(
-                f"transform lookup error ({self._tf_map_frame} -> {self._tf_cam_frame}): {e}"
-            )
-            return None
-        if tf is None:
-            self._log(
-                f"transform lookup returned None ({self._tf_map_frame} -> "
-                f"{self._tf_cam_frame}); skipping tick"
-            )
-            return None
-
-        from walkie_sdk.utils.converters import quaternion_to_matrix
-
-        q, p = tf["quaternion"], tf["position"]
-        R = quaternion_to_matrix(float(q["x"]), float(q["y"]), float(q["z"]), float(q["w"]))
-        t = np.array([float(p["x"]), float(p["y"]), float(p["z"])])
-        if self._debug:
-            self._log(
-                f"pose(optical tf {self._tf_cam_frame}) "
-                f"cam=({t[0]:.2f},{t[1]:.2f},{t[2]:.2f})m"
-            )
-        return CameraPose(R=R, t=t)
-
-    def _depth(self):
-        try:
-            return self.walkie.robot.camera.get_depth()
-        except Exception as e:  # noqa: BLE001
-            self._log(f"depth unavailable: {e}")
-            return None
-
-    def _robot_pose(self):
-        """Robot base pose dict (``status.get_position()``) — snapshot heading + viz marker.
-
-        Read as part of the frame snapshot so the snapshot's per-object headings use the
-        pose from capture time, not a later read. Best-effort: returns ``None`` on failure
-        (the snapshot then degrades the heading to 0.0 and the viz marker is omitted)."""
-        try:
-            return self.walkie.status.get_position()
-        except Exception as e:  # noqa: BLE001
-            self._log(f"robot pose unavailable: {e}")
-            return None

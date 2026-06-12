@@ -36,11 +36,11 @@ from .skills import (
     face_point,
     find_seated_person_bbox,
     heading_to_point,
+    lift_bbox_world_xy,
     llm_intro_speeches,
     llm_pick_seat,
     parse_pose,
     scan_seats,
-    bboxes_world_position,
 )
 
 
@@ -135,7 +135,8 @@ class OfferSeat(SubTask):
 
     def run(self, ctx: TaskContext) -> StepResult:
         time.sleep(5) # wait for navigation to settle
-        seats, persons, img = scan_seats(ctx)
+        seats, persons, snap = scan_seats(ctx)
+        img = snap.img if snap is not None else None
         img_w = img.width if img is not None else 0
         host = ctx.data.setdefault("host", {})
         # First offer: the only seated person can be the host (guest 1 is
@@ -164,10 +165,10 @@ class OfferSeat(SubTask):
         if seat is None:
             ctx.say(prompts.OFFER_SEAT_FALLBACK)
             return StepResult.DONE
-        # Lift the seat to a map-frame point while the camera still sees the
-        # scanned scene; facing then uses odometry + atan2 instead of the
-        # pixel/HFOV approximation. Pixel facing stays as the fallback.
-        world_xy = bboxes_world_position(ctx, seat.bbox_xyxy)
+        # Lift the seat to a map-frame point against the SCAN-TIME geometry
+        # frozen in the snapshot — exact despite the slow llm_pick_seat call
+        # above; facing then uses odometry + atan2.
+        world_xy = lift_bbox_world_xy(ctx, snap, seat.bbox_xyxy)
         ctx.data.setdefault("seats", {})[self.guest] = (seat, img_w, world_xy)
         faced = face_point(ctx, *world_xy) if world_xy else False
         if announcement:  # LLM-worded offer (may refer to the host)
@@ -227,16 +228,17 @@ class IntroduceEveryone(SubTask):
         }
 
         # Anchor each person to where they actually ARE: recognize the
-        # enrolled faces/attire in one scan frame (guests may have switched
+        # enrolled faces/attire in one snapshot (guests may have switched
         # seats — the rulebook allows it) and lift each matched person's bbox
-        # to a map-frame point while the camera still sees the scanned scene.
+        # against the snapshot's frozen capture-time geometry, so the slow
+        # face/attire recognition round-trips can't skew the positions.
         # A guest who isn't recognized falls back to their offered seat's
         # stored world point. World-point headings survive the robot's own
         # rotations, so they stay valid across all three turns; a person with
         # no anchor is introduced without rotating.
-        img = ctx.capture()
+        snap = ctx.snapshot()
         located = (
-            locate_people(ctx, img, list(self.ORDER)) if img is not None else {}
+            locate_people(ctx, snap.img, list(self.ORDER)) if snap is not None else {}
         )
         seats: dict = ctx.data.get("seats", {})
         headings: dict[str, float] = {}
@@ -244,7 +246,7 @@ class IntroduceEveryone(SubTask):
             world_xy = None
             box = located.get(pid)
             if box is not None:
-                world_xy = bboxes_world_position(ctx, box)
+                world_xy = lift_bbox_world_xy(ctx, snap, box)
             if world_xy is None and pid.startswith("guest-"):
                 stored = seats.get(int(pid.removeprefix("guest-")))
                 if stored is not None:

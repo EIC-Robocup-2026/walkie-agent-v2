@@ -135,6 +135,21 @@ class TaskContext:
             _log("ctx", f"capture: camera failed ({exc})")
             return None
 
+    def snapshot(self):
+        """Atomic camera snapshot (img + depth + pose + intrinsics) with 3D lifting.
+
+        Unlike capture(), the returned CameraSnapshot can lift masks/bboxes to
+        map-frame points against the geometry of the capture instant — accurate
+        even after slow detection/LLM round-trips. None on any failure.
+        """
+        try:
+            from services.walkie_graphs.camera_snapshot import CameraSnapshot
+
+            return CameraSnapshot.capture(self.walkie)
+        except Exception as exc:
+            _log("ctx", f"snapshot failed ({exc})")
+            return None
+
     # --- navigation -----------------------------------------------------
 
     def goto(self, x: float, y: float, heading_rad: float) -> bool:

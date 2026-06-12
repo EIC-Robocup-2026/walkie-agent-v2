@@ -28,11 +28,13 @@ import os
 from typing import Optional
 
 from . import geometry
+from .camera_snapshot import CameraSnapshot
 from .memory import Detection3D, GraphMemory, ObjectNode, Relation
 from .service import WalkieGraphsService
 
 __all__ = [
     "WalkieGraphs",
+    "CameraSnapshot",
     "GraphMemory",
     "WalkieGraphsService",
     "ObjectNode",
