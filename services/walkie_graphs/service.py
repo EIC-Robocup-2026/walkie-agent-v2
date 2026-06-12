@@ -1,13 +1,24 @@
 """WalkieGraphsService — the robot's perception loop and scene-graph builder.
 
-A daemon thread that, each tick, resolves the camera's pose (the optical frame's pose in
-the map frame from the SDK ``transform.lookup``) and intrinsics (``camera.get_intrinsics``),
-captures an RGB-D frame, runs masked object detection (scoped to the *interested classes*),
-lifts each mask to a 3D world point cloud, embeds + captions the crop via the AI client, and
-upserts it into :class:`~services.walkie_graphs.memory.GraphMemory`. When a ``snapshot_path``
-is configured it then writes the live ``perception.json`` view of the frame (the agents'
-"what's in front of me now" context). Every few ticks it recomputes the geometric relations,
-prunes, and pushes to the visualizer.
+A daemon thread that, each tick, captures an RGB-D frame *with* its pose and
+intrinsics (one :class:`CameraSnapshot`), runs masked object detection, and folds
+the frame into the graph **as one capture**:
+
+1. every kept mask lifts to a world-frame point *segment*, and the unmasked
+   remainder lifts to a classless *background* cloud (walls, floor — carved
+   around ALL masks, including masking-only excluded classes like ``person``);
+2. the whole capture is registered against the existing map with ONE rigid ICP
+   correction (``capture.register_capture``) — pose error belongs to the
+   capture, not to individual objects;
+3. corrected segments are captioned/embedded via the AI client and upserted
+   into :class:`~services.walkie_graphs.memory.GraphMemory` (which persists the
+   segments through the :class:`~services.walkie_graphs.capture.CaptureStore`),
+   and the background remainder accumulates in the ``BackgroundStore``.
+
+When a ``snapshot_path`` is configured the live ``perception.json`` view of the
+frame is then written (the agents' "what's in front of me now" context). Every
+few ticks it recomputes the geometric relations, prunes, and pushes to the
+visualizer.
 
 Detection/caption/embedding are all direct ``walkieAI`` client calls — there is no
 local model here. Pose/people detection is intentionally not part of this loop.
@@ -25,6 +36,7 @@ from pathlib import Path
 import numpy as np
 
 from .camera_snapshot import CameraSnapshot, camera_pose
+from .capture import lift_capture, register_capture
 from .fusion import subtract_contained_masks
 from .geometry import depth_discontinuity_mask, deproject_mask
 from .memory import Detection3D, GraphMemory
@@ -87,6 +99,12 @@ class WalkieGraphsService(threading.Thread):
         self.interested = _csv(os.getenv("WALKIE_GRAPHS_INTERESTED_CLASSES", ""))
         self._interested_lower = {c.lower() for c in self.interested}
         self.exclude = {c.lower() for c in _csv(os.getenv("WALKIE_GRAPHS_EXCLUDE_CLASSES", "person"))}
+        # Excluded classes are still PROMPTED for, in a masking-only role: a person
+        # we'd never map must still get a mask, so their pixels are carved out of the
+        # background cloud instead of lingering as ghost geometry. Only meaningful
+        # when detection is scoped (an empty interested list already detects all).
+        extra = sorted(c for c in self.exclude if c not in self._interested_lower)
+        self.detect_prompts = (self.interested + extra) if self.interested else []
         # Empty caption list => fall back to the interested list; empty both => caption all.
         cap = _csv(os.getenv("WALKIE_GRAPHS_CAPTION_CLASSES", "")) or self.interested
         self.caption_classes = {c.lower() for c in cap}
@@ -123,6 +141,23 @@ class WalkieGraphsService(threading.Thread):
         )
         # Context margin around the bbox for the CLIP/caption crop (CG pads 20 px).
         self.crop_margin_px = int(os.getenv("WALKIE_GRAPHS_CROP_MARGIN_PX", "20"))
+        # Capture-level registration: ONE rigid ICP correction per frame against the
+        # map (background + nearby objects), replacing all per-object ICP. 0 = off
+        # (code default, so unit tests never need open3d); config.toml enables it.
+        # The trans/rot caps bound a correction to plausible pose error — anything
+        # bigger is a degenerate solve (corridor sliding along itself) and the frame
+        # ingests raw instead.
+        self.capture_icp_max_corr_m = float(os.getenv("WALKIE_GRAPHS_CAPTURE_ICP_MAX_CORR_M", "0"))
+        self.capture_icp_min_fitness = float(os.getenv("WALKIE_GRAPHS_CAPTURE_ICP_MIN_FITNESS", "0.5"))
+        self.capture_icp_max_trans_m = float(os.getenv("WALKIE_GRAPHS_CAPTURE_ICP_MAX_TRANS_M", "0.3"))
+        self.capture_icp_max_rot_deg = float(os.getenv("WALKIE_GRAPHS_CAPTURE_ICP_MAX_ROT_DEG", "5"))
+        self.capture_icp_src_budget = int(os.getenv("WALKIE_GRAPHS_CAPTURE_ICP_SRC_BUDGET", "20000"))
+        self.capture_icp_tgt_budget = int(os.getenv("WALKIE_GRAPHS_CAPTURE_ICP_TGT_BUDGET", "40000"))
+        # Background remainder: lift resolution, mask-union dilation (mask rims are
+        # exactly where depth is least reliable), and the store's save cadence.
+        self.bg_voxel_m = float(os.getenv("WALKIE_GRAPHS_BG_VOXEL_M", "0.05"))
+        self.bg_mask_dilate_px = int(os.getenv("WALKIE_GRAPHS_BG_MASK_DILATE_PX", "4"))
+        self.bg_save_every_n = int(os.getenv("WALKIE_GRAPHS_BG_SAVE_EVERY_N", "20"))
         # Concurrency for the per-object CLIP embed calls (no batch endpoint exists, so
         # fan the I/O-bound round-trips out across a thread pool). 1 = sequential.
         self._embed_workers = int(os.getenv("WALKIE_GRAPHS_EMBED_WORKERS", "8"))
@@ -166,10 +201,14 @@ class WalkieGraphsService(threading.Thread):
         self._stop_event.set()
         if self.is_alive():
             self.join(timeout)
-        try:  # persist any deferred point clouds before the process exits
+        try:  # persist any deferred clouds/captures/background before the process exits
             self.memory.flush_pcds()
+            if getattr(self.memory, "capture_store", None) is not None:
+                self.memory.capture_store.flush()
+            if getattr(self.memory, "background", None) is not None:
+                self.memory.background.save()
         except Exception as e:  # noqa: BLE001 — shutdown must not raise
-            self._log(f"final pcd flush failed: {e}")
+            self._log(f"final flush failed: {e}")
 
     def _log(self, msg: str) -> None:
         if self.verbose:
@@ -245,14 +284,16 @@ class WalkieGraphsService(threading.Thread):
         detection round-trip, so the camera pose that lifts the depth (and the robot heading
         in the snapshot) matches where the robot was when the frame was taken — the robot
         keeps moving while detection runs. Detection is scoped to the interested classes
-        (``prompts=self.interested``), so both the graph and the snapshot only carry those.
+        plus the excluded ones in a masking-only role (``self.detect_prompts``) — the
+        graph and the snapshot still only carry interested classes; excluded masks just
+        carve the background.
         """
         frame = self._capture_frame()
         if frame is None:
             return []
         t_det = time.perf_counter()
         detections = self.walkieAI.object_detection.detect(
-            frame.img, prompts=self.interested or None, return_mask=True
+            frame.img, prompts=self.detect_prompts or None, return_mask=True
         )
         d_det = time.perf_counter() - t_det
         self._perf_log(f"detect: {d_det * 1000:.0f}ms ({len(detections)} detections)")
@@ -323,13 +364,25 @@ class WalkieGraphsService(threading.Thread):
 
         Reuses the centroids/captions the ingest pass already produced (no extra detection
         or caption work) and the robot heading captured *with* the frame, so the per-object
-        headings match where the robot was at capture time. A graph hiccup or a build error
-        must never take the loop down, so the whole write is best-effort.
+        headings match where the robot was at capture time. Masking-only detections
+        (excluded classes, prompted purely to carve the background) are dropped — the
+        live view stays scoped to the interested classes, as before. A graph hiccup or
+        a build error must never take the loop down, so the whole write is best-effort.
         """
         try:
             pose = frame.robot_pose or {"heading": 0.0}
             robot_heading = float(pose.get("heading", 0.0))
-            objs = build_object_records(detections, ingest_result, frame.img.size, robot_heading)
+            shown = [
+                i
+                for i, d in enumerate(detections)
+                if (d.class_name or "").lower() not in self.exclude
+            ]
+            objs = build_object_records(
+                [detections[i] for i in shown],
+                {j: ingest_result[i] for j, i in enumerate(shown)},
+                frame.img.size,
+                robot_heading,
+            )
             write_atomic(self.snapshot_path, {"ts": frame.ts, "objects": objs})
         except Exception as e:  # noqa: BLE001
             self._log(f"snapshot write failed: {e}")
@@ -407,6 +460,10 @@ class WalkieGraphsService(threading.Thread):
             mask = masks[i]
             if mask is None or not mask.any():
                 continue
+            if (d.class_name or "").lower() in self.exclude:
+                # Masking-only detection: its mask carves the background union below,
+                # but it gets no centroid (not shown in the live view) and no segment.
+                continue
             if not self._passes_size_filters(d, img_area):
                 continue
             pts = deproject_mask(
@@ -433,6 +490,33 @@ class WalkieGraphsService(threading.Thread):
                 pending.append((i, d, pts, _crop_pil(img, d.bbox, self.crop_margin_px)))
         d_deproject = time.perf_counter() - t
 
+        # Fold the frame into ONE capture: the kept segments plus the background
+        # remainder (every valid-depth pixel under no mask — the dilated union
+        # includes dropped and masking-only masks, so e.g. people are carved out).
+        t = time.perf_counter()
+        capture = lift_capture(
+            frame,
+            masks,
+            [(i, pts) for i, _d, pts, _crop in pending],
+            edge_mask=edge_mask,
+            bg_voxel_m=self.bg_voxel_m,
+            bg_dilate_px=self.bg_mask_dilate_px,
+        )
+        d_bg = time.perf_counter() - t
+
+        # Register the capture against the map: one rigid correction for the whole
+        # frame, anchored by the background. On accept, every segment (and the
+        # remainder) is transformed; on reject/skip the frame ingests raw.
+        t = time.perf_counter()
+        capture = self._register_capture(capture)
+        if capture.segments:
+            corrected = {s.det_idx: s for s in capture.segments}
+            pending = [(i, d, corrected[i].points, crop) for i, d, _pts, crop in pending]
+            for i, d, pts, _crop in pending:
+                c = pts.mean(axis=0)
+                result[i]["centroid"] = (float(c[0]), float(c[1]), float(c[2]))
+        d_icp = time.perf_counter() - t
+
         # Single caption pass over the captionable kept subset (reuses _caption's policy),
         # mapped back to original detection indices.
         t = time.perf_counter()
@@ -447,9 +531,15 @@ class WalkieGraphsService(threading.Thread):
         embeddings = self._embed_batch([p[3] for p in pending])
         d_embed = time.perf_counter() - t
 
+        # Persist the capture's segments (deferred write) BEFORE upserting, so every
+        # segment_ref the nodes take is already readable from the store.
+        if getattr(self.memory, "capture_store", None) is not None:
+            self.memory.capture_store.save(capture)
+
         # Upsert the kept subset, batching the per-object Chroma writes into one flush.
         t = time.perf_counter()
         touched = []
+        seg_refs = {s.det_idx: s.ref for s in capture.segments}
         with self.memory.batch_writes():
             for (i, d, pts, crop), emb in zip(pending, embeddings):
                 det = Detection3D(
@@ -462,10 +552,15 @@ class WalkieGraphsService(threading.Thread):
                     caption=result[i]["caption"],
                     ts=time.time(),
                     crop=crop,
+                    segment_ref=seg_refs.get(i),
                 )
                 touched.append(self.memory.upsert(det))
         d_upsert = time.perf_counter() - t
         self._last_touched = touched
+
+        # The classless remainder joins the world background (viz + future ICP anchor).
+        if getattr(self.memory, "background", None) is not None and len(capture.background):
+            self.memory.background.add(capture.background)
 
         t = time.perf_counter()
         self._maybe_tick(tick, touched=touched, robot_pose=frame.robot_pose)
@@ -475,16 +570,53 @@ class WalkieGraphsService(threading.Thread):
         n_cap = len(captions)
         stats = self.memory.pop_perf_stats()
         breakdown = " ".join(f"{k}={v * 1000:.0f}ms" for k, v in sorted(stats.items()))
+        icp_state = (
+            f"fit={capture.icp_fitness:.2f}"
+            + ("" if capture.icp_accepted else " rejected")
+            if capture.icp_fitness > 0
+            else "skipped"
+        )
         self._perf_log(
             f"ingest tick #{self._tick}: TOTAL={total:.2f}s | "
             f"masksub={d_masksub * 1000:.0f}ms edge={d_edge * 1000:.0f}ms "
             f"deproject={d_deproject * 1000:.0f}ms ({len(detections)} det) | "
+            f"bg={d_bg * 1000:.0f}ms ({len(capture.background)} pts) "
+            f"capture_icp={d_icp * 1000:.0f}ms ({icp_state}) | "
             f"caption={d_caption * 1000:.0f}ms ({n_cap}) "
             f"embed={d_embed * 1000:.0f}ms ({len(pending)}) "
             f"upsert={d_upsert * 1000:.0f}ms [{breakdown}] | "
             f"maint+viz={d_tick * 1000:.0f}ms"
         )
         return result
+
+    def _register_capture(self, capture):
+        """Solve the capture's pose correction against the map (skip when starved).
+
+        Skips (identity) when disabled (``capture_icp_max_corr_m <= 0``), when the
+        capture has nothing to align, or when the map target around the capture is
+        still too thin to anchor a solve (cold start) — ``register_capture`` itself
+        enforces the fitness and translation/rotation caps.
+        """
+        if self.capture_icp_max_corr_m <= 0:
+            return capture
+        parts = [capture.background] + [s.points for s in capture.segments]
+        parts = [p for p in parts if len(p)]
+        if not parts:
+            return capture
+        mins = np.min([p.min(axis=0) for p in parts], axis=0)
+        maxs = np.max([p.max(axis=0) for p in parts], axis=0)
+        target = self.memory.icp_target_near(
+            tuple(mins), tuple(maxs), pad=0.5, budget=self.capture_icp_tgt_budget
+        )
+        return register_capture(
+            capture,
+            target,
+            max_corr_dist=self.capture_icp_max_corr_m,
+            min_fitness=self.capture_icp_min_fitness,
+            max_trans_m=self.capture_icp_max_trans_m,
+            max_rot_deg=self.capture_icp_max_rot_deg,
+            src_budget=self.capture_icp_src_budget,
+        )
 
     def _passes_size_filters(self, d, img_area: int) -> bool:
         """Drop degenerate masks and whole-frame (background) boxes — CG ``filter_gobs``."""
@@ -532,6 +664,17 @@ class WalkieGraphsService(threading.Thread):
             _timed("evict", lambda: self.memory.evict_stale_provisional(time.time()))
         if self.pcd_flush_every_n > 0 and t % self.pcd_flush_every_n == 0:
             _timed("pcd_flush", self.memory.flush_pcds)
+            if getattr(self.memory, "capture_store", None) is not None:
+                _timed("cap_flush", self.memory.capture_store.flush)
+                _timed("cap_gc", self.memory.capture_store.gc)
+        # Background persistence on its own (offset) cadence — losing a few ticks of
+        # wall points to a crash is harmless, they re-observe on the next pass.
+        if (
+            getattr(self.memory, "background", None) is not None
+            and self.bg_save_every_n > 0
+            and t % self.bg_save_every_n == self.bg_save_every_n - 1
+        ):
+            _timed("bg_save", self.memory.background.save)
         # Tier 3 LLM passes (only when a model is wired and the cadence is enabled).
         if (
             self.model is not None

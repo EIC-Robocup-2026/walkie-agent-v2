@@ -1,9 +1,13 @@
 """walkie_graphs — small open-vocabulary 3D scene-graph spatial memory for Walkie.
 
-Segment (object detection + mask) → lift masked depth to 3D world points → fuse
-across views into object nodes → derive distance-based relations → store
-(ChromaDB + .npz point clouds + NetworkX edges) → visualize (Rerun) → export to
-text for the LLM.
+Capture-centric (ConceptGraphs-style): each frame becomes one **Capture** —
+detected segmentations lifted to per-detection world-point segments plus the
+classless background remainder (walls/floor) — registered against the map with
+ONE rigid ICP correction (pose error is per-capture, not per-object), then
+fused across views into object nodes whose clouds derive from their captures'
+segments. Distance-based relations are derived on a cadence; everything is
+stored (ChromaDB + .npz point clouds/segments + NetworkX edges), visualized
+(Rerun, background included), and exportable to text for the LLM.
 
 Typical use (constructed with a LangChain model, the AI client, and the hardware
 interface — the same trio the agents take)::
@@ -29,12 +33,16 @@ from typing import Optional
 
 from . import geometry
 from .camera_snapshot import CameraSnapshot
+from .capture import Capture, CaptureStore, Segment
 from .memory import Detection3D, GraphMemory, ObjectNode, Relation
 from .service import WalkieGraphsService
 
 __all__ = [
     "WalkieGraphs",
     "CameraSnapshot",
+    "Capture",
+    "CaptureStore",
+    "Segment",
     "GraphMemory",
     "WalkieGraphsService",
     "ObjectNode",

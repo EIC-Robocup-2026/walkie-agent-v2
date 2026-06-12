@@ -66,11 +66,20 @@ def icp(
     max_iter: int = 30,
     device: str | None = None,
 ) -> tuple[np.ndarray, float]:
-    """Rigid point-to-point ICP of ``source`` onto ``target``.
+    """Rigid ICP of ``source`` onto ``target`` — point-to-plane, with fallback.
 
     Returns ``(T, fitness)`` — a 4×4 transform (apply with
     :func:`apply_transform`) and the fraction of source points with a
-    correspondence within ``max_corr_dist``. Point-to-point needs no normals.
+    correspondence within ``max_corr_dist``.
+
+    **Point-to-plane** (target normals estimated here) is the estimator because
+    the capture-vs-map workload is dominated by large smooth surfaces — walls,
+    floors — sampled onto a voxel grid: point-to-point locks into the lattice's
+    nearest-neighbour minimum and recovers almost none of a tangential offset
+    (measured: ~9 mm of a 60 mm error; point-to-plane recovers it exactly),
+    because sliding along a plane costs point-to-point nothing. Normal
+    estimation failures fall back to point-to-point.
+
     Identity + 0.0 when disabled (``max_corr_dist <= 0``), inputs are
     degenerate, open3d is missing, or registration fails — callers gate on
     fitness, so a failed solve simply means "no correction".
@@ -100,12 +109,17 @@ def _icp_tensor(o3d, src, tgt, max_corr_dist, max_iter, device_str):
     dev = core.Device(device_str)
     sp = o3d.t.geometry.PointCloud(core.Tensor(src, device=dev))
     tp = o3d.t.geometry.PointCloud(core.Tensor(tgt, device=dev))
+    try:
+        tp.estimate_normals(max_nn=30, radius=float(max_corr_dist))
+        est = treg.TransformationEstimationPointToPlane()
+    except Exception:  # noqa: BLE001 — no normals (degenerate cloud) → point-to-point
+        est = treg.TransformationEstimationPointToPoint()
     res = treg.icp(
         sp,
         tp,
         float(max_corr_dist),
         core.Tensor(np.eye(4)),
-        treg.TransformationEstimationPointToPoint(),
+        est,
         treg.ICPConvergenceCriteria(max_iteration=int(max_iter)),
     )
     return res.transformation.cpu().numpy().astype(np.float64), float(res.fitness)
@@ -115,12 +129,19 @@ def _icp_legacy(o3d, src, tgt, max_corr_dist, max_iter):
     reg = o3d.pipelines.registration
     sp = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(src.astype(np.float64)))
     tp = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(tgt.astype(np.float64)))
+    try:
+        tp.estimate_normals(
+            o3d.geometry.KDTreeSearchParamHybrid(radius=float(max_corr_dist), max_nn=30)
+        )
+        est = reg.TransformationEstimationPointToPlane()
+    except Exception:  # noqa: BLE001 — no normals (degenerate cloud) → point-to-point
+        est = reg.TransformationEstimationPointToPoint()
     res = reg.registration_icp(
         sp,
         tp,
         float(max_corr_dist),
         np.eye(4),
-        reg.TransformationEstimationPointToPoint(),
+        est,
         reg.ICPConvergenceCriteria(max_iteration=int(max_iter)),
     )
     return np.asarray(res.transformation, dtype=np.float64), float(res.fitness)

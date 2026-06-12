@@ -69,6 +69,7 @@ class RerunViz:
         self._show_labels = os.getenv("WALKIE_GRAPHS_VIZ_LABELS", "1").lower() in ("1", "true", "yes")
         self._show_robot = os.getenv("WALKIE_GRAPHS_VIZ_ROBOT", "1").lower() in ("1", "true", "yes")
         self._show_camera = os.getenv("WALKIE_GRAPHS_VIZ_CAMERA", "1").lower() in ("1", "true", "yes")
+        self._show_background = os.getenv("WALKIE_GRAPHS_VIZ_BACKGROUND", "1").lower() in ("1", "true", "yes")
 
         if os.getenv("WALKIE_GRAPHS_RERUN_SERVE", "0").lower() not in ("1", "true", "yes"):
             rr.spawn()  # local native window on the robot
@@ -100,6 +101,12 @@ class RerunViz:
 
     def update(self, memory, robot_pose=None, cam_pose=None) -> None:
         rr = self._rr
+        if self._show_background and getattr(memory, "background", None) is not None:
+            bg = memory.background.points()
+            if len(bg):
+                if len(bg) > 100_000:  # bound the per-update stream size
+                    bg = bg[:: len(bg) // 100_000 + 1]
+                rr.log("world/background", rr.Points3D(bg, colors=[(128, 128, 128)], radii=0.008))
         nodes = memory.all_objects()
         for n in nodes:
             color = _class_color(n.class_name)

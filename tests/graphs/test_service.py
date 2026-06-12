@@ -90,6 +90,35 @@ def test_tick_false_runs_nothing(svc):
     assert svc.memory.calls == []
 
 
+def test_capture_and_background_cadences(svc):
+    calls = svc.memory.calls
+    svc.memory.capture_store = SimpleNamespace(
+        flush=lambda: calls.append("cap_flush"), gc=lambda: calls.append("cap_gc")
+    )
+    svc.memory.background = SimpleNamespace(save=lambda: calls.append("bg_save"))
+    svc.pcd_flush_every_n = 5
+    svc.bg_save_every_n = 20
+    for _ in range(40):
+        svc._maybe_tick(True)
+    # capture flush+gc piggyback every pcd flush (ticks 5,10,...,40)
+    assert calls.count("cap_flush") == 8
+    assert calls.count("cap_gc") == 8
+    # background saves on its own offset cadence (ticks 19, 39)
+    assert calls.count("bg_save") == 2
+
+
+def test_detect_prompts_include_exclude_classes_for_masking(monkeypatch):
+    # Excluded classes are prompted for (masking-only) when detection is scoped...
+    monkeypatch.setenv("WALKIE_GRAPHS_INTERESTED_CLASSES", "box, cup")
+    monkeypatch.setenv("WALKIE_GRAPHS_EXCLUDE_CLASSES", "person")
+    s = WalkieGraphsService(walkieAI=None, walkie=None, memory=_StubMemory(), verbose=False)
+    assert s.detect_prompts == ["box", "cup", "person"]
+    # ...but never narrow an unscoped (detect-everything) configuration.
+    monkeypatch.setenv("WALKIE_GRAPHS_INTERESTED_CLASSES", "")
+    s = WalkieGraphsService(walkieAI=None, walkie=None, memory=_StubMemory(), verbose=False)
+    assert s.detect_prompts == []
+
+
 def test_fixed_rate_wait(svc):
     svc.interval = 3.0
     # cycle faster than the interval → wait the remainder
