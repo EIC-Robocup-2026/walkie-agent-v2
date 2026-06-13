@@ -37,33 +37,7 @@ uv run python -m tools.reset_db --all -y   # both, no confirmation
 
 # Diagnose a corrupt / desynced store, read-only (snapshot copy, never the live files):
 uv run python -m tools.db_doctor --scene   # dangling vectors + caption↔entries desync
-
-# Launch for a specific RoboCup challenge (own model + prompt + tuning):
-./tasks/GPSR/run.sh                        # General Purpose Service Robot
-./tasks/HRI/run.sh                         # HRI & Receptionist
-./tasks/GPSR/run.sh fresh                  # wipe DBs then start (any base run.sh subcommand works)
 ```
-
-### Per-challenge launchers (`tasks/`)
-
-Each RoboCup challenge lives under `tasks/<NAME>/` so it runs with its own model,
-prompt, and tuning without touching `main.py`. The mechanism is purely env-driven
-(no monkey-patching) — see `tasks/runtime.py` and `tasks/README.md`:
-
-- `tasks/<NAME>/run.sh` → `tasks/_run.sh` exports `WALKIE_TASK_DIR` and `exec`s the
-  repo-root `run.sh`, so every base subcommand (`start`/`fresh`/`reset`/`viewer`/
-  `doctor`) and the stale-viewer-port cleanup still work, now task-aware.
-- `main.py` calls `load_task_config()` right after `load_dotenv()` and **before**
-  the base `load_config()`, so `tasks/<NAME>/config.toml` overrides the base one
-  (both use `setdefault`). Model selection per task is just `WALKIE_MODEL` there.
-- The shared agent factory (`agents/core/agent.py`) calls
-  `apply_task_prompt(name, base_prompt)` for **every** agent, so each picks up an
-  optional `tasks/<NAME>/prompts/<name>.md` addendum (the main agent also accepts
-  the shorthand `tasks/<NAME>/prompt.md`), appended under a `# Current task` heading.
-- When no task is active (plain `./run.sh`), every hook is a no-op.
-
-Precedence: **shell env > .env > task config.toml > base config.toml > code default**.
-Add a challenge with `cp -r tasks/_template tasks/<NAME>`.
 
 To run without the microphone (typing prompts at a TTY), set `DISABLE_LISTENING=1`.
 
@@ -73,21 +47,20 @@ To run without the microphone (typing prompts at a TTY), set `DISABLE_LISTENING=
 
 `main.py` sets `RobotContext.stage = "ready"` and runs `run_ready_stage` directly — there is no separate explore/catalogue-building stage and no operator "drive around then press Enter" gate.
 
-In the **`ready`** stage two background threads run alongside the agent: `PerceptionService` writes the latest live scene snapshot to `perception.json` every `PERCEPTION_INTERVAL_SEC`, and `ScenePerceptionService` builds the long-term CLIP scene catalogue (`chroma_db_scene`) continuously — detect, lift, caption, embed, dedup, prune. The agent stack listens to mic input via STT, runs the Walkie agent on each utterance, and speaks back via TTS. So the scene DB fills itself in the background while the robot already takes commands.
+In the **`ready`** stage a single background thread — the `walkie_graphs` perception loop (`services.walkie_graphs`, started by `graphs.start()`) — runs alongside the agent. Each tick (every `WALKIE_GRAPHS_INTERVAL_SEC`) it captures an RGB-D frame, runs one masked open-vocabulary detection scoped to `WALKIE_GRAPHS_INTERESTED_CLASSES`, lifts each mask to a 3D world point, fuses/captions/embeds it into the scene-graph object records, and writes the latest live snapshot to `perception.json`. The agent stack listens to mic input via STT, runs the Walkie agent on each utterance, and speaks back via TTS. So the scene graph fills itself in the background while the robot already takes commands. (Pose/people detection is **not** part of this loop — live pose lookups live only in the Vision agent's tools.)
 
 The legacy explore stage (`ExploreService`) and its object store (`WalkieVectorDB`/`chroma_db`) were removed; the `SceneStore` is the only long-term memory backend. `tools/reset_db --object` / `db_doctor --object` still operate on a leftover `chroma_db/` dir by path for cleanup, but nothing writes it anymore.
 
-### Five-agent topology
+### Four-agent topology
 
-All five agents are built by the same factory: `agents/core/agent.py::create_walkie_agent`, which wraps `langchain.agents.create_agent` with a fixed middleware stack.
+All four agents are built by the same factory: `agents/core/agent.py::create_walkie_agent`, which wraps `langchain.agents.create_agent` with a fixed middleware stack.
 
-- **Walkie main** (`agents/walkie_agent/`) — user-facing orchestrator. Owns the conversation thread (`thread_id="main"`). Delegates with `delegate_to_actuator` / `delegate_to_vision` / `delegate_to_database` / `delegate_to_human` (sequential tools that invoke the sub-agent graphs synchronously), plus a fast-path `find_object_from_memory` and `speak`.
+- **Walkie main** (`agents/walkie_agent/`) — user-facing orchestrator. Owns the conversation thread (`thread_id="main"`). Delegates with `delegate_to_actuator` / `delegate_to_vision` / `delegate_to_database` (sequential tools that invoke the sub-agent graphs synchronously), plus a fast-path `find_object_from_memory` and `speak`.
 - **Actuator** (`agents/actuator_agent/`) — `move_absolute`, `move_relative`, `get_current_pose`, `command_arm`, `speak`. `move_relative` does the local→global frame conversion in-process before calling `walkie.nav.go_to`.
 - **Vision** (`agents/vision_agent/`) — **live camera only**: `detect_objects_from_view`, `image_caption`, `detect_people_poses`, `get_camera_view_description`, `speak`. (Long-term memory lookups were moved out to the Database agent.)
 - **Database** (`agents/database_agent/`) — long-term spatial-memory specialist over the `SceneStore`: `find_object` (caption-first), `objects_near`, `recently_seen`, `list_known_objects`, `speak`. Use for "where have I seen X / what's near here / what did I just see".
-- **Human** (`agents/human_agent/`) — HRI/people specialist (Receptionist etc.): `describe_person`, `count_people`, `detect_gestures`, `enroll_person` / `recognize_person` / `list_known_people` over the face-keyed `PeopleStore` (`chroma_db_people`), `find_empty_seat`, `locate_person`, `speak`. Recognition is **two-modality** when the server exposes `/appearance/embed` (OSNet attire re-ID — pipeline design by Chalk, EIC team; see `docs/eic_human_review.md`): face + attire fused adaptively by face-detection confidence (`PeopleStore.recognize_fused`), with an appearance-only fallback when no face is visible. Without the route it degrades to face-only.
 
-Division of labour: "what's in front of me now" → Vision; "where have I seen it / what's stored" → Database; "who is this person / remember them" → Human.
+Division of labour: "what's in front of me now" → Vision; "where have I seen it / what's stored" → Database.
 
 Sub-agents are invoked as plain tools — there's no streaming or interleaving; the parent blocks until the sub-agent returns its last AIMessage content.
 
@@ -115,7 +88,7 @@ Convention: read-only inspection / DB lookup → parallelable. Anything that mov
 
 `agents/core/robot_context.py` is a thread-safe process-wide singleton (`RobotContext.init(...)` in `main.py`, then `RobotContext.get()` everywhere else). It holds:
 
-- `perception_path` — where `PerceptionService` writes.
+- `perception_path` — where the `walkie_graphs` perception loop writes the live snapshot.
 - `stage` — currently always `"ready"` (set in `main.py`); the field is kept because perception middleware gates on it.
 - `speech_log` — bounded deque of `(agent_name, text, ts)` appended whenever any agent's `speak` tool fires. Read by `RobotContextMiddleware` to inject into prompts.
 
@@ -132,9 +105,9 @@ The two are passed side-by-side everywhere (typically as `walkie, walkieAI`).
 
 `build_model()` in `main.py` uses `ChatOpenAI` pointed at OpenRouter (`OPENROUTER_BASE_URL`, defaults to `anthropic/claude-sonnet-4.5`). Switching providers means swapping the `ChatOpenAI` construction; the agent code is provider-agnostic as long as the model supports tool calls.
 
-### Configuration: `config.toml` + `.env`
+### Configuration: `config.toml` + module configs + `.env`
 
-Tuning knobs live in **`config.toml`** (version-controlled), secrets/endpoints/transport in **`.env`** (gitignored). `walkie_config.py::load_config()` reads `config.toml` and `os.environ.setdefault`s every leaf — so the code still reads everything via `os.getenv(NAME, default)` unchanged, and precedence is **shell env > `.env` > `config.toml` > code default**. Every entrypoint calls `load_dotenv()` then `load_config()` (main.py, tools/chroma_viewer.py, tools/scene_explore.py, tools/reset_db.py). The TOML keys *are* the exact env-var names; tables are just for grouping. When you add a new tunable, give it a sensible `os.getenv` default in code AND an entry in `config.toml` — don't put it back in `.env`.
+Tuning knobs live in **`config.toml`** (version-controlled) plus **module-local `services/*/config.toml`** files (e.g. `services/walkie_graphs/config.toml` holds every `WALKIE_GRAPHS_*` knob); secrets/endpoints/transport stay in **`.env`** (gitignored). `walkie_config.py::load_config()` reads the root `config.toml` first, then every `services/*/config.toml`, and `os.environ.setdefault`s every leaf — so the code still reads everything via `os.getenv(NAME, default)` unchanged, and precedence is **shell env > `.env` > root `config.toml` > module `config.toml` > code default** (first-set wins, so the root can override a module knob). Every entrypoint calls `load_dotenv()` then `load_config()`. The TOML keys *are* the exact env-var names; tables are just for grouping. When you add a new tunable, give it a sensible `os.getenv` default in code AND an entry in the owning module's `config.toml` (root `config.toml` for cross-cutting knobs) — don't put it back in `.env`.
 
 ### Scene memory specifics (`perception/store.py`)
 
@@ -152,5 +125,5 @@ Tuning knobs live in **`config.toml`** (version-controlled), secrets/endpoints/t
 
 - **Adding a tool to an agent**: write it in that agent's `tools.py`, decorate with `@parallelable_tool` or `@sequential_tool` *outside* the `@tool` decorator (the wrapper sets the `_walkie_parallelable` attribute on the `BaseTool` instance), and document via Google-style docstring with `parse_docstring=True` if the tool takes args.
 - **Adding a new sub-agent**: copy the shape of `agents/vision_agent/` (a `__init__.py` exporting a `create_*_agent` factory, a `prompts.py`, a `tools.py`). Wire it into `main.py:run_ready_stage` and add a `delegate_to_*` tool in `agents/walkie_agent/tools.py`.
-- **Atomic perception writes**: `PerceptionService._write_atomic` writes `perception.json.tmp` then `os.replace` — readers in `PerceptionContextMiddleware` are tolerant of read-during-write but never read a half-written file. Preserve this if you add new on-disk shared state.
-- **Bbox conventions**: `walkie-ai-server` returns object bboxes in `xyxy` (used directly in JSON), but `walkie.tools.bboxes_to_positions` expects `cxcywh`. Conversion lives in `_xyxy_to_cxcywh` (in `services/perception.py`; the scene path converts in `perception/pipeline.py`).
+- **Atomic perception writes**: `services.walkie_graphs.snapshot.write_atomic` writes `perception.json.tmp` then `os.replace` — readers in `PerceptionContextMiddleware` are tolerant of read-during-write but never read a half-written file. Preserve this if you add new on-disk shared state.
+- **Bbox conventions**: `walkie-ai-server` returns object bboxes in `xyxy` (used directly in the snapshot JSON and as crop/heading bounds). The `walkie_graphs` path lifts each detection's *mask* to 3D via depth deprojection (`services/walkie_graphs/geometry.py`), not the legacy `bboxes_to_positions` ROS lift, so no `xyxy`→`cxcywh` conversion is involved.

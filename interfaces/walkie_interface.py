@@ -2,16 +2,16 @@ import logging
 
 from .devices.speaker import Speaker
 from .devices.microphone import Microphone
-from .devices.camera import Camera
+from .devices.camera import Camera, CameraSnapshot
 from walkie_sdk.robot import WalkieRobot
 
 _log = logging.getLogger(__name__)
 
 class WalkieInterface:
-    def __init__(self, robot: WalkieRobot):
+    def __init__(self, robot: WalkieRobot, microphone_device: int | str | None = None):
         self._robot = robot
         self._speaker = Speaker()
-        self._microphone = Microphone()
+        self._microphone = Microphone(device=microphone_device)
         self._camera = Camera(robot)
         self._nav = robot.nav
         self._status = robot.status
@@ -49,6 +49,27 @@ class WalkieInterface:
     @property
     def arm(self):
         return self._arm
+
+    def capture_snapshot(self, *, log=None) -> CameraSnapshot | None:
+        """Read this instant's RGB-D frame, camera pose, and intrinsics together.
+
+        Reads depth, the RGB frame, the camera optical-frame pose, intrinsics, and
+        the robot pose back-to-back into one
+        :class:`~interfaces.devices.camera.CameraSnapshot`, so they all describe the
+        same moment even before slow detection/LLM round-trips — the snapshot can
+        then lift masks/bboxes from that frame to map-frame 3D points. The capture
+        spans the whole interface (camera, transform, status), which is why it lives
+        here rather than on the bare :class:`~interfaces.devices.camera.Camera`.
+
+        Args:
+            log: Optional callable taking a message string, for capture diagnostics.
+
+        Returns:
+            The snapshot, or ``None`` when depth or the RGB frame is unavailable.
+        """
+        if log is None:
+            return CameraSnapshot.capture(self)
+        return CameraSnapshot.capture(self, log=log)
 
     def close(self) -> None:
         """Best-effort teardown of every owned resource, for a clean shutdown.

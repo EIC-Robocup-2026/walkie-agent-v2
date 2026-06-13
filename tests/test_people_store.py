@@ -205,3 +205,67 @@ def test_clear_empties_both_collections(store):
     store.clear()
     assert store.count() == 0
     assert store.recognize_fused(None, ALICE_ATTIRE) is None
+
+
+# ---------------------------------------------------------------------------
+# Local adjustments to Chalk's design: caller-chosen ids + env construction.
+# ---------------------------------------------------------------------------
+
+
+def test_enroll_with_person_id_and_unknown_name(store):
+    """A guest whose name was never understood still gets a stable record."""
+    rec = store.enroll("", "cola", ALICE, person_id="guest-1")
+    assert rec.id == "guest-1"
+    found = store.recognize(ALICE_2)
+    assert found is not None and found.id == "guest-1"
+    assert store.get("guest-1") is not None
+
+
+def test_person_id_reenroll_fills_in_name_later(store):
+    """Re-enrolling the same id with the now-known name keeps one record."""
+    store.enroll("", "", ALICE, person_id="guest-1")
+    store.enroll("Alice", "cola", ALICE_2, person_id="guest-1")
+    assert store.count() == 1
+    rec = store.get("guest-1")
+    assert rec.name == "Alice" and rec.drink == "cola"
+    assert rec.enrollments == 2
+
+
+def test_reenroll_with_empty_name_keeps_previous(store):
+    store.enroll("Alice", "cola", ALICE, person_id="guest-1")
+    store.enroll("", "", ALICE_2, person_id="guest-1")
+    rec = store.get("guest-1")
+    assert rec.name == "Alice" and rec.drink == "cola"
+
+
+def test_enroll_requires_name_or_person_id(store):
+    with pytest.raises(ValueError):
+        store.enroll("", "cola", ALICE)
+
+
+def test_from_env_uses_people_vars(tmp_path, monkeypatch):
+    monkeypatch.setenv("PEOPLE_CHROMA_DIR", str(tmp_path / "pdb"))
+    monkeypatch.setenv("PEOPLE_FRAMES_DIR", str(tmp_path / "pframes"))
+    store = PeopleStore.from_env()
+    store.enroll("Alice", "cola", ALICE)
+    assert (tmp_path / "pdb").exists()
+    assert store.count() == 1
+
+
+def test_zero_face_enrollment_is_appearance_only(store):
+    """An attire-only sighting (zero face vector) must not poison fused scoring."""
+    store.enroll("Host", "tea", [0.0, 0.0, 0.0], person_id="host", app_embedding=BOB_ATTIRE)
+    # A confident face query + matching attire: the zero stored face is treated
+    # as absent, so the appearance modality alone carries the match.
+    rec = store.recognize_fused(CAROL, BOB_ATTIRE, face_confidence=0.95)
+    assert rec is not None and rec.id == "host"
+    assert rec.matched_by == "appearance"
+    # And the zero vector can never win a face-only recognize().
+    assert store.recognize(ALICE) is None
+
+
+def test_threshold_env_accessors(monkeypatch):
+    monkeypatch.setenv("FACE_MATCH_THRESHOLD", "0.3")
+    monkeypatch.setenv("APPEARANCE_MATCH_THRESHOLD", "0.6")
+    assert PeopleStore.face_match_max_distance() == 0.3
+    assert PeopleStore.fused_min_score() == 0.6

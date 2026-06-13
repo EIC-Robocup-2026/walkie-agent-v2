@@ -27,20 +27,16 @@ wheels/
 # Stray local docs (not source)
 master.pdf
 
-# Vector DBs + perception artifacts (all generated at runtime — never commit)
-chroma_db/
+# temp
+concept-graphs/
+
+# Walkie Graphs
+perception.json
+graph_thumbs/
+graph_pcds/
+graph_edges.json
+frames/
 chroma_db_scene/
 chroma_db_people/
-frames/
-people_frames/
-object_frames/
-perception.json
-perception.json.tmp
-
-# Throwaway mock data for the Chroma viewer (tools/seed_mock_chroma.py)
-chroma_db_mock/
-chroma_db_scene_mock/
-frames_mock/
-
-# Chroma viewer downscaled-thumbnail cache (regenerated on demand)
+chroma_db_graph/
 .thumb_cache/

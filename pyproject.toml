@@ -10,14 +10,17 @@ dependencies = [
     "langchain>=1.2.14",
     "langchain-openai>=0.2",
     "langgraph>=0.2",
+    "networkx>=3.0",
     "numpy>=2.4.4",
     "onnxruntime>=1.24.4",
+    "open3d>=0.19.0",
     "opencv-python>=4.13.0.92",
     "pillow>=12.2.0",
     "pyaudio>=0.2.14",
     "pydub>=0.25.1",
     "pytest>=9.0.2",
     "python-dotenv>=1.2.2",
+    "scikit-learn>=1.9.0",
     "scipy>=1.17.1",
     "silero-vad>=6.2.1",
     "sounddevice>=0.5.5",
@@ -37,9 +40,20 @@ clip = [
     "torch>=2.7",
     "transformers>=4.45",
 ]
+# Real-time 3D visualization for walkie_graphs (rerun.io). Imported lazily, so
+# the module + tests run without it; install with `uv sync --extra graphs`.
+graphs = [
+    "rerun-sdk>=0.20",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Put the repo root on sys.path so tests can `import services.walkie_graphs` / `client` etc.
+pythonpath = ["."]
+# On the robot the shell sources /opt/ros, which puts ROS's pytest plugins on the
+# path; some (launch_testing) need `lark` and crash collection. We use none of
+# them, so disable them explicitly (`-p no:` is a no-op when a plugin is absent).
+addopts = "-p no:launch_testing -p no:launch_ros -p no:ament_lint -p no:ament_flake8 -p no:ament_pep257 -p no:ament_mypy -p no:ament_copyright -p no:ament_xmllint"
 
 [tool.uv.sources]
-walkie-sdk = { git = "https://github.com/EIC-Robocup-2026/walkie-sdk.git" }
+walkie-sdk = { git = "https://github.com/EIC-Robocup-2026/walkie-sdk.git", rev = "feat/camera_info" }

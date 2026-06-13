@@ -1,6 +1,7 @@
 """Top-level WalkieClient — single entry point for the entire HTTP API."""
 
 from __future__ import annotations
+import os
 
 from .appearance import AppearanceClient
 from .face_recognition import FaceRecognitionClient
@@ -54,9 +55,11 @@ class WalkieAIClient:
 
     def __init__(
         self,
-        base_url: str = "http://localhost:5000",
+        base_url: str|None = None,
         timeout: int = 60,
     ) -> None:
+        if base_url is None:
+            base_url = os.getenv("WALKIE_AI_BASE_URL") or "http://localhost:5000"
         self.stt = STTClient(base_url=base_url, timeout=timeout)
         self.tts = TTSClient(base_url=base_url, timeout=timeout)
         self.object_detection = ObjectDetectionClient(base_url=base_url, timeout=timeout)

@@ -1,37 +1,34 @@
-"""Tools for the Walkie Database sub-agent.
-
-A focused surface over the long-term spatial memory, backed by the CLIP
-:class:`perception.SceneStore` (caption text search + spatial / recency
-queries).
-
-All lookups are read-only → ``@parallelable_tool``. ``speak`` moves audio →
-``@sequential_tool``.
-"""
-
 from __future__ import annotations
 
 import time
-from collections import Counter
 
 from langchain_core.tools import tool
 
-from agents.core.object_memory import lookup_object_in_memory, query_min_conf, robot_xy
-from agents.core.robot_context import RobotContext
 from agents.core.tool_decorators import parallelable_tool, sequential_tool
+from agents.core.robot_context import RobotContext
 from interfaces.walkie_interface import WalkieInterface
 
+_NO_MEM = "Long-term spatial memory is not available right now."
 
-def _fmt_entries(entries) -> str:
-    """One line per SceneEntry: class @ (x, y, z) conf sightings caption."""
-    lines = []
-    for e in entries:
-        x, y, z = e.position
-        lines.append(
-            f"- {e.class_name} @ ({x:+.2f}, {y:+.2f}, {z:+.2f}) "
-            f"conf={e.position_conf:.2f} sightings={e.sightings} "
-            f"caption={e.caption!r}"
-        )
-    return "\n".join(lines)
+
+def _fmt_age(ts: float) -> str:
+    if not ts:
+        return "unknown"
+    dt = max(0.0, time.time() - ts)
+    if dt < 60:
+        return f"{int(dt)}s ago"
+    if dt < 3600:
+        return f"{int(dt / 60)}m ago"
+    return f"{int(dt / 3600)}h ago"
+
+
+def _fmt_node(n) -> str:
+    x, y, z = n.centroid
+    desc = n.best_caption or n.class_name
+    return (
+        f"{desc} [{n.class_name}] at ({x:.2f}, {y:.2f}, {z:.2f}) — "
+        f"seen {n.n_obs}x, last {_fmt_age(n.last_seen_ts)}"
+    )
 
 
 def make_database_tools(
@@ -39,126 +36,125 @@ def make_database_tools(
     walkieAI,
     *,
     agent_name: str = "database",
-    scene_store=None,
+    graphs=None,
 ):
-    """Build the database sub-agent's tool list.
+    """Build the Database sub-agent's tools over the walkie_graphs 3D memory.
 
-    ``scene_store`` (a :class:`perception.SceneStore`) powers the spatial /
-    recency / caption tools. When it's unavailable the spatial/recency tools
-    report that scene memory is off.
+    Lookups are read-only (parallelable); speak is sequential. ``graphs`` is a
+    :class:`walkie_graphs.WalkieGraphs`; when None the tools report memory is off.
     """
 
     @parallelable_tool
     @tool(parse_docstring=True)
-    def find_object(query: str, near_me: bool = False, radius_m: float = 2.0) -> str:
-        """Find where the robot has previously seen an object, by description.
+    def find_object(query: str) -> str:
+        """Find where an object has been seen, by description or name.
 
-        Searches stored captions first (text-to-text, so "coffee mug" matches
-        "a white ceramic coffee mug"), then visual similarity. This is the
-        primary "where is X?" lookup. Low-confidence positions are filtered out
-        so the answer is something the robot can actually navigate to.
-
-        Set ``near_me=True`` to restrict matches to the robot's current vicinity
-        (use for "the cup near me / in this room"); otherwise the whole map is
-        searched.
+        Use for "where is the red mug?", "have you seen a backpack?". Searches the
+        long-term 3D memory (captions + appearance) and returns stored locations.
 
         Args:
-            query: Name or description of the object (e.g. "red backpack").
-            near_me: Only return matches within ``radius_m`` of the robot now.
-            radius_m: Vicinity radius in metres when ``near_me`` is set.
+            query: A description or class name, e.g. "red mug" or "chair".
 
         Returns:
-            Top match(es) with map-frame coordinates, or a not-found message.
+            Matching objects with their 3D map coordinates, or a not-found note.
         """
-        within = max_dist = None
-        if near_me:
-            within = robot_xy(walkie)
-            if within is None:
-                return "Can't search 'near me' — the robot's position is unknown."
-            max_dist = float(radius_m)
-        return lookup_object_in_memory(
-            query,
-            scene_store=scene_store,
-            n_results=5,
-            within_radius_of=within,
-            max_distance_m=max_dist,
-            min_position_conf=query_min_conf(),
+        if graphs is None:
+            return _NO_MEM
+        hits = graphs.query_text(query, k=5)
+        if not hits:
+            return f"No stored object matches {query!r}."
+        return f"Found {len(hits)} match(es) for {query!r}:\n" + "\n".join(
+            f"- {_fmt_node(n)}" for n in hits
         )
 
     @parallelable_tool
     @tool(parse_docstring=True)
-    def objects_near(x: float, y: float, radius_m: float = 1.5) -> str:
-        """List catalogued objects within a radius of a map-frame point.
+    def objects_near(radius_m: float = 1.5) -> str:
+        """List stored objects near the robot's current position.
 
-        Use for "what's around here / near the table" questions.
+        Use for "what's around me?", "what's nearby?".
 
         Args:
-            x: Map-frame X (metres).
-            y: Map-frame Y (metres).
-            radius_m: Search radius in metres (default 1.5).
+            radius_m: Search radius in meters around the robot (default 1.5).
 
         Returns:
-            Objects inside the ball, nearest first, with coordinates.
+            Nearby stored objects with coordinates, nearest first.
         """
-        if scene_store is None:
-            return "Spatial search needs the CLIP scene memory, which is off."
-        entries = scene_store.spatial_query(
-            center=(float(x), float(y), 0.0), radius_m=float(radius_m)
-        )
-        if not entries:
-            return f"No objects within {radius_m:g}m of ({x:+.2f}, {y:+.2f})."
-        return (
-            f"{len(entries)} object(s) within {radius_m:g}m of "
-            f"({x:+.2f}, {y:+.2f}):\n" + _fmt_entries(entries)
+        if graphs is None:
+            return _NO_MEM
+        pose = walkie.status.get_position()
+        if not pose:
+            return "I don't know my current position yet."
+        center = (float(pose["x"]), float(pose["y"]))
+        hits = graphs.query_near(center, radius_m)
+        if not hits:
+            return f"No stored objects within {radius_m:.1f} m of me."
+        return f"{len(hits)} object(s) within {radius_m:.1f} m:\n" + "\n".join(
+            f"- {_fmt_node(n)}" for n in hits
         )
 
     @parallelable_tool
     @tool(parse_docstring=True)
-    def recently_seen(within_seconds: float = 60.0) -> str:
-        """List objects whose most recent sighting is within a time window.
+    def recently_seen(limit: int = 5) -> str:
+        """List the most recently observed objects.
 
-        Use for "what did you just see?" questions.
+        Use for "what did you just see?", "what have you seen lately?".
 
         Args:
-            within_seconds: Look-back window in seconds (default 60).
+            limit: Maximum number of objects to return (default 5).
 
         Returns:
-            Recently-seen objects, newest first.
+            The most recently seen objects, newest first.
         """
-        if scene_store is None:
-            return "Recency search needs the CLIP scene memory, which is off."
-        since = time.time() - float(within_seconds)
-        entries = scene_store.recency_query(since_ts=since)
-        if not entries:
-            return f"Nothing seen in the last {within_seconds:g}s."
-        return (
-            f"{len(entries)} object(s) seen in the last {within_seconds:g}s:\n"
-            + _fmt_entries(entries)
-        )
+        if graphs is None:
+            return _NO_MEM
+        hits = graphs.recently_seen(limit)
+        if not hits:
+            return "I haven't catalogued any objects yet."
+        return "Recently seen:\n" + "\n".join(f"- {_fmt_node(n)}" for n in hits)
 
     @parallelable_tool
     @tool
     def list_known_objects() -> str:
-        """Summarize the whole long-term database: total + per-class counts.
+        """Summarize everything in long-term memory, counted by class.
 
-        Use for "what do you know about?" / "how many chairs?" questions.
+        Use for "what objects do you know about?", "how many chairs have you seen?".
         """
-        if scene_store is None:
-            return "The scene database is off."
-        entries = scene_store.recency_query(since_ts=0.0)
-        total = len(entries)
-        if total == 0:
-            return "The scene database is empty."
-        by_class = Counter(e.class_name for e in entries).most_common()
-        breakdown = ", ".join(f"{cls}×{n}" for cls, n in by_class)
-        return f"Scene database holds {total} object(s): {breakdown}."
+        if graphs is None:
+            return _NO_MEM
+        objs = graphs.all_objects()
+        if not objs:
+            return "I haven't catalogued any objects yet."
+        counts: dict[str, int] = {}
+        for n in objs:
+            counts[n.class_name] = counts.get(n.class_name, 0) + 1
+        lines = [
+            f"- {cls}: {k}"
+            for cls, k in sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+        ]
+        return (
+            f"I know {len(objs)} object(s) across {len(counts)} class(es):\n"
+            + "\n".join(lines)
+        )
+
+    @parallelable_tool
+    @tool
+    def describe_known_scene() -> str:
+        """Describe the whole stored scene: objects and their spatial relations.
+
+        Use for "what's on the table?", "describe what you've mapped", or any
+        question needing relations (on / above / inside / near) between objects.
+        """
+        if graphs is None:
+            return _NO_MEM
+        return graphs.to_text_description()
 
     @sequential_tool
     @tool(parse_docstring=True)
     def speak(text: str) -> str:
         """Speak text aloud through the robot's speaker.
 
-        Use sparingly: the parent agent usually speaks the final answer.
+        Use sparingly: the main Walkie agent already speaks high-level results.
 
         Args:
             text: The text to vocalize.
@@ -174,4 +170,11 @@ def make_database_tools(
             pass
         return f"Spoke: {text!r}"
 
-    return [find_object, objects_near, recently_seen, list_known_objects, speak]
+    return [
+        find_object,
+        objects_near,
+        recently_seen,
+        list_known_objects,
+        describe_known_scene,
+        speak,
+    ]

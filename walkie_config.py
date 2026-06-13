@@ -1,15 +1,22 @@
-"""Load tuning config from ``config.toml`` into the process environment.
+"""Load tuning config from ``config.toml`` files into the process environment.
 
 The app reads all its tuning via ``os.getenv(NAME, default)``. Rather than
-rewrite every call site, this loader reads ``config.toml`` and, for each leaf
-value, calls ``os.environ.setdefault(NAME, value)`` — so config.toml provides
-defaults but a real shell variable or a value already loaded from ``.env``
-always wins (``setdefault`` only fills what's missing).
+rewrite every call site, this loader reads the root ``config.toml`` — then any
+module-local ``services/*/config.toml`` — and, for each leaf value, calls
+``os.environ.setdefault(NAME, value)`` — so config files provide defaults but
+a real shell variable or a value already loaded from ``.env`` always wins
+(``setdefault`` only fills what's missing). The root file loads first, so it
+can also override a module file's knob.
 
-Precedence ends up being: shell env > .env > config.toml > code default.
+Precedence: shell env > .env > root config.toml > services/*/config.toml >
+code default.
 
 Call :func:`load_config` once at startup, *after* ``load_dotenv()``, in every
-entrypoint (main.py, tools/chroma_viewer.py, tools/scene_explore.py).
+entrypoint (main.py, tool scripts).
+
+Competition tasks may layer a task-local ``tasks/<NAME>/config.toml`` on top by
+loading it first (``tasks.common.load_task_config``) — same setdefault
+semantics, so the task file overrides these but env/.env still win.
 """
 
 from __future__ import annotations
@@ -41,25 +48,35 @@ def _walk(d: dict[str, Any], _prefix: str = "") -> Iterator[tuple[str, str]]:
             yield key, "1" if val else "0"
 
 
-def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> int:
-    """Populate ``os.environ`` defaults from ``config.toml``.
-
-    Returns the number of keys filled (i.e. not already set in the
-    environment). Missing config file is fine — returns 0 silently so a
-    deployment can run on env vars alone.
-    """
-    p = Path(path)
-    if not p.is_file():
+def _load_one(path: Path) -> int:
+    """setdefault every leaf of one TOML file; 0 on a missing/unreadable file."""
+    if not path.is_file():
         return 0
     try:
-        with p.open("rb") as fh:
+        with path.open("rb") as fh:
             data = tomllib.load(fh)
     except (OSError, tomllib.TOMLDecodeError) as e:
-        print(f"[config] failed to read {p}: {e!r}", file=sys.stderr)
+        print(f"[config] failed to read {path}: {e!r}", file=sys.stderr)
         return 0
     filled = 0
     for key, value in _walk(data):
         if key not in os.environ:
             os.environ[key] = value
             filled += 1
+    return filled
+
+
+def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> int:
+    """Populate ``os.environ`` defaults from the root + module config files.
+
+    Loads ``path`` (the root ``config.toml``) first, then every
+    ``services/*/config.toml`` next to it — first-set wins, so the root can
+    override a module knob and env/.env override both. Returns the number of
+    keys filled. Missing files are fine — a deployment can run on env vars
+    alone.
+    """
+    p = Path(path)
+    filled = _load_one(p)
+    for module_cfg in sorted(p.resolve().parent.glob("services/*/config.toml")):
+        filled += _load_one(module_cfg)
     return filled

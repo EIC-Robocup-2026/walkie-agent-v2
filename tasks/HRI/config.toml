@@ -1,12 +1,32 @@
-# HRI (Human Robot Interaction) overrides — rulebook §5.1.
+# HRI (receptionist) task config — loaded by tasks/HRI/run.py via
+# tasks.common.load_task_config BEFORE the root config.toml, so any key here
+# (including keys that also exist in the root file, e.g. WALKIE_MODEL) wins
+# over the global value. Real shell env vars and .env still override both.
 #
-# Conversational + person-centric: a fast model keeps greetings snappy, and
-# human perception (face re-ID) must be on so the robot recognises each guest
-# and can re-introduce them after they switch seats (§5.1 "Switching Places").
+# Precedence: shell env > .env > this file > root config.toml > code default.
 
-[model]
-WALKIE_MODEL = "anthropic/claude-sonnet-4.5"
-WALKIE_TEMPERATURE = "0"
-
-[perception]
-HUMAN_PERCEPTION_ENABLED = "1"
+[hri]
+# Waypoints are map-frame poses "x,y,heading_rad" (set after mapping the arena).
+HRI_DOOR_POSE = "0.8,-0.95,2.97"
+HRI_LIVING_ROOM_POSE = "4.64,1.09,-0.40"   # scan pose facing the seating area
+# Host's name and favorite drink (given in the competition briefing). Used in
+# the seat-offer wording ("next to our host James"); "" = unknown.
+HRI_HOST_NAME = "Armmy"
+HRI_HOST_DRINK = "pepsi"
+# Open-vocab detector prompts used to find seats.
+HRI_SEAT_CLASSES = "chair,sofa,armchair,stool"
+# A seat is occupied when (person bbox ∩ seat bbox) / seat area >= this.
+HRI_SEAT_OCCUPIED_OVERLAP = "0.25"
+# Horizontal field of view (deg) for pixel->heading conversion (tune for ZED).
+HRI_CAMERA_HFOV_DEG = "110"
+# IntroduceEveryone sweeps left/center/right by this many degrees (base rotation,
+# positive = left) to find people who drifted off-center before introducing them.
+HRI_INTRO_SWEEP_DEG = "10"
+# Seconds to let the base + depth settle after each sweep rotation before capturing.
+HRI_SWEEP_SETTLE_SEC = "1.0"
+# 1 = forget all remembered people at task start (guests differ every run).
+HRI_PEOPLE_RESET = "1"
+# 1 = enable the timed gripper bag-handover steps (no torque sensing yet).
+HRI_ENABLE_BAG = "0"
+# Seconds the gripper stays open for the guest to hang the bag.
+HRI_BAG_HANDOVER_WAIT_SEC = "8"

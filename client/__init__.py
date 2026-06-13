@@ -13,9 +13,7 @@ Quick start::
     caption = walkie.image_caption.caption(pil_image)
 """
 
-from .appearance import AppearanceClient
 from .base import WalkieAPIError
-from .face_recognition import FaceEmbedding, FaceRecognitionClient
 from .image_caption import ImageCaptionClient
 from .image_embed import ImageEmbedClient
 from .object_detection import ObjectDetectionClient
@@ -33,7 +31,4 @@ __all__ = [
     "PoseEstimationClient",
     "ImageCaptionClient",
     "ImageEmbedClient",
-    "FaceRecognitionClient",
-    "FaceEmbedding",
-    "AppearanceClient",
 ]

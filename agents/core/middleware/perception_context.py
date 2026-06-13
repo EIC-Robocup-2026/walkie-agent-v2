@@ -49,20 +49,6 @@ def _format_objects(objs: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _format_people(people: list[dict]) -> str:
-    if not people:
-        return "  (none)"
-    lines = []
-    for p in people:
-        bbox = p.get("bbox")
-        pose = p.get("pose_summary") or p.get("pose") or ""
-        bbox_str = f"bbox={tuple(bbox)}" if bbox else "bbox=?"
-        heading_str = _heading_str(p.get("heading"))
-        frame_str = _frame_str(p)
-        lines.append(f"  - person {bbox_str}{heading_str}{frame_str} pose: {pose or 'unknown'}")
-    return "\n".join(lines)
-
-
 def _build_section() -> str:
     """Compute the dynamic perception section, or '' if not applicable."""
     try:
@@ -81,12 +67,7 @@ def _build_section() -> str:
         return ""
     age_str = f" (updated {age:.1f}s ago)" if age is not None else ""
     objects_str = _format_objects(snap.get("objects", []))
-    people_str = _format_people(snap.get("people", []))
-    return (
-        f"## Current perception{age_str}\n"
-        f"Objects in view:\n{objects_str}\n"
-        f"People:\n{people_str}"
-    )
+    return f"## Current perception{age_str}\nObjects in view:\n{objects_str}"
 
 
 def _append_to_system(request: ModelRequest, extra: str) -> ModelRequest:

@@ -11,7 +11,7 @@ model = ChatOpenAI(
     model="qwen3.5-9b",
     api_key="your api key goes here",
     base_url="http://10.0.0.210:8000/v1",
-    temperature=0,
+    temperature=float(os.getenv("WALKIE_TEMPERATURE", "0")),
 )
 
 while True:

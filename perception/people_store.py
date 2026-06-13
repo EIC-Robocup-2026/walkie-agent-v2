@@ -1,42 +1,46 @@
 """Face-keyed people memory for HRI tasks (RoboCup @Home Receptionist).
 
-Unlike :class:`~perception.store.SceneStore`, which is a **spatial** catalogue
-deduplicated by 3D position, this store is keyed by **face identity**. People
-move and may switch seats (the rulebook explicitly allows it and penalizes
-mis-identification heavily), so position can't identify a guest — their face
-embedding can. There is therefore **no spatial dedup and no location prune**
-here; a person is one record, recalled by nearest face vector.
+Unlike the spatial object stores (deduplicated by 3D position), this store is
+keyed by **face identity**. People move and may switch seats (the rulebook
+explicitly allows it and penalizes mis-identification heavily), so position
+can't identify a guest — their face embedding can. There is therefore **no
+spatial dedup and no location prune** here; a person is one record, recalled
+by nearest face vector.
 
-Two ChromaDB collections, one id space (the same pattern as ``SceneStore``):
-``people`` holds the face embedding (the primary query vector) plus the
-person's ``name``, ``drink``, free-text ``attributes`` and provenance in
-metadata; ``people_appearance`` holds an optional **appearance** (attire/body)
-embedding for the same id, so a guest can still be re-identified when their
-face is not visible (turned away, far, occluded). Faces fold into a running
-centroid across enrollments; appearance is latest-wins, because clothing is
-session-specific. :meth:`recognize_fused` combines the two modalities with
-adaptive weighting by face-detection confidence.
+Two ChromaDB collections, one id space: ``people`` holds the face embedding
+(the primary query vector) plus the person's ``name``, ``drink``, free-text
+``attributes`` and provenance in metadata; ``people_appearance`` holds an
+optional **appearance** (attire/body) embedding for the same id, so a guest
+can still be re-identified when their face is not visible (turned away, far,
+occluded). Faces fold into a running centroid across enrollments; appearance
+is latest-wins, because clothing is session-specific. :meth:`recognize_fused`
+combines the two modalities with adaptive weighting by face-detection
+confidence.
 
 The two-modality fusion design is by **Chalk (EIC team)** — adopted from the
 ``eic-human`` subproject (``eic_human/core.py::_fuse_score`` and
-``pipeline/store.py``), re-homed onto this store's ChromaDB backend.
+``pipeline/store.py``); this file is a port of his ``PeopleStore`` from the
+``feat/appearance-reid-chalk`` branch, re-homed onto the shared
+:mod:`perception.vector_db` ChromaDB layer and extended with caller-chosen
+record ids (``person_id``) so a guest whose name was never understood can
+still be enrolled under a stable key ("guest-1").
 
 The server routes (``/face-recognition/embed``, ``/appearance/embed``) are
-stateless — all enrollment and matching lives here. See
-``docs/human_recognition_design.md`` (C2/C3).
+stateless — all enrollment and matching lives here.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Sequence
 
-import chromadb
-from chromadb.config import Settings
 from PIL import Image
+
+from .vector_db import drop_collection, get_collection, get_rows, make_client, query_rows
 
 
 @dataclass(frozen=True)
@@ -102,7 +106,6 @@ def _mean_unit(vectors: Sequence[Sequence[float]]) -> list[float]:
     single shot. Returns the renormalized mean; falls back to the first vector
     if the mean is degenerate.
     """
-    n = len(vectors)
     dim = len(vectors[0])
     acc = [0.0] * dim
     for v in vectors:
@@ -128,23 +131,12 @@ class PeopleStore:
         frames_dir: str | Path | None = None,
         crop_margin: float = 0.25,
     ) -> None:
-        if persist_dir is None:
-            self._client = chromadb.EphemeralClient(
-                settings=Settings(anonymized_telemetry=False, allow_reset=True),
-            )
-        else:
-            path = str(Path(persist_dir).resolve())
-            self._client = chromadb.PersistentClient(
-                path=path,
-                settings=Settings(anonymized_telemetry=False, allow_reset=True),
-            )
-        self._collection = self._client.get_or_create_collection(
-            name=self.COLLECTION,
-            metadata={"hnsw:space": "cosine"},
+        self._client = make_client(persist_dir)
+        self._collection = get_collection(
+            self._client, self.COLLECTION, unique_if_ephemeral=True
         )
-        self._app_collection = self._client.get_or_create_collection(
-            name=self.APP_COLLECTION,
-            metadata={"hnsw:space": "cosine"},
+        self._app_collection = get_collection(
+            self._client, self.APP_COLLECTION, unique_if_ephemeral=True
         )
         self._embedding_model = embedding_model
         # When set, enroll archives the guest's face crop here so the DB viewer
@@ -153,6 +145,25 @@ class PeopleStore:
         self._crop_margin = crop_margin
         if self._frames_dir:
             self._frames_dir.mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def from_env(cls, *, embedding_model: str = "") -> "PeopleStore":
+        """Build from the PEOPLE_* environment (config.toml ``[people]`` table)."""
+        return cls(
+            persist_dir=os.getenv("PEOPLE_CHROMA_DIR", "chroma_db_people"),
+            embedding_model=embedding_model,
+            frames_dir=os.getenv("PEOPLE_FRAMES_DIR", "people_frames") or None,
+        )
+
+    @staticmethod
+    def face_match_max_distance() -> float:
+        """Configured cosine-distance gate for :meth:`recognize`."""
+        return float(os.getenv("FACE_MATCH_THRESHOLD", "0.4"))
+
+    @staticmethod
+    def fused_min_score() -> float:
+        """Configured minimum fused similarity for :meth:`recognize_fused`."""
+        return float(os.getenv("APPEARANCE_MATCH_THRESHOLD", "0.5"))
 
     @property
     def client(self):
@@ -169,38 +180,42 @@ class PeopleStore:
         drink: str,
         embedding: Sequence[float],
         *,
+        person_id: Optional[str] = None,
         attributes: str = "",
         app_embedding: Optional[Sequence[float]] = None,
         frame: Optional[Image.Image] = None,
         face_bbox_xyxy: Optional[Sequence[int]] = None,
         ts: Optional[float] = None,
     ) -> PersonRecord:
-        """Remember a guest, or refresh an existing one with the same name.
+        """Remember a guest, or refresh an existing one with the same id.
 
-        Re-enrolling a known name updates their drink/attributes and folds the
-        new face vector into a running centroid (more robust recognition across
-        lighting/pose), bumping the enrollment count. ``app_embedding`` (the
-        OSNet attire/body vector) is stored latest-wins — clothing changes
+        The record id is ``person_id`` (slugged) when given, else the slug of
+        ``name`` — pass a stable ``person_id`` ("guest-1") when the name may be
+        unknown or mis-heard, so recognition keys never depend on STT.
+        Re-enrolling a known id updates their name/drink/attributes and folds
+        the new face vector into a running centroid (more robust recognition
+        across lighting/pose), bumping the enrollment count. ``app_embedding``
+        (the OSNet attire/body vector) is stored latest-wins — clothing changes
         between sessions, so averaging it would blur identities. When ``frame``
         (and a ``face_bbox_xyxy``) are given and a frames dir is configured, the
         guest's face crop is archived for the DB viewer. Returns the stored
         record.
         """
-        if not name or not name.strip():
-            raise ValueError("name must be non-empty")
+        if person_id is None and not (name and name.strip()):
+            raise ValueError("name must be non-empty when no person_id is given")
         emb = [float(x) for x in embedding]
         if not emb:
             raise ValueError("embedding must be non-empty")
         now = time.time() if ts is None else float(ts)
-        rid = _slug(name)
+        rid = _slug(person_id) if person_id else _slug(name)
 
         existing = self._raw_get(rid)
         if existing is not None:
             prev_emb, meta = existing
             new_emb = _mean_unit([prev_emb, emb]) if prev_emb else emb
             metadata = {
-                "name": name.strip(),
-                "drink": drink.strip(),
+                "name": name.strip() or str(meta.get("name", "")),
+                "drink": drink.strip() or str(meta.get("drink", "")),
                 "attributes": attributes.strip() or str(meta.get("attributes", "")),
                 "embedding_model": self._embedding_model or str(meta.get("embedding_model", "")),
                 "enrollments": int(meta.get("enrollments", 1)) + 1,
@@ -227,13 +242,13 @@ class PeopleStore:
             metadata["frame_ref"] = ref
         document = f"{metadata['name']} — likes {metadata['drink']}".strip(" —")
         self._collection.upsert(
-            ids=[rid], embeddings=[new_emb], metadatas=[metadata], documents=[document]
+            ids=[rid], embeddings=[new_emb], metadatas=[metadata], documents=[document or rid]
         )
         if app_embedding is not None:
             app = [float(x) for x in app_embedding]
             if app:
                 self._app_collection.upsert(
-                    ids=[rid], embeddings=[app], documents=[document]
+                    ids=[rid], embeddings=[app], documents=[document or rid]
                 )
         return self._to_record(rid, new_emb, metadata)
 
@@ -262,16 +277,11 @@ class PeopleStore:
 
     def clear(self) -> None:
         """Forget everyone (e.g. between Receptionist runs) — both collections."""
-        self._client.delete_collection(self.COLLECTION)
-        self._collection = self._client.get_or_create_collection(
-            name=self.COLLECTION,
-            metadata={"hnsw:space": "cosine"},
-        )
-        self._client.delete_collection(self.APP_COLLECTION)
-        self._app_collection = self._client.get_or_create_collection(
-            name=self.APP_COLLECTION,
-            metadata={"hnsw:space": "cosine"},
-        )
+        for attr in ("_collection", "_app_collection"):
+            col = getattr(self, attr)
+            name = col.name  # actual name (may carry an ephemeral suffix)
+            drop_collection(self._client, name)
+            setattr(self, attr, get_collection(self._client, name))
 
     # ------------------------------------------------------------------
     # Read
@@ -293,17 +303,13 @@ class PeopleStore:
             n_results=1,
             include=["embeddings", "metadatas", "distances"],
         )
-        ids = res.get("ids") or [[]]
-        if not ids[0]:
+        rows = query_rows(res)
+        if not rows:
             return None
-        dist = float(res["distances"][0][0])
-        if dist > max_distance:
+        rid, stored_emb, meta, dist = rows[0]
+        if dist is None or dist > max_distance:
             return None
-        embs = res.get("embeddings")
-        stored_emb = embs[0][0] if embs is not None and len(embs) and len(embs[0]) else None
-        metas = res.get("metadatas")
-        meta = (metas[0][0] if metas is not None and len(metas) and len(metas[0]) else {}) or {}
-        return self._to_record(ids[0][0], stored_emb, meta, distance=dist)
+        return self._to_record(rid, stored_emb, meta, distance=dist)
 
     def recognize_fused(
         self,
@@ -346,30 +352,21 @@ class PeopleStore:
             return None
         cfg = {**FUSION_DEFAULTS, **(fusion or {})}
 
-        res = self._collection.get(include=["embeddings", "metadatas"])
-        ids = res.get("ids") or []
-        face_embs = res.get("embeddings")
-        metas = res.get("metadatas")
-        app_res = self._app_collection.get(include=["embeddings"])
-        app_ids = app_res.get("ids") or []
-        app_embs = app_res.get("embeddings")
+        rows = get_rows(self._collection.get(include=["embeddings", "metadatas"]))
         app_by_id = {
-            rid: app_embs[i]
-            for i, rid in enumerate(app_ids)
-            if app_embs is not None and i < len(app_embs) and app_embs[i] is not None
+            rid: emb
+            for rid, emb, _meta in get_rows(self._app_collection.get(include=["embeddings"]))
+            if emb is not None
         }
 
-        best: Optional[tuple[float, str, int, dict, str]] = None
-        for i, rid in enumerate(ids):
-            stored_face = (
-                face_embs[i]
-                if face_embs is not None and i < len(face_embs)
-                else None
-            )
-            meta = (metas[i] if metas is not None and i < len(metas) else {}) or {}
+        best: Optional[tuple[float, str, list | None, dict, str]] = None
+        for rid, stored_face, meta in rows:
+            # A zero-norm stored face means "enrolled without a face" (an
+            # attire-only sighting) — treat it as absent, not as similarity 0,
+            # so the appearance modality carries the match alone.
             face_sim = (
                 _cosine_sim(face, stored_face)
-                if face is not None and stored_face is not None and len(stored_face)
+                if face is not None and stored_face and any(stored_face)
                 else None
             )
             stored_app = app_by_id.get(rid)
@@ -398,35 +395,28 @@ class PeopleStore:
                 continue
 
             if score >= min_score and (best is None or score > best[0]):
-                best = (score, rid, i, meta, matched_by)
+                best = (score, rid, stored_face, meta, matched_by)
 
         if best is None:
             return None
-        score, rid, i, meta, matched_by = best
-        stored_face = face_embs[i] if face_embs is not None and i < len(face_embs) else None
+        score, rid, stored_face, meta, matched_by = best
         return self._to_record(
             rid, stored_face, meta, distance=1.0 - score, matched_by=matched_by
         )
 
-    def get(self, name: str) -> Optional[PersonRecord]:
-        """Look a person up by name (exact, case-insensitive via the slug)."""
-        raw = self._raw_get(_slug(name))
+    def get(self, name_or_id: str) -> Optional[PersonRecord]:
+        """Look a person up by name or record id (case-insensitive via the slug)."""
+        rid = _slug(name_or_id)
+        raw = self._raw_get(rid)
         if raw is None:
             return None
         emb, meta = raw
-        return self._to_record(_slug(name), emb, meta)
+        return self._to_record(rid, emb, meta)
 
     def list_people(self) -> list[PersonRecord]:
         """Everyone enrolled, most-recently-seen first."""
-        res = self._collection.get(include=["embeddings", "metadatas"])
-        ids = res.get("ids") or []
-        embs = res.get("embeddings")
-        metas = res.get("metadatas")
-        records = []
-        for i, rid in enumerate(ids):
-            emb = embs[i] if embs is not None and i < len(embs) else None
-            meta = (metas[i] if metas is not None and i < len(metas) else {}) or {}
-            records.append(self._to_record(rid, emb, meta))
+        rows = get_rows(self._collection.get(include=["embeddings", "metadatas"]))
+        records = [self._to_record(rid, emb, meta) for rid, emb, meta in rows]
         return sorted(records, key=lambda r: r.last_seen_ts, reverse=True)
 
     def count(self) -> int:
@@ -438,16 +428,11 @@ class PeopleStore:
 
     def _raw_get(self, rid: str):
         """``(embedding, metadata)`` for an id, or ``None`` if absent."""
-        res = self._collection.get(ids=[rid], include=["embeddings", "metadatas"])
-        ids = res.get("ids") or []
-        if not ids:
+        rows = get_rows(self._collection.get(ids=[rid], include=["embeddings", "metadatas"]))
+        if not rows:
             return None
-        embs = res.get("embeddings")
-        metas = res.get("metadatas")
-        emb = embs[0] if embs is not None and len(embs) else None
-        meta = (metas[0] if metas is not None and len(metas) else {}) or {}
-        emb = list(emb) if emb is not None else []
-        return emb, meta
+        _rid, emb, meta = rows[0]
+        return (emb if emb is not None else []), meta
 
     def _to_record(
         self,
