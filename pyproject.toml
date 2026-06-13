@@ -32,10 +32,11 @@ dev = [
     "pytest>=8.0.0",
     "requests>=2.32.0",
 ]
-# In-process CLIP for SCENE_EMBED_BACKEND=local (no walkie-ai-server dependency
-# for embeddings). Install with `uv sync --extra clip`. NOTE: on an RTX 5090
-# (Blackwell / sm_120) you need a CUDA 12.8 torch build — install torch from the
-# cu128 index, e.g. `uv pip install torch --index-url https://download.pytorch.org/whl/cu128`.
+# VESTIGIAL in v2 — the local-CLIP embed path (SCENE_EMBED_BACKEND=local) was
+# removed; embeddings now come from walkie-ai-server's /image-embed. `transformers`
+# is unused. Do NOT drop this blindly: `torch` is *also* required by silero-vad
+# (core, mic VAD), so removing this extra changes which torch/CUDA variant resolves
+# on the robot. Clean up only on the GPU box where it can be verified.
 clip = [
     "torch>=2.7",
     "transformers>=4.45",

@@ -2,51 +2,47 @@
 
 The on-robot brain for **Walkie** — a 4th-gen omnidirectional robot from Chulalongkorn University's EIC team.
 
-This repo orchestrates a LangChain/LangGraph **multi-agent system** over a real robot body (movement, arm, camera, mic, speaker). It's a mostly-thin local process — the heavy perception/speech models live in `walkie-ai-server` — though by default it runs the **CLIP embedder in-process** so long-term memory has no network dependency. It talks to:
+This repo orchestrates a LangChain/LangGraph **multi-agent system** over a real robot body (movement, arm, camera, mic, speaker). It is a thin local process — the heavy perception/speech models live in a separate **`walkie-ai-server`**. It talks to:
 
 - **`walkie-sdk`** (git dependency) → hardware: navigation, arm, camera over Zenoh.
-- **`walkie-ai-server`** (separate HTTP service at `WALKIE_AI_BASE_URL`) → heavy model inference (STT, TTS, object detection, image captioning, pose estimation). CLIP embeddings can come from here too (`SCENE_EMBED_BACKEND=remote`) but default to in-process.
+- **`walkie-ai-server`** (HTTP, at `WALKIE_AI_BASE_URL`) → model inference: STT, TTS, object detection, image captioning, pose estimation, image/text embeddings, face & appearance re-ID.
+- **OpenRouter** (HTTP) → the LLM that drives the agents.
 
 ```
-┌──────────────────┐      Zenoh        ┌──────────────┐
-│  walkie-agent-v2 │ ───────────────►  │ robot body   │  (nav, arm, camera)
-│  (this repo)     │                   └──────────────┘
+┌──────────────────┐      Zenoh        ┌──────────────────┐
+│  walkie-agent-v2 │ ───────────────►  │ robot body       │  (nav, arm, camera, mic, speaker)
+│  (this repo)     │                   └──────────────────┘
 │                  │      HTTP         ┌──────────────────┐
-│  LangGraph       │ ───────────────►  │ walkie-ai-server │  (STT/TTS/vision)
+│  LangGraph       │ ───────────────►  │ walkie-ai-server │  (STT/TTS/vision/embeddings)
 │  agent stack     │                   └──────────────────┘
-│                  │      HTTP         ┌──────────────┐
-│                  │ ───────────────►  │ OpenRouter   │  (the LLM brain)
-└──────────────────┘                   └──────────────┘
+│  + walkie_graphs │      HTTP         ┌──────────────────┐
+│  perception loop │ ───────────────►  │ OpenRouter       │  (the LLM brain)
+└──────────────────┘                   └──────────────────┘
 ```
 
 ---
 
-## TL;DR — the three commands you'll actually run
+## Quick start
 
 ```bash
-uv sync --extra clip                      # one-time: deps + in-process CLIP (the default backend)
-cp .env.example .env                      # one-time: then set OPENROUTER_API_KEY + WALKIE_AI_BASE_URL
+uv sync                                   # one-time: deps (resolves walkie-sdk from git, Python 3.12)
+cp .env.example .env                      # one-time: then set OPENROUTER_API_KEY
+uv run python main.py                      # run the robot — ready for commands immediately
 ```
 
-> The default embedding backend is **local** (CLIP runs in this process), so it needs the `clip` extra (torch + transformers). On an **RTX 5090** also install a CUDA 12.8 torch build: `uv pip install torch --index-url https://download.pytorch.org/whl/cu128`. Don't want the local model? `uv sync` (no extra) + set `SCENE_EMBED_BACKEND=remote` in `config.toml`. See [Embedding backend](#embedding-backend-local-default-or-remote).
+- `.env` holds **only** secrets/endpoints (`OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`). All tuning lives in version-controlled TOML — no edit needed to start.
+- Needs **`walkie-ai-server`** reachable at `WALKIE_AI_BASE_URL` (default in `config.toml`) for STT/TTS/detection/caption/embeddings.
+- No microphone? Type prompts instead: `DISABLE_LISTENING=1 uv run python main.py`.
+- Optional extras: `uv sync --extra graphs` adds [Rerun](https://rerun.io) for live 3D scene-graph visualization (imported lazily; everything else runs without it).
 
-`.env` holds only secrets/endpoints; all tuning lives in **`config.toml`** (no edit needed to start). See [Configure your environment](#2-configure-your-environment).
-
-Then, usually two things:
+The unified launcher wraps the common operations:
 
 ```bash
-# Run the robot + agent — ready for commands immediately; the scene DB fills
-# itself in the background. This also auto-starts the live DB viewer at :8500.
-uv run python main.py                        # add DISABLE_LISTENING=1 to type instead of speaking
-#    → open http://<ip-of-this-box>:8500 to watch the database fill in real time
-
-# Optional: deliberately rebuild the catalogue offline (wipe, then just drive).
-uv run python -m tools.scene_explore -y      # press Enter when you're done driving
+./run.sh                 # start the agent (same as: uv run python main.py)
+./run.sh reset           # wipe the walkie_graphs store for a clean slate
+./run.sh fresh           # reset, then start
+./run.sh help            # usage
 ```
-
-`main.py` now brings the **DB viewer up in its own process**, so you don't run a second script — open `http://<ip-of-this-box>:8500` (it binds `0.0.0.0`, so teammates on the LAN can open it too). Because it shares the robot's live ChromaDB client, browsing is fully live _and_ can't corrupt the store. Disable it with `CHROMA_VIEWER_AUTOSTART=0`; run it standalone (robot stopped) with `uv run python -m tools.chroma_viewer`. `main.py` and `scene_explore` need **`walkie-ai-server`** up at `WALKIE_AI_BASE_URL` for detection/caption/STT/TTS (CLIP embeddings run in-process by default — see [Embedding backend](#embedding-backend-local-default-or-remote)). Each command is explained in full below.
-
-> Need a clean slate? `uv run python -m tools.reset_db --all` wipes both vector DBs.
 
 ---
 
@@ -54,237 +50,76 @@ uv run python -m tools.scene_explore -y      # press Enter when you're done driv
 
 `main.py` brings the robot up **ready to take commands immediately** — there's no explore stage and nothing to press Enter for. From the first second:
 
-- A background **scene-perception loop** continuously builds and updates the CLIP scene memory (`chroma_db_scene`) from whatever the camera sees — see, remember, and re-see without any "drive around first" phase.
-- A background service writes a live perception snapshot to `perception.json`.
-- The agent listens to the mic (STT), runs the **Walkie agent** on each utterance, and speaks replies back (TTS) — so you can look at, update, and command the robot all at once.
+- A background **`walkie_graphs` perception loop** continuously builds a 3D scene graph of what the camera sees — capture RGB-D → masked open-vocabulary detection → lift each mask to a world-frame 3D point → register (ICP) → caption + embed → fuse into the spatial-memory store. It also writes a live snapshot to `perception.json` each tick for the agents to read.
+- The agent listens to the mic (STT), runs the **Walkie agent** on each utterance, and speaks replies back (TTS).
 
-(To _deliberately_ rebuild the catalogue offline — wipe and just drive to collect — use the standalone [`tools/scene_explore`](#building--rebuilding-it-toolsscene_explore); it's optional now that the ready stage fills the DB on its own.)
-
-The agent stack is four agents built from one factory:
+The agent stack is **four agents** built from one factory (`agents/core/agent.py`):
 
 - **Walkie main** — user-facing orchestrator; delegates to the sub-agents.
-- **Actuator** — movement + arm (`move_absolute`, `move_relative`, `command_arm`, …).
-- **Vision** — _live camera only_: `detect_objects_from_view`, `image_caption`, `detect_people_poses`, …
-- **Database** — long-term spatial memory: `find_object` (caption-first), `objects_near`, `recently_seen`, `list_known_objects`. "Where have I seen X / what's near here?" → Database; "what's in front of me now?" → Vision.
+- **Actuator** — movement + arm.
+- **Vision** — *live camera only*: detection, captioning, pose.
+- **Database** — long-term spatial memory over the `walkie_graphs` scene graph ("where have I seen X / what's near here?").
 
-> **Note:** the agent only "talks" by calling the `speak` tool. A plain-text model reply with no tool call ends the turn silently — by design.
+> The agent only "talks" by calling the `speak` tool. A plain-text model reply with no tool call ends the turn **silently** — by design.
 
----
-
-## Prerequisites
-
-| Requirement                                     | Notes                                                                                                                                                                                    |
-| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Python 3.12**                                 | Pinned in `.python-version`.                                                                                                                                                             |
-| **[uv](https://docs.astral.sh/uv/)**            | Package/venv manager used by this repo.                                                                                                                                                  |
-| **Git access to `EIC-Robocup-2026/walkie-sdk`** | Resolved automatically by `uv sync`.                                                                                                                                                     |
-| **OpenRouter API key**                          | The LLM brain. Get one at [openrouter.ai](https://openrouter.ai).                                                                                                                        |
-| **`walkie-ai-server` running**                  | Needed for STT/TTS/detection/caption/pose. Default `http://localhost:5000`. (CLIP embeddings run in-process by default.)                                                                 |
-| **`clip` extra (torch + transformers)**         | For the default local embedding backend: `uv sync --extra clip`. GPU strongly recommended; RTX 5090 needs a CUDA 12.8 torch build. Skip it only if you set `SCENE_EMBED_BACKEND=remote`. |
-| **A robot (or local webcam)**                   | Full nav/arm needs the robot; the camera can fall back to `device=0`.                                                                                                                    |
-| **PortAudio + a mic/speaker**                   | For `pyaudio`/`sounddevice`. On Debian/Ubuntu: `sudo apt install portaudio19-dev`.                                                                                                       |
+See **[`CLAUDE.md`](./CLAUDE.md)** for the authoritative architecture (middleware stack, tool parallelism, cross-agent state, the full tool list per agent) and **[`docs/WALKIE_GRAPHS.md`](./docs/WALKIE_GRAPHS.md)** for the perception-pipeline deep-dive.
 
 ---
 
-## Step-by-step: getting started
+## RoboCup challenge tasks (`tasks/`)
 
-### 1. Install dependencies
-
-```bash
-uv sync --extra clip    # .venv + all deps (incl. walkie-sdk) + in-process CLIP (default backend)
-```
-
-The `clip` extra pulls **torch + transformers** for the local embedding backend (the default). On an **RTX 5090** (Blackwell / sm_120) install a CUDA 12.8 torch build into the venv:
+Scripted challenge runs (their own state machine over the robot, separate from the conversational agent) live under `tasks/`:
 
 ```bash
-uv pip install torch --index-url https://download.pytorch.org/whl/cu128
+uv run python -m tasks.HRI.run            # HRI / Receptionist
+DISABLE_LISTENING=1 uv run python -m tasks.HRI.run   # type instead of speak
 ```
 
-First run downloads the CLIP checkpoint (~600 MB) and caches it. If you'd rather use the server's `/image-embed`, plain `uv sync` is enough — set `SCENE_EMBED_BACKEND=remote` in `config.toml`.
-
-### 2. Configure your environment
-
-Config is split in two:
-
-- **`.env`** (gitignored) — secrets, endpoints, per-machine/runtime toggles only.
-- **`config.toml`** (version-controlled) — all tuning knobs (perception/scene/explore/viewer/model). Edit here for behavior changes.
-
-Precedence: a shell env var **>** `.env` **>** `config.toml` **>** the code default — so you can still override any tunable from `.env` or the shell for a one-off run.
-
-```bash
-cp .env.example .env
-```
-
-Open `.env` and at minimum set your LLM key:
-
-```dotenv
-OPENROUTER_API_KEY=sk-or-...
-```
-
-`.env` variables (the full set):
-
-| Variable                                  | Default                        | What it does                                      |
-| ----------------------------------------- | ------------------------------ | ------------------------------------------------- |
-| `OPENROUTER_API_KEY`                      | _(empty)_                      | **Required.** Agent calls fail without it.        |
-| `OPENROUTER_BASE_URL`                     | `https://openrouter.ai/api/v1` | LLM endpoint.                                     |
-| `WALKIE_AI_BASE_URL`                      | `http://localhost:5000`        | Where `walkie-ai-server` lives.                   |
-| `WALKIE_ROS_PROTOCOL` / `WALKIE_ROS_PORT` | `rosbridge` / `9090`           | Robot transport.                                  |
-| `DISABLE_LISTENING`                       | `0`                            | Set `1` to type prompts instead of using the mic. |
-
-Tuning lives in **`config.toml`** — e.g. `[llm] WALKIE_MODEL`, `[scene] SCENE_PERCEPTION_INTERVAL_SEC`, `[scene.dedup] SCENE_DEDUP_RADIUS_M`, `[viewer] CHROMA_VIEWER_PORT`. Each key is the exact env-var name the code reads, grouped into tables for readability.
-
-### 3. Start the dependencies
-
-- Make sure **`walkie-ai-server`** is up and reachable at `WALKIE_AI_BASE_URL`.
-- Make sure the **robot** is powered and reachable over Zenoh (or plan to use a local webcam — see below).
-
-### 4. Run the robot
-
-```bash
-uv run python main.py
-```
-
-By default this launches the **ready stage**. You'll see:
-
-```
-[Ready] Listening — speak to Walkie. Ctrl+C to exit.
-```
-
-Now **speak to Walkie** through the mic. Each utterance is transcribed, handed to the agent, and answered with spoken audio. Press **Ctrl+C** to shut down.
-
-### 5. Run without a microphone (typing mode)
-
-Handy for development without audio hardware:
-
-```bash
-DISABLE_LISTENING=1 uv run python main.py
-```
-
-You'll get an `Enter your instruction:` prompt — type and press Enter to drive the agent.
+A task is an ordered list of `SubTask`s over a shared `TaskContext` (`tasks/base.py`); see `tasks/HRI/` for the reference implementation (greet & learn guests, offer a seat, introduce guests) and `tasks/HRI/config.toml` for its tuning (waypoints, host name, seat classes, …).
 
 ---
 
-## The legacy object memory (`chroma_db`)
+## Configuration
 
-`main.py` **no longer runs an explore stage** — the robot is ready to take commands the instant it starts, and the CLIP scene memory (below) fills itself in the background. The older `WalkieVectorDB` (`chroma_db/`) is kept only as a _fallback_ that `find_object_from_memory` reads when the CLIP `/image-embed` route is unavailable; nothing populates it automatically anymore.
+Tuning knobs live in **TOML** (version-controlled); secrets/endpoints in **`.env`** (gitignored). The TOML keys *are* the exact env-var names the code reads.
 
-To collect into it deliberately you can still drive the legacy `ExploreService` yourself (it lives in `services/explore.py`), but for "where is the X?" lookups prefer the **CLIP scene memory** below — it's what `find_object_from_memory` uses whenever `/image-embed` is available.
+| File | Scope |
+|------|-------|
+| `config.toml` | App-wide: LLM (`WALKIE_MODEL`), transport, `WALKIE_AI_BASE_URL`, runtime toggles. |
+| `services/walkie_graphs/config.toml` | The perception pipeline: detection classes, ICP/fusion thresholds, maintenance cadences, storage paths, Rerun viz. |
+| `tasks/HRI/config.toml` | The HRI task: waypoints, host, seat detection, camera FOV. Loaded **before** the app config so task values win. |
 
----
-
-## CLIP scene memory (long-term semantic search)
-
-During the **ready** stage the app also runs an always-on **scene-perception loop** that builds a semantic, spatial memory of what the robot sees. It is wired to walkie-ai-server's CLIP service:
-
-```
-camera → object_detection → bboxes_to_positions (3D) → image_caption + CLIP embed → ChromaDB (chroma_db_scene/)
-                                                          (CLIP runs in-process by default; see Embedding backend)
-```
-
-Once it's populated, `find_object_from_memory` (and the **Database agent**) answer "where is the X?" by searching the stored **captions** first (`SceneStore.text_query`, text→text — "coffee mug" matches a record captioned "a white ceramic coffee mug"), falling back to CLIP image search (`semantic_query`) if the caption index has no hit. Either way it returns map-frame `(x, y, z)` coordinates the actuator can navigate to. It runs **alongside** the `perception.json` live snapshot — they serve different purposes (long-term catalogue vs. current view).
-
-Internally the store keeps two ChromaDB collections under one id space: `scene_entries` (CLIP image embeddings, used for dedup) and `scene_captions` (CLIP text embeddings of the captions, used by `text_query`). The caption index is written automatically on new sightings; for data collected with an older build, set `SCENE_REINDEX_CAPTIONS=1` once (in `.env` or `config.toml`) to backfill it.
-
-Objects whose 3D depth-lift fails — small/distant ones, or a whole crowded frame on timeout — are **dropped** by default, so only objects with a real per-object position enter the catalogue (stamping the robot's own pose instead would store _where the robot stood_, not where the object is, and navigating back there finds nothing). Set `SCENE_POSITION_FALLBACK_POSE=1` to re-enable the old robot-pose fallback once `get_3d_poses` is trustworthy. A separate sanity gate, `SCENE_MAX_LIFT_DISTANCE_M`, rejects lifted positions farther than N metres from the robot as sensor outliers. On a confident re-sighting that merges across a large distance (visual dedup), the position is **not** averaged into the empty space between the two observations — the higher-confidence one is kept.
-
-### Embedding backend: local (default) or remote
-
-CLIP embeddings can be produced **in-process** (`SCENE_EMBED_BACKEND=local`, the default) or by the **server** (`remote`):
-
-- **local** — loads the same checkpoint (`openai/clip-vit-base-patch16`) in this process via `transformers`, GPU-accelerated (CUDA + fp16 auto). No dependency on walkie-ai-server's `/image-embed`, so a server hiccup can't break perception or lookups. Needs the optional extra: `uv sync --extra clip`. On an **RTX 5090** (Blackwell/sm_120) install a CUDA 12.8 torch build, e.g. `uv pip install torch --index-url https://download.pytorch.org/whl/cu128`. First run downloads the model (~600 MB) and caches it.
-  - Startup → `[scene] embedding backend: local (model=clip-vit-base-patch16)` then `[scene] CLIP scene memory ON (dim=…, N record(s))`.
-  - Missing extra / load failure → `[scene] local CLIP unavailable …; CLIP scene perception OFF` and the app continues on the legacy fallback.
-- **remote** — calls the server's `/image-embed` route (must be enabled there: uncomment `app.register_blueprint(image_embed.bp)` in `walkie-ai-server`). Unavailable → `[scene] image-embed unavailable …; CLIP scene perception OFF`.
-
-Either backend records the same `model_name`, so they're interchangeable over one store. Even so, if the embed path is unavailable mid-run, "where is X?" lookups still degrade to a local keyword search (see below).
-
-Tuning knobs (in `config.toml`, `[scene]` / `[scene.dedup]` / `[scene.position]` / `[scene.query]`): `SCENE_PERCEPTION_ENABLED`, `SCENE_EMBED_BACKEND`, `SCENE_CHROMA_DIR`, `SCENE_FRAMES_DIR`, `SCENE_PERCEPTION_INTERVAL_SEC`, `SCENE_MIN_CONF`, `SCENE_CAPTION_PER_OBJECT`, `SCENE_FRAME_REFRESH_ON_UPDATE`, `SCENE_FRAME_CROP`, `SCENE_FRAME_CROP_MARGIN`, `SCENE_REINDEX_CAPTIONS`, `SCENE_DEDUP_RADIUS_M`, `SCENE_DEDUP_VISUAL_K`, `SCENE_POSITION_SOURCE`, `SCENE_POSITION_FALLBACK_POSE`, `SCENE_MAX_LIFT_DISTANCE_M`, `SCENE_QUERY_MIN_CONF`.
-
-The stored document is **caption-led** (the detector class is often wrong, so it's kept out of the search text and only used as a fallback when there's no caption), and archived thumbnails are the **object crop** (bbox + `SCENE_FRAME_CROP_MARGIN` padding), not the whole frame. For "where is X?" the Database agent and `find_object_from_memory` accept `near_me=True` to restrict the search to the robot's current vicinity, and drop matches below `SCENE_QUERY_MIN_CONF` so a returned coordinate is always one the robot can actually be sent to. If the `/image-embed` server is down, lookups **fall back to a local keyword (word-overlap) search** over the stored captions so "find X" keeps working offline.
-
-### Building / rebuilding it: `tools/scene_explore`
-
-The ready stage fills the scene memory passively while you talk to the robot. To build it **deliberately** — wipe it clean and drive around just to collect — use the standalone helper:
-
-```bash
-uv run python -m tools.scene_explore         # asks before wiping, then collects
-uv run python -m tools.scene_explore -y      # skip the wipe confirmation (fast iteration)
-uv run python -m tools.scene_explore --keep   # don't wipe; add to what's already there
-uv run python -m tools.scene_explore --reset-only  # just wipe and exit
-```
-
-It deletes `SCENE_CHROMA_DIR` + `SCENE_FRAMES_DIR`, runs the same detect → lift → embed → store loop (no agent, no mic), and stops when you **press Enter**. Pruning stays off here — an explore run keeps everything it sees. Needs `/image-embed` up, same as the ready-stage loop. Its logs are at INFO so you can watch records land (`main.py` keeps them quiet — see [Logs / verbosity](#logs--verbosity)).
-
-### Eviction (keeping it fresh)
-
-In the **ready** stage the loop periodically prunes objects it no longer sees, so things you physically move away stop lingering in the store (and the viewer). It's spatially gated to the robot's current vicinity, so objects in rooms it hasn't revisited aren't wrongly deleted while it roams; thumbnails also refresh on each re-sighting. Tune with `SCENE_PRUNE_TTL_SEC`, `SCENE_PRUNE_RADIUS_M`, `SCENE_PRUNE_INTERVAL_SEC`, `SCENE_PRUNE_MAX_RECORDS` (in `config.toml`, `[scene.prune]`).
+**Precedence:** shell env **>** `.env` **>** task `config.toml` **>** app `config.toml` **>** module `config.toml` **>** code default. `walkie_config.py::load_config()` `setdefault`s every key, so the code keeps reading everything via `os.getenv(NAME, default)`.
 
 ---
 
-## Inspecting the vector DBs (Chroma viewer)
-
-A **read-only** web UI to browse everything the robot has stored — the legacy `objects` (and older `people` / `scenes`) collections in `chroma_db/`, plus the CLIP `scene_entries` memory in `chroma_db_scene/`.
-
-**The usual way: it starts itself.** `python main.py` launches the viewer in-process (a daemon thread reusing the robot's own ChromaDB clients) and prints its URL. No second script, and — crucially — no risk to the store: it reads the _same_ live index the robot writes, so there's only one HNSW index (a separate process opening the same dir would spin up a rival index and corrupt it). Turn it off with `CHROMA_VIEWER_AUTOSTART=0`; change where it binds with `CHROMA_VIEWER_HOST` / `CHROMA_VIEWER_PORT`.
-
-**Running it standalone** (a separate process — only when the robot is **not** running):
+## Maintenance tools
 
 ```bash
-uv run python -m tools.chroma_viewer            # http://localhost:8500
-uv run python -m tools.chroma_viewer --dirs chroma_db,chroma_db_scene --port 8500
+# Wipe the walkie_graphs store (chroma + point clouds + captures + background + thumbs).
+# Run with the robot stopped — ChromaDB's persistent client is single-process.
+uv run python -m services.walkie_graphs.tools.reset       # asks for confirmation
+uv run python -m services.walkie_graphs.tools.reset -y     # no confirmation   (or: ./run.sh reset)
+
+# Check Open3D GPU / ICP support.
+uv run python -m services.walkie_graphs.tools.check_gpu
 ```
-
-A standalone process can't share the robot's index, so it defaults to opening a **read-only snapshot copy** of each dir (taken once at startup) — safe to run anytime, but its data is **frozen at launch**; restart it to pick up new writes. `--live` (or `CHROMA_VIEWER_LIVE=1`) reads the real dirs in place instead, which is live but **only safe with the robot stopped** (concurrent writes from two processes corrupt the DB). For watching the DB grow during a run, use the in-process auto-start above.
-
-**Sharing it on the LAN:** the viewer binds `0.0.0.0` by default, so anyone on the same network opens `http://<ip-of-the-box-running-it>:8500` — it runs on the machine holding the Chroma dirs (the one running `main.py`). To pin a different port use `--port` (or `CHROMA_VIEWER_PORT`).
-
-It enumerates every collection in each directory and renders rows from whatever metadata they carry (so it works for any collection, not just the ones above). The UI gives you:
-
-- A persistent **sidebar** of stores → collections (with live count badges) and a **light/dark theme** toggle.
-- **Sortable columns**, **class-filter chips**, **colored class badges**, and inline **confidence/distance bars**.
-- A top-down **position map** (SVG scatter of each record's `x`/`y` in the map frame, colored by class, with the robot origin marked) — click a point to open that record.
-- **Frame thumbnails** with click-to-zoom **lightbox**; per record, the full metadata, document, archived JPEG, and an **embedding sparkline** + stats (dim / L2 norm). Frames are **downscaled server-side** (cached, keyed by `?w=`) so full-resolution camera captures render as small thumbnails in tables/galleries instead of failing to load — the lightbox still shows a crisp larger version.
-- **Search**: substring by default; switch the dropdown to **semantic** for a CLIP/vector query (best-effort — falls back to substring with a warning if `walkie-ai-server` is down).
-
-**Live updates:** the header has an **auto-refresh** dropdown (off / 2s / 5s / 10s / 30s with a countdown, remembered per-browser; initial value is `CHROMA_VIEWER_REFRESH_SEC`, default 5s). It refreshes by swapping just the content area — so your scroll position, theme, and search focus are preserved (no jarring full reload) — and pauses while you're typing. **When auto-started by `main.py`** (in-process), browse tables, counts, and substring search reflect the robot's latest writes, so you can watch the DB fill in real time; only **semantic (vector) search** lags — it's loaded into memory at startup and refreshes on viewer restart. **In standalone snapshot mode**, the auto-refresh re-renders but the underlying data is frozen at launch, so restart to see new rows.
-
-Config (in `config.toml`, `[viewer]`): `CHROMA_VIEWER_AUTOSTART`, `CHROMA_VIEWER_HOST`, `CHROMA_VIEWER_DIRS`, `CHROMA_VIEWER_PORT`, `CHROMA_VIEWER_REFRESH_SEC`, `CHROMA_VIEWER_THUMB_CACHE`, plus `SCENE_FRAMES_DIR`.
 
 ---
 
-## Standalone client tests (manual demos)
-
-These open a **local webcam** and require `walkie-ai-server` running. They are visual smoke tests, not pytest tests. They live in `manual_tests/` — run them as modules so `from client import …` resolves:
+## Tests
 
 ```bash
-uv run python -m manual_tests.test_object_detection   # boxes + labels live from webcam
-uv run python -m manual_tests.test_captioning         # image captioning
-uv run python -m manual_tests.test_pose_estimation    # human pose keypoints
+uv run pytest                 # the real suite (pyproject testpaths = ["tests"])
 ```
 
-Press `q` in the OpenCV window to quit.
-
----
-
-## Running the test suite
-
-A real pytest suite lives under `tests/` (mostly the perception subsystem):
+Interactive demos that need live hardware / the AI server live in `manual_tests/` (guarded by `__main__`, deliberately **outside** `testpaths` so pytest never collects them):
 
 ```bash
-uv run pytest                 # all tests
-uv run pytest tests/perception -v
-```
-
-> The webcam demos live in `manual_tests/` (not `tests/`), so they're never collected by the pytest run (`testpaths` is `["tests"]`).
-
-### Wiping a vector DB
-
-The DBs are generated at runtime (and gitignored). To start fresh — run with the robot/viewer stopped:
-
-```bash
-uv run python -m tools.reset_db --object   # legacy object DB (chroma_db) + object_frames
-uv run python -m tools.reset_db --scene    # CLIP scene memory (chroma_db_scene) + frames
-uv run python -m tools.reset_db --all -y   # both, skip the confirmation
+uv run python -m manual_tests.test_robot_object_detection   # robot camera + detection
+uv run python -m manual_tests.test_captioning               # image captioning
+uv run python -m manual_tests.test_pose_estimation          # human pose keypoints
+uv run python -m manual_tests.test_graphs_live              # live walkie_graphs ingest + Rerun viz
 ```
 
 ---
@@ -292,62 +127,39 @@ uv run python -m tools.reset_db --all -y   # both, skip the confirmation
 ## Project layout
 
 ```
-main.py                  Entry point: builds clients, runs the ready loop (no explore stage).
+main.py                  Entry point: builds clients, runs the ready loop.
+run.sh                   Unified launcher (start / reset / fresh).
+walkie_config.py         Loads config.toml layers via os.environ.setdefault.
+config.toml              App-wide tuning knobs.
 agents/
   core/                  Shared agent factory, middleware stack, RobotContext, tool decorators.
   walkie_agent/          Main orchestrator agent (thread_id="main").
   actuator_agent/        Movement + arm tools.
   vision_agent/          Live-camera tools: detection / captioning / pose.
-  database_agent/        Long-term spatial-memory tools (find_object, objects_near, …).
-client/                  HTTP client to walkie-ai-server (stt, tts, detection, pose, caption, embed).
-config.toml              Tuning knobs (perception/scene/explore/viewer/model); loaded by walkie_config.py.
+  database_agent/        Long-term spatial-memory tools over the scene graph.
+client/                  HTTP client to walkie-ai-server (stt, tts, detection, pose, caption, embed, face, appearance).
 interfaces/
   walkie_interface.py    Composes hardware sub-clients (nav/arm/status/tools + camera/mic/speaker).
   devices/               Local camera, microphone, speaker wrappers.
 services/
-  explore.py             Legacy explore background service (no longer run by main.py; manual use only).
-  perception.py          Ready-stage snapshot writer.
-  scene_perception.py    Ready-stage CLIP scene-perception loop (thread adapter).
-perception/              Scene store, dedup, prune, async loop, embedders, pipeline.
-db/walkie_db.py          WalkieVectorDB (ChromaDB wrapper) for object memory.
-tools/chroma_viewer.py   Read-only web UI to inspect the ChromaDB stores.
-tools/scene_explore.py   Reset + collect into the CLIP scene store (no agent/mic).
-tools/reset_db.py        Wipe the object and/or CLIP scene DBs for a clean slate.
-docs/                    Scene perception design docs (EN + TH).
-tests/                   pytest suite (perception).
-manual_tests/            Interactive webcam/robot demos (run via `python -m manual_tests.*`).
+  walkie_graphs/         The 3D scene-graph perception pipeline + store + config.toml + tools/.
+perception/              Stores layer: shared ChromaDB plumbing (vector_db) + PeopleStore (face/attire re-ID).
+tasks/                   Scripted RoboCup challenges (base/common + HRI/).
+tests/                   pytest suite (mostly walkie_graphs).
+manual_tests/            Interactive hardware/server demos (run via python -m manual_tests.*).
+docs/                    Long-form docs (WALKIE_GRAPHS.md pipeline deep-dive, RERUN.md, HRI.pdf).
 ```
-
----
-
-## Logs / verbosity
-
-Perception emits a line per tick plus a `scene.dedup` line per detection — handy when watching collection, but they bury your prompt when commanding the robot. So the default differs per entrypoint:
-
-| Command               | Perception logs     | Why                                |
-| --------------------- | ------------------- | ---------------------------------- |
-| `main.py`             | **WARNING** (quiet) | you're typing or speaking commands |
-| `tools.scene_explore` | **INFO** (verbose)  | you're watching it collect         |
-
-Override with `WALKIE_LOG_LEVEL` — uncomment it in `.env` to force one level everywhere, or set it inline for a single run: `WALKIE_LOG_LEVEL=INFO uv run python main.py`.
 
 ---
 
 ## Troubleshooting
 
-| Symptom                                                                                   | Likely cause / fix                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WARNING: OPENROUTER_API_KEY not set` and agent errors                                    | Fill `OPENROUTER_API_KEY` in `.env`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| Perception logs flooding the prompt                                                       | Expected at INFO. `main.py` defaults to WARNING; if it's noisy, comment out / unset `WALKIE_LOG_LEVEL` in `.env` (see [Logs / verbosity](#logs--verbosity)).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| Connection errors to vision/STT/TTS                                                       | `walkie-ai-server` not running or wrong `WALKIE_AI_BASE_URL`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `PortAudio`/`pyaudio` build or device errors                                              | Install PortAudio (`sudo apt install portaudio19-dev`), or run with `DISABLE_LISTENING=1`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| Robot/Zenoh connection fails                                                              | Check the robot is up and `ROBOT_IP`/`ZENOH_PORT` in `main.py` are correct.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `find_object_from_memory` returns nothing                                                 | The DB hasn't filled yet — let the robot look around (the ready-stage loop builds it in the background), or collect deliberately with `uv run python -m tools.scene_explore`. Also check matches aren't all being dropped by `SCENE_QUERY_MIN_CONF`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| Walkie "responds" but says nothing aloud                                                  | Expected unless the agent calls `speak` — the no-plain-text contract.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `walkie_graphs` Rerun viewer unreachable from another computer (connection **times out**) | The robot's **host firewall** is dropping the ports — the servers bind `0.0.0.0`, but `ufw`/iptables default-deny incoming (only SSH is allowed, which is why ping/SSH work but the viewer doesn't). Open **both** ports on the robot: `sudo ufw allow 9090/tcp && sudo ufw allow 9876/tcp` (use your actual `WALKIE_GRAPHS_RERUN_WEB_PORT` / `WALKIE_GRAPHS_RERUN_GRPC_PORT`). Both are required — the browser loads the page on the web port **and** streams data on the gRPC port. Also confirm you launched with `WALKIE_GRAPHS_VIZ=rerun WALKIE_GRAPHS_RERUN_SERVE=1` (without `RERUN_SERVE=1` it opens a local-only native window). A _connection refused_ (instant, not a timeout) instead means it isn't serving — check that startup printed the "Rerun viewer live on the LAN" line. |
+| Symptom | Likely cause / fix |
+|---------|--------------------|
+| `OPENROUTER_API_KEY not set` and agent errors | Fill `OPENROUTER_API_KEY` in `.env`. |
+| Connection errors to vision/STT/TTS | `walkie-ai-server` not running, or wrong `WALKIE_AI_BASE_URL`. |
+| `PortAudio`/`pyaudio` device errors | Install PortAudio (`sudo apt install portaudio19-dev`), or run with `DISABLE_LISTENING=1`. |
+| Walkie "responds" but says nothing aloud | Expected unless the agent calls `speak` — the no-plain-text contract. |
+| `walkie_graphs` Rerun viewer times out from another computer | The robot's host firewall is dropping the ports. Open both: `sudo ufw allow <WALKIE_GRAPHS_RERUN_WEB_PORT>/tcp && sudo ufw allow <WALKIE_GRAPHS_RERUN_GRPC_PORT>/tcp`. Launch with `WALKIE_GRAPHS_VIZ=rerun WALKIE_GRAPHS_RERUN_SERVE=1` (without it you get a local-only native window). A *connection refused* (instant, not a timeout) means it isn't serving — check the startup log. |
 
----
-
-## More context
-
-See [`CLAUDE.md`](./CLAUDE.md) for the deeper architecture notes (middleware stack, tool parallelism, cross-agent state, bbox conventions) and [`docs/`](./docs) for the scene-perception design.
+For deeper architecture and conventions, see **[`CLAUDE.md`](./CLAUDE.md)**.

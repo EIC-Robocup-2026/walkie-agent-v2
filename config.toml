@@ -54,7 +54,7 @@ DISABLE_LISTENING = "0"
 # Face/appearance person memory (perception.PeopleStore): two-modality re-ID
 # over InsightFace + OSNet embeddings from walkie-ai-server. Used by the HRI
 # task to remember guests; same single-process ChromaDB caveat as the other
-# stores. Wipe with: uv run python -m tools.reset_db --people
+# stores. Wipe by removing the PEOPLE_CHROMA_DIR / PEOPLE_FRAMES_DIR dirs below.
 PEOPLE_CHROMA_DIR = "chroma_db_people"
 PEOPLE_FRAMES_DIR = "people_frames"
 # Face-only match gate: max cosine DISTANCE (1 - similarity) to accept.

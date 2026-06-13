@@ -20,23 +20,26 @@ cp .env.example .env                   # then fill OPENROUTER_API_KEY
 # Run the robot
 uv run python main.py                  # full pipeline (Ready stage by default)
 
-# Standalone client demos (need walkie-ai-server running + local webcam).
+# Standalone client/robot demos (need walkie-ai-server running; some need the robot or a webcam).
 # Run as modules so repo root is on sys.path for `from client import ...`.
-uv run python -m manual_tests.test_object_detection
+uv run python -m manual_tests.test_robot_object_detection
 uv run python -m manual_tests.test_captioning
 uv run python -m manual_tests.test_pose_estimation
+uv run python -m manual_tests.test_graphs_live   # live walkie_graphs ingest + Rerun viz
 
 # The real pytest suite is under tests/ (pyproject testpaths=["tests"]).
 # The interactive demo scripts live in manual_tests/ (webcam/robot/live server,
 # guarded by __main__) — deliberately OUTSIDE testpaths so pytest never collects them.
 
-# Wipe a vector DB for a clean slate (run with robot/viewer stopped):
-uv run python -m tools.reset_db --object   # legacy object DB (chroma_db) + object_frames
-uv run python -m tools.reset_db --scene    # CLIP scene memory (chroma_db_scene) + frames
-uv run python -m tools.reset_db --all -y   # both, no confirmation
+# Wipe the walkie_graphs store for a clean slate (run with the robot stopped —
+# ChromaDB's persistent client is single-process). Removes the node Chroma DB,
+# point-cloud sidecars, capture segments, background cloud, thumbnails, and edges.
+uv run python -m services.walkie_graphs.tools.reset      # asks for confirmation
+uv run python -m services.walkie_graphs.tools.reset -y   # no confirmation
+#   (or: ./run.sh reset  /  ./run.sh fresh)
 
-# Diagnose a corrupt / desynced store, read-only (snapshot copy, never the live files):
-uv run python -m tools.db_doctor --scene   # dangling vectors + caption↔entries desync
+# Check Open3D GPU/ICP support:
+uv run python -m services.walkie_graphs.tools.check_gpu
 ```
 
 To run without the microphone (typing prompts at a TTY), set `DISABLE_LISTENING=1`.
@@ -97,7 +100,7 @@ There's no other shared state mechanism — graph checkpointing is `InMemorySave
 ### `WalkieInterface` and `WalkieAIClient` — two different things
 
 - `WalkieInterface` (`interfaces/walkie_interface.py`) — composes the **hardware** sub-clients: `walkie.nav`, `walkie.arm`, `walkie.status`, `walkie.tools` come from the `walkie-sdk` `WalkieRobot`; `walkie.camera`, `walkie.microphone`, `walkie.speaker` are local wrappers in `interfaces/devices/`. The camera defaults to robot mode but can be instantiated with `device=0` for a local webcam.
-- `WalkieAIClient` (`client/`) — HTTP client to the **remote AI server**. Each sub-client (`stt`, `tts`, `object_detection`, `pose_estimation`, `image_caption`) holds its own `requests.Session`. Responses are unwrapped from `{"success": true, "data": ...}`; failures raise `WalkieAPIError`.
+- `WalkieAIClient` (`client/`) — HTTP client to the **remote AI server**. Each sub-client (`stt`, `tts`, `object_detection`, `pose_estimation`, `image_caption`, `image_embed`, `face_recognition`, `appearance`) holds its own `requests.Session`. Responses are unwrapped from `{"success": true, "data": ...}`; failures raise `WalkieAPIError`.
 
 The two are passed side-by-side everywhere (typically as `walkie, walkieAI`).
 
@@ -109,17 +112,17 @@ The two are passed side-by-side everywhere (typically as `walkie, walkieAI`).
 
 Tuning knobs live in **`config.toml`** (version-controlled) plus **module-local `services/*/config.toml`** files (e.g. `services/walkie_graphs/config.toml` holds every `WALKIE_GRAPHS_*` knob); secrets/endpoints/transport stay in **`.env`** (gitignored). `walkie_config.py::load_config()` reads the root `config.toml` first, then every `services/*/config.toml`, and `os.environ.setdefault`s every leaf — so the code still reads everything via `os.getenv(NAME, default)` unchanged, and precedence is **shell env > `.env` > root `config.toml` > module `config.toml` > code default** (first-set wins, so the root can override a module knob). Every entrypoint calls `load_dotenv()` then `load_config()`. The TOML keys *are* the exact env-var names; tables are just for grouping. When you add a new tunable, give it a sensible `os.getenv` default in code AND an entry in the owning module's `config.toml` (root `config.toml` for cross-cutting knobs) — don't put it back in `.env`.
 
-### Scene memory specifics (`perception/store.py`)
+### Scene memory specifics (`services/walkie_graphs/`)
 
-- **Two collections, one id space.** `scene_entries` holds the CLIP *image* embedding (used for dedup + `visual_query`/`semantic_query`). `scene_captions` holds the CLIP *text* embedding of each caption; `text_query` searches it (text→text) so "where is the mug?" matches the caption words. `find_object_from_memory` / the Database agent query captions first, then fall back to image search. The caption index is written on insert and on caption-changing updates only; `reindex_captions()` (gated by `SCENE_REINDEX_CAPTIONS=1`) backfills pre-existing data. `prune`/`clear` keep both collections in lock-step.
-- **Caption-led documents.** `_format_document` returns the caption alone (class name only as a fallback when the caption is empty) — the detector's `class_name` is frequently wrong (it may label a bottle a "mug") while the captioner is reliable, so keeping the wrong class out of the searchable text stops it polluting "find X". The class still lives in metadata for dedup/`where` filters.
-- **Embedding backend: local (default) or remote.** `build_scene_store` picks via `SCENE_EMBED_BACKEND`. `local` (`perception.LocalCLIPEmbedder`) loads the same checkpoint (`openai/clip-vit-base-patch16`) in-process via `transformers` (CUDA+fp16 auto), so embeddings need no walkie-ai-server — crash-proof. Needs the optional extra `uv sync --extra clip` (torch+transformers, imported lazily; the rest of the app and the tests run without them). `remote` (`RemoteCLIPEmbedder`) calls `/image-embed`. Both record the same `model_name`, so the two are interchangeable over one store. Image detection/caption/STT/TTS still come from the server regardless.
-- **Embed outage is non-fatal for lookups.** `text_query`/`semantic_query` need a CLIP text embed (local tower or the server). If it errors, `lookup_object_in_memory` (shared by `find_object` and `find_object_from_memory`) catches it and degrades to `SceneStore.keyword_query` — a local word-overlap scan over stored captions that needs no embedder — labelling the answer "(semantic search unavailable)". `find_object`/`find_object_from_memory` also take `near_me=True` (restrict to the robot's pose vicinity) and drop matches below `SCENE_QUERY_MIN_CONF`.
-- **Thumbnails are object crops.** `_archive_frame` crops the source frame to the detection's bbox (+`SCENE_FRAME_CROP_MARGIN` padding) before saving, so the viewer shows the object, not the whole scene. Disable with `crop_frames_to_bbox=False` / `SCENE_FRAME_CROP=0`.
-- **Position fallback.** `process_frame(..., fallback_position=)` (fed the robot pose via the loop's `pose_provider`) stamps detections whose 3D depth-lift returns `None` — small/distant objects, or the whole batch on timeout — with the robot's own pose instead of dropping them. Without a fallback the old drop-on-`None` behavior holds.
-- **Dedup candidate sourcing.** `upsert` decides insert-vs-update by feeding `classify` (`perception/dedup.py`) a candidate set of same-class records. That set is **spatial** (`find_nearby`, within `SCENE_DEDUP_RADIUS_M`) plus, when `SCENE_DEDUP_VISUAL_K > 0`, the top-K **visual** neighbours by image embedding *regardless of position* (`_visual_candidates`). The visual path exists because the spatial radius is tight, so a confident re-sighting whose 3D position drifted (lift jitter, or the robot-pose fallback) would otherwise duplicate. Watch the band: `SCENE_DEDUP_RADIUS_M`/`TIGHT_M` must stay **above** lift jitter (~5–15 cm) or even stationary objects re-insert. Visual dedup defaults **off in code** (`os.getenv(...,"0")` — what the unit tests assert) and **on via config.toml** — the standard code-default-plus-config split. Tradeoff: distance-independent visual merge can fuse two genuinely-distinct identical-looking objects; raise `SCENE_EMB_SIM_HIGH` to be stricter.
-- **Moving classes don't belong in a spatial catalogue.** `SCENE_EXCLUDE_CLASSES` (default `person`) is filtered in `process_frame` *before* lift/caption/embed, so excluded classes cost nothing and never reach the store — people move every tick and can't be position-deduped, so they'd duplicate endlessly.
-- **Single-process only.** ChromaDB's `PersistentClient` is not safe for concurrent multi-process access. During the `ready` stage `ScenePerceptionService` writes `chroma_db_scene` continuously (insert/update + prune), so opening the *same* directory from a second process corrupts the HNSW index — surfacing as `InternalError: Error finding id` and vector queries whose results don't match the stored records. Therefore: `tools/chroma_viewer` opens a **snapshot copy** of each dir by default (`--live` / `CHROMA_VIEWER_LIVE=1` opts back into the live files, only safe with the robot stopped); `tools/db_doctor` does the same; and `text_query`'s id-join (`SceneStore._safe_get_by_ids`) degrades to a per-id fetch so one dangling id can't crash or skew the whole lookup. To diagnose an already-corrupt store use `tools/db_doctor`; to recover, `reindex_captions` fixes caption desync in place, but dangling vectors require a rebuild (`reset_db --scene`, then let the `ready` stage repopulate it).
+The long-term spatial memory is `GraphMemory` (`services/walkie_graphs/memory.py`), a ConceptGraphs-style 3D scene graph — **not** the old `SceneStore`/`perception/store.py` (removed). The full pipeline + every tuning knob is documented in [`docs/WALKIE_GRAPHS.md`](docs/WALKIE_GRAPHS.md); the load-bearing facts:
+
+- **One Chroma collection + point-cloud sidecars.** Object nodes live in a single Chroma collection (`objects`, dir `WALKIE_GRAPHS_CHROMA_DIR=chroma_db_graph`) holding each node's CLIP image embedding + metadata. The 3D point clouds, capture segments, classless background cloud, thumbnails, and relation edges live in `.npz`/JSON sidecars (`graph_pcds/`, `graph_captures/`, `graph_background.npz`, `graph_thumbs/`, `graph_edges.json`). `reset` and `prune` keep them in lock-step.
+- **Capture-centric ingest.** Each tick lifts every detection's *mask* to a world-frame cloud via depth deprojection (`geometry.deproject_mask`), assembles the segments + a background cloud into one `Capture`, applies **one rigid ICP correction per frame** (anchored by the background), then upserts each detection. Pose error lives on the capture, not per-object.
+- **Two-stage association (insert vs. merge).** `upsert` first tries a geometric+semantic match (`fusion.nn_ratio` cloud overlap + CLIP cosine, gated by `WALKIE_GRAPHS_SIM_THRESHOLD`; cross-class gated harder by `WALKIE_GRAPHS_CROSS_CLASS_SIM_THRESHOLD`), then a visual-K fallback. Spatial candidates come from within `WALKIE_GRAPHS_DEDUP_RADIUS_M`; matched → merge clouds + update node, unmatched → new node.
+- **Embeddings are remote.** CLIP image/text embeds come from walkie-ai-server's `/image-embed` (`walkieAI.image_embed`, injected as `GraphMemory.embed_text`). There is **no** local-CLIP / `SCENE_EMBED_BACKEND` path in v2 — detection, captioning, STT, TTS, and embeds all come from the server. If the text-embed call fails, caption lookups degrade gracefully.
+- **Caption-led documents, scoped classes.** Detection is scoped to `WALKIE_GRAPHS_INTERESTED_CLASSES`; `WALKIE_GRAPHS_EXCLUDE_CLASSES` (default `person`) are dropped *before* lift (moving things can't be position-deduped, so they'd duplicate endlessly); only `WALKIE_GRAPHS_CAPTION_CLASSES` get captioned. The stored searchable document is the caption — the detector class is frequently wrong, so it's kept in metadata only.
+- **Periodic maintenance.** Denoise / merge-overlapping-nodes / per-object refine / free-space carve / prune / relation-derivation run on **staggered tick cadences** (the `WALKIE_GRAPHS_*_EVERY_N` knobs) so no two collide on one tick; prune caps the store at `WALKIE_GRAPHS_PRUNE_MAX_RECORDS` (default 500).
+- **Single-process only.** ChromaDB's `PersistentClient` is not safe for concurrent multi-process access, and the `walkie_graphs` loop writes its store **continuously** during the `ready` stage — opening the *same* directory from a second process corrupts the HNSW index (`InternalError: Error finding id`, mismatched query results). To wipe & rebuild: `uv run python -m services.walkie_graphs.tools.reset` (or `./run.sh reset`), then let the `ready` stage repopulate. (The v1 `chroma_viewer` / `db_doctor` snapshot tools were removed with `SceneStore`.)
 
 ## Conventions worth knowing
 
