@@ -192,6 +192,7 @@ class OfferSeat(SubTask):
         # above; facing then uses odometry + atan2.
         world_xy = lift_bbox_world_xy(ctx, snap, seat.bbox_xyxy)
         ctx.data.setdefault("seats", {})[self.guest] = (seat, img_w, world_xy)
+        ctx.walkie.robot.arm.left.go_to_pose_relative([0.3, 0, 0.2], [0, -1.57, 0], blocking=False)
         faced = face_point(ctx, *world_xy) if world_xy else False
         if announcement:  # LLM-worded offer (may refer to the host)
             ctx.say(announcement)
@@ -203,6 +204,7 @@ class OfferSeat(SubTask):
             # No map-frame point to face (3D lift failed) — name the seat
             # without a stale left/right phrase and let the guest find it.
             ctx.say(prompts.OFFER_SEAT_FALLBACK)
+        ctx.walkie.robot.arm.left.go_to_home(blocking=False)  # reset the arm for better nav after facing
         return StepResult.DONE
 
 
@@ -212,18 +214,24 @@ class ReceiveBag(SubTask):
     def run(self, ctx: TaskContext) -> StepResult:
         if not _bag_enabled():
             return StepResult.DONE
-        wait_sec = float(os.getenv("HRI_BAG_HANDOVER_WAIT_SEC", "8"))
-        ctx.say(prompts.BAG_ASK_HANDOVER)
-        try:
-            ctx.walkie.arm.control_gripper(1.0)  # open
-            time.sleep(wait_sec)
-            ctx.say(prompts.BAG_CLOSING_WARNING)
-            time.sleep(3)
-            ctx.walkie.arm.control_gripper(0.0)  # close
-        except Exception as exc:
-            print(f"[HRI] gripper handover failed ({exc})")
-            return StepResult.DONE  # degrade: continue the flow bagless
+        ctx.walkie.robot.arm.left.go_to_pose([0.5, 0.15, 1.1], [0, -0.6, 3.14], blocking=False)
+
+        _, _, efforts = ctx.walkie.robot.arm.left.get_joint_states()
+        initial_effort = efforts[3] if efforts else 0.0
+        # Get joint 4's effort, which spikes when the bag is placed in the hand.
+        threshold = float(os.getenv("HRI_BAG_EFFORT_THRESHOLD", "1.0").strip())
+        # Give up waiting after this long so a no-show guest can't stall the run.
+        timeout = float(os.getenv("HRI_BAG_WAIT_TIMEOUT_SEC", "20").strip())
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            _, _, efforts = ctx.walkie.robot.arm.left.get_joint_states()
+            if abs(efforts[3] - initial_effort) > threshold:
+                break
+
         ctx.data["has_bag"] = True
+        time.sleep(1.5)  # let the nav settle after the arm movement and possible wait
+        ctx.walkie.robot.arm.left.go_to_home(pose_name="standby", blocking=False)  # reset the arm for better nav after receiving
         ctx.say(prompts.BAG_RECEIVED)
         return StepResult.DONE
 
