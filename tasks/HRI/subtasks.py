@@ -215,8 +215,8 @@ class ReceiveBag(SubTask):
         if not _bag_enabled():
             return StepResult.DONE
         ctx.say(prompts.BAG_ASK_HANDOVER)
-        ctx.walkie.robot.arm.left.go_to_pose([0.5, 0.15, 1.1], [0, -0.6, 3.14], blocking=False)
-        ctx.walkie.robot.arm.left.gripper(1.0)  # open: ready to receive
+        ctx.walkie.robot.arm.left.gripper(1.0, blocking=False)  # open: ready to receive
+        ctx.walkie.robot.arm.left.go_to_pose([0.5, 0.15, 1.1], [0, -0.6, 3.14], blocking=True)
 
         _, _, efforts = ctx.walkie.robot.arm.left.get_joint_states()
         initial_effort = efforts[3] if efforts else 0.0
