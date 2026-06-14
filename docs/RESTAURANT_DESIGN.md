@@ -290,8 +290,9 @@ RESTAURANT_GAZE_TRACK         # 0 = re-center between utterances, 1 = background
 - **Phase 2 — Manipulation ~1000 pts:** `pick_item` + `serve_item` on
   `go_to_pose`/`control_gripper`/`lift`. **Start the perception→grasp-pose spike
   during Phase 1** — it's the long pole.
-- **Phase 3 — Bonus:** `use_tray` (400), LLM interleave scheduler (200),
-  background gaze-tracking thread.
+- **Phase 3 — Throughput + bonus:** batched order-taking (take several orders per
+  sweep — a throughput win within the 15-min limit, *not* a separate bonus line),
+  `use_tray` (the real extra reward, 2×200), background gaze-tracking thread.
 
 ---
 
@@ -322,8 +323,11 @@ RESTAURANT_GAZE_TRACK         # 0 = re-center between utterances, 1 = background
   unit-tested), `_in_reach`, `locate_item`, `pick_item` / `serve_item` /
   `collect_items` / `serve_order`. **Fail-safe by default** — they compute and log
   the target pose but DO NOT move the arm unless `RESTAURANT_ARM_CALIBRATED=1`.
-- **Phase 3 — pending:** interleave/batch scheduler (pure logic, testable), tray
-  (bonus, bimanual — stub), background gaze-tracking thread.
+- **Phase 3 — PARTIAL:** batched order-taking (`ServeCustomersBatched`, opt-in via
+  `RESTAURANT_BATCH`; pure scheduling, off-robot verified) DONE; tray
+  (`transport_with_tray`) is a logged no-move stub (bonus, bimanual — needs
+  calibration); background gaze-tracking thread is still future (the MVP re-centers
+  between utterances instead).
 
 ### Phase 2 calibration checklist (one ordered on-robot pass)
 Do these with the robot stationary and a clear bench before setting

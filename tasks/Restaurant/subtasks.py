@@ -20,6 +20,7 @@ Blackboard layout (ctx.data):
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -188,6 +189,70 @@ class ServeCustomers(SubTask):
         return StepResult.DONE
 
 
+class ServeCustomersBatched(SubTask):
+    """Phase 3 (opt-in): take several orders in one sweep, then deliver each.
+
+    The rulebook explicitly allows taking/placing several orders before delivery.
+    Batching the order-TAKING (one scan, approach the nearest few, take all their
+    orders) trims walking and fits more customers into the 15-min limit. Delivery
+    is still per-order (one gripper can't carry a multi-item order without a tray —
+    see skills.transport_with_tray). Pure scheduling logic; pick/serve degrade as
+    in Phase 2. Selected by RESTAURANT_BATCH=1.
+    """
+
+    def run(self, ctx: TaskContext) -> StepResult:
+        target = _int("RESTAURANT_TARGET_CUSTOMERS", "2")
+        batch_size = max(1, _int("RESTAURANT_BATCH_SIZE", "2"))
+        orders: dict[int, Order] = ctx.data.setdefault("orders", {})
+
+        # Phase A — gather a batch of orders (nearest callers first).
+        callers = scan_for_callers(ctx)
+        if not callers:
+            ctx.say(prompts.NO_CUSTOMER)
+            return StepResult.DONE
+        p = ctx.current_pose()
+        callers.sort(key=lambda c: math.hypot(c.world_xy[0] - p["x"], c.world_xy[1] - p["y"]))
+        taken: list[Order] = []
+        for caller in callers[:min(batch_size, target)]:
+            order = Order(id=len(orders) + 1, world_xy=caller.world_xy, bearing=caller.bearing)
+            orders[order.id] = order
+            if not approach_to_standoff(ctx, caller.world_xy):
+                order.status = OrderStatus.FAILED
+                continue
+            order.status = OrderStatus.APPROACHED
+            order.appearance = capture_appearance(ctx, caller.world_xy)
+            items = take_order(ctx, world_xy=order.world_xy)
+            if not items:
+                order.status = OrderStatus.FAILED
+                continue
+            order.items, order.status = items, OrderStatus.ORDERED
+            taken.append(order)
+
+        if not taken:
+            ctx.say(prompts.ALL_DONE)
+            return StepResult.DONE
+
+        # Phase B — deliver each (per-order bar trip; tray would allow one trip).
+        for order in taken:
+            return_to_bar(ctx)
+            if relay_to_barman(ctx, order.items):
+                order.status = OrderStatus.RELAYED
+            if collect_items(ctx, order.items):
+                order.status = OrderStatus.PICKED
+                fresh = return_to_customer(ctx, order.world_xy) if order.world_xy else None
+                if fresh is not None:
+                    order.world_xy = fresh
+                    if serve_order(ctx, order.items):
+                        order.status = OrderStatus.SERVED
+                else:
+                    ctx.say(prompts.SERVE_NO_CUSTOMER)
+
+        ctx.say(prompts.ALL_DONE)
+        print("[restaurant] batched orders: " + ", ".join(
+            f"#{o.id}={o.status.name}({o.items})" for o in orders.values()))
+        return StepResult.DONE
+
+
 # ---------------------------------------------------------------------------
 # Factories
 # ---------------------------------------------------------------------------
@@ -197,5 +262,10 @@ def build_phase0_slice(ctx: TaskContext) -> Task:
 
 
 def build_restaurant_task(ctx: TaskContext) -> Task:
-    """Full MVP serial loop. Pure: touches no hardware at build time."""
-    return Task("Restaurant", [GoToStart(), ServeCustomers()], ctx)
+    """Full task. Serial loop by default; batched order-taking when RESTAURANT_BATCH=1.
+
+    Pure: touches no hardware at build time.
+    """
+    batched = os.getenv("RESTAURANT_BATCH", "0").lower() in ("1", "true", "yes")
+    serve = ServeCustomersBatched() if batched else ServeCustomers()
+    return Task("Restaurant", [GoToStart(), serve], ctx)

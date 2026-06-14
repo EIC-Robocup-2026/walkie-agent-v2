@@ -554,3 +554,18 @@ def serve_order(ctx: TaskContext, items: list[str]) -> bool:
     if not items:
         return False
     return all(serve_item(ctx, it) for it in items)
+
+
+def transport_with_tray(ctx: TaskContext, items: list[str]) -> bool:
+    """Optional bonus (rulebook extra reward 2×200): carry an order on a tray.
+
+    PHASE 3 FAIL-SAFE STUB. A tray is the only way to carry a multi-item order in
+    one trip (one gripper holds one object), so it both unlocks the bonus and
+    enables true batched delivery. But it is bimanual and twice the calibration
+    guesswork of a single grasp, so it is left as a logged, no-move scaffold:
+    place each item on the tray, grasp the tray with both arms, carry, deliver.
+    Returns False until implemented + calibrated. See docs/RESTAURANT_DESIGN.md.
+    """
+    print(f"[restaurant.skills] TODO transport_with_tray({items}) — bimanual tray "
+          "carry not implemented (Phase 3 bonus; needs on-robot calibration)")
+    return False
