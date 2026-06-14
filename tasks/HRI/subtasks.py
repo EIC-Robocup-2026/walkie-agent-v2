@@ -228,6 +228,7 @@ class ReceiveBag(SubTask):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             _, _, efforts = ctx.walkie.robot.arm.left.get_joint_states()
+            print(f"[HRI] waiting for bag handover... joint 4 effort: {abs(efforts[3] - initial_effort) if efforts else 'N/A'}")
             if abs(efforts[3] - initial_effort) > threshold:
                 break
 
