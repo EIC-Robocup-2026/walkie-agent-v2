@@ -1,34 +1,62 @@
-"""Restaurant subtasks + the build_restaurant_task factory (rulebook 5.5).
+"""Restaurant subtasks + task factories (rulebook 5.5).
 
-PLACEHOLDER scaffold mirroring tasks/HRI/subtasks.py. Customers call dynamically
-and any number of times, so the serving loop cannot be pre-listed as fixed steps
-the way HRI lists two guests — ServeCustomers loops until it has served the
-target number (or runs out of callers). Each iteration follows the rulebook:
-detect a calling customer -> navigate to their table -> take + confirm the order
--> relay it to the barman -> collect the items from the kitchen-bar -> deliver.
+Phase 0 (this slice) is REAL: GoToStart -> ScanForCaller -> ApproachCustomer
+(scan the dining area, detect a waving customer from pose keypoints, lift them to
+a map point, drive to a stand-off facing them). The downstream serve flow
+(take order -> relay to barman -> pick -> serve) runs too, with order-taking and
+relay real and manipulation as Phase-2 stubs that degrade.
 
-Gesture detection, online navigation and manipulation are honest stubs that
-degrade (partial scoring is allowed). Restart handling (rulebook 5.5.1) is an
-operator-driven concern and is out of scope for this scaffold.
+Two factories:
+- ``build_phase0_slice``  — GoToStart -> ScanAndApproach, for on-robot bring-up of
+  just the detection + approach skills (this box can't dry-run reactive loops).
+- ``build_restaurant_task`` — the full MVP serial loop (one customer at a time;
+  the LLM interleave scheduler is a later phase, rulebook bonus only).
 
 Blackboard layout (ctx.data):
-    served: list[list[str]]   # the orders delivered, for logging
+    bar_anchor: {"x","y","heading"}   # the Kitchen-bar pose, captured at GoToStart
+    orders:     {id: Order}           # every order seen this run
+    target:     Caller                # the caller ApproachCustomer is heading to
 """
 
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass, field
+from enum import Enum, auto
 
 from tasks.base import StepResult, SubTask, Task, TaskContext
 
 from . import prompts
 from .skills import (
+    approach_to_standoff,
     collect_items,
-    detect_calling_customer,
-    navigate_to_customer,
+    nearest_caller,
+    relay_to_barman,
+    scan_for_callers,
     serve_order,
     take_order,
 )
+
+
+class OrderStatus(Enum):
+    DETECTED = auto()
+    APPROACHED = auto()
+    ORDERED = auto()
+    RELAYED = auto()
+    PICKED = auto()
+    SERVED = auto()
+    FAILED = auto()
+
+
+@dataclass
+class Order:
+    """One customer's order through the serve pipeline (see design doc §6.1)."""
+
+    id: int
+    world_xy: tuple[float, float] | None
+    bearing: float | None
+    items: list[str] = field(default_factory=list)
+    status: OrderStatus = OrderStatus.DETECTED
 
 
 def _pose(env_key: str, default: str = "0.0,0.0,0.0") -> tuple[float, float, float]:
@@ -39,68 +67,128 @@ def _pose(env_key: str, default: str = "0.0,0.0,0.0") -> tuple[float, float, flo
     return x, y, h
 
 
+def _int(env_key: str, default: str) -> int:
+    return int(os.getenv(env_key, default))
+
+
+# ---------------------------------------------------------------------------
+# Phase 0 states
+# ---------------------------------------------------------------------------
 class GoToStart(SubTask):
-    """Position next to the kitchen-bar, facing the dining area (rulebook setup)."""
+    """Go to the Kitchen-bar start pose and remember it as the bar anchor.
+
+    The bar anchor is where relayed orders are placed and picked; later phases
+    re-acquire the bar/barman visually on return rather than trusting this point
+    blindly (design doc §5.1).
+    """
 
     critical = True
 
     def run(self, ctx: TaskContext) -> StepResult:
         x, y, h = _pose("RESTAURANT_KITCHEN_BAR_POSE")
-        return StepResult.DONE if ctx.goto(x, y, h) else StepResult.RETRY
+        ok = ctx.goto(x, y, h)
+        # Capture the real pose we ended at as the bar anchor (falls back to config).
+        pose = ctx.current_pose()
+        ctx.data["bar_anchor"] = pose if pose.get("x") or pose.get("y") else {"x": x, "y": y, "heading": h}
+        return StepResult.DONE if ok else StepResult.RETRY
 
 
+class ScanAndApproach(SubTask):
+    """Phase 0 core: sweep for a waving customer, then approach to a stand-off.
+
+    Re-sweeps on an empty scan (callers come and go); aborts to the next step
+    only after exhausting retries. Stores the chosen caller on ctx.data["target"].
+    """
+
+    max_retries = 2
+
+    def run(self, ctx: TaskContext) -> StepResult:
+        callers = scan_for_callers(ctx)
+        target = nearest_caller(ctx, callers)
+        if target is None:
+            ctx.say(prompts.NO_CUSTOMER)
+            return StepResult.RETRY
+        ctx.data["target"] = target
+        if approach_to_standoff(ctx, target.world_xy):
+            return StepResult.DONE
+        # Reached no nav goal (no odom fix / nav refused) — re-sweep and retry.
+        return StepResult.RETRY
+
+
+# ---------------------------------------------------------------------------
+# Full MVP serial loop (Phase 0 real; order/relay real; pick/serve = Phase 2 stubs)
+# ---------------------------------------------------------------------------
 class ServeCustomers(SubTask):
     """Serve up to RESTAURANT_TARGET_CUSTOMERS callers, one full cycle each.
 
-    One cycle = detect -> navigate -> order -> relay to barman -> collect ->
-    deliver, then back to the kitchen-bar. The manipulation/nav legs are stubs;
-    detection + order dialogue are real-ish.
+    One cycle = scan -> approach -> take order -> relay at the bar -> pick ->
+    deliver. Detection/approach/order/relay are real; pick/serve degrade (Phase 2).
+    Serial by design — the interleave scheduler is a later phase (bonus only).
     """
 
     def run(self, ctx: TaskContext) -> StepResult:
-        target = int(os.getenv("RESTAURANT_TARGET_CUSTOMERS", "2"))
-        served: list[list[str]] = ctx.data.setdefault("served", [])
+        target = _int("RESTAURANT_TARGET_CUSTOMERS", "2")
+        max_attempts = target + _int("RESTAURANT_EXTRA_ATTEMPTS", "3")
+        orders: dict[int, Order] = ctx.data.setdefault("orders", {})
+        served = 0
         attempts = 0
-        max_attempts = target + int(os.getenv("RESTAURANT_EXTRA_ATTEMPTS", "3"))
 
-        while len(served) < target and attempts < max_attempts:
+        while served < target and attempts < max_attempts:
             attempts += 1
-            heading = detect_calling_customer(ctx)
-            if heading is None:
+
+            # 1. Detect + approach (Phase 0).
+            caller = nearest_caller(ctx, scan_for_callers(ctx))
+            if caller is None:
                 ctx.say(prompts.NO_CUSTOMER)
                 continue
+            order = Order(id=len(orders) + 1, world_xy=caller.world_xy, bearing=caller.bearing)
+            orders[order.id] = order
+            if not approach_to_standoff(ctx, caller.world_xy):
+                order.status = OrderStatus.FAILED
+                continue
+            order.status = OrderStatus.APPROACHED
 
-            navigate_to_customer(ctx, heading)  # STUB -> partial: still take order
+            # 2. Take + confirm the order (real).
             items = take_order(ctx)
             if not items:
+                order.status = OrderStatus.FAILED
                 continue
+            order.items = items
+            order.status = OrderStatus.ORDERED
 
-            # Relay to the barman at the kitchen-bar.
-            x, y, h = _pose("RESTAURANT_KITCHEN_BAR_POSE")
-            ctx.goto(x, y, h)
-            ctx.say(prompts.RELAY_TO_BARMAN.format(items=", ".join(items)))
+            # 3. Relay at the bar (real). go_to the anchor; later: re-acquire bar visually.
+            bar = ctx.data.get("bar_anchor")
+            if bar:
+                ctx.goto(bar["x"], bar["y"], bar["heading"])
+            if relay_to_barman(ctx, items):
+                order.status = OrderStatus.RELAYED
 
-            # Collect + deliver (both STUBs today).
+            # 4. Pick + serve (Phase 2 stubs — degrade, order still counts as handled).
             if collect_items(ctx, items):
-                navigate_to_customer(ctx, heading)
-                if serve_order(ctx, items):
-                    ctx.say(prompts.SERVE_ANNOUNCE.format(items=", ".join(items)))
+                order.status = OrderStatus.PICKED
+                # TODO Phase 1/2: re-acquire the customer visually instead of the
+                # stored world_xy (design doc §5.1) before serving.
+                if order.world_xy and approach_to_standoff(ctx, order.world_xy):
+                    if serve_order(ctx, items):
+                        order.status = OrderStatus.SERVED
 
-            served.append(items)  # logged even if delivery degraded (order was taken)
-            ctx.goto(x, y, h)  # back to the bar for the next caller
+            served += 1
+            if bar:
+                ctx.goto(bar["x"], bar["y"], bar["heading"])  # back to the bar for the next caller
 
         ctx.say(prompts.ALL_DONE)
-        print(f"[restaurant] orders handled: {served}")
+        print(f"[restaurant] orders: " + ", ".join(f"#{o.id}={o.status.name}({o.items})" for o in orders.values()))
         return StepResult.DONE
 
 
+# ---------------------------------------------------------------------------
+# Factories
+# ---------------------------------------------------------------------------
+def build_phase0_slice(ctx: TaskContext) -> Task:
+    """Phase 0 only: GoToStart -> ScanAndApproach. For on-robot bring-up."""
+    return Task("Restaurant-Phase0", [GoToStart(), ScanAndApproach()], ctx)
+
+
 def build_restaurant_task(ctx: TaskContext) -> Task:
-    """Construct the Restaurant task. Pure: touches no hardware at build time."""
-    return Task(
-        "Restaurant",
-        [
-            GoToStart(),
-            ServeCustomers(),
-        ],
-        ctx,
-    )
+    """Full MVP serial loop. Pure: touches no hardware at build time."""
+    return Task("Restaurant", [GoToStart(), ServeCustomers()], ctx)

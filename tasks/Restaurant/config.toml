@@ -9,14 +9,35 @@
 # disqualification (rulebook 5.5).
 
 [restaurant]
-# Relative start reference "x,y,heading_rad" (robot starts next to the kitchen-bar
-# facing the dining area). Not an arena waypoint — online nav must take over.
+# Kitchen-bar start pose "x,y,heading_rad". Captured as the bar anchor at GoToStart;
+# later phases re-acquire the bar/barman visually on return (design doc §5.1).
 RESTAURANT_KITCHEN_BAR_POSE = "0.0,0.0,0.0"
-# Horizontal FOV (deg) for the pixel->heading aim of the gesture-detection stub.
+# Horizontal FOV (deg) of the camera (pixel<->bearing conversions).
 RESTAURANT_CAMERA_HFOV_DEG = "110"
 # How many customers to serve (rulebook scores up to two; tables >= 5 exist).
 RESTAURANT_TARGET_CUSTOMERS = "2"
 # Extra detect attempts beyond the target before giving up (no caller in view).
 RESTAURANT_EXTRA_ATTEMPTS = "3"
+# 1 = run only the Phase 0 slice (GoToStart -> scan -> approach) for on-robot bring-up.
+RESTAURANT_PHASE0 = "0"
+
+# --- Phase 0: caller detection + approach -----------------------------------
+# Base-rotation sweep that searches the dining area for a waving customer
+# (the head only tilts, so looking around is an in-place base rotation).
+RESTAURANT_SCAN_ARC_DEG = "120"      # total arc swept, centered on entry heading
+RESTAURANT_SCAN_STEP_DEG = "30"      # rotation between snapshots within the arc
+RESTAURANT_SCAN_SETTLE_SEC = "0.8"   # settle time after each rotation before capture
+# is_calling: a wrist must sit above its shoulder by this fraction of the person's
+# bbox height (rejects an arm resting near shoulder level); keypoint conf floor.
+RESTAURANT_CALL_WRIST_MARGIN = "0.05"
+RESTAURANT_KP_CONF = "0.3"
+# Merge callers whose lifted map points are within this distance (same person).
+RESTAURANT_CALLER_DEDUP_M = "0.6"
+# Stop this far in front of the customer/table (conversational + public-space safe).
+RESTAURANT_STANDOFF_M = "0.8"
+# Conservative approach speed for the public venue — a Nav2/robot-side param;
+# recorded here for that tuning (go_to does not cap velocity itself).
+RESTAURANT_APPROACH_SPEED = "0.3"
+
 # 1 = use an unattached tray to transport orders (optional goal, extra points).
 RESTAURANT_USE_TRAY = "0"
