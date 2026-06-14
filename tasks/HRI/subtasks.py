@@ -316,7 +316,7 @@ class FollowHostAndDropBag(SubTask):
         ctx.say(prompts.FOLLOW_HOST_NOT_AVAILABLE)
         try:
             ctx.walkie.robot.arm.right.go_to_home(pose_name="standby", blocking=False)  # get the arm out of the way for better nav while following
-            ctx.walkie.robot.arm.left.go_to_pose([0.38, 0.1558, 0.5299], [-2.6230, -0.0326, -1.4681], group_name="left_arm", blocking=True)
+            ctx.walkie.robot.arm.left.go_to_pose([0.38, 0.1558, 0.5299], [-2.6230, -0.0326, -1.4681], blocking=True)
             ctx.walkie.arm.control_gripper(1.0)  # open: release the bag
         except Exception as exc:
             print(f"[HRI] bag release failed ({exc})")
