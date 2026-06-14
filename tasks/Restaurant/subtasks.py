@@ -92,9 +92,17 @@ class GoToStart(SubTask):
     def run(self, ctx: TaskContext) -> StepResult:
         x, y, h = _pose("RESTAURANT_KITCHEN_BAR_POSE")
         ok = ctx.goto(x, y, h)
-        # Capture the real pose we ended at as the bar anchor (falls back to config).
-        pose = ctx.current_pose()
-        ctx.data["bar_anchor"] = pose if pose.get("x") or pose.get("y") else {"x": x, "y": y, "heading": h}
+        # Capture the real pose we ended at as the bar anchor. Key off a genuine
+        # odometry fix (None) — NOT coordinate truthiness: (0,0) is a valid pose at
+        # the SLAM origin, so `if pose.get("x")` would wrongly discard a real fix.
+        try:
+            fix = ctx.walkie.status.get_position()
+        except Exception:
+            fix = None
+        ctx.data["bar_anchor"] = (
+            {"x": fix["x"], "y": fix["y"], "heading": fix["heading"]}
+            if fix else {"x": x, "y": y, "heading": h}
+        )
         return StepResult.DONE if ok else StepResult.RETRY
 
 
