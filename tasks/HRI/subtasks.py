@@ -214,7 +214,9 @@ class ReceiveBag(SubTask):
     def run(self, ctx: TaskContext) -> StepResult:
         if not _bag_enabled():
             return StepResult.DONE
+        ctx.say(prompts.BAG_ASK_HANDOVER)
         ctx.walkie.robot.arm.left.go_to_pose([0.5, 0.15, 1.1], [0, -0.6, 3.14], blocking=False)
+        ctx.walkie.robot.arm.left.gripper(1.0)  # open: ready to receive
 
         _, _, efforts = ctx.walkie.robot.arm.left.get_joint_states()
         initial_effort = efforts[3] if efforts else 0.0
@@ -232,6 +234,7 @@ class ReceiveBag(SubTask):
         ctx.data["has_bag"] = True
         time.sleep(1.5)  # let the nav settle after the arm movement and possible wait
         ctx.walkie.robot.arm.left.go_to_home(pose_name="standby", blocking=False)  # reset the arm for better nav after receiving
+        ctx.walkie.robot.arm.left.gripper(0.0)  # open: ready to receive
         ctx.say(prompts.BAG_RECEIVED)
         return StepResult.DONE
 
