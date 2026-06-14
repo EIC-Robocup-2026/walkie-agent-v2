@@ -306,4 +306,45 @@ RESTAURANT_GAZE_TRACK         # 0 = re-center between utterances, 1 = background
 - **Customer re-ID** — appearance caption (current plan) vs. `PeopleStore` face
   re-ID. Start with appearance; escalate if return-to-customer mis-fires.
 - **Restart (5.5.1)** — needs a clean "reset to start, void all `Order` state" path.
-```
+
+---
+
+## 12. Implementation status (branch `feat/restaurant`)
+
+- **Phase 0 — DONE (off-robot verified, on-robot untested):** `is_calling`
+  (keypoint), `scan_for_callers` (base sweep), `approach_to_standoff`,
+  `face_person`; `GoToStart` → `ScanAndApproach`. Run isolated with
+  `RESTAURANT_PHASE0=1`.
+- **Phase 1 — DONE (off-robot verified):** gaze re-center in `take_order`,
+  `capture_appearance`, `find_person_near`, `return_to_bar` / `return_to_customer`
+  (re-detect on arrival), full serial `ServeCustomers` loop (order + relay real).
+- **Phase 2 — CALIBRATION-READY SCAFFOLD (NOT VALIDATED):** `_map_to_base` (pure,
+  unit-tested), `_in_reach`, `locate_item`, `pick_item` / `serve_item` /
+  `collect_items` / `serve_order`. **Fail-safe by default** — they compute and log
+  the target pose but DO NOT move the arm unless `RESTAURANT_ARM_CALIBRATED=1`.
+- **Phase 3 — pending:** interleave/batch scheduler (pure logic, testable), tray
+  (bonus, bimanual — stub), background gaze-tracking thread.
+
+### Phase 2 calibration checklist (one ordered on-robot pass)
+Do these with the robot stationary and a clear bench before setting
+`RESTAURANT_ARM_CALIBRATED=1`. Each is a config knob — no code change.
+
+1. **Groups** — confirm `RESTAURANT_ARM_GROUP` / `RESTAURANT_GRIPPER_GROUP` match
+   the MoveIt group names (`left_arm`/`right_arm`, …).
+2. **Gripper widths** — measure `RESTAURANT_GRIPPER_OPEN_M` / `_CLOSED_M` (m) for
+   the actual objects.
+3. **map→base z (`RESTAURANT_Z_OFFSET`)** — ON-ROBOT VERIFY #1: place an object at a
+   known height, compare `pick_item`'s logged `base_grasp` z to reality; set the
+   offset to close the gap.
+4. **Grasp orientation (`RESTAURANT_GRASP_RPY`)** — jog the arm to a comfortable
+   top-down (or side) grasp; read back the RPY; set it.
+5. **Pre-grasp clearance (`RESTAURANT_PREGRASP_DZ`)** — enough to clear the rim.
+6. **Reach envelope (`RESTAURANT_REACH_*`)** — jog to the arm's limits; set the box
+   so unreachable targets are rejected (logged "needs base reposition").
+7. **Lift heights (`RESTAURANT_LIFT_PICK` / `_CARRY`)** — torso height that brings
+   the bar / table into the reach box.
+8. **Place offset (`RESTAURANT_PLACE_OFFSET`)** — base-frame point over a typical
+   table; verify it's inside the reach box.
+9. Dry-run `pick_item` UNCALIBRATED first and eyeball every logged pose; only then
+   flip `RESTAURANT_ARM_CALIBRATED=1` and test pick → serve on the bench, then in
+   the loop.

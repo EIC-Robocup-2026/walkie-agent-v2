@@ -46,5 +46,36 @@ RESTAURANT_REACQUIRE_RADIUS_M = "1.5"
 # When back at the bar, treat a person within this distance of the anchor as the barman.
 RESTAURANT_BARMAN_RADIUS_M = "2.5"
 
+# --- Phase 2: manipulation (CALIBRATION-READY, NOT VALIDATED) ----------------
+# MASTER SAFETY GATE. 0 = pick/serve compute + log the target pose but DO NOT move
+# the arm (fail-safe). Set to 1 only AFTER the on-robot calibration pass below —
+# untested arm motion in a public venue is dangerous (contact = e-stop).
+RESTAURANT_ARM_CALIBRATED = "0"
+# MoveIt groups (confirm names on the robot).
+RESTAURANT_ARM_GROUP = "right_arm"
+RESTAURANT_GRIPPER_GROUP = "right_gripper"
+# Gripper opening in meters (0.0 closed .. 0.04 open) — calibrate to the objects.
+RESTAURANT_GRIPPER_OPEN_M = "0.04"
+RESTAURANT_GRIPPER_CLOSED_M = "0.0"
+# Grasp orientation roll,pitch,yaw (rad). Default = top-down (pitch 90deg). CALIBRATE.
+RESTAURANT_GRASP_RPY = "0,1.5708,0"
+# Pre-grasp clearance above the object (m), before descending to grasp.
+RESTAURANT_PREGRASP_DZ = "0.10"
+# map->base z offset (m): map z-origin vs. floor. ON-ROBOT VERIFY #1. CALIBRATE.
+RESTAURANT_Z_OFFSET = "0.0"
+# Torso lift (normalized 0..1) while picking from the bar / carrying. CALIBRATE.
+RESTAURANT_LIFT_PICK = "0.5"
+RESTAURANT_LIFT_CARRY = "0.5"
+# Where to place a served item, in the base frame "x_fwd,y_left,z_up" (m). CALIBRATE.
+RESTAURANT_PLACE_OFFSET = "0.55,0.0,0.80"
+# Arm reach envelope in the base frame (m) — a target outside this is rejected
+# ("needs base reposition") instead of commanded. CALIBRATE to the real arm.
+RESTAURANT_REACH_X_MIN = "0.20"
+RESTAURANT_REACH_X_MAX = "0.85"
+RESTAURANT_REACH_Y_MIN = "-0.55"
+RESTAURANT_REACH_Y_MAX = "0.55"
+RESTAURANT_REACH_Z_MIN = "0.0"
+RESTAURANT_REACH_Z_MAX = "1.30"
+
 # 1 = use an unattached tray to transport orders (optional goal, extra points).
 RESTAURANT_USE_TRAY = "0"

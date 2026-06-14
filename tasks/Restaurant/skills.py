@@ -373,22 +373,184 @@ def relay_to_barman(ctx: TaskContext, items: list[str]) -> bool:
     return True
 
 
-# --- Manipulation primitives (EXTENSION POINTS — Phase 2, not implemented) --
-def collect_items(ctx: TaskContext, items: list[str]) -> bool:
-    """Pick the ordered items from the kitchen-bar (optionally onto a tray).
+# ---------------------------------------------------------------------------
+# Manipulation (Phase 2 — CALIBRATION-READY SCAFFOLD, NOT VALIDATED)
+# ---------------------------------------------------------------------------
+# The arm has never executed (command_arm was a no-op), and grasp RPY / gripper
+# widths / reach envelope / the z-origin of the map->base transform are unknowable
+# without the robot. So this is FAIL-SAFE BY DEFAULT: pick/serve compute and LOG
+# the full target pose, then return False WITHOUT commanding motion — unless
+# RESTAURANT_ARM_CALIBRATED=1 is set after on-robot calibration. Untested arm
+# motion in a public venue is dangerous (contact = e-stop). See the calibration
+# checklist in docs/RESTAURANT_DESIGN.md. The transform + reach + lift math is the
+# real, unit-tested part; the constants are guesses until calibrated.
 
-    STUB: needs grasping on go_to_pose/control_gripper. Returns False so the
-    caller score-degrades.
+def _arm_calibrated() -> bool:
+    return os.getenv("RESTAURANT_ARM_CALIBRATED", "0").lower() in ("1", "true", "yes")
+
+
+def _vec3(name: str, default: str) -> tuple[float, float, float]:
+    parts = [p.strip() for p in os.getenv(name, default).split(",")]
+    x, y, z = (float(p) for p in parts)
+    return x, y, z
+
+
+def _map_to_base(pose: dict, world_xyz: tuple[float, float, float], *,
+                 z_offset: float = 0.0) -> tuple[float, float, float]:
+    """Transform a MAP-frame point into the robot's base_footprint frame (+x fwd, +y left).
+
+    Pure 2D rotation by -heading about the robot's position, plus a z offset. The
+    arm commands in base_footprint, but the depth lift gives map coordinates, so
+    every grasp goes through here. ON-ROBOT VERIFY #1: ``z_offset`` accounts for
+    the map z-origin vs. the floor (assumed equal here) — a one-number fix, not a
+    code change, once measured.
     """
-    ctx.say(prompts.PICK_NOT_AVAILABLE)
-    print(f"[restaurant.skills] TODO collect_items({items}) — manipulation not implemented")
-    return False
+    rx, ry, rh = pose["x"], pose["y"], pose["heading"]
+    dx, dy = world_xyz[0] - rx, world_xyz[1] - ry
+    c, s = math.cos(rh), math.sin(rh)
+    bx = c * dx + s * dy   # rotate by -heading
+    by = -s * dx + c * dy
+    bz = world_xyz[2] + z_offset
+    return (bx, by, bz)
+
+
+def _in_reach(base_xyz: tuple[float, float, float]) -> bool:
+    """Whether a base-frame point is inside the configured arm reach envelope."""
+    bx, by, bz = base_xyz
+    return (
+        _f("RESTAURANT_REACH_X_MIN", "0.20") <= bx <= _f("RESTAURANT_REACH_X_MAX", "0.85")
+        and _f("RESTAURANT_REACH_Y_MIN", "-0.55") <= by <= _f("RESTAURANT_REACH_Y_MAX", "0.55")
+        and _f("RESTAURANT_REACH_Z_MIN", "0.0") <= bz <= _f("RESTAURANT_REACH_Z_MAX", "1.30")
+    )
+
+
+def locate_item(ctx: TaskContext, item: str):
+    """Detect *item* on the surface ahead and lift it to a MAP-frame (x,y,z).
+
+    Returns (map_xyz, bbox_xyxy) for the highest-confidence detection, or None.
+    """
+    snap = ctx.snapshot()
+    if snap is None or not getattr(snap, "has_geometry", False):
+        return None
+    try:
+        dets = ctx.walkieAI.object_detection.detect(snap.img, prompts=[item], return_mask=True)
+    except Exception as exc:
+        print(f"[restaurant.skills] item detection failed ({exc})")
+        return None
+    dets = [d for d in dets if d.bbox is not None]
+    if not dets:
+        print(f"[restaurant.skills] item {item!r} not found on the surface")
+        return None
+    best = max(dets, key=lambda d: d.confidence or 0.0)
+    xyz = snap.bbox_world_point(best.bbox)
+    if xyz is None:
+        return None
+    return xyz, best.bbox
+
+
+def _plan_grasp(ctx: TaskContext, map_xyz: tuple[float, float, float]):
+    """Compute (and return) the base-frame grasp plan; None if no odom fix."""
+    pose = _robot_pose(ctx)
+    if pose is None:
+        return None
+    base = _map_to_base(pose, map_xyz, z_offset=_f("RESTAURANT_Z_OFFSET", "0.0"))
+    pregrasp = (base[0], base[1], base[2] + _f("RESTAURANT_PREGRASP_DZ", "0.10"))
+    rpy = _vec3("RESTAURANT_GRASP_RPY", "0,1.5708,0")  # default top-down (pitch 90°)
+    return {"grasp": base, "pregrasp": pregrasp, "rpy": rpy}
+
+
+def pick_item(ctx: TaskContext, item: str) -> bool:
+    """Pick *item* from the surface ahead. FAIL-SAFE: logs the plan, moves only if calibrated.
+
+    Pipeline: detect -> lift to map -> transform to base -> reach-check -> (calibrated)
+    lift torso, open gripper, go to pre-grasp, descend to grasp, close, retract.
+    """
+    found = locate_item(ctx, item)
+    if found is None:
+        return False
+    map_xyz, _bbox = found
+    plan = _plan_grasp(ctx, map_xyz)
+    if plan is None:
+        print("[restaurant.skills] pick: no odometry fix")
+        return False
+    group = os.getenv("RESTAURANT_ARM_GROUP", "right_arm")
+    grip = os.getenv("RESTAURANT_GRIPPER_GROUP", "right_gripper")
+    print(f"[restaurant.skills] PICK PLAN {item!r}: map={tuple(round(v,3) for v in map_xyz)} "
+          f"base_grasp={tuple(round(v,3) for v in plan['grasp'])} "
+          f"pregrasp={tuple(round(v,3) for v in plan['pregrasp'])} rpy={plan['rpy']} "
+          f"arm={group} gripper={grip}")
+    if not _in_reach(plan["grasp"]):
+        print("[restaurant.skills] pick: target OUT OF REACH — needs a base reposition (TODO)")
+        return False
+    if not _arm_calibrated():
+        print("[restaurant.skills] pick: UNCALIBRATED — computed pose only, NOT moving "
+              "(set RESTAURANT_ARM_CALIBRATED=1 after calibration)")
+        ctx.say(prompts.PICK_NOT_AVAILABLE)
+        return False
+    # --- calibrated execution path (untested until the robot session) ---
+    r, p, yw = plan["rpy"]
+    gx, gy, gz = plan["grasp"]
+    px, py, pz = plan["pregrasp"]
+    try:
+        ctx.walkie.robot.lift.set(_f("RESTAURANT_LIFT_PICK", "0.5"))
+        ctx.walkie.arm.control_gripper(grip, _f("RESTAURANT_GRIPPER_OPEN_M", "0.04"))
+        if ctx.walkie.arm.go_to_pose(px, py, pz, r, p, yw, group) != "SUCCEEDED":
+            return False
+        if ctx.walkie.arm.go_to_pose(gx, gy, gz, r, p, yw, group, cartesian_path=True) != "SUCCEEDED":
+            return False
+        ctx.walkie.arm.control_gripper(grip, _f("RESTAURANT_GRIPPER_CLOSED_M", "0.0"))
+        ctx.walkie.arm.go_to_pose(px, py, pz, r, p, yw, group, cartesian_path=True)  # retract up
+    except Exception as exc:
+        print(f"[restaurant.skills] pick: arm command failed ({exc})")
+        return False
+    return True
+
+
+def serve_item(ctx: TaskContext, item: str) -> bool:
+    """Place a held item on the table ahead. FAIL-SAFE like pick_item.
+
+    Places at a fixed base-frame point (RESTAURANT_PLACE_OFFSET = forward, table
+    height) since the robot is already faced at the customer's table.
+    """
+    place = _vec3("RESTAURANT_PLACE_OFFSET", "0.55,0.0,0.80")
+    rpy = _vec3("RESTAURANT_GRASP_RPY", "0,1.5708,0")
+    group = os.getenv("RESTAURANT_ARM_GROUP", "right_arm")
+    grip = os.getenv("RESTAURANT_GRIPPER_GROUP", "right_gripper")
+    print(f"[restaurant.skills] SERVE PLAN {item!r}: base_place={place} rpy={rpy} arm={group}")
+    if not _in_reach(place):
+        print("[restaurant.skills] serve: place point OUT OF REACH — adjust RESTAURANT_PLACE_OFFSET")
+        return False
+    if not _arm_calibrated():
+        print("[restaurant.skills] serve: UNCALIBRATED — computed pose only, NOT moving")
+        return False
+    r, p, yw = rpy
+    x, y, z = place
+    try:
+        ctx.walkie.robot.lift.set(_f("RESTAURANT_LIFT_CARRY", "0.5"))
+        if ctx.walkie.arm.go_to_pose(x, y, z, r, p, yw, group) != "SUCCEEDED":
+            return False
+        ctx.walkie.arm.control_gripper(grip, _f("RESTAURANT_GRIPPER_OPEN_M", "0.04"))
+        ctx.walkie.arm.go_to_home(group_name=group)
+    except Exception as exc:
+        print(f"[restaurant.skills] serve: arm command failed ({exc})")
+        return False
+    return True
+
+
+def collect_items(ctx: TaskContext, items: list[str]) -> bool:
+    """Pick every ordered item from the Kitchen-bar. True only if all succeeded.
+
+    FAIL-SAFE until calibrated (see pick_item). NOTE: a single gripper holds one
+    item — multi-item carry/tray batching is a Phase-3 concern; for now each item
+    is picked in turn (and, uncalibrated, none actually move).
+    """
+    if not items:
+        return False
+    return all(pick_item(ctx, it) for it in items)
 
 
 def serve_order(ctx: TaskContext, items: list[str]) -> bool:
-    """Place the items on the customer's table (or hand off the tray).
-
-    STUB: depends on collect_items. Returns False until implemented.
-    """
-    print(f"[restaurant.skills] TODO serve_order({items}) — not implemented")
-    return False
+    """Place every item on the customer's table. True only if all succeeded."""
+    if not items:
+        return False
+    return all(serve_item(ctx, it) for it in items)
