@@ -317,7 +317,8 @@ class FollowHostAndDropBag(SubTask):
         try:
             ctx.walkie.robot.arm.right.go_to_home(pose_name="standby", blocking=False)  # get the arm out of the way for better nav while following
             ctx.walkie.robot.arm.left.go_to_pose([0.38, 0.1558, 0.5299], [-2.6230, -0.0326, -1.4681], blocking=True)
-            ctx.walkie.arm.control_gripper(1.0)  # open: release the bag
+            ctx.walkie.robot.arm.left.control_gripper(1.0)  # open: release the bag
+            ctx.walkie.robot.arm.go_to_home(group_name="both_arms_lift", blocking=False)  # reset the arm for better nav after releasing the bag
         except Exception as exc:
             print(f"[HRI] bag release failed ({exc})")
         return StepResult.DONE
