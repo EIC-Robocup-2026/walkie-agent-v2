@@ -227,27 +227,148 @@ def approach_to_standoff(ctx: TaskContext, world_xy: tuple[float, float], *,
 # ---------------------------------------------------------------------------
 # Interaction (order taking is real; relay speaks the order)
 # ---------------------------------------------------------------------------
-def take_order(ctx: TaskContext) -> list[str]:
+def describe_customer(ctx: TaskContext, snap, bbox_xyxy: BBox) -> str | None:
+    """Caption a customer's appearance from their crop, to re-identify on return."""
+    img = getattr(snap, "img", None)
+    if img is None:
+        return None
+    x1, y1, x2, y2 = (int(v) for v in bbox_xyxy)
+    m = 15  # px padding so clothing isn't clipped
+    crop = img.crop((max(0, x1 - m), max(0, y1 - m),
+                     min(img.width, x2 + m), min(img.height, y2 + m)))
+    try:
+        return ctx.walkieAI.image_caption.caption(crop, prompt=prompts.CUSTOMER_APPEARANCE_PROMPT)
+    except Exception as exc:
+        print(f"[restaurant.skills] appearance caption failed ({exc})")
+        return None
+
+
+def capture_appearance(ctx: TaskContext, world_xy: tuple[float, float]) -> str | None:
+    """Snapshot, find the person nearest *world_xy*, and caption their appearance.
+
+    Detection + caption share one snapshot so the bbox lines up with the image.
+    Best-effort; None if no person/geometry. Stored on the Order for re-ID/logging.
+    """
+    snap = ctx.snapshot()
+    if snap is None or not getattr(snap, "has_geometry", False):
+        return None
+    try:
+        persons = ctx.walkieAI.pose_estimation.estimate(snap.img)
+    except Exception as exc:
+        print(f"[restaurant.skills] appearance pose estimation failed ({exc})")
+        return None
+    best_box = None
+    best_d = float("inf")
+    for p in persons:
+        xyxy = _cxcywh_to_xyxy(p.bbox)
+        wxy = snap.bbox_world_xy(xyxy)
+        if wxy is None:
+            continue
+        d = math.hypot(wxy[0] - world_xy[0], wxy[1] - world_xy[1])
+        if d < best_d:
+            best_box, best_d = xyxy, d
+    return describe_customer(ctx, snap, best_box) if best_box is not None else None
+
+
+def find_person_near(ctx: TaskContext, world_xy: tuple[float, float], *,
+                     radius_m: float | None = None) -> Caller | None:
+    """Re-acquire a person near a remembered map point (anti-drift, design §5.1).
+
+    One forward snapshot: detect people, lift each, return the one closest to
+    *world_xy* within *radius_m*. None if nobody qualifies. Used to re-find the
+    customer (before serving) or the barman (at the bar) rather than trusting a
+    stored coordinate after minutes in a moving room.
+    """
+    if radius_m is None:
+        radius_m = _f("RESTAURANT_REACQUIRE_RADIUS_M", "1.5")
+    pose = _robot_pose(ctx)
+    snap = ctx.snapshot()
+    if snap is None or not getattr(snap, "has_geometry", False):
+        return None
+    try:
+        persons = ctx.walkieAI.pose_estimation.estimate(snap.img)
+    except Exception as exc:
+        print(f"[restaurant.skills] re-acquire pose estimation failed ({exc})")
+        return None
+    best: Caller | None = None
+    best_d = radius_m
+    for p in persons:
+        xyxy = _cxcywh_to_xyxy(p.bbox)
+        wxy = snap.bbox_world_xy(xyxy)
+        if wxy is None:
+            continue
+        d = math.hypot(wxy[0] - world_xy[0], wxy[1] - world_xy[1])
+        if d <= best_d:
+            bearing = (math.atan2(wxy[1] - pose["y"], wxy[0] - pose["x"])
+                       if pose else 0.0)
+            best, best_d = Caller(wxy, bearing, xyxy, p.confidence or 0.0), d
+    return best
+
+
+def take_order(ctx: TaskContext, world_xy: tuple[float, float] | None = None) -> list[str]:
     """Greet the customer, capture and confirm their order. Real dialogue today.
 
-    The rulebook scores 'understand and confirm the order' and penalises not
-    making eye contact — a real version should face the customer while talking.
+    Gaze (rulebook-scored): if *world_xy* is given, the robot re-faces the
+    customer before each utterance — MVP "look at the person" without a full
+    continuous-tracking thread (design doc §5.2). The order is asked in one
+    question (no penalised confirmation questions); re-asking on a misheard reply
+    is allowed and not penalised.
     """
+    def recenter():
+        if world_xy is not None:
+            face_person(ctx, world_xy)
+
+    recenter()
     answer = ctx.ask(prompts.GREET_CUSTOMER)
     if not answer:
+        recenter()
         answer = ctx.ask(prompts.ASK_REPEAT, retries=0)
     parsed = ctx.extract(prompts.Order, prompts.EXTRACT_ORDER_INSTRUCTIONS, answer or "")
     items = parsed.items if parsed else []
     if items:
+        recenter()
         ctx.say(prompts.CONFIRM_ORDER.format(items=", ".join(items)))
         ctx.say(prompts.ORDER_TAKEN)
     return items
+
+
+def return_to_bar(ctx: TaskContext) -> bool:
+    """Drive to the bar anchor, then re-acquire the barman and face them.
+
+    go_to gets us near the remembered anchor; the truth is the live camera, so we
+    look for the person there and face them for the relay (design §5.1). Degrades
+    to just reaching the anchor if no barman is seen.
+    """
+    bar = ctx.data.get("bar_anchor")
+    if not bar:
+        return False
+    ok = ctx.goto(bar["x"], bar["y"], bar["heading"])
+    barman = find_person_near(ctx, (bar["x"], bar["y"]),
+                              radius_m=_f("RESTAURANT_BARMAN_RADIUS_M", "2.5"))
+    if barman is not None:
+        face_person(ctx, barman.world_xy)
+    return ok
+
+
+def return_to_customer(ctx: TaskContext, world_xy: tuple[float, float]) -> tuple[float, float] | None:
+    """Return to a customer: go near the stored point, then re-acquire them fresh.
+
+    Returns the customer's refreshed map point (for serving) or None if they
+    could not be re-found. Approaches the fresh detection to a stand-off; updates
+    nothing in place (caller stores the returned point on the Order).
+    """
+    approach_to_standoff(ctx, world_xy)  # get into viewing range of the table
+    fresh = find_person_near(ctx, world_xy)
+    target = fresh.world_xy if fresh is not None else world_xy
+    approach_to_standoff(ctx, target)
+    return target if fresh is not None else None
 
 
 def relay_to_barman(ctx: TaskContext, items: list[str]) -> bool:
     """Speak the order to the barman at the Kitchen-bar (real). Returns whether spoken."""
     if not items:
         return False
+    ctx.say(prompts.GREET_BARMAN)
     ctx.say(prompts.RELAY_TO_BARMAN.format(items=", ".join(items)))
     return True
 

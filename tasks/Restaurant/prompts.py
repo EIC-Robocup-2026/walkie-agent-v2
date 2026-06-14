@@ -40,6 +40,16 @@ RELAY_TO_BARMAN = "Order for a customer: {items}, please."
 SERVE_ANNOUNCE = "Here is your order: {items}. Enjoy!"
 ALL_DONE = "I have served all the customers I could reach."
 
-# Placeholder lines for the not-yet-implemented perception/manipulation steps.
+GREET_BARMAN = "Hello! I have an order to place."
+SERVE_NO_CUSTOMER = "I could not find you again to serve the order, sorry."
+
+# Caption prompt to remember a customer's look, so we can re-find them on return.
+CUSTOMER_APPEARANCE_PROMPT = (
+    "Describe this seated restaurant customer's visible appearance in one short "
+    "sentence for someone who must recognize them again: clothing and its colors, "
+    "hair, glasses, and any other distinctive feature."
+)
+
+# Placeholder lines for the not-yet-implemented manipulation steps.
 NO_CUSTOMER = "I do not see anyone calling right now."
 PICK_NOT_AVAILABLE = "I cannot pick up the items yet — manipulation is not implemented."

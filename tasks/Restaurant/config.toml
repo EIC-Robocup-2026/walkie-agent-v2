@@ -39,5 +39,12 @@ RESTAURANT_STANDOFF_M = "0.8"
 # recorded here for that tuning (go_to does not cap velocity itself).
 RESTAURANT_APPROACH_SPEED = "0.3"
 
+# --- Phase 1: re-acquire on return (anti-drift, design §5.1) -----------------
+# When returning to a customer, accept a re-detected person within this distance
+# of the stored point as "the same customer" (else keep the stored point).
+RESTAURANT_REACQUIRE_RADIUS_M = "1.5"
+# When back at the bar, treat a person within this distance of the anchor as the barman.
+RESTAURANT_BARMAN_RADIUS_M = "2.5"
+
 # 1 = use an unattached tray to transport orders (optional goal, extra points).
 RESTAURANT_USE_TRAY = "0"

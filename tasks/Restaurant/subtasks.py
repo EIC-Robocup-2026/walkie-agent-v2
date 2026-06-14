@@ -29,9 +29,12 @@ from tasks.base import StepResult, SubTask, Task, TaskContext
 from . import prompts
 from .skills import (
     approach_to_standoff,
+    capture_appearance,
     collect_items,
     nearest_caller,
     relay_to_barman,
+    return_to_bar,
+    return_to_customer,
     scan_for_callers,
     serve_order,
     take_order,
@@ -56,6 +59,7 @@ class Order:
     world_xy: tuple[float, float] | None
     bearing: float | None
     items: list[str] = field(default_factory=list)
+    appearance: str | None = None  # caption, to re-identify the customer on return
     status: OrderStatus = OrderStatus.DETECTED
 
 
@@ -121,8 +125,9 @@ class ScanAndApproach(SubTask):
 class ServeCustomers(SubTask):
     """Serve up to RESTAURANT_TARGET_CUSTOMERS callers, one full cycle each.
 
-    One cycle = scan -> approach -> take order -> relay at the bar -> pick ->
-    deliver. Detection/approach/order/relay are real; pick/serve degrade (Phase 2).
+    One cycle = scan -> approach -> take order (gaze) -> relay at the bar
+    (re-acquire barman) -> pick -> return to customer (re-acquire) -> serve.
+    Detection/approach/order/relay are real; pick/serve degrade (Phase 2).
     Serial by design — the interleave scheduler is a later phase (bonus only).
     """
 
@@ -147,37 +152,39 @@ class ServeCustomers(SubTask):
                 order.status = OrderStatus.FAILED
                 continue
             order.status = OrderStatus.APPROACHED
+            order.appearance = capture_appearance(ctx, caller.world_xy)  # for re-ID/logging
 
-            # 2. Take + confirm the order (real).
-            items = take_order(ctx)
+            # 2. Take + confirm the order (real), re-facing the customer (gaze).
+            items = take_order(ctx, world_xy=order.world_xy)
             if not items:
                 order.status = OrderStatus.FAILED
                 continue
             order.items = items
             order.status = OrderStatus.ORDERED
 
-            # 3. Relay at the bar (real). go_to the anchor; later: re-acquire bar visually.
-            bar = ctx.data.get("bar_anchor")
-            if bar:
-                ctx.goto(bar["x"], bar["y"], bar["heading"])
+            # 3. Relay at the bar — go_to the anchor, then re-acquire the barman.
+            return_to_bar(ctx)
             if relay_to_barman(ctx, items):
                 order.status = OrderStatus.RELAYED
 
             # 4. Pick + serve (Phase 2 stubs — degrade, order still counts as handled).
             if collect_items(ctx, items):
                 order.status = OrderStatus.PICKED
-                # TODO Phase 1/2: re-acquire the customer visually instead of the
-                # stored world_xy (design doc §5.1) before serving.
-                if order.world_xy and approach_to_standoff(ctx, order.world_xy):
+                # Re-acquire the customer visually (don't trust the stale point, §5.1).
+                fresh = return_to_customer(ctx, order.world_xy) if order.world_xy else None
+                if fresh is not None:
+                    order.world_xy = fresh
                     if serve_order(ctx, items):
                         order.status = OrderStatus.SERVED
+                else:
+                    ctx.say(prompts.SERVE_NO_CUSTOMER)
 
             served += 1
-            if bar:
-                ctx.goto(bar["x"], bar["y"], bar["heading"])  # back to the bar for the next caller
+            return_to_bar(ctx)  # back to the bar for the next caller
 
         ctx.say(prompts.ALL_DONE)
-        print(f"[restaurant] orders: " + ", ".join(f"#{o.id}={o.status.name}({o.items})" for o in orders.values()))
+        print("[restaurant] orders: " + ", ".join(
+            f"#{o.id}={o.status.name}({o.items})" for o in orders.values()))
         return StepResult.DONE
 
 
