@@ -1,0 +1,22 @@
+# Doing Laundry task config (rulebook 5.4) — loaded by tasks/Laundry/run.py via
+# tasks.common.load_task_config BEFORE the root config.toml, so any key here wins
+# over the global value. Shell env and .env still override both.
+# Precedence: shell env > .env > this file > root config.toml > code default.
+#
+# PLACEHOLDER: waypoints are stubs — set them after mapping the laundry area.
+
+[laundry]
+# Map-frame waypoints "x,y,heading_rad".
+LAUNDRY_AREA_POSE = "0.0,0.0,0.0"     # entry / laundry-area approach
+LAUNDRY_WASHER_POSE = "0.0,0.0,0.0"   # facing the washing machine
+LAUNDRY_BASKET_POSE = "0.0,0.0,0.0"   # facing the laundry basket
+LAUNDRY_TABLE_POSE = "0.0,0.0,0.0"    # facing the folding table
+
+# Open-vocab detector prompts for clothing (rulebook: laundry is all T-shirts).
+LAUNDRY_CLOTH_CLASSES = "t-shirt,shirt,clothing,cloth,towel"
+# How many garments to attempt folding (main goal needs at least one).
+LAUNDRY_MAX_FOLD = "1"
+
+# Optional goals — off by default until the manipulation primitives exist.
+LAUNDRY_ENABLE_WASHER = "0"   # open the washing-machine door + remove clothes
+LAUNDRY_USE_BASKET = "0"      # carry the basket to transport clothes

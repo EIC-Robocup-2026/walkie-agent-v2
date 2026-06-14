@@ -1,0 +1,22 @@
+# Restaurant task config (rulebook 5.5) — loaded by tasks/Restaurant/run.py via
+# tasks.common.load_task_config BEFORE the root config.toml, so any key here wins
+# over the global value. Shell env and .env still override both.
+# Precedence: shell env > .env > this file > root config.toml > code default.
+#
+# PLACEHOLDER. NOTE: this test runs in a REAL, undisclosed restaurant with online
+# mapping — there is no pre-mapped arena, so the kitchen-bar "pose" is only a
+# relative start reference, not an absolute map waypoint. Mapping in advance is a
+# disqualification (rulebook 5.5).
+
+[restaurant]
+# Relative start reference "x,y,heading_rad" (robot starts next to the kitchen-bar
+# facing the dining area). Not an arena waypoint — online nav must take over.
+RESTAURANT_KITCHEN_BAR_POSE = "0.0,0.0,0.0"
+# Horizontal FOV (deg) for the pixel->heading aim of the gesture-detection stub.
+RESTAURANT_CAMERA_HFOV_DEG = "110"
+# How many customers to serve (rulebook scores up to two; tables >= 5 exist).
+RESTAURANT_TARGET_CUSTOMERS = "2"
+# Extra detect attempts beyond the target before giving up (no caller in view).
+RESTAURANT_EXTRA_ATTEMPTS = "3"
+# 1 = use an unattached tray to transport orders (optional goal, extra points).
+RESTAURANT_USE_TRAY = "0"

@@ -1,0 +1,26 @@
+# Pick and Place task config (rulebook 5.2) — loaded by tasks/PickAndPlace/run.py
+# via tasks.common.load_task_config BEFORE the root config.toml, so any key here
+# wins over the global value. Shell env and .env still override both.
+# Precedence: shell env > .env > this file > root config.toml > code default.
+#
+# PLACEHOLDER: every waypoint is a stub "x,y,heading_rad" — set them after
+# mapping the kitchen arena.
+
+[pick_and_place]
+# Map-frame waypoints "x,y,heading_rad".
+PNP_KITCHEN_POSE = "0.0,0.0,0.0"            # entry / kitchen approach
+PNP_DINING_TABLE_POSE = "0.0,0.0,0.0"       # facing the dining table
+PNP_DISHWASHER_POSE = "0.0,0.0,0.0"
+PNP_CABINET_POSE = "0.0,0.0,0.0"
+PNP_TRASH_BIN_POSE = "0.0,0.0,0.0"
+PNP_BREAKFAST_SURFACE_POSE = "0.0,0.0,0.0"  # where bowl + spoon start
+PNP_EXTRA_SURFACE_POSE = "0.0,0.0,0.0"
+
+# Open-vocab detector prompts for the dining-table / extra-surface objects.
+PNP_TABLE_CLASSES = "cup,mug,plate,fork,knife,spoon,bottle,box,can,bowl"
+# The object category treated as trash this run (announced during Setup Days).
+PNP_TRASH_CATEGORY = ""
+
+# Optional goals — off by default until the manipulation primitives exist.
+PNP_ENABLE_DISHWASHER = "0"   # open/close door, pull/push rack, place tab
+PNP_ENABLE_POUR = "0"         # pour milk + cereal into the bowl

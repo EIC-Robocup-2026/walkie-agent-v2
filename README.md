@@ -71,11 +71,17 @@ See **[`CLAUDE.md`](./CLAUDE.md)** for the authoritative architecture (middlewar
 Scripted challenge runs (their own state machine over the robot, separate from the conversational agent) live under `tasks/`:
 
 ```bash
-uv run python -m tasks.HRI.run            # HRI / Receptionist
-DISABLE_LISTENING=1 uv run python -m tasks.HRI.run   # type instead of speak
+uv run python -m tasks.HRI.run            # 5.1 HRI / Receptionist  (reference implementation)
+uv run python -m tasks.PickAndPlace.run   # 5.2 Pick and Place      (scaffold)
+uv run python -m tasks.GPSR.run           # 5.3 GPSR                (scaffold — delegates to the agent stack)
+uv run python -m tasks.Laundry.run        # 5.4 Doing Laundry       (scaffold)
+uv run python -m tasks.Restaurant.run     # 5.5 Restaurant          (scaffold)
+DISABLE_LISTENING=1 uv run python -m tasks.HRI.run   # type instead of speak (any task)
 ```
 
 A task is an ordered list of `SubTask`s over a shared `TaskContext` (`tasks/base.py`); see `tasks/HRI/` for the reference implementation (greet & learn guests, offer a seat, introduce guests) and `tasks/HRI/config.toml` for its tuning (waypoints, host name, seat classes, …).
+
+The other four challenges (`tasks/PickAndPlace`, `tasks/GPSR`, `tasks/Laundry`, `tasks/Restaurant`) are **placeholder scaffolds** copying the HRI shape: each lays out its rulebook flow as named `SubTask` steps with honest TODO stubs for the perception/manipulation that doesn't exist yet (degrading like `HRI.FollowHostAndDropBag`, never crashing), plus a `prompts.py`, `config.toml`, and (where useful) a `skills.py`. The per-challenge rulebook excerpts they implement live in [`docs/`](docs/) — one PDF per challenge (`docs/HRI.pdf`, `docs/PickAndPlace.pdf`, `docs/GPSR.pdf`, `docs/Laundry.pdf`, `docs/Restaurant.pdf`), cut from the RoboCup@Home 2026 rulebook chapter 5.
 
 ---
 

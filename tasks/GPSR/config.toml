@@ -1,0 +1,17 @@
+# GPSR task config (rulebook 5.3) — loaded by tasks/GPSR/run.py via
+# tasks.common.load_task_config BEFORE the root config.toml, so any key here
+# wins over the global value. Shell env and .env still override both.
+# Precedence: shell env > .env > this file > root config.toml > code default.
+
+[gpsr]
+# Map-frame waypoint "x,y,heading_rad" announced ~2h before the test.
+GPSR_INSTRUCTION_POINT_POSE = "0.0,0.0,0.0"
+# Maximum commands taken in one go (the rulebook issues three).
+GPSR_MAX_COMMANDS = "3"
+# How the operator issues commands: "consecutive" (all at once, enables the
+# interleaved-task bonus) or "one_by_one" (return to the instruction point
+# between each).
+GPSR_ISSUE_MODE = "consecutive"
+# 1 = run the walkie_graphs perception loop in the background during the task so
+# "find/bring object" commands can use long-term spatial memory.
+GPSR_START_PERCEPTION = "1"
