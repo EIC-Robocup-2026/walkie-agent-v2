@@ -192,7 +192,7 @@ class OfferSeat(SubTask):
         # above; facing then uses odometry + atan2.
         world_xy = lift_bbox_world_xy(ctx, snap, seat.bbox_xyxy)
         ctx.data.setdefault("seats", {})[self.guest] = (seat, img_w, world_xy)
-        ctx.walkie.robot.arm.left.go_to_pose_relative([0.3, 0, 0.2], [0, -1.57, 0], blocking=False)
+        ctx.walkie.robot.arm.go_to_pose_relative([0.3, 0, 0.2], [0, -1.57, 0], group_name="left_arm", blocking=False)
         faced = face_point(ctx, *world_xy) if world_xy else False
         if announcement:  # LLM-worded offer (may refer to the host)
             ctx.say(announcement)
@@ -216,7 +216,7 @@ class ReceiveBag(SubTask):
             return StepResult.DONE
         ctx.say(prompts.BAG_ASK_HANDOVER)
         ctx.walkie.robot.arm.left.gripper(1.0, blocking=False)  # open: ready to receive
-        ctx.walkie.robot.arm.left.go_to_pose([0.5, 0.15, 1.1], [0, -0.6, 3.14], blocking=True)
+        ctx.walkie.robot.arm.go_to_pose([0.45, 0.15, 1.15], [-0.8, 0, -1.57], group_name="left_arm", blocking=True)
 
         _, _, efforts = ctx.walkie.robot.arm.left.get_joint_states()
         initial_effort = efforts[3] if efforts else 0.0
@@ -234,7 +234,7 @@ class ReceiveBag(SubTask):
 
         ctx.data["has_bag"] = True
         time.sleep(1.5)  # let the nav settle after the arm movement and possible wait
-        ctx.walkie.robot.arm.left.go_to_home(pose_name="standby", blocking=False)  # reset the arm for better nav after receiving
+        ctx.walkie.robot.arm.go_to_pose([0.3, 0.15, 1.15], [-0.8, 0, -1.57], group_name="left_arm", blocking=True)
         ctx.walkie.robot.arm.left.gripper(0.0)  # open: ready to receive
         ctx.say(prompts.BAG_RECEIVED)
         return StepResult.DONE
@@ -315,6 +315,8 @@ class FollowHostAndDropBag(SubTask):
             return StepResult.DONE
         ctx.say(prompts.FOLLOW_HOST_NOT_AVAILABLE)
         try:
+            ctx.walkie.robot.arm.right.go_to_home(pose_name="standby", blocking=False)  # get the arm out of the way for better nav while following
+            ctx.walkie.robot.arm.left.go_to_pose([0.38, 0.1558, 0.5299], [-2.6230, -0.0326, -1.4681], group_name="left_arm", blocking=True)
             ctx.walkie.arm.control_gripper(1.0)  # open: release the bag
         except Exception as exc:
             print(f"[HRI] bag release failed ({exc})")
