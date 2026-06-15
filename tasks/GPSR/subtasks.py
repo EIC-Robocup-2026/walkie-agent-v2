@@ -19,16 +19,14 @@ Blackboard layout (ctx.data):
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
-from enum import Enum, auto
-
-from langchain.messages import HumanMessage
+from dataclasses import dataclass
 
 from tasks.base import StepResult, SubTask, Task, TaskContext
 
 from . import prompts
+from .dispatch import execute_plan
 from .parse import parse_commands
-from .plan import Plan, render_plan_speech
+from .plan import CmdStatus, Plan, render_plan_speech
 
 
 def _pose(env_key: str, default: str = "0.0,0.0,0.0") -> tuple[float, float, float]:
@@ -47,13 +45,8 @@ def _speak_plan_enabled() -> bool:
     return os.getenv("GPSR_SPEAK_PLAN", "1").lower() in ("1", "true", "yes")
 
 
-class CmdStatus(Enum):
-    RECEIVED = auto()
-    PLANNED = auto()
-    IN_PROGRESS = auto()
-    DONE = auto()
-    PARTIAL = auto()
-    FAILED = auto()
+def _manip_enabled() -> bool:
+    return os.getenv("GPSR_ENABLE_MANIPULATION", "0").lower() in ("1", "true", "yes")
 
 
 @dataclass
@@ -126,33 +119,32 @@ class ReceiveAndPlanCommands(SubTask):
 
 
 class ExecuteCommands(SubTask):
-    """Execute each planned command.
+    """Execute each planned command via the two-tier dispatcher.
 
-    Phase 0: Tier-2 only — hand each command to the agent stack (planning +
-    execution belong to the agent for the long tail). Phase 1 replaces this with
-    deterministic Tier-1 dispatch of each PlanStep to a skill, agent-fallback on
-    miss. Degrades to a spoken note if the brain was not wired.
+    For each command, `dispatch.execute_plan` runs every PlanStep with its
+    deterministic Tier-1 skill, falling back to the agent stack (Tier-2) for
+    ungrounded/gated/failed steps. The per-command CmdStatus reflects partial
+    scoring. In one-by-one mode the robot returns to the operator between
+    commands. Degrades to a spoken note if the brain (Tier-2) was not wired.
     """
 
     def run(self, ctx: TaskContext) -> StepResult:
         brain = ctx.data.get("brain")
+        world = ctx.data.get("world")
         commands: list[Command] = ctx.data.get("commands", [])
-        if brain is None:
-            print("[gpsr] no agent stack on ctx.data['brain'] — cannot execute")
-            ctx.say("My execution system is not connected, so I cannot carry out the commands.")
+        if world is None:
+            print("[gpsr] no world model on ctx.data['world'] — cannot execute")
             return StepResult.DONE
+        manip = _manip_enabled()
         for cmd in commands:
             cmd.status = CmdStatus.IN_PROGRESS
             ctx.say(prompts.COMMAND_ANNOUNCE.format(n=cmd.id, command=cmd.utterance))
             try:
-                brain.walkie_agent.invoke(
-                    {"messages": [HumanMessage(content=cmd.utterance)]},
-                    config={"configurable": {"thread_id": "gpsr"}},
-                )
-                cmd.status = CmdStatus.DONE
+                cmd.status = execute_plan(ctx, cmd.plan, world, brain, manip_enabled=manip)
             except Exception as exc:
-                print(f"[gpsr] command {cmd.id} failed ({exc})")
+                print(f"[gpsr] command {cmd.id} execution raised ({exc})")
                 cmd.status = CmdStatus.FAILED
+            print(f"[gpsr] command {cmd.id} -> {cmd.status.name}")
             if _one_by_one() and cmd.id < len(commands):
                 x, y, h = _pose("GPSR_INSTRUCTION_POINT_POSE")
                 ctx.goto(x, y, h)  # return to operator for the next command

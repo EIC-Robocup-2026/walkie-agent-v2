@@ -16,7 +16,7 @@ gate possible.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, auto
 
 
 class Primitive(str, Enum):
@@ -44,6 +44,17 @@ class Primitive(str, Enum):
 # Primitives that need manipulation (gated by GPSR_ENABLE_MANIPULATION until the
 # arm is calibrated) — used by the executor/scheduler to flag arm-dependent work.
 MANIPULATION_PRIMITIVES = frozenset({Primitive.PICK, Primitive.PLACE, Primitive.DELIVER})
+
+
+class CmdStatus(Enum):
+    """Lifecycle of one operator command through the executor."""
+
+    RECEIVED = auto()
+    PLANNED = auto()
+    IN_PROGRESS = auto()
+    DONE = auto()       # every step succeeded (Tier-1 or Tier-2)
+    PARTIAL = auto()    # some steps succeeded (partial scoring applies)
+    FAILED = auto()     # no step succeeded
 
 
 @dataclass
@@ -95,6 +106,33 @@ class Plan:
     @property
     def needs_manipulation(self) -> bool:
         return any(s.primitive in MANIPULATION_PRIMITIVES for s in self.steps)
+
+
+# --- dispatch policy (pure, offline-testable) -------------------------------
+
+def prefer_tier1(step: PlanStep, *, manip_enabled: bool) -> bool:
+    """Whether to attempt this step with a deterministic skill (Tier 1) first.
+
+    Eligible when the step is fully grounded and not a manipulation primitive
+    that's currently gated off. Otherwise it goes straight to the Tier-2 agent
+    fallback (which can also handle ungrounded / exotic clauses).
+    """
+    if not step.grounded:
+        return False
+    if step.primitive in MANIPULATION_PRIMITIVES and not manip_enabled:
+        return False
+    return True
+
+
+def summarize_status(step_oks: list[bool]) -> CmdStatus:
+    """Aggregate per-step success into a command status (partial scoring aware)."""
+    if not step_oks:
+        return CmdStatus.FAILED
+    if all(step_oks):
+        return CmdStatus.DONE
+    if any(step_oks):
+        return CmdStatus.PARTIAL
+    return CmdStatus.FAILED
 
 
 # --- deterministic plan -> speech (scores the 300) --------------------------

@@ -441,11 +441,28 @@ flat string — decide alongside the CompetitionTemplate import.)
     The split path (`parse_commands`) and the spoken plan were also verified on
     the real path with a three-commands-at-once utterance. The gate needs
     `OPENROUTER_API_KEY` (skips without it).
-- **Phase 1 — NEXT:** `skills.py` + deterministic Tier-1 dispatch of each
-  `PlanStep` to a skill (navigate/find/count/say/greet first — no arm), reusing
-  HRI people skills; replace `ExecuteCommands`' agent-only path with
-  dispatch-then-fallback.
-- **Phase 2 / 3 —** manipulation (Restaurant reuse), then interleave bonus.
+- **Phase 1 — DONE (offline-verified; on-robot validation pending):** the
+  deterministic Tier-1 dispatch for the no-arm primitives.
+  - `gestures.py` — pure COCO-keypoint heuristics (waving, raising L/R arm,
+    pointing L/R, sitting, standing, lying) → canonical gesture ids. Offline-
+    tested (`tests/test_gpsr_gestures.py`).
+  - `skills.py` — 8 skills (navigate, find_object, find_person, count, say,
+    greet, get_person_info, get_object_property), each `(ctx, step, world,
+    state) -> bool`; reuses HRI lift/face helpers + `gestures`. Robot-side.
+  - `dispatch.py` — `execute_plan`: per step, Tier-1 skill if eligible
+    (`plan.prefer_tier1`), else Tier-2 agent fallback; status aggregated by
+    `plan.summarize_status` (partial-scoring aware). The routing/status *policy*
+    is pure and offline-tested (`tests/test_gpsr_dispatch.py`).
+  - `subtasks.py::ExecuteCommands` now runs the dispatcher per command;
+    `CmdStatus`/dispatch policy moved to `plan.py` (offline-importable).
+  - Manipulation (pick/place/deliver) is gated off (`GPSR_ENABLE_MANIPULATION`)
+    and falls through to Tier-2 until Phase 2.
+- **Phase 2 — BLOCKED (by design):** manipulation. Do NOT build a parallel
+  pick/place here — resolve the shared `tasks/base.py` promotion (Restaurant §11)
+  + arm calibration first; Restaurant's `pick_item`/`serve_item` are not on this
+  branch (off `origin/main`). Greenfield arm code is unvalidatable offline and
+  `command_arm` is still a no-op.
+- **Phase 3 —** interleave bonus (LLM scheduler), last.
 
 ### Known gaps / decisions deferred to Phase 1+
 - **Real poses** — `world.toml` poses are all `[0,0,0]`; navigation is a no-op
