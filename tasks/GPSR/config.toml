@@ -15,3 +15,15 @@ GPSR_ISSUE_MODE = "consecutive"
 # 1 = run the walkie_graphs perception loop in the background during the task so
 # "find/bring object" commands can use long-term spatial memory.
 GPSR_START_PERCEPTION = "1"
+# 1 = speak the parsed plan for each command before executing — this is what
+# scores "demonstrate a plan has been generated" (3×100). Leave on.
+GPSR_SPEAK_PLAN = "1"
+# Path to the world-model file (arena nouns the parser grounds against). The rich
+# data lives in its own TOML loaded directly (NOT flattened to env vars); only
+# the path is a knob. Relative to the repo root. Override to swap arenas.
+GPSR_WORLD_FILE = "tasks/GPSR/world.toml"
+# Manipulation is gated until the arm is calibrated (mirrors
+# RESTAURANT_ARM_CALIBRATED). Phase 1 is navigation-class; Phase 2 flips this on.
+GPSR_ENABLE_MANIPULATION = "0"
+# Minimum parser coverage the Phase-0 gate (tests/test_gpsr_coverage.py) requires.
+GPSR_COVERAGE_MIN = "0.85"

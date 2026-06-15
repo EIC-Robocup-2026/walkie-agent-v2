@@ -1,0 +1,49 @@
+# GPSR parser coverage corpus — one+ command per official CommandGenerator
+# category, plus a few multi-clause/rephrased variants. All nouns are drawn from
+# the default world.toml (CompetitionTemplate arena), so a CORRECT parse yields a
+# fully-grounded, complete Plan. Coverage = fraction reaching plan.is_complete.
+# Lines starting with # and blank lines are ignored. Format: optional "<cat>: "
+# prefix is stripped before parsing.
+#
+# This measures parser+grounding correctness on in-grammar commands. Synonym
+# robustness (e.g. "coke" -> cola) is a separate axis, not gated here.
+
+# -- primary categories --
+goToLoc: go to the kitchen
+goToLoc: navigate to the bedroom
+takeObjFromPlcmt: take the cola from the cabinet
+takeObjFromPlcmt: grasp the apple from the desk
+findPrsInRoom: find a waving person in the living room
+findObjInRoom: locate the cola in the kitchen
+meetPrsAtBeac: meet Charlie at the sofa
+countObjOnPlcmt: tell me how many drinks are in the cabinet
+countPrsInRoom: tell me how many people are standing in the office
+tellPrsInfoInLoc: tell me the name of the person at the bed
+tellPrsInfoInLoc: tell me the gesture of the person in the kitchen
+tellObjPropOnPlcmt: tell me the biggest object on the desk
+talkInfoToGestPrsInRoom: tell the time to the waving person in the kitchen
+followNameFromBeacToRoom: follow Charlie from the sofa to the kitchen
+guideNameFromBeacToBeac: guide Jane from the entrance to the sofa
+guidePrsFromBeacToBeac: escort the sitting person from the bed to the exit
+guideClothPrsFromBeacToBeac: lead the person wearing a red shirt from the kitchen to the exit
+bringMeObjFromPlcmt: bring me the cola from the cabinet
+bringMeObjFromPlcmt: get me an apple from the desk
+greetClothDscInRm: greet the person wearing a blue jacket in the living room
+greetNameInRm: say hello to Charlie in the kitchen
+followPrsAtLoc: follow the standing person in the living room
+
+# -- follow-up categories (issued standalone) --
+findObj: find the cola
+findPrs: find a waving person
+meetName: meet Charlie
+placeObjOnPlcmt: put the cola on the kitchen table
+deliverObjToMe: give me the cola
+deliverObjToPrsInRoom: bring the cola to the waving person in the living room
+deliverObjToNameAtBeac: deliver the cola to Charlie at the sofa
+followPrsToRoom: follow the standing person to the bedroom
+guidePrsToBeacon: guide the sitting person to the exit
+
+# -- multi-clause / realistic rephrasings --
+compound: go to the kitchen, find the cola, and bring it to me
+compound: take the apple from the desk and place it on the kitchen table
+compound: find Charlie in the living room and say hello
