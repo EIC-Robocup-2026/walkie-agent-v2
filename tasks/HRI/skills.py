@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import math
 import os
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from PIL import Image
 
+from client.face_recognition import FaceEmbedding
 from client.pose_estimation import PersonPose
 from tasks.base import TaskContext
 
@@ -493,6 +495,145 @@ def llm_pick_seat(
     print(f"[skills] LLM picked seat [{choice.seat_index}] {seat.class_name}"
           f" ({choice.reason or 'no reason given'})")
     return seat, (choice.announcement or "").strip() or None
+
+
+# ---------------------------------------------------------------------------
+# Face presence & tracking
+# ---------------------------------------------------------------------------
+# The head servo only tilts, so "face the person" is a small in-place BASE
+# rotation (nav.go_to, like sweep_snapshots/face_point). We track the single
+# biggest face in view — the person standing right in front — and ignore any
+# face whose bbox area is below HRI_FACE_MIN_AREA_PX, so a distant bystander
+# never pulls the robot.
+
+
+def biggest_face(
+    ctx: TaskContext, img: Image.Image | None = None, *, min_area: float = 0.0
+) -> FaceEmbedding | None:
+    """The largest detected face in *img* (or a fresh capture) above *min_area* px².
+
+    Returns the nearest (largest-bbox) face, or None when capture/detection
+    fails or no face clears the area floor. Best-effort: never raises.
+    """
+    if img is None:
+        img = ctx.capture()
+    if img is None:
+        return None
+    try:
+        faces = ctx.walkieAI.face_recognition.embed(img)
+    except Exception as exc:
+        print(f"[skills] face detection failed ({exc})")
+        return None
+    faces = [f for f in faces if f.area() >= min_area]
+    if not faces:
+        return None
+    return max(faces, key=lambda f: f.area())
+
+
+def wait_for_person(
+    ctx: TaskContext,
+    *,
+    min_area: float | None = None,
+    timeout: float | None = None,
+    poll: float | None = None,
+) -> bool:
+    """Block until a face bigger than *min_area* px² is in view, or *timeout* s.
+
+    Polls the camera every *poll* seconds. Returns True as soon as someone is
+    standing in front, False if the timeout elapses first (the caller proceeds
+    anyway so a no-show can't stall the run). Params default from the
+    ``HRI_FACE_*`` env vars.
+    """
+    if min_area is None:
+        min_area = float(os.getenv("HRI_FACE_MIN_AREA_PX", "10000"))
+    if timeout is None:
+        timeout = float(os.getenv("HRI_FACE_WAIT_TIMEOUT_SEC", "30"))
+    if poll is None:
+        poll = float(os.getenv("HRI_FACE_WAIT_POLL_SEC", "0.5"))
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if biggest_face(ctx, min_area=min_area) is not None:
+            return True
+        time.sleep(poll)
+    return False
+
+
+class FaceTracker:
+    """Background loop that keeps the base pointed at the biggest face in view.
+
+    Each tick captures a frame, picks the largest face above
+    ``HRI_FACE_MIN_AREA_PX`` (the person right in front), and rotates the base
+    by the face's measured angular offset from the optical axis (scaled by
+    ``HRI_FACE_TRACK_GAIN`` and capped at ``HRI_FACE_TRACK_MAX_STEP_DEG``) so it
+    re-centers. A dead-band (``HRI_FACE_TRACK_DEADBAND_PX``) suppresses jitter
+    when the face is already roughly centered. Runs in its own daemon thread so
+    the calling step can ask questions / caption meanwhile; every camera /
+    detector / nav failure is swallowed so a tracking glitch never crashes the
+    step.
+
+    The head servo only tilts, so this rotates the BASE (nav.go_to) — only use
+    it while nothing else is driving the base. Use as a context manager::
+
+        with FaceTracker(ctx):
+            ... ask the guest their name, caption their appearance ...
+    """
+
+    def __init__(self, ctx: TaskContext) -> None:
+        self.ctx = ctx
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.min_area = float(os.getenv("HRI_FACE_MIN_AREA_PX", "10000"))
+        self.interval = float(os.getenv("HRI_FACE_TRACK_INTERVAL_SEC", "0.6"))
+        self.deadband_px = float(os.getenv("HRI_FACE_TRACK_DEADBAND_PX", "80"))
+        self.max_step = math.radians(float(os.getenv("HRI_FACE_TRACK_MAX_STEP_DEG", "20")))
+        self.gain = float(os.getenv("HRI_FACE_TRACK_GAIN", "0.8"))
+        self.hfov = math.radians(float(os.getenv("HRI_CAMERA_HFOV_DEG", "110")))
+
+    def start(self) -> "FaceTracker":
+        if self._thread is None:
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._loop, daemon=True)
+            self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(2.0, self.interval * 3))
+            self._thread = None
+
+    def __enter__(self) -> "FaceTracker":
+        return self.start()
+
+    def __exit__(self, *exc) -> None:
+        self.stop()
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._tick()
+            except Exception as exc:
+                print(f"[skills] face tracker tick failed ({exc})")
+            self._stop.wait(self.interval)
+
+    def _tick(self) -> None:
+        img = self.ctx.capture()
+        if img is None:
+            return
+        face = biggest_face(self.ctx, img, min_area=self.min_area)
+        if face is None:
+            return
+        x1, _y1, x2, _y2 = face.bbox_xyxy
+        face_cx = (x1 + x2) / 2
+        # Pixel offset of the face from frame center (positive = face is left of
+        # center, i.e. the robot must turn left / CCW / +heading to re-center).
+        offset_px = img.width / 2 - face_cx
+        if abs(offset_px) <= self.deadband_px:
+            return
+        delta = (offset_px / img.width) * self.hfov * self.gain
+        delta = max(-self.max_step, min(self.max_step, delta))
+        pose = self.ctx.current_pose()
+        self.ctx.rotate_to(pose["heading"] + delta)
 
 
 def llm_intro_speeches(ctx: TaskContext, people: dict[str, dict]) -> dict[str, str]:

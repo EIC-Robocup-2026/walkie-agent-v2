@@ -19,6 +19,22 @@ HRI_SEAT_CLASSES = "chair,sofa,armchair,stool"
 HRI_SEAT_OCCUPIED_OVERLAP = "0.25"
 # Horizontal field of view (deg) for pixel->heading conversion (tune for ZED).
 HRI_CAMERA_HFOV_DEG = "110"
+# --- Face presence & tracking ------------------------------------------------
+# "Biggest face" must exceed this bbox area (px²) to count as the person
+# standing right in front — distant bystanders are ignored. Used both by
+# GoToDoor's wait and GreetAndLearn's tracker. Tune for the camera resolution.
+HRI_FACE_MIN_AREA_PX = "10000"
+# GoToDoor: max seconds to wait for a guest's face before greeting anyway, and
+# how often (s) to poll the camera while waiting.
+HRI_FACE_WAIT_TIMEOUT_SEC = "30"
+HRI_FACE_WAIT_POLL_SEC = "0.5"
+# GreetAndLearn face tracking: loop period (s); dead-band (px) inside which the
+# face counts as centered and the base doesn't move; per-tick base-rotation cap
+# (deg); and proportional gain on the measured angular offset (<1 damps overshoot).
+HRI_FACE_TRACK_INTERVAL_SEC = "0.6"
+HRI_FACE_TRACK_DEADBAND_PX = "80"
+HRI_FACE_TRACK_MAX_STEP_DEG = "20"
+HRI_FACE_TRACK_GAIN = "0.8"
 # IntroduceEveryone sweeps left/center/right by this many degrees (base rotation,
 # positive = left) to find people who drifted off-center before introducing them.
 HRI_INTRO_SWEEP_DEG = "10"
@@ -29,6 +45,6 @@ HRI_PEOPLE_RESET = "1"
 # 1 = enable the timed gripper bag-handover steps (no torque sensing yet).
 HRI_ENABLE_BAG = "1"
 # Effort threshold when bag is placed
-HRI_BAG_EFFORT_THRESHOLD = "1.0"
+HRI_BAG_EFFORT_THRESHOLD = "0.7"
 # Max seconds to wait for the bag's effort spike before giving up (no-show guest).
 HRI_BAG_WAIT_TIMEOUT_SEC = "20"

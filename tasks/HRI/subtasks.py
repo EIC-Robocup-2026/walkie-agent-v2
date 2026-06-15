@@ -32,6 +32,7 @@ from tasks.base import StepResult, SubTask, Task, TaskContext
 from . import prompts
 from .identity import enroll_guest, enroll_person_in_box, locate_people
 from .skills import (
+    FaceTracker,
     describe_seated_person,
     face_point,
     find_seated_person_bbox,
@@ -43,6 +44,7 @@ from .skills import (
     parse_pose,
     scan_seats,
     sweep_snapshots,
+    wait_for_person,
 )
 
 
@@ -63,7 +65,20 @@ class GoToDoor(SubTask):
 
     def run(self, ctx: TaskContext) -> StepResult:
         x, y, heading = parse_pose(os.getenv("HRI_DOOR_POSE", "0.0,0.0,0"))
-        return StepResult.DONE if ctx.goto(x, y, heading) else StepResult.RETRY
+        if not ctx.goto(x, y, heading):
+            return StepResult.RETRY
+        # Wait for the guest to come stand in front before greeting. Look
+        # straight ahead so a standing person's face is in frame (nav may have
+        # left the head tilted down), then poll for a face bigger than the area
+        # floor; restore the tilt afterwards for the greeting/next nav.
+        original_tilt = ctx.walkie.robot.head.get_angle()
+        ctx.walkie.robot.head.tilt(0)
+        if wait_for_person(ctx):
+            print("[HRI] guest detected at the door")
+        else:
+            print("[HRI] no guest detected before timeout; greeting anyway")
+        ctx.walkie.robot.head.tilt(original_tilt if original_tilt is not None else 0.0)
+        return StepResult.DONE
 
 
 class GreetAndLearn(SubTask):
@@ -79,40 +94,44 @@ class GreetAndLearn(SubTask):
 
         original_head_tilt = ctx.walkie.robot.head.get_angle()
         ctx.walkie.robot.head.tilt(0)
-        answer = ctx.ask(prompts.GREET_ASK_BOTH)
-        info = ctx.extract(prompts.GuestInfo, prompts.EXTRACT_GUEST_INFO_INSTRUCTIONS, answer) if answer else None
-        if info:
-            record["name"], record["drink"] = info.name, info.drink
-
-        # One targeted follow-up per missing field (asking for genuinely
-        # missing info is not a penalized confirmation question).
-        for field, question in (("name", prompts.ASK_MISSING_NAME), ("drink", prompts.ASK_MISSING_DRINK)):
-            if record[field]:
-                continue
-            answer = ctx.ask(question, retries=0)
+        # Keep the base turned toward the guest's face for the whole exchange:
+        # a background loop tracks the biggest face in view and rotates the base
+        # to re-center it while we ask questions and caption below.
+        with FaceTracker(ctx):
+            answer = ctx.ask(prompts.GREET_ASK_BOTH)
             info = ctx.extract(prompts.GuestInfo, prompts.EXTRACT_GUEST_INFO_INSTRUCTIONS, answer) if answer else None
-            if info and getattr(info, field):
-                record[field] = getattr(info, field)
+            if info:
+                record["name"], record["drink"] = info.name, info.drink
 
-        img = ctx.capture()
-        # Visual description: only guest 1's is needed (told to guest 2 later).
-        if self.guest == 1 and img is not None:
-            try:
-                record["appearance"] = ctx.walkieAI.image_caption.caption(
-                    img, prompt=prompts.APPEARANCE_CAPTION_PROMPT
+            # One targeted follow-up per missing field (asking for genuinely
+            # missing info is not a penalized confirmation question).
+            for field, question in (("name", prompts.ASK_MISSING_NAME), ("drink", prompts.ASK_MISSING_DRINK)):
+                if record[field]:
+                    continue
+                answer = ctx.ask(question, retries=0)
+                info = ctx.extract(prompts.GuestInfo, prompts.EXTRACT_GUEST_INFO_INSTRUCTIONS, answer) if answer else None
+                if info and getattr(info, field):
+                    record[field] = getattr(info, field)
+
+            img = ctx.capture()
+            # Visual description: only guest 1's is needed (told to guest 2 later).
+            if self.guest == 1 and img is not None:
+                try:
+                    record["appearance"] = ctx.walkieAI.image_caption.caption(
+                        img, prompt=prompts.APPEARANCE_CAPTION_PROMPT
+                    )
+                except Exception as exc:
+                    print(f"[HRI] appearance caption failed ({exc})")
+            # Remember this guest's face + attire under a stable id, so the
+            # introduction step can find them again even after a seat switch.
+            if img is not None:
+                enroll_guest(
+                    ctx, img, f"guest-{self.guest}",
+                    name=record["name"] or "", drink=record["drink"] or "",
                 )
-            except Exception as exc:
-                print(f"[HRI] appearance caption failed ({exc})")
-        # Remember this guest's face + attire under a stable id, so the
-        # introduction step can find them again even after a seat switch.
-        if img is not None:
-            enroll_guest(
-                ctx, img, f"guest-{self.guest}",
-                name=record["name"] or "", drink=record["drink"] or "",
-            )
 
-        name = record["name"] or "there"
-        ctx.say(f"Nice to meet you, {name}!")
+            name = record["name"] or "there"
+            ctx.say(f"Nice to meet you, {name}!")
         ctx.walkie.robot.head.tilt(original_head_tilt)  # restore the head tilt for better nav
         return StepResult.DONE  # partial info still scores — never block here
 
@@ -228,7 +247,7 @@ class ReceiveBag(SubTask):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             _, _, efforts = ctx.walkie.robot.arm.left.get_joint_states()
-            print(f"[HRI] waiting for bag handover... joint 4 effort: {abs(efforts[3] - initial_effort) if efforts else 'N/A'}")
+            # print(f"[HRI] waiting for bag handover... joint 4 effort: {abs(efforts[3] - initial_effort) if efforts else 'N/A'}")
             if abs(efforts[3] - initial_effort) > threshold:
                 break
 
@@ -318,7 +337,8 @@ class FollowHostAndDropBag(SubTask):
             ctx.walkie.robot.arm.right.go_to_home(pose_name="standby", blocking=False)  # get the arm out of the way for better nav while following
             ctx.walkie.robot.arm.left.go_to_pose([0.38, 0.1558, 0.5299], [-2.6230, -0.0326, -1.4681], blocking=True)
             ctx.walkie.robot.arm.left.gripper(1.0)  # open: release the bag
-            ctx.walkie.robot.arm.go_to_home(group_name="both_arms_lift", blocking=False)  # reset the arm for better nav after releasing the bag
+            ctx.walkie.robot.arm.go_to_home(group_name="both_arms_lift", blocking=True)  # reset the arm for better nav after releasing the bag
+            ctx.walkie.robot.arm.left.gripper(0, blocking=False)  # close the gripper after releasing the bag, so it's not just hanging open while following
         except Exception as exc:
             print(f"[HRI] bag release failed ({exc})")
         return StepResult.DONE
@@ -335,16 +355,16 @@ def build_hri_task(ctx: TaskContext) -> Task:
     return Task(
         "HRI",
         [
-            GoToDoor(1),
-            GreetAndLearn(1),
-            GuideToLivingRoom(1),
-            OfferSeat(1),
-            GoToDoor(2),
-            GreetAndLearn(2),
+#            GoToDoor(1),
+#            GreetAndLearn(1),
+#            GuideToLivingRoom(1),
+#            OfferSeat(1),
+#            GoToDoor(2),
+#            GreetAndLearn(2),
             ReceiveBag(),
-            GuideToLivingRoom(2),
-            OfferSeat(2),
-            IntroduceEveryone(),
+#            GuideToLivingRoom(2),
+#            OfferSeat(2),
+#            IntroduceEveryone(),
             FollowHostAndDropBag(),
         ],
         ctx,
