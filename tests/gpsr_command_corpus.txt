@@ -47,3 +47,11 @@ guidePrsToBeacon: guide the sitting person to the exit
 compound: go to the kitchen, find the cola, and bring it to me
 compound: take the apple from the desk and place it on the kitchen table
 compound: find Charlie in the living room and say hello
+
+# -- synonym / colloquial / STT-slip variants (exercise the vocab normalization
+#    layer: coke->cola, fridge->refrigerator, couch->sofa, etc.) --
+synonym: bring me a coke from the fridge
+synonym: grab the soda from the cabinet
+synonym: go to the lounge and find someone waving
+synonym: get the apple off the desk and put it on the couch
+synonym: how many sodas are in the fridge

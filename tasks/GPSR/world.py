@@ -137,6 +137,33 @@ class WorldModel:
         room = self.rooms.get(canonical)
         return room.pose if room is not None else None
 
+    def vocab_prompt(self) -> str:
+        """Compact listing of the arena nouns for the parser's system prompt.
+
+        Giving the LLM the canonical vocabulary lets it normalize synonyms / STT
+        slips to the exact terms ("coke"→cola, "fridge"→refrigerator) at parse
+        time, so grounding hits directly — the robustness layer for §11. Nouns
+        are shown with spaces; grounding is underscore/space tolerant anyway.
+        """
+        def _spaced(items):
+            return ", ".join(sorted(i.replace("_", " ") for i in items))
+
+        objs_by_cat = "; ".join(
+            f"{cat.replace('_', ' ')}: {_spaced(items)}"
+            for cat, items in sorted(self.categories.items())
+        )
+        return (
+            "Arena vocabulary — map each reference to the CLOSEST term below and "
+            "use that exact spelling (e.g. 'coke'/'soda' -> 'cola', 'fridge' -> "
+            "'refrigerator', 'couch' -> 'sofa'). If something genuinely isn't "
+            "listed, use the operator's words.\n"
+            f"Rooms: {_spaced(self.rooms)}\n"
+            f"Locations: {_spaced(self.locations)}\n"
+            f"Objects by category: {objs_by_cat}\n"
+            f"Names: {', '.join(sorted(self.names))}\n"
+            f"Gestures/poses: {_spaced(self.gestures)}"
+        )
+
 
 def _alias_keys(canonical: str, aliases: list[str] | None) -> list[str]:
     keys = {_norm(canonical), _norm(canonical.replace("_", " "))}

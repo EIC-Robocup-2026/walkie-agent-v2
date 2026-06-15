@@ -259,7 +259,8 @@ def _extract(model, schema: "type[BaseModel]", instructions: str, text: str):
 
 def parse_command(model, command: str, world: WorldModel) -> Plan:
     """Parse ONE command string into a grounded Plan (needs the LLM)."""
-    raw = _extract(model, RawPlan, prompts.PARSE_INSTRUCTIONS, command)
+    instructions = f"{prompts.PARSE_INSTRUCTIONS}\n\n{world.vocab_prompt()}"
+    raw = _extract(model, RawPlan, instructions, command)
     if raw is None:
         print(f"[gpsr] parse failed for command: {command!r}")
         return Plan(steps=[], source=command)

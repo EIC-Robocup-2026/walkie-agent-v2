@@ -65,6 +65,13 @@ def test_name_and_gesture_grounding(world):
     assert world.gesture("person raising their left arm") == "raising_left_arm"
 
 
+def test_vocab_prompt_lists_canonical_terms(world):
+    p = world.vocab_prompt()
+    assert "cola" in p and "refrigerator" in p and "living room" in p
+    assert "Charlie" in p and "waving" in p
+    assert "coke" in p.lower()  # the synonym-mapping hint is present
+
+
 # --- step grounding ---------------------------------------------------------
 
 def _step(primitive, **fields):

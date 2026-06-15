@@ -467,8 +467,9 @@ flat string — decide alongside the CompetitionTemplate import.)
 ### Known gaps / decisions deferred to Phase 1+
 - **Real poses** — `world.toml` poses are all `[0,0,0]`; navigation is a no-op
   until the announced arena is filled in.
-- **Synonym robustness** — the corpus uses in-vocab nouns; out-of-vocab synonyms
-  ("coke"→cola) currently ground as gaps. Measure on rephrased variants and
-  decide whether to add a synonym layer or lean on the LLM to normalize.
+- **Synonym robustness** — *resolved:* the parser injects the world vocabulary
+  (`WorldModel.vocab_prompt`) into the parse prompt, so the LLM normalizes
+  synonyms / STT slips to canonical terms ("coke"→cola, "fridge"→refrigerator,
+  "couch"→sofa). Corpus extended with such variants; coverage 39/39 = 100%.
 - **`say`/`tell` knowledge source** (above) — unbuilt; `say` steps carry the info
   string but nothing answers open questions yet.
