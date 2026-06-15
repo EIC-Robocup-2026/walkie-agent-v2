@@ -66,6 +66,10 @@ def execute_plan(
                     ok = False
         if not ok:  # ungrounded, gated, no skill, or skill error -> agent fallback
             ok = _tier2(ctx, brain, step.raw or plan.source)
+            # The agent may have driven the robot (delegate_to_actuator), so the
+            # deterministic nav cache (state["at"]) can no longer be trusted — drop
+            # it so a following navigate to a "known" place still actually drives.
+            state.pop("at", None)
         oks.append(ok)
         print(f"[gpsr.dispatch] step {step.primitive.value}: {'ok' if ok else 'failed'}")
     return summarize_status(oks)

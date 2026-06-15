@@ -23,6 +23,7 @@ gestures.py / plan.py.
 from __future__ import annotations
 
 import os
+from datetime import datetime
 
 from langchain.messages import HumanMessage
 
@@ -70,15 +71,49 @@ def _llm_line(ctx: TaskContext, prompt: str) -> str:
         return ""
 
 
-def go_to_named(ctx: TaskContext, name: str | None, world: WorldModel) -> bool:
-    """Navigate to a canonical room/location by its world-model pose."""
+def _facts_context() -> str:
+    """Known facts the robot can be asked to 'tell' (the §11 say/tell source).
+
+    RoboCup 'tell' commands ask for things general knowledge can't give reliably
+    — the day/date/time, the team name, who the robot is. We ground the LLM with
+    these instead of letting it hallucinate or refuse. Identity is config-driven
+    (GPSR_ROBOT_NAME/GPSR_TEAM_NAME/GPSR_TEAM_AFFILIATION); the clock is read live.
+    """
+    now = datetime.now()
+    robot = os.getenv("GPSR_ROBOT_NAME", "Walkie")
+    team = os.getenv("GPSR_TEAM_NAME", "EIC")
+    affiliation = os.getenv("GPSR_TEAM_AFFILIATION", "Chulalongkorn University")
+    return (
+        f"You are {robot}, a domestic service robot competing in RoboCup@Home for "
+        f"team {team} from {affiliation}. "
+        # `now.day` (not %-d) so the format is portable, not glibc-only.
+        f"Today is {now:%A}, {now.day} {now:%B %Y}; the current time is {now:%H:%M}."
+    )
+
+
+def go_to_named(
+    ctx: TaskContext, name: str | None, world: WorldModel, state: dict | None = None
+) -> bool:
+    """Navigate to a canonical room/location by its world-model pose.
+
+    Idempotent within a command: if `state` already records the robot at `name`,
+    the redundant drive is skipped. This dedups the parser's *explicit* navigate
+    step against a following find/greet/count step that also names the same place
+    (the parser is told to make navigation explicit, but still fills the find
+    step's room/location) — otherwise the robot drives there twice.
+    """
     if not name:
         return False
+    if state is not None and state.get("at") == name:
+        return True  # already here this command — don't drive again
     pose = world.location_pose(name)
     if pose is None:
         print(f"[gpsr.skill] no pose for {name!r}")
         return False
-    return ctx.goto(*pose)
+    ok = ctx.goto(*pose)
+    if ok and state is not None:
+        state["at"] = name  # remember so the next step doesn't re-navigate
+    return ok
 
 
 def _object_classes(obj: str | None, category: str | None, world: WorldModel) -> list[str]:
@@ -98,14 +133,14 @@ def _crop(img, bbox_xyxy):
 # --- primitives -------------------------------------------------------------
 
 def navigate(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
-    return go_to_named(ctx, step.args.get("target"), world)
+    return go_to_named(ctx, step.args.get("target"), world, state)
 
 
 def find_object(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
     obj = step.args.get("object")
     where = step.args.get("location") or step.args.get("room")
     if where:
-        go_to_named(ctx, where, world)
+        go_to_named(ctx, where, world, state)
     snap = ctx.snapshot()
     if snap is None:
         return False
@@ -147,7 +182,7 @@ def _find_person_match(ctx: TaskContext, step: PlanStep):
 def find_person(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
     room = step.args.get("room")
     if room:
-        go_to_named(ctx, room, world)
+        go_to_named(ctx, room, world, state)
     snap, bbox = _find_person_match(ctx, step)
     if snap is None:
         return False
@@ -166,7 +201,7 @@ def find_person(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict
 def count(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
     where = step.args.get("location") or step.args.get("room")
     if where:
-        go_to_named(ctx, where, world)
+        go_to_named(ctx, where, world, state)
     snap = ctx.snapshot()
     if snap is None:
         return False
@@ -190,20 +225,27 @@ def say(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> boo
     info = (step.args.get("info") or "").strip()
     if not info:
         return False
-    # Resolve dynamic asks (the time, a joke, an answer) via the LLM; speak
-    # literal statements as-is.
-    dynamic = info.endswith("?") or any(
-        w in info.lower() for w in ("time", "date", "day", "joke", "name of", "what", "who", "how")
+    # Route every 'tell' through the LLM with the known-facts context: it answers
+    # information requests (the day, time, a joke, who/what the robot is) using
+    # the facts, and otherwise just announces the phrase. This replaces a brittle
+    # keyword heuristic and grounds the answer (§11 say/tell knowledge source).
+    prompt = (
+        f"{_facts_context()}\n\n"
+        f'The operator asked you to convey: "{info}".\n'
+        "Reply with ONE short, natural spoken sentence. If it requests information "
+        "(the day, date, time, a joke, a fact about you or your team), answer it "
+        "using the facts above. If it is simply a phrase to announce, say it as "
+        "given. Output only the sentence to speak, no quotes."
     )
-    text = _llm_line(ctx, f"In one short spoken sentence, respond to this request: {info}") if dynamic else info
-    ctx.say(text or info)
+    text = _llm_line(ctx, prompt)
+    ctx.say(text or info)  # fall back to the literal request if the LLM fails
     return True
 
 
 def greet(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
     room = step.args.get("room")
     if room:
-        go_to_named(ctx, room, world)
+        go_to_named(ctx, room, world, state)
     snap, bbox = _find_person_match(ctx, step)
     if snap is not None and bbox is not None:
         xy = lift_bbox_world_xy(ctx, snap, bbox)

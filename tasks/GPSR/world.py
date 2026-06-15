@@ -44,6 +44,23 @@ def _strip_article(key: str) -> str:
     return key
 
 
+def _singulars(key: str) -> list[str]:
+    """Candidate singular forms of a (already normalized) plural noun.
+
+    Conservative English de-pluralization — callers only accept a candidate that
+    is actually a known entity, so over-generating here is harmless: "cups"->
+    "cup", "boxes"/"dishes"->"box"/"dish", "candies"->"candy".
+    """
+    cands: list[str] = []
+    if key.endswith("ies") and len(key) > 3:
+        cands.append(key[:-3] + "y")
+    if key.endswith("es") and len(key) > 2:
+        cands.append(key[:-2])
+    if key.endswith("s") and len(key) > 1:
+        cands.append(key[:-1])
+    return cands
+
+
 @dataclass(frozen=True)
 class Room:
     name: str
@@ -99,14 +116,19 @@ class WorldModel:
     def obj(self, text: str | None) -> str | None:
         """Ground an object reference: an exact item, else a category's stand-in.
 
-        "the cola" -> "cola"; "a drink"/"drinks" -> the first object of that
-        category (so a category reference still yields a concrete pickable item).
+        "the cola" -> "cola"; "the cups" -> "cup" (counting commands are plural by
+        nature); "a drink"/"drinks" -> the first object of that category (so a
+        category reference still yields a concrete pickable item).
         """
         if not text:
             return None
         hit = self._lookup(self._obj_alias, text)
         if hit:
             return hit
+        key = _strip_article(_norm(text))
+        for cand in _singulars(key):  # tolerate a plural ("cups"->"cup", "boxes"->"box")
+            if cand in self._obj_alias:
+                return self._obj_alias[cand]
         cat = self.category(text)
         if cat and self.categories.get(cat):
             return self.categories[cat][0]

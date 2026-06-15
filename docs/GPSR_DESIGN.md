@@ -457,6 +457,35 @@ flat string — decide alongside the CompetitionTemplate import.)
     `CmdStatus`/dispatch policy moved to `plan.py` (offline-importable).
   - Manipulation (pick/place/deliver) is gated off (`GPSR_ENABLE_MANIPULATION`)
     and falls through to Tier-2 until Phase 2.
+- **Phase 1 hardening — DONE (derisk pass, all offline-verified):** since the dev
+  box has no robot/CUDA, the only confidence available off-robot is pure-logic +
+  integration wiring. This pass made the latter testable and closed the seams the
+  unit tests couldn't see:
+  - **`tasks/base.py` is now offline-importable** — the type-only
+    `WalkieInterface`/`WalkieAIClient` imports moved under `TYPE_CHECKING` (they
+    were pulling `interfaces → silero_vad → torch → CUDA`). The whole GPSR
+    robot-side chain (`dispatch`/`skills`/`subtasks`) now imports on a GPU-less
+    box, which is what enables the integration test below. (Pure annotation move;
+    no runtime change — nobody imports those names *from* `tasks.base`.)
+  - **Navigation is deduped within a command** (`go_to_named` keys on
+    `state["at"]`): the parser is told to emit an explicit `navigate`, but still
+    fills the following find/count/greet step's room — without the dedup the robot
+    drove to the same place twice. Keyed by canonical name, so distinct spots
+    (room vs. a table in it) are *not* collapsed. The cache is **dropped after any
+    Tier-2 fallback** (`execute_plan` pops `state["at"]`) — the agent may have
+    driven the robot, so a later "known" place must still actually be navigated to.
+  - **`say`/`tell` knowledge source built** — every `say` routes through the LLM
+    grounded with a facts context (robot/team identity from config
+    `GPSR_ROBOT_NAME`/`GPSR_TEAM_NAME`/`GPSR_TEAM_AFFILIATION`, plus the live
+    day/time), replacing a brittle keyword heuristic; falls back to the literal
+    phrase if the LLM fails.
+  - **Plural object grounding** — `world.obj` now de-pluralizes conservatively
+    ("cups"→"cup"), so natural counting commands hit the deterministic skill
+    instead of falling to Tier-2. Found *by* the new integration test.
+  - **`tests/test_gpsr_integration.py`** — drives the real `execute_plan` over the
+    real skill bodies with a mock ctx (no robot, no LLM): proves nav-dedup, the
+    grounding→skill seam, say routing/fallback, and Tier-2 gating. 14 tests; total
+    offline GPSR suite now 54, full repo suite 344 passed.
 - **Phase 2 — BLOCKED (by design):** manipulation. Do NOT build a parallel
   pick/place here — resolve the shared `tasks/base.py` promotion (Restaurant §11)
   + arm calibration first; Restaurant's `pick_item`/`serve_item` are not on this
@@ -471,5 +500,8 @@ flat string — decide alongside the CompetitionTemplate import.)
   (`WorldModel.vocab_prompt`) into the parse prompt, so the LLM normalizes
   synonyms / STT slips to canonical terms ("coke"→cola, "fridge"→refrigerator,
   "couch"→sofa). Corpus extended with such variants; coverage 39/39 = 100%.
-- **`say`/`tell` knowledge source** (above) — unbuilt; `say` steps carry the info
-  string but nothing answers open questions yet.
+- **`say`/`tell` knowledge source** — *resolved (Phase 1 hardening):* `say` routes
+  through the LLM grounded with a config-driven identity + the live clock, with a
+  literal fallback. Open answer quality (jokes, trivia) still wants on-robot/real-
+  LLM spot-checks, but the brittle keyword heuristic and the "nothing answers it"
+  gap are gone.
