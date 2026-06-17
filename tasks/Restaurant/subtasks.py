@@ -1,15 +1,17 @@
 """Restaurant subtasks + the build_restaurant_task factory (rulebook 5.5).
 
-PLACEHOLDER scaffold mirroring tasks/HRI/subtasks.py. Customers call dynamically
-and any number of times, so the serving loop cannot be pre-listed as fixed steps
-the way HRI lists two guests — ServeCustomers loops until it has served the
-target number (or runs out of callers). Each iteration follows the rulebook:
-detect a calling customer -> navigate to their table -> take + confirm the order
--> relay it to the barman -> collect the items from the kitchen-bar -> deliver.
+Mirrors tasks/HRI/subtasks.py. Customers call dynamically and any number of
+times, so the serving loop cannot be pre-listed as fixed steps the way HRI lists
+two guests — ServeCustomers loops until it has served the target number (or runs
+out of callers). Each iteration follows the rulebook: detect a waving customer ->
+navigate to their table (or clearly identify them) -> take + confirm the order ->
+relay it to the barman -> collect the items from the kitchen-bar and serve them
+one at a time.
 
-Gesture detection, online navigation and manipulation are honest stubs that
-degrade (partial scoring is allowed). Restart handling (rulebook 5.5.1) is an
-operator-driven concern and is out of scope for this scaffold.
+Gesture detection, customer approach, order dialogue and item manipulation are
+real (the grasp planner behind collect/serve is a stub — see tasks/manipulation.py
+— but the arm motion is real). The unattached-tray optional goal is a gated stub.
+Restart handling (rulebook 5.5.1) is operator-driven and out of scope.
 
 Blackboard layout (ctx.data):
     served: list[list[str]]   # the orders delivered, for logging
@@ -23,10 +25,11 @@ from tasks.base import StepResult, SubTask, Task, TaskContext
 
 from . import prompts
 from .skills import (
-    collect_items,
     detect_calling_customer,
+    identify_customer,
     navigate_to_customer,
-    serve_order,
+    pick_bar_item,
+    serve_item,
     take_order,
 )
 
@@ -52,9 +55,11 @@ class GoToStart(SubTask):
 class ServeCustomers(SubTask):
     """Serve up to RESTAURANT_TARGET_CUSTOMERS callers, one full cycle each.
 
-    One cycle = detect -> navigate -> order -> relay to barman -> collect ->
-    deliver, then back to the kitchen-bar. The manipulation/nav legs are stubs;
-    detection + order dialogue are real-ish.
+    One cycle = detect a waving customer -> approach (or identify) -> take +
+    confirm order -> relay to the barman -> for each item: pick at the bar,
+    navigate to the customer, serve, return to the bar. Detection, approach and
+    dialogue are real; the grasp planner behind pick/serve is a stub but the arm
+    motion is real, so each leg degrades gracefully (partial scoring).
     """
 
     def run(self, ctx: TaskContext) -> StepResult:
@@ -62,32 +67,47 @@ class ServeCustomers(SubTask):
         served: list[list[str]] = ctx.data.setdefault("served", [])
         attempts = 0
         max_attempts = target + int(os.getenv("RESTAURANT_EXTRA_ATTEMPTS", "3"))
+        bar = _pose("RESTAURANT_KITCHEN_BAR_POSE")
+        if os.getenv("RESTAURANT_USE_TRAY", "0").lower() in ("1", "true", "yes"):
+            # Optional goal (2x200): place items on an unattached tray, carry the
+            # tray, unload at the table. Not implemented — fall back to per-item.
+            print("[restaurant] RESTAURANT_USE_TRAY set, but tray transport is not "
+                  "implemented; serving items individually instead")
 
         while len(served) < target and attempts < max_attempts:
             attempts += 1
-            heading = detect_calling_customer(ctx)
-            if heading is None:
+            customer = detect_calling_customer(ctx)
+            if customer is None:
                 ctx.say(prompts.NO_CUSTOMER)
                 continue
 
-            navigate_to_customer(ctx, heading)  # STUB -> partial: still take order
+            # Approach the table; if the drive fails, clearly identify the person
+            # for partial points and still take the order from where we are.
+            if not navigate_to_customer(ctx, customer):
+                identify_customer(ctx, customer)
+            else:
+                ctx.rotate_to(customer.heading)  # face them for eye contact
+
             items = take_order(ctx)
             if not items:
                 continue
 
-            # Relay to the barman at the kitchen-bar.
-            x, y, h = _pose("RESTAURANT_KITCHEN_BAR_POSE")
-            ctx.goto(x, y, h)
+            # Relay the whole order to the barman at the kitchen-bar (once).
+            ctx.goto(*bar)
             ctx.say(prompts.RELAY_TO_BARMAN.format(items=", ".join(items)))
 
-            # Collect + deliver (both STUBs today).
-            if collect_items(ctx, items):
-                navigate_to_customer(ctx, heading)
-                if serve_order(ctx, items):
-                    ctx.say(prompts.SERVE_ANNOUNCE.format(items=", ".join(items)))
+            # Collect + serve one item per trip (single-arm carry).
+            for item in items:
+                ctx.goto(*bar)
+                ctx.say(prompts.COLLECTING_ITEM.format(item=item))
+                if not pick_bar_item(ctx, item):
+                    continue
+                navigate_to_customer(ctx, customer)
+                if serve_item(ctx):
+                    ctx.say(prompts.SERVE_ITEM.format(item=item))
 
-            served.append(items)  # logged even if delivery degraded (order was taken)
-            ctx.goto(x, y, h)  # back to the bar for the next caller
+            served.append(items)  # logged even if a leg degraded (order was taken)
+            ctx.goto(*bar)  # back to the bar for the next caller
 
         ctx.say(prompts.ALL_DONE)
         print(f"[restaurant] orders handled: {served}")
