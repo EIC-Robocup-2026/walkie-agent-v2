@@ -49,13 +49,22 @@ PERCEPTION_ANNOUNCE = "I can see {count} objects on the table. Let me sort them.
 ASK_OPEN_DISHWASHER = (
     "I could not open the dishwasher door myself. Could you please open it for me?"
 )
+ASK_CLOSE_DISHWASHER = (
+    "I have loaded the dishwasher. Could you please close the door for me?"
+)
 ASK_OPEN_MILK = "I cannot open the milk container. Could you please open it for me?"
 BREAKFAST_DONE = "Breakfast is served: a bowl, spoon, cereal, and milk."
 TASK_DONE = "I have finished tidying the kitchen and serving breakfast."
 
-# Placeholder lines for not-yet-implemented manipulation extension points.
+# --- Manipulation narration (real arm motion; communicates perception) -------
+PICKING = "I am picking up the {obj}."
+PLACED = "I have placed it in the {destination}."
+BREAKFAST_START = "Now I will set up breakfast."
+BREAKFAST_FETCH = "Let me get the {obj} for breakfast."
+BREAKFAST_NOT_FOUND = "I could not find the {obj}, so I will skip it for now."
+
+# Used only when no 3D grasp plan could be computed (object not lifted to 3D).
 PICK_NOT_AVAILABLE = (
-    "I cannot pick up the {obj} yet — manipulation is not implemented. "
-    "Skipping it for now."
+    "I cannot work out how to grasp the {obj}, so I will skip it for now."
 )
 POUR_NOT_AVAILABLE = "I cannot pour yet — pouring is not implemented."
