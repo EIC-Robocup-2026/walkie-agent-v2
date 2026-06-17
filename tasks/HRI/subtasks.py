@@ -361,7 +361,6 @@ class _HostSampler:
     def __init__(self) -> None:
         self.confirm_every_n = int(os.getenv("HRI_FOLLOW_CONFIRM_EVERY_N", "8"))
         self.gate_frac = float(os.getenv("HRI_FOLLOW_TRACK_GATE_FRAC", "0.2"))
-        self.lift_gate = float(os.getenv("HRI_FOLLOW_LIFT_GATE_FRAC", "0.15"))
         self.debug = os.getenv("HRI_FOLLOW_TRACK_DEBUG", "0").lower() in ("1", "true", "yes")
         self._locked: tuple | None = None      # last host box (xyxy)
         self._since_confirm = 1 << 30          # force a confirm on the first sample
@@ -401,13 +400,9 @@ class _HostSampler:
             return None, None
         self._locked = box
         side = (box[0] + box[2]) / 2 / img.width - 0.5
-        # The ~depth lift is the expensive per-sample step (full-frame edge mask
-        # + deproject). The control loop only needs the map point to APPROACH,
-        # i.e. when the host is roughly centered; while they're off-center it just
-        # rotates to re-center off `side`. So skip the lift when off-center —
-        # keeping the tracker at the fast pose-only rate exactly when the host is
-        # moving sideways. See HRI_FOLLOW_LIFT_GATE_FRAC.
-        xy = lift_bbox_world_xy(ctx, snap, box) if abs(side) <= self.lift_gate else None
+        # Lift every tick (the follow loop drives to this point each cycle); skip
+        # the full-frame edge filter to keep the lift cheap enough to run flat out.
+        xy = lift_bbox_world_xy(ctx, snap, box, use_edge_filter=False)
         if self.debug:
             print(f"[HostSampler] {mode} snap={1e3 * (t_snap - t0):.0f}ms "
                   f"pose={1e3 * (t_pose - t_snap):.0f}ms id={1e3 * (t_id - t_pose):.0f}ms "

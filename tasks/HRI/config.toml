@@ -69,27 +69,13 @@ HRI_FOLLOW_SAMPLE_INTERVAL_SEC = "0.0"
 # The host counts as in-view for this long (s) after the last sighting, so a
 # single dropped detection frame doesn't flip the loop into "lost"/search.
 HRI_FOLLOW_VIEW_GRACE_SEC = "2"
-# --- Pixel-offset centering servo (keep the target framed while in view) ------
-# When the target is in view but off-center, the base rotates toward it using
-# its horizontal frame offset (cx/width - 0.5) instead of the depth-lifted map
-# point — the offset stays reliable at point-blank range, where the lift fails
-# and the robot would otherwise freeze as the target strafes out of frame. Same
-# control law as the FaceTracker: delta = -offset * HFOV * GAIN, clamped to
-# MAX_STEP_DEG per tick. GAIN up / MAX_STEP_DEG up = snappier turns (raise if it
-# lags fast sidesteps); down = calmer (lower if it oscillates around center).
-HRI_FOLLOW_CENTER_GAIN = "0.8"
-HRI_FOLLOW_CENTER_MAX_STEP_DEG = "30"
-# Dead-band: a target within this fraction of frame-center counts as "centered"
-# and the loop switches to the forward-approach path instead of rotating.
-HRI_FOLLOW_CENTER_DEADBAND_FRAC = "0.07"
-# The depth lift (full-frame edge mask + deproject, ~hundreds of ms) is the
-# costliest per-sample step, and the loop only needs the lifted map point to
-# APPROACH — i.e. when the target is roughly centered. The sampler skips the
-# lift when |offset| exceeds this fraction, so while the target moves sideways
-# the tracker stays at the fast pose-only rate (only `side` is needed to
-# re-center). Keep this >= the centering dead-band so centered samples still
-# lift. Raise toward 0.5 to lift more often (slower); lower to lift less.
-HRI_FOLLOW_LIFT_GATE_FRAC = "0.15"
+# Follow control: every tick the base is re-commanded (nav.go_to) toward the
+# target's lifted map point, led forward by their velocity × this many seconds,
+# stopping HRI_FOLLOW_DISTANCE_M short. Nav orients the base along its travel
+# direction, so aiming at the target also faces it — no separate look-at step.
+# Raise to aim further ahead of a fast walker (re-acquires sooner, but overshoots
+# if too high); 0 = drive straight to where they are now.
+HRI_FOLLOW_LEAD_GAIN = "0.5"
 # --- Two-tier sampling (fast pose tracking + periodic identity re-lock) -------
 # Full identity recognition (face + attire embeds) is the slow part, so it runs
 # only every Nth sample; between confirms the host is tracked by pose alone

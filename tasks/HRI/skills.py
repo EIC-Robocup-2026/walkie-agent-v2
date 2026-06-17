@@ -253,7 +253,9 @@ def bboxes_world_position(ctx: TaskContext, bboxes: BBox) -> tuple[float, float]
     return _cxcywh_to_world_position(ctx, cxcywh)
 
 
-def lift_bbox_world_xy(ctx: TaskContext, snap, bbox_xyxy: BBox) -> tuple[float, float] | None:
+def lift_bbox_world_xy(
+    ctx: TaskContext, snap, bbox_xyxy: BBox, *, use_edge_filter: bool = True
+) -> tuple[float, float] | None:
     """Lift a bbox to a map-frame (x, y): snapshot geometry first, service fallback.
 
     The snapshot lift (CameraSnapshot.bbox_world_xy) deprojects the bbox's
@@ -261,10 +263,16 @@ def lift_bbox_world_xy(ctx: TaskContext, snap, bbox_xyxy: BBox) -> tuple[float, 
     matter how much detection/LLM latency has elapsed since the scan. Only when
     the snapshot is missing or carries no geometry does this fall back to the
     legacy live-depth service lift.
+
+    *use_edge_filter* False skips the per-frame full-resolution depth-discontinuity
+    mask — the lift's dominant cost. The deprojection itself is already cropped to
+    the bbox and capped, so dropping the edge filter makes the lift cheap enough to
+    run every tick; the median over the (shrunk) central box stays on the person
+    even without the flying-pixel cleanup. Use it on the fast follow path.
     """
     if snap is not None and getattr(snap, "has_geometry", False):
         try:
-            xy = snap.bbox_world_xy(bbox_xyxy)
+            xy = snap.bbox_world_xy(bbox_xyxy, use_edge_filter=use_edge_filter)
             if xy is not None:
                 return xy
             print("[skills] snapshot lift returned no points; trying service fallback")
@@ -469,7 +477,9 @@ class HostEstimate:
 
     *in_view*: a sighting landed within the view-grace window (a brief detector
     dropout does not flip this false). *xy*: the freshly lifted map-frame point
-    when in view, else None. *predicted*: the MotionPredictor's extrapolation
+    when in view, LED forward by the host's velocity × the read's ``lead_gain``
+    so the robot drives to where they will be (the goal nav faces, so it tracks
+    them naturally); else None. *predicted*: the MotionPredictor's extrapolation
     for when the host is out of view (None if not trustworthy). *side*: the last
     horizontal frame offset, for the rotate-search fallback direction.
     """
@@ -562,16 +572,25 @@ class HostTracker:
             if self.interval > 0:
                 self._stop.wait(self.interval)  # else loop flat out (detector paces)
 
-    def read(self, now: float | None = None) -> HostEstimate:
-        """Best current view of the host: in-view flag, fresh point, prediction."""
+    def read(self, now: float | None = None, *, lead_gain: float = 0.0) -> HostEstimate:
+        """Best current view of the host: in-view flag, LED point, prediction.
+
+        *lead_gain* (seconds) extrapolates the in-view point forward along the
+        host's fitted velocity, so the loop drives to where they are heading
+        rather than where they were — 0 aims at the current point. The
+        out-of-view *predicted* point is unaffected (it already extrapolates).
+        """
         if now is None:
             now = time.monotonic()
         with self._lock:
             seen_t, lift_t = self._last_seen_t, self._last_lift_t
             xy, side = self._last_xy, self._last_side
+            vel = self.predictor.velocity() if self.predictor is not None else None
             predicted = self.predictor.predict(now) if self.predictor is not None else None
         in_view = seen_t is not None and (now - seen_t) <= self.view_grace
         fresh_xy = xy if (lift_t is not None and now - lift_t <= self.view_grace) else None
+        if fresh_xy is not None and vel is not None and lead_gain:
+            fresh_xy = (fresh_xy[0] + lead_gain * vel[0], fresh_xy[1] + lead_gain * vel[1])
         return HostEstimate(in_view=in_view, xy=fresh_xy, predicted=predicted, side=side)
 
 
@@ -597,18 +616,16 @@ def follow_target(
     :class:`MotionPredictor` a dense trajectory); this control loop reads the
     freshest estimate and issues a nav goal every *nav_period* s.
 
-    While the target is in view it is kept FRAMED by a pixel-offset centering
-    servo (the :class:`FaceTracker` control law on the body box): when the target
-    is off-center, the base rotates proportionally to its horizontal frame offset
-    (``est.side``) — a signal that stays reliable even at point-blank range,
-    where the depth lift that yields ``est.xy`` goes noisy or empty. Only once
-    the target is roughly centered (so the map-point heading ≈ the current one)
-    does the loop approach to within *follow_distance* m via the lifted point, so
-    it never bumps them. When they slip out of frame the predictor extrapolates
-    where they were heading and the robot drives there to re-acquire, falling
-    back to rotating toward the last-seen side only when there is no usable
-    prediction. Returns the exit reason: ``'stopped'`` | ``'lost'`` |
-    ``'timeout'``.
+    The control law is just "drive to where the target is going". Every tick it
+    re-targets ``nav.go_to`` at the target's lifted map point LED forward by their
+    velocity × *lead_gain* (``HRI_FOLLOW_LEAD_GAIN`` seconds), stopping
+    *follow_distance* m short. Because nav orients the base along its travel
+    direction, aiming at the target IS facing the target — no separate
+    look-at/centering step — so the faster the tracker samples, the tighter it
+    holds them. When they slip out of frame the predictor's extrapolation keeps
+    the goal moving the way they were heading; only with no usable point does it
+    fall back to rotating toward the last-seen side. Returns the exit reason:
+    ``'stopped'`` | ``'lost'`` | ``'timeout'``.
 
     *sample* is a ``(ctx) -> (world_xy | None, side | None)`` callable the
     tracker polls each tick — e.g. ``_HostSampler().sample`` for identity-based
@@ -638,13 +655,9 @@ def follow_target(
     if predict_on is None:
         predict_on = os.getenv("HRI_FOLLOW_PREDICT", "1").lower() in ("1", "true", "yes")
 
-    # Pixel-offset centering servo (mirrors FaceTracker): rotate proportionally
-    # to the target's horizontal frame offset, clamped per tick, with a deadband
-    # so a roughly-centered target switches to the forward-approach path.
-    hfov = math.radians(float(os.getenv("HRI_CAMERA_HFOV_DEG", "110")))
-    center_gain = float(os.getenv("HRI_FOLLOW_CENTER_GAIN", "0.8"))
-    center_max_step = math.radians(float(os.getenv("HRI_FOLLOW_CENTER_MAX_STEP_DEG", "30")))
-    center_deadband = float(os.getenv("HRI_FOLLOW_CENTER_DEADBAND_FRAC", "0.07"))
+    # How far ahead (s) to aim along the target's velocity, so the goal leads
+    # them instead of trailing. 0 = drive to where they are right now.
+    lead_gain = float(os.getenv("HRI_FOLLOW_LEAD_GAIN", "0.5"))
 
     idle = threading.Event()  # never set — an interruptible sleep when no stopper
     lost = 0
@@ -657,30 +670,21 @@ def follow_target(
         with (stopper if stopper is not None else nullcontext()) as listener:
             placed = getattr(listener, "placed", None)
             while time.monotonic() < deadline and not (placed is not None and placed.is_set()):
-                est = tracker.read()
+                est = tracker.read(lead_gain=lead_gain)
                 if est.side is not None:
                     # Left of center (side < 0) -> turn left (+) to re-center.
                     last_dir = 1.0 if est.side < 0 else -1.0
-                if est.in_view:
+                # Drive to where the target is going (in view: lifted point led by
+                # velocity; just out of view: the predictor's extrapolation). nav
+                # faces the travel direction, so this also faces the target.
+                target = est.xy or est.predicted
+                if target is not None:
                     lost = 0
-                    if est.side is not None and abs(est.side) > center_deadband:
-                        # Off-center: keep the target framed using the reliable
-                        # pixel offset, NOT the close-range depth lift. side < 0
-                        # (left of center) -> turn left (+). Non-blocking so the
-                        # loop stays responsive and re-centers closed-loop.
-                        delta = max(-center_max_step,
-                                    min(center_max_step, -est.side * hfov * center_gain))
-                        rotate_by(ctx, delta, blocking=False)
-                    else:
-                        # Roughly centered: the map-point heading ~= current
-                        # heading, so a forward approach is safe. With no usable
-                        # point (close-range lift failed) just hold and re-center
-                        # next tick rather than driving blind.
-                        target = est.xy or est.predicted
-                        if target is not None:
-                            approach_point(ctx, *target, stop_distance=follow_distance,
-                                           blocking=False)
+                    approach_point(ctx, *target, stop_distance=follow_distance,
+                                   blocking=False)
                 else:
+                    # No usable point at all: turn toward the last-seen side and
+                    # keep turning until the target comes back into view.
                     lost += 1
                     if lost == 1 and on_lost is not None:
                         on_lost()  # nudge once, then keep searching
@@ -688,16 +692,7 @@ def follow_target(
                         print("[skills] follow_target: lost the target past the search budget")
                         reason = "lost"
                         break
-                    if est.predicted is not None:
-                        # Chase where the target was heading, not where they were.
-                        print(f"[skills] follow_target: target out of frame; driving to "
-                              f"predicted ({est.predicted[0]:.2f}, {est.predicted[1]:.2f})")
-                        approach_point(ctx, *est.predicted, stop_distance=follow_distance,
-                                       blocking=False)
-                    else:
-                        # No usable prediction: turn toward the last-seen side
-                        # and keep turning until the target comes back in view.
-                        rotate_by(ctx, last_dir * search_step)
+                    rotate_by(ctx, last_dir * search_step)
                 # Nav cadence — the "higher delay" between commands. The event
                 # wait returns the instant the stopper flags a place command.
                 (placed or idle).wait(nav_period)
@@ -751,7 +746,6 @@ def nearest_person_sample(ctx: TaskContext) -> tuple[tuple[float, float] | None,
     lift) every sample, so you can see what is capping the tracker's frame rate.
     """
     debug = os.getenv("HRI_FOLLOW_TRACK_DEBUG", "0").lower() in ("1", "true", "yes")
-    lift_gate = float(os.getenv("HRI_FOLLOW_LIFT_GATE_FRAC", "0.15"))
     t0 = time.monotonic()
     snap = ctx.snapshot()
     t_snap = time.monotonic()
@@ -766,17 +760,13 @@ def nearest_person_sample(ctx: TaskContext) -> tuple[tuple[float, float] | None,
                   f"snap={1e3 * (t_snap - t0):.0f}ms pose={1e3 * (t_pose - t_snap):.0f}ms")
         return None, None
     side = (box[0] + box[2]) / 2 / img.width - 0.5
-    # The ~depth lift is the expensive per-sample step (full-frame edge mask +
-    # deproject). The control loop only needs the map point to APPROACH (target
-    # roughly centered); off-center it just rotates to re-center off `side`. So
-    # skip the lift when off-center, keeping the tracker at the fast pose-only
-    # rate exactly when the target is moving sideways. See HRI_FOLLOW_LIFT_GATE_FRAC.
-    xy = lift_bbox_world_xy(ctx, snap, box) if abs(side) <= lift_gate else None
+    # Lift every tick (the follow loop drives to this point each cycle); skip the
+    # full-frame edge filter to keep the lift cheap enough to run flat out.
+    xy = lift_bbox_world_xy(ctx, snap, box, use_edge_filter=False)
     if debug:
         print(f"[nearest_person_sample] snap={1e3 * (t_snap - t0):.0f}ms "
               f"pose={1e3 * (t_pose - t_snap):.0f}ms side={side:+.2f} "
-              f"lift={1e3 * (time.monotonic() - t_pose):.0f}ms"
-              f"{'' if abs(side) <= lift_gate else ' (skipped, off-center)'}")
+              f"lift={1e3 * (time.monotonic() - t_pose):.0f}ms")
     return xy, side
 
 
