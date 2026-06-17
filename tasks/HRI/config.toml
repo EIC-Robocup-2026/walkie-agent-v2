@@ -7,18 +7,44 @@
 
 [hri]
 # Waypoints are map-frame poses "x,y,heading_rad" (set after mapping the arena).
-HRI_DOOR_POSE = "0.8,-0.95,2.97"
-HRI_LIVING_ROOM_POSE = "4.64,1.09,-0.40"   # scan pose facing the seating area
+HRI_DOOR_POSE = "1.77,0.0,-3.12"
+HRI_LIVING_ROOM_POSE = "6.3,-1.29,-1.79"   # scan pose facing the seating area
 # Host's name and favorite drink (given in the competition briefing). Used in
 # the seat-offer wording ("next to our host James"); "" = unknown.
 HRI_HOST_NAME = "Armmy"
 HRI_HOST_DRINK = "pepsi"
 # Open-vocab detector prompts used to find seats.
 HRI_SEAT_CLASSES = "chair,sofa,armchair,stool"
-# A seat is occupied when (person bbox ∩ seat bbox) / seat area >= this.
+# Used by match_people_to_seats to tie a recognized person to the seat their
+# box overlaps most: a person claims a seat when (person bbox ∩ seat bbox) /
+# seat area >= this.
 HRI_SEAT_OCCUPIED_OVERLAP = "0.25"
+# Seat occupancy is decided from where a person actually sits (their hip
+# keypoint anchor), so a neighbour's box clipping a free seat no longer marks it
+# taken and one guest on a sofa no longer hides its free cushions. This overlap
+# floor is only the fallback for a person whose hips weren't detected — keep it
+# high so an edge-clipping box still doesn't count as sitting there.
+HRI_SEAT_OCCUPIED_HARD_OVERLAP = "0.5"
+# Min keypoint confidence for a hip to be used as the seating anchor.
+HRI_POSE_KP_CONF = "0.3"
+# Detector classes treated as multi-seat sofas (split into LEFT/MIDDLE/RIGHT
+# cushions with per-cushion occupancy) instead of one free/taken unit.
+HRI_SOFA_CLASSES = "sofa,couch,bench,loveseat"
+# 1 = sofas have LEFT/MIDDLE/RIGHT cushions; 0 = LEFT/RIGHT only (two-seaters).
+HRI_SOFA_HAS_MIDDLE = "1"
+# OfferSeat: before finishing, confirm the guest sat down — treat them staying
+# recognized in the frame continuously for DWELL_SEC as seated. Bounded by
+# WAIT_TIMEOUT_SEC so a no-show can't stall the run; the camera is polled every
+# POLL_SEC (real rate is also capped by the recognition round-trip).
+HRI_SEATED_DWELL_SEC = "3"
+HRI_SEATED_WAIT_TIMEOUT_SEC = "20"
+HRI_SEATED_POLL_SEC = "0.5"
 # Horizontal field of view (deg) for pixel->heading conversion (tune for ZED).
 HRI_CAMERA_HFOV_DEG = "110"
+# GreetAndLearn: per missing field (name / drink), how many times to re-ask &
+# re-extract until we get it before moving on (asking for missing info is not a
+# penalized confirmation question).
+HRI_ASK_RETRIES = "4"
 # --- Face presence & tracking ------------------------------------------------
 # "Biggest face" must exceed this bbox area (px²) to count as the person
 # standing right in front — distant bystanders are ignored. Used both by
@@ -26,7 +52,7 @@ HRI_CAMERA_HFOV_DEG = "110"
 HRI_FACE_MIN_AREA_PX = "10000"
 # GoToDoor: max seconds to wait for a guest's face before greeting anyway, and
 # how often (s) to poll the camera while waiting.
-HRI_FACE_WAIT_TIMEOUT_SEC = "30"
+HRI_FACE_WAIT_TIMEOUT_SEC = "90"
 HRI_FACE_WAIT_POLL_SEC = "0.5"
 # GreetAndLearn face tracking: loop period (s); dead-band (px) inside which the
 # face counts as centered and the base doesn't move; per-tick base-rotation cap
@@ -35,8 +61,8 @@ HRI_FACE_TRACK_INTERVAL_SEC = "0.6"
 HRI_FACE_TRACK_DEADBAND_PX = "80"
 HRI_FACE_TRACK_MAX_STEP_DEG = "20"
 HRI_FACE_TRACK_GAIN = "0.8"
-# IntroduceEveryone sweeps left/center/right by this many degrees (base rotation,
-# positive = left) to find people who drifted off-center before introducing them.
+# IntroduceGuests sweeps left/center/right by this many degrees (base rotation,
+# positive = left) to find guests who drifted off-center before introducing them.
 HRI_INTRO_SWEEP_DEG = "10"
 # Seconds to let the base + depth settle after each sweep rotation before capturing.
 HRI_SWEEP_SETTLE_SEC = "1.0"
@@ -45,55 +71,82 @@ HRI_PEOPLE_RESET = "1"
 # 1 = enable the timed gripper bag-handover steps (no torque sensing yet).
 HRI_ENABLE_BAG = "1"
 # Effort threshold when bag is placed
-HRI_BAG_EFFORT_THRESHOLD = "0.7"
+HRI_BAG_EFFORT_THRESHOLD = "0.4"
 # Max seconds to wait for the bag's effort spike before giving up (no-show guest).
 HRI_BAG_WAIT_TIMEOUT_SEC = "20"
 # --- Follow host & place the bag ---------------------------------------------
 # How far (m) the base stops short of the host when following, so it never
 # bumps them (the host's lifted body point minus this along the approach line).
-HRI_FOLLOW_DISTANCE_M = "1"
+HRI_FOLLOW_DISTANCE_M = "1.5"
 # Window (s) for the ONE synchronous listen right after asking where the bag
 # goes (the robot is still then). The follow loop itself does not block-listen.
 HRI_FOLLOW_LISTEN_TIMEOUT_SEC = "5"
 # Background CommandListener: max length (s) of one record cycle. Also bounds
 # how long stop() waits for the recorder to wind down, so keep it modest.
 HRI_FOLLOW_RECORD_TIMEOUT_SEC = "5"
-# Sampling and nav commanding are DECOUPLED. The HostTracker thread samples the
-# host's position as fast as the detector allows; this control loop only issues
-# a nav goal every NAV_PERIOD_SEC (the "higher delay" — re-commanding faster
-# just thrashes nav). The wait also returns instantly when a place command lands.
-HRI_FOLLOW_NAV_PERIOD_SEC = "0.2"
-# Min seconds between HostTracker samples; 0 = sample flat out (the detector
-# latency itself paces it). Raise to throttle the camera/detector load.
-HRI_FOLLOW_SAMPLE_INTERVAL_SEC = "0.0"
-# The host counts as in-view for this long (s) after the last sighting, so a
-# single dropped detection frame doesn't flip the loop into "lost"/search.
-HRI_FOLLOW_VIEW_GRACE_SEC = "2"
+# Optional extra delay (s) between nav commands. The follow loop is synchronous —
+# the per-tick snapshot + lift already pace it at the detector rate — so 0 means
+# flat out (re-command every tick). Raise only if re-issuing go_to that fast
+# thrashes the nav stack. The wait also returns instantly on a place command.
+HRI_FOLLOW_NAV_PERIOD_SEC = "0"
 # Follow control: every tick the base is re-commanded (nav.go_to) toward the
 # target's lifted map point, led forward by their velocity × this many seconds,
 # stopping HRI_FOLLOW_DISTANCE_M short. Nav orients the base along its travel
 # direction, so aiming at the target also faces it — no separate look-at step.
 # Raise to aim further ahead of a fast walker (re-acquires sooner, but overshoots
 # if too high); 0 = drive straight to where they are now.
-HRI_FOLLOW_LEAD_GAIN = "0.5"
-# --- Two-tier sampling (fast pose tracking + periodic identity re-lock) -------
-# Full identity recognition (face + attire embeds) is the slow part, so it runs
-# only every Nth sample; between confirms the host is tracked by pose alone
-# (real-time), following the box nearest the last lock. 1 = identify every tick
-# (slow, the old behaviour). Lower it if the wrong person gets followed in a crowd.
-HRI_FOLLOW_CONFIRM_EVERY_N = "8"
-# Continuity gate: a tracked box may jump at most this fraction of the frame
-# width between samples, else the lock is dropped and identity is re-run.
-HRI_FOLLOW_TRACK_GATE_FRAC = "0.2"
-# 1 = log the achieved sample rate (Hz) and per-stage timings (snapshot / pose /
-# identify / lift) so you can see what's actually capping the frame rate.
+HRI_FOLLOW_LEAD_GAIN = "0.9"
+# --- Person selection --------------------------------------------------------
+# The real host follow picks the host out of the crowd FACE first, falling back
+# to ATTIRE (an OSNet vector embedded per candidate person box) only when no
+# face in view is recognized as the host. Face detection runs once per tick;
+# the attire embeds are the costly part in a crowd. Only the largest this-many
+# person boxes are kept as candidates; 0 = keep all (the default — a host who
+# walks off shrinks below a nearer guest, so capping by size can drop the real
+# host from the candidate set). The largest-person test selector ignores this.
+# Both match floors are the perception-wide APPEARANCE_MATCH_THRESHOLD.
+HRI_FOLLOW_APPEARANCE_MAX_CANDIDATES = "0"
+# A box is only followed when the host's attire score beats the best GUEST's by
+# at least this margin — not just edges it out. People dress alike at a party,
+# so a bare top-1 host match flips onto a guest on embedding noise; the margin
+# demands the host clearly win. Raise if it locks onto guests; lower toward 0 if
+# it can't hold the host (0 = top-1 wins, the old behaviour).
+HRI_FOLLOW_APPEARANCE_MARGIN = "0.05"
+# Same idea for the FACE pass: the host's face score must beat the best other
+# enrolled person by this margin. Faces are far more discriminative than attire,
+# so a small margin is plenty — it just rejects an ambiguous frame.
+HRI_FOLLOW_FACE_MARGIN = "0.05"
+# Among the boxes that pass the identity gate (face or attire), the follow loop
+# prefers the NEAREST: the combined score is similarity + this weight × the
+# box's pose-keypoint scale relative to the nearest qualifier. It is only a
+# tie-breaker between genuine matches — a near bystander that fails the identity
+# gate can never win. 0 = pure similarity (ignore proximity); raise to lean
+# harder toward the closest matching body.
+HRI_FOLLOW_PROXIMITY_WEIGHT = "0.15"
+# Min keypoint confidence for the pose-scale closeness proxy (torso length →
+# shoulder width → bbox height). Keypoints below this are ignored; a box with
+# too few confident keypoints to measure gets no proximity bonus.
+HRI_FOLLOW_POSE_KP_CONF = "0.3"
+# 1 = log the follow loop's per-tick stage costs (snapshot / select / lift+nav)
+# and achieved Hz, so you can see what's capping the rate.
 HRI_FOLLOW_TRACK_DEBUG = "1"
-# When the host leaves the frame AND there is no usable motion prediction,
+# 1 = write an annotated frame every tick to HRI_FOLLOW_VIZ_PATH showing which
+# person the loop is locked onto: green box = tracking a fresh detection, yellow
+# = coasting on the last-seen box (prediction/grace), red banner = searching.
+# Overwrites the file each tick — open it in a viewer that auto-reloads.
+HRI_FOLLOW_VIZ = "1"
+HRI_FOLLOW_VIZ_PATH = "follow_viz.jpg"
+# When a tick yields no detection, keep driving to the last seen point for this
+# long (s) before searching — absorbs single dropped pose frames and a briefly
+# stationary person (whom the predictor can't extrapolate), so the loop doesn't
+# stutter into the rotate-search on every momentary miss.
+HRI_FOLLOW_LOST_GRACE_SEC = "1.5"
+# When the host is lost past the grace AND there is no usable motion prediction,
 # turn this many degrees toward the side they were last seen on, each lost
-# frame, until they reappear.
+# frame, until they reappear (non-blocking — never stalls the loop).
 HRI_FOLLOW_SEARCH_STEP_DEG = "10"
 # Overall time budget (s) for the follow loop before placing the bag anyway.
-HRI_FOLLOW_TIMEOUT_SEC = "150"
+HRI_FOLLOW_TIMEOUT_SEC = "450"
 # Consecutive lost frames (each predicting or turning to look for the host)
 # before giving up the search and placing the bag here.
 HRI_FOLLOW_MAX_LOST = "8"

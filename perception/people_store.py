@@ -352,6 +352,65 @@ class PeopleStore:
             return None
         cfg = {**FUSION_DEFAULTS, **(fusion or {})}
 
+        best: Optional[tuple[float, str, list | None, dict, str]] = None
+        for score, rid, stored_face, meta, matched_by in self._fused_candidates(
+            face, app, face_confidence, cfg
+        ):
+            if score >= min_score and (best is None or score > best[0]):
+                best = (score, rid, stored_face, meta, matched_by)
+
+        if best is None:
+            return None
+        score, rid, stored_face, meta, matched_by = best
+        return self._to_record(
+            rid, stored_face, meta, distance=1.0 - score, matched_by=matched_by
+        )
+
+    def fused_scores(
+        self,
+        face_embedding: Optional[Sequence[float]] = None,
+        app_embedding: Optional[Sequence[float]] = None,
+        *,
+        face_confidence: float = 0.0,
+        fusion: Optional[dict] = None,
+    ) -> dict[str, float]:
+        """Fused similarity of one query against EVERY enrolled id — no threshold.
+
+        Same scoring as :meth:`recognize_fused` (adaptive face↔appearance fusion)
+        but returns ``{id: score}`` for all scorable people instead of only the
+        best over ``min_score``. For callers that must compare identities rather
+        than take the winner — e.g. a follow loop that only locks onto the host
+        when their attire out-scores every guest by a margin, so two people in
+        similar clothing don't flip the lock. Empty when no query vector is given
+        or the store is empty.
+        """
+        face = [float(x) for x in face_embedding] if face_embedding else None
+        app = [float(x) for x in app_embedding] if app_embedding else None
+        if (face is None and app is None) or self.count() == 0:
+            return {}
+        cfg = {**FUSION_DEFAULTS, **(fusion or {})}
+        return {
+            rid: score
+            for score, rid, _f, _m, _mb in self._fused_candidates(
+                face, app, face_confidence, cfg
+            )
+        }
+
+    def _fused_candidates(
+        self,
+        face: Optional[list[float]],
+        app: Optional[list[float]],
+        face_confidence: float,
+        cfg: dict,
+    ) -> list[tuple[float, str, list | None, dict, str]]:
+        """Score every enrolled id on both modalities: ``(score, id, stored_face,
+        meta, matched_by)`` per scorable person, unfiltered.
+
+        The store is tiny (a handful of Receptionist guests), so this scans all
+        records exactly instead of merging two approximate HNSW queries. Shared
+        by :meth:`recognize_fused` (best over threshold) and :meth:`fused_scores`
+        (every score, for margin comparisons).
+        """
         rows = get_rows(self._collection.get(include=["embeddings", "metadatas"]))
         app_by_id = {
             rid: emb
@@ -359,7 +418,7 @@ class PeopleStore:
             if emb is not None
         }
 
-        best: Optional[tuple[float, str, list | None, dict, str]] = None
+        out: list[tuple[float, str, list | None, dict, str]] = []
         for rid, stored_face, meta in rows:
             # A zero-norm stored face means "enrolled without a face" (an
             # attire-only sighting) — treat it as absent, not as similarity 0,
@@ -394,15 +453,8 @@ class PeopleStore:
             else:
                 continue
 
-            if score >= min_score and (best is None or score > best[0]):
-                best = (score, rid, stored_face, meta, matched_by)
-
-        if best is None:
-            return None
-        score, rid, stored_face, meta, matched_by = best
-        return self._to_record(
-            rid, stored_face, meta, distance=1.0 - score, matched_by=matched_by
-        )
+            out.append((score, rid, stored_face, meta, matched_by))
+        return out
 
     def get(self, name_or_id: str) -> Optional[PersonRecord]:
         """Look a person up by name or record id (case-insensitive via the slug)."""

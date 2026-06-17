@@ -56,6 +56,67 @@ def overlap_fraction(person_xyxy: BBox, seat_xyxy: BBox) -> float:
     return (iw * ih) / seat_area
 
 
+def _point_in_box(point: tuple[float, float], box: BBox) -> bool:
+    """True when (x, y) lies inside the xyxy *box* (inclusive bounds)."""
+    px, py = point
+    x1, y1, x2, y2 = box
+    return x1 <= px <= x2 and y1 <= py <= y2
+
+
+# COCO keypoint indices for the seating anchor (the hips are the part of the
+# body resting on the cushion). Same convention as Restaurant/skills.py.
+_LEFT_HIP, _RIGHT_HIP = 11, 12
+
+
+def person_hip_anchor(
+    person: PersonPose, conf_thresh: float = 0.3
+) -> tuple[float, float] | None:
+    """The hip midpoint (COCO 11/12) when at least one hip is confidently seen.
+
+    This is where the person actually rests on a seat — far more reliable for
+    deciding *which* seat (or sofa cushion) they occupy than their bounding box,
+    which sprawls sideways over neighbouring seats. Returns None when neither hip
+    clears *conf_thresh* (pose keypoints missing or occluded), so the caller can
+    fall back to a coarser bbox-overlap test only for those people.
+    """
+    kpts = {kp.index: kp for kp in person.keypoints}
+    lh, rh = kpts.get(_LEFT_HIP), kpts.get(_RIGHT_HIP)
+    lo = lh if (lh is not None and lh.confidence > conf_thresh) else None
+    ro = rh if (rh is not None and rh.confidence > conf_thresh) else None
+    if lo is not None and ro is not None:
+        return ((lo.x + ro.x) / 2, (lo.y + ro.y) / 2)
+    if lo is not None or ro is not None:
+        h = lo or ro
+        return (h.x, h.y)
+    return None
+
+
+def person_seat_anchor(
+    person: PersonPose, conf_thresh: float = 0.3
+) -> tuple[float, float]:
+    """Best estimate of where *person* is seated, always a point.
+
+    The reliable hip midpoint (:func:`person_hip_anchor`) when available, else
+    the bbox's lower-centre — roughly where the seat is under a person whose
+    hips weren't detected.
+    """
+    anchor = person_hip_anchor(person, conf_thresh)
+    if anchor is not None:
+        return anchor
+    cx, cy, _w, h = person.bbox
+    return (cx, cy + h * 0.25)
+
+
+@dataclass
+class SeatPart:
+    """One cushion of a multi-seat sofa, with its own occupancy."""
+
+    label: str  # "LEFT" | "MIDDLE" | "RIGHT"
+    bbox_xyxy: BBox
+    center_px: tuple[float, float]
+    occupied: bool
+
+
 @dataclass
 class SeatCandidate:
     bbox_xyxy: BBox
@@ -63,6 +124,116 @@ class SeatCandidate:
     confidence: float
     center_px: tuple[float, float]
     occupied: bool
+    # For a sofa/couch: its LEFT/MIDDLE/RIGHT cushions with per-cushion
+    # occupancy (None for an ordinary single seat). ``occupied`` above is then
+    # True only when every cushion is taken.
+    parts: list[SeatPart] | None = None
+
+
+# --- Sofa cushion parsing ----------------------------------------------------
+# A sofa seats several people, so treating it as one occupied/free unit either
+# wastes free cushions (one guest on a 3-seater hides two empty spots) or, with
+# a low overlap floor, marks a free chair taken because a neighbour's box edges
+# onto it. Both are fixed by deciding occupancy per cushion from where people
+# actually sit (their hip anchor), not from whole-bbox overlap.
+
+
+def _sofa_classes() -> list[str]:
+    return [
+        c.strip().lower()
+        for c in os.getenv("HRI_SOFA_CLASSES", "sofa,couch,bench,loveseat").split(",")
+        if c.strip()
+    ]
+
+
+def is_sofa_class(class_name: str | None) -> bool:
+    """True for detector classes that seat several people (split into cushions)."""
+    return (class_name or "").lower() in _sofa_classes()
+
+
+def split_seat_regions(bbox: BBox, *, has_middle: bool = True) -> list[tuple[str, BBox]]:
+    """Split a sofa bbox into evenly-spaced cushion regions, left→right.
+
+    x grows rightward and x=0 is the robot's far left, so the first column is the
+    robot's LEFT. *has_middle* False gives a two-cushion (LEFT, RIGHT) sofa — set
+    it for sofas that only have two seats.
+    """
+    x1, y1, x2, y2 = bbox
+    labels = ("LEFT", "MIDDLE", "RIGHT") if has_middle else ("LEFT", "RIGHT")
+    n = len(labels)
+    step = (x2 - x1) / n
+    regions: list[tuple[str, BBox]] = []
+    for i, label in enumerate(labels):
+        rx1, rx2 = x1 + i * step, x1 + (i + 1) * step
+        regions.append((label, (rx1, y1, rx2, y2)))
+    return regions
+
+
+def _occupied_region_indices(
+    persons: list[PersonPose],
+    region_boxes: list[BBox],
+    *,
+    hard_overlap: float,
+    conf_thresh: float,
+) -> set[int]:
+    """Which of *region_boxes* a person is sitting on (one region per person).
+
+    Each person is placed on the single region containing their hip anchor; a
+    person whose hips weren't detected falls back to the region their box covers
+    most, but only when that coverage reaches *hard_overlap* — high enough that a
+    neighbour's box merely clipping a cushion's edge doesn't count as sitting on
+    it.
+    """
+    occupied: set[int] = set()
+    for p in persons:
+        anchor = person_hip_anchor(p, conf_thresh)
+        if anchor is not None:
+            for i, rb in enumerate(region_boxes):
+                if _point_in_box(anchor, rb):
+                    occupied.add(i)
+                    break  # a person sits on one cushion
+            continue
+        pb = cxcywh_to_xyxy(p.bbox)
+        best_i, best_ov = None, hard_overlap
+        for i, rb in enumerate(region_boxes):
+            ov = overlap_fraction(pb, rb)
+            if ov >= best_ov:
+                best_i, best_ov = i, ov
+        if best_i is not None:
+            occupied.add(best_i)
+    return occupied
+
+
+def parse_sofa_parts(
+    sofa_bbox: BBox,
+    persons: list[PersonPose],
+    *,
+    has_middle: bool = True,
+    hard_overlap: float = 0.5,
+    conf_thresh: float = 0.3,
+) -> list[SeatPart]:
+    """Split a sofa into cushions and mark each one occupied independently.
+
+    A cushion is occupied when a person's seating anchor falls on it (see
+    :func:`_occupied_region_indices`). The result lets the picker offer a free
+    cushion of a sofa that already has someone on it, instead of writing the
+    whole sofa off as taken.
+    """
+    regions = split_seat_regions(sofa_bbox, has_middle=has_middle)
+    occ = _occupied_region_indices(
+        persons, [rb for _label, rb in regions],
+        hard_overlap=hard_overlap, conf_thresh=conf_thresh,
+    )
+    parts: list[SeatPart] = []
+    for i, (label, rb) in enumerate(regions):
+        rx1, ry1, rx2, ry2 = rb
+        parts.append(SeatPart(
+            label=label,
+            bbox_xyxy=rb,
+            center_px=((rx1 + rx2) / 2, (ry1 + ry2) / 2),
+            occupied=i in occ,
+        ))
+    return parts
 
 
 def find_persons(ctx: TaskContext) -> list[PersonPose]:
@@ -97,7 +268,13 @@ def scan_seats(ctx: TaskContext):
         for c in os.getenv("HRI_SEAT_CLASSES", "chair,sofa,armchair,stool").split(",")
         if c.strip()
     ]
-    occupied_overlap = float(os.getenv("HRI_SEAT_OCCUPIED_OVERLAP", "0.25"))
+    # Occupancy is decided from where people actually sit (their hip anchor); the
+    # overlap floor is only a fallback for a person whose hips weren't detected,
+    # so it's set high enough that a neighbour's box clipping a free seat's edge
+    # no longer marks it taken.
+    hard_overlap = float(os.getenv("HRI_SEAT_OCCUPIED_HARD_OVERLAP", "0.5"))
+    conf_thresh = float(os.getenv("HRI_POSE_KP_CONF", "0.3"))
+    sofa_has_middle = os.getenv("HRI_SOFA_HAS_MIDDLE", "1").lower() in ("1", "true", "yes")
     try:
         detections = ctx.walkieAI.object_detection.detect(img, prompts=seat_classes)
     except Exception as exc:
@@ -108,24 +285,34 @@ def scan_seats(ctx: TaskContext):
     except Exception as exc:
         print(f"[skills] pose estimation failed ({exc}); assuming all seats free")
         persons = []
-    person_boxes = [cxcywh_to_xyxy(p.bbox) for p in persons]
 
     seats: list[SeatCandidate] = []
     for det in detections:
         if det.class_name and det.class_name.lower() not in [c.lower() for c in seat_classes]:
             continue
         x1, y1, x2, y2 = det.bbox
-        occupied = any(
-            overlap_fraction(pb, (x1, y1, x2, y2)) >= occupied_overlap
-            for pb in person_boxes
-        )
+        bbox = (x1, y1, x2, y2)
+        if is_sofa_class(det.class_name):
+            # A sofa is parsed into cushions; it only counts as fully occupied
+            # when every cushion is taken — otherwise a free cushion is offered.
+            parts = parse_sofa_parts(
+                bbox, persons, has_middle=sofa_has_middle,
+                hard_overlap=hard_overlap, conf_thresh=conf_thresh,
+            )
+            occupied = bool(parts) and all(p.occupied for p in parts)
+        else:
+            parts = None
+            occupied = bool(_occupied_region_indices(
+                persons, [bbox], hard_overlap=hard_overlap, conf_thresh=conf_thresh,
+            ))
         seats.append(
             SeatCandidate(
-                bbox_xyxy=(x1, y1, x2, y2),
+                bbox_xyxy=bbox,
                 class_name=det.class_name or "seat",
                 confidence=det.confidence or 0.0,
                 center_px=((x1 + x2) / 2, (y1 + y2) / 2),
                 occupied=occupied,
+                parts=parts,
             )
         )
     return seats, persons, snap
@@ -181,15 +368,40 @@ def pick_free_seat(seats: list[SeatCandidate]) -> SeatCandidate | None:
     return max(free, key=lambda s: (s.confidence, area(s)))
 
 
+def resolve_free_part(
+    seat: SeatCandidate | None, label: str | None = None
+) -> SeatPart | None:
+    """The cushion to actually offer on a sofa, or None for an ordinary seat.
+
+    With a *label* ("LEFT"/"MIDDLE"/"RIGHT") the matching cushion is returned
+    when it's free; otherwise (no/invalid/taken label) the first free cushion is
+    used. None when the seat has no cushions or every cushion is taken — the
+    caller then falls back to the whole-seat bbox.
+    """
+    if seat is None or not seat.parts:
+        return None
+    free = [p for p in seat.parts if not p.occupied]
+    if label:
+        for p in free:
+            if p.label == (label or "").upper():
+                return p
+    return free[0] if free else None
+
+
 def find_seated_person_bbox(
     persons: list[PersonPose], seats: list[SeatCandidate]
 ) -> BBox | None:
-    """The person overlapping an occupied seat (a lone person is accepted too)."""
-    occupied = [s.bbox_xyxy for s in seats if s.occupied]
+    """The bbox of a person actually sitting on one of the detected seats.
+
+    A person is seated when their seating anchor falls within a seat's bbox (any
+    cushion of a sofa counts, since a sofa with a free cushion is no longer
+    flagged occupied). A lone detected person is accepted too; None when nobody
+    lines up with a seat.
+    """
+    seat_boxes = [s.bbox_xyxy for s in seats]
     for p in persons:
-        pb = cxcywh_to_xyxy(p.bbox)
-        if any(overlap_fraction(pb, sb) > 0 for sb in occupied):
-            return pb
+        if any(_point_in_box(person_seat_anchor(p), sb) for sb in seat_boxes):
+            return cxcywh_to_xyxy(p.bbox)
     if len(persons) == 1:
         return cxcywh_to_xyxy(persons[0].bbox)
     return None
@@ -279,6 +491,46 @@ def lift_bbox_world_xy(
         except Exception as exc:
             print(f"[skills] snapshot lift failed ({exc}); trying service fallback")
     return bboxes_world_position(ctx, bbox_xyxy)
+
+
+# --- Persisted people positions (ctx.data blackboard) ------------------------
+# Where each seated person ("host"/"guest-1"/"guest-2") was last seen, in the
+# map frame, so a later step can face them without re-scanning. People may
+# switch seats, so every write is latest-wins (a fresh sighting overwrites the
+# old point) and reset_people_positions clears the lot at the start of a run.
+
+
+def remember_person_xy(
+    ctx: TaskContext, person_id: str, xy: tuple[float, float]
+) -> None:
+    """Persist a person's latest map-frame (x, y) on the blackboard (latest wins)."""
+    ctx.data.setdefault("people_xy", {})[person_id] = xy
+
+
+def recall_person_xy(ctx: TaskContext, person_id: str) -> tuple[float, float] | None:
+    """The last persisted map-frame (x, y) for a person, or None if unknown."""
+    return ctx.data.get("people_xy", {}).get(person_id)
+
+
+def reset_people_positions(ctx: TaskContext) -> None:
+    """Forget every persisted people position (call at the start of a fresh run)."""
+    ctx.data.pop("people_xy", None)
+
+
+def remember_located_positions(
+    ctx: TaskContext, located: dict[str, tuple[int, BBox]], snaps: list
+) -> None:
+    """Lift each recognized person to a map point and persist it (latest wins).
+
+    *located* is :func:`identity.locate_people`'s ``{id: (frame_index, bbox)}``;
+    *snaps* is the aligned snapshot list, so each box lifts against the geometry
+    of the very frame it was found in.
+    """
+    for pid, (fi, box) in located.items():
+        if 0 <= fi < len(snaps):
+            xy = lift_bbox_world_xy(ctx, snaps[fi], box)
+            if xy is not None:
+                remember_person_xy(ctx, pid, xy)
 
 
 def heading_to_point(ctx: TaskContext, x: float, y: float) -> float | None:
@@ -471,132 +723,34 @@ class MotionPredictor:
         self._hist.clear()
 
 
-@dataclass
-class HostEstimate:
-    """A control-loop's-eye view of the host, computed at read time.
+def _draw_follow_viz(img, box, *, color, label, save_path) -> None:
+    """Best-effort: draw the tracked person's box + a status banner on *img*,
+    then write it to *save_path* (overwritten each call).
 
-    *in_view*: a sighting landed within the view-grace window (a brief detector
-    dropout does not flip this false). *xy*: the freshly lifted map-frame point
-    when in view, LED forward by the host's velocity × the read's ``lead_gain``
-    so the robot drives to where they will be (the goal nav faces, so it tracks
-    them naturally); else None. *predicted*: the MotionPredictor's extrapolation
-    for when the host is out of view (None if not trustworthy). *side*: the last
-    horizontal frame offset, for the rotate-search fallback direction.
+    Used by :func:`follow_person` when ``HRI_FOLLOW_VIZ=1`` so you can watch which
+    body the robot is locked onto — *box* is the tracked person on the live frame
+    (which already shows everyone else), *color* encodes the loop state, and
+    *label* is the one-line status. Never raises: a viz glitch must not disturb
+    the follow loop.
     """
+    try:
+        from PIL import ImageDraw
 
-    in_view: bool
-    xy: tuple[float, float] | None
-    predicted: tuple[float, float] | None
-    side: float | None
-
-
-class HostTracker:
-    """Background perception loop that samples the host's map-frame position as
-    fast as the camera + detector allow, feeding a :class:`MotionPredictor` — so
-    the control loop can issue navigation goals at its OWN, slower cadence off a
-    dense, always-fresh estimate.
-
-    This decouples the *sampling rate* from the *nav-command rate*. The detector
-    runs flat out in a daemon thread (or every ``HRI_FOLLOW_SAMPLE_INTERVAL_SEC``
-    if a floor is set); the caller polls :meth:`read` only when it is ready to
-    command the base — a much longer period, because re-issuing nav goals too
-    fast just thrashes the stack and the base can't react that quickly anyway.
-    A short detection dropout does not read as "lost": :attr:`HostEstimate.in_view`
-    stays true for ``HRI_FOLLOW_VIEW_GRACE_SEC`` after the last sighting, which
-    also absorbs single-frame detector flicker.
-
-    *locate* is a callable ``(ctx) -> (world_xy | None, side | None)`` (the
-    subtask's sampler). Set ``HRI_FOLLOW_TRACK_DEBUG=1`` to log the achieved
-    sample rate every few seconds. Thread-safe — all predictor + shared-state
-    access is under one lock; every camera/detector failure is swallowed so a
-    glitch never crashes the step. Context manager, like :class:`FaceTracker`.
-    """
-
-    def __init__(self, ctx: TaskContext, locate, *, predict_on: bool = True) -> None:
-        self.ctx = ctx
-        self._locate = locate
-        self.predictor = MotionPredictor() if predict_on else None
-        self.interval = float(os.getenv("HRI_FOLLOW_SAMPLE_INTERVAL_SEC", "0.0"))
-        self.view_grace = float(os.getenv("HRI_FOLLOW_VIEW_GRACE_SEC", "0.6"))
-        self.debug = os.getenv("HRI_FOLLOW_TRACK_DEBUG", "0").lower() in ("1", "true", "yes")
-        self._lock = threading.Lock()
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._last_xy: tuple[float, float] | None = None
-        self._last_lift_t: float | None = None
-        self._last_seen_t: float | None = None
-        self._last_side: float | None = None
-
-    def start(self) -> "HostTracker":
-        if self._thread is None:
-            self._stop.clear()
-            self._thread = threading.Thread(target=self._loop, daemon=True)
-            self._thread.start()
-        return self
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=max(2.0, self.interval + 1.0))
-            self._thread = None
-
-    def __enter__(self) -> "HostTracker":
-        return self.start()
-
-    def __exit__(self, *exc) -> None:
-        self.stop()
-
-    def _loop(self) -> None:
-        n, t_log = 0, time.monotonic()
-        while not self._stop.is_set():
-            try:
-                world_xy, side = self._locate(self.ctx)
-            except Exception as exc:
-                print(f"[skills] HostTracker sample failed ({exc})")
-                world_xy, side = None, None
-            now = time.monotonic()
-            if self.debug:
-                n += 1
-                if now - t_log >= 3.0:
-                    print(f"[HostTracker] sampling at {n / (now - t_log):.1f} Hz")
-                    n, t_log = 0, now
-            with self._lock:
-                if side is not None:  # a person box was found this sample
-                    self._last_seen_t = now
-                    self._last_side = side
-                    if world_xy is not None:  # ...and it lifted to a map point
-                        self._last_xy = world_xy
-                        self._last_lift_t = now
-                        if self.predictor is not None:
-                            self.predictor.update(now, world_xy)
-            if self.interval > 0:
-                self._stop.wait(self.interval)  # else loop flat out (detector paces)
-
-    def read(self, now: float | None = None, *, lead_gain: float = 0.0) -> HostEstimate:
-        """Best current view of the host: in-view flag, LED point, prediction.
-
-        *lead_gain* (seconds) extrapolates the in-view point forward along the
-        host's fitted velocity, so the loop drives to where they are heading
-        rather than where they were — 0 aims at the current point. The
-        out-of-view *predicted* point is unaffected (it already extrapolates).
-        """
-        if now is None:
-            now = time.monotonic()
-        with self._lock:
-            seen_t, lift_t = self._last_seen_t, self._last_lift_t
-            xy, side = self._last_xy, self._last_side
-            vel = self.predictor.velocity() if self.predictor is not None else None
-            predicted = self.predictor.predict(now) if self.predictor is not None else None
-        in_view = seen_t is not None and (now - seen_t) <= self.view_grace
-        fresh_xy = xy if (lift_t is not None and now - lift_t <= self.view_grace) else None
-        if fresh_xy is not None and vel is not None and lead_gain:
-            fresh_xy = (fresh_xy[0] + lead_gain * vel[0], fresh_xy[1] + lead_gain * vel[1])
-        return HostEstimate(in_view=in_view, xy=fresh_xy, predicted=predicted, side=side)
+        vis = img.convert("RGB").copy()
+        draw = ImageDraw.Draw(vis)
+        if box is not None:
+            x1, y1, x2, y2 = (int(v) for v in box)
+            draw.rectangle((x1, y1, x2, y2), outline=color, width=4)
+        draw.rectangle((0, 0, vis.width, 22), fill=(0, 0, 0))
+        draw.text((6, 6), label, fill=color)
+        vis.save(save_path, "JPEG", quality=70)
+    except Exception as exc:
+        print(f"[skills] follow viz failed ({exc})")
 
 
-def follow_target(
+def follow_person(
     ctx: TaskContext,
-    sample,
+    select,
     *,
     stopper=None,
     on_warmup=None,
@@ -607,99 +761,158 @@ def follow_target(
     nav_period: float | None = None,
     search_step_deg: float | None = None,
     max_lost: int | None = None,
+    lead_gain: float | None = None,
     predict_on: bool | None = None,
 ) -> str:
-    """Drive the base after a moving person until stopped, lost, or timed out.
+    """Follow a person by re-targeting nav at their (predicted) position each tick.
 
-    The reusable core of the follow behaviour. A :class:`HostTracker` samples
-    the target's map-frame position flat out in its own thread (feeding a
-    :class:`MotionPredictor` a dense trajectory); this control loop reads the
-    freshest estimate and issues a nav goal every *nav_period* s.
+    A dead-simple synchronous loop — no background thread. Every tick it
+    snapshots the camera, asks *select* for the person's box, lifts it to a
+    map-frame point, and drives ``nav.go_to`` there (led forward by the target's
+    velocity × *lead_gain* seconds), stopping *follow_distance* m short. Because
+    nav orients the base along its travel direction, driving to the target also
+    faces it — there is no separate look-at/centering step, so the faster the
+    loop runs the tighter it tracks. A :class:`MotionPredictor` keeps a running
+    velocity estimate; when a tick yields no usable point (no detection, or the
+    depth lift failed) the loop COASTS on the predictor's extrapolation, and only
+    once that is exhausted does it rotate-search toward the last-seen side.
+    Returns the exit reason: ``'stopped'`` | ``'lost'`` | ``'timeout'``.
 
-    The control law is just "drive to where the target is going". Every tick it
-    re-targets ``nav.go_to`` at the target's lifted map point LED forward by their
-    velocity × *lead_gain* (``HRI_FOLLOW_LEAD_GAIN`` seconds), stopping
-    *follow_distance* m short. Because nav orients the base along its travel
-    direction, aiming at the target IS facing the target — no separate
-    look-at/centering step — so the faster the tracker samples, the tighter it
-    holds them. When they slip out of frame the predictor's extrapolation keeps
-    the goal moving the way they were heading; only with no usable point does it
-    fall back to rotating toward the last-seen side. Returns the exit reason:
-    ``'stopped'`` | ``'lost'`` | ``'timeout'``.
-
-    *sample* is a ``(ctx) -> (world_xy | None, side | None)`` callable the
-    tracker polls each tick — e.g. ``_HostSampler().sample`` for identity-based
-    host following, or :func:`nearest_person_sample` for an identity-free
-    "follow whoever's closest". *stopper*, when given, is a context manager
-    carrying a ``.placed`` :class:`threading.Event` (a :class:`CommandListener`);
-    it is entered AFTER *on_warmup* — so a background mic listener never
-    transcribes the warmup speech — and its event ends the loop the instant it
-    is set. *on_warmup* runs once right after the tracker starts (e.g. a spoken
-    ack, so the tracker warms up during the TTS); *on_lost* runs once the first
-    time the target drops out of view; *on_stopped* runs after a
-    *stopper*-triggered exit, before the threads are torn down, so a closing
-    speech overlaps the join cost instead of adding a silent gap. Every tunable
-    defaults from the ``HRI_FOLLOW_*`` env vars.
+    *select* is a callable ``(ctx, snap) -> bbox_xyxy | None`` — e.g.
+    :func:`select_largest_person` (follow whoever's closest, for testing) or
+    ``identity.select_person_to_follow`` (match an enrolled person by face first,
+    attire fallback). *stopper*, when given, is a context manager carrying a ``.placed``
+    :class:`threading.Event` (a :class:`CommandListener`); it is entered AFTER
+    *on_warmup* — so a background mic listener never transcribes the warmup
+    speech — and its event ends the loop the instant it is set. *on_warmup* runs
+    once before the loop (e.g. a spoken ack); *on_lost* runs once the first time
+    the target is lost; *on_stopped* runs after a *stopper*-triggered exit, before
+    teardown, so a closing speech overlaps the join cost. Every tunable defaults
+    from the ``HRI_FOLLOW_*`` env vars.
     """
     if follow_distance is None:
         follow_distance = float(os.getenv("HRI_FOLLOW_DISTANCE_M", "1.0"))
     if timeout is None:
         timeout = float(os.getenv("HRI_FOLLOW_TIMEOUT_SEC", "90"))
     if nav_period is None:
-        nav_period = float(os.getenv("HRI_FOLLOW_NAV_PERIOD_SEC", "1.0"))
+        nav_period = float(os.getenv("HRI_FOLLOW_NAV_PERIOD_SEC", "0"))
     if search_step_deg is None:
         search_step_deg = float(os.getenv("HRI_FOLLOW_SEARCH_STEP_DEG", "10"))
     search_step = math.radians(search_step_deg)
     if max_lost is None:
         max_lost = int(os.getenv("HRI_FOLLOW_MAX_LOST", "8"))
+    if lead_gain is None:
+        lead_gain = float(os.getenv("HRI_FOLLOW_LEAD_GAIN", "0.5"))
     if predict_on is None:
         predict_on = os.getenv("HRI_FOLLOW_PREDICT", "1").lower() in ("1", "true", "yes")
+    # Keep driving to the last seen point for this long (s) when a tick yields no
+    # detection — a dropped pose frame or a briefly-stationary person must NOT
+    # fall straight into the rotate-search (which would otherwise stutter / stall).
+    lost_grace = float(os.getenv("HRI_FOLLOW_LOST_GRACE_SEC", "1.5"))
+    debug = os.getenv("HRI_FOLLOW_TRACK_DEBUG", "0").lower() in ("1", "true", "yes")
+    # Visualization: annotate each frame with the tracked person's box + status
+    # and write it to HRI_FOLLOW_VIZ_PATH (overwritten every tick) so you can
+    # watch who the robot is locked onto. Separate flag from the timing debug.
+    viz = os.getenv("HRI_FOLLOW_VIZ", "0").lower() in ("1", "true", "yes")
+    viz_path = os.getenv("HRI_FOLLOW_VIZ_PATH", "follow_viz.jpg")
 
-    # How far ahead (s) to aim along the target's velocity, so the goal leads
-    # them instead of trailing. 0 = drive to where they are right now.
-    lead_gain = float(os.getenv("HRI_FOLLOW_LEAD_GAIN", "0.5"))
-
+    predictor = MotionPredictor() if predict_on else None
     idle = threading.Event()  # never set — an interruptible sleep when no stopper
     lost = 0
     last_dir = 1.0  # default search direction (left) until first seen
+    last_xy: tuple[float, float] | None = None  # last good lifted point, for the grace hold
+    last_seen_t: float | None = None
+    last_box: BBox | None = None  # last selected box, drawn dim while coasting (viz)
     deadline = time.monotonic() + timeout
     reason = "timeout"
-    with HostTracker(ctx, sample, predict_on=predict_on) as tracker:
-        if on_warmup is not None:
-            on_warmup()  # tracker warms up during this (e.g. a TTS ack)
-        with (stopper if stopper is not None else nullcontext()) as listener:
-            placed = getattr(listener, "placed", None)
-            while time.monotonic() < deadline and not (placed is not None and placed.is_set()):
-                est = tracker.read(lead_gain=lead_gain)
-                if est.side is not None:
-                    # Left of center (side < 0) -> turn left (+) to re-center.
-                    last_dir = 1.0 if est.side < 0 else -1.0
-                # Drive to where the target is going (in view: lifted point led by
-                # velocity; just out of view: the predictor's extrapolation). nav
-                # faces the travel direction, so this also faces the target.
-                target = est.xy or est.predicted
-                if target is not None:
-                    lost = 0
-                    approach_point(ctx, *target, stop_distance=follow_distance,
-                                   blocking=False)
+    n, t_log = 0, time.monotonic()
+    if on_warmup is not None:
+        on_warmup()  # speak the ack BEFORE the stopper starts (so the mic skips it)
+    with (stopper if stopper is not None else nullcontext()) as listener:
+        placed = getattr(listener, "placed", None)
+        while time.monotonic() < deadline and not (placed is not None and placed.is_set()):
+            now = time.monotonic()
+            snap = ctx.snapshot()
+            t_snap = time.monotonic()
+            box = select(ctx, snap) if snap is not None else None
+            t_sel = time.monotonic()
+            # In view: lift the box and lead it by the fitted velocity. The lift
+            # feeds the predictor (raw), so it can coast when a tick comes up empty.
+            side = None
+            target = None
+            if box is not None:
+                side = (box[0] + box[2]) / 2 / snap.img.width - 0.5
+                last_dir = 1.0 if side < 0 else -1.0  # left of center -> turn left (+)
+                xy = lift_bbox_world_xy(ctx, snap, box, use_edge_filter=False)
+                if xy is not None:
+                    last_xy, last_seen_t, last_box = xy, now, box
+                    if predictor is not None:
+                        predictor.update(now, xy)
+                        vel = predictor.velocity()
+                        if vel is not None and lead_gain:
+                            xy = (xy[0] + lead_gain * vel[0], xy[1] + lead_gain * vel[1])
+                    target = xy
+            if target is None:
+                # No fresh point this tick — COAST instead of searching: use the
+                # predictor's extrapolation if it has one (target moving), else
+                # hold the last seen point for the grace window (target stationary,
+                # or a single dropped detection frame). Only past the grace do we
+                # actually search.
+                pred = predictor.predict(now) if predictor is not None else None
+                if pred is not None:
+                    target = pred
+                elif (
+                    last_xy is not None
+                    and last_seen_t is not None
+                    and (now - last_seen_t) <= lost_grace
+                ):
+                    target = last_xy
+            if target is not None:
+                lost = 0
+                approach_point(ctx, *target, stop_distance=follow_distance, blocking=False)
+            else:
+                # Truly lost (no detection, no prediction, grace expired): turn
+                # toward the last-seen side until the target reappears. NON-blocking
+                # so a single search turn can't freeze the loop (a blocking go_to to
+                # the robot's own pose can stall on a nav recovery for seconds).
+                lost += 1
+                if lost == 1 and on_lost is not None:
+                    on_lost()  # nudge once, then keep searching
+                if lost >= max_lost:
+                    print("[skills] follow_person: lost the target past the search budget")
+                    reason = "lost"
+                    break
+                rotate_by(ctx, last_dir * search_step, blocking=False)
+            if viz and snap is not None:
+                # Green = tracking a fresh detection; yellow = coasting on the last
+                # seen box (prediction/grace hold); red = searching, nothing to draw.
+                if box is not None:
+                    draw_box, color, state = box, (0, 255, 0), "TRACK"
+                elif target is not None:
+                    draw_box, color, state = last_box, (255, 200, 0), "COAST"
                 else:
-                    # No usable point at all: turn toward the last-seen side and
-                    # keep turning until the target comes back into view.
-                    lost += 1
-                    if lost == 1 and on_lost is not None:
-                        on_lost()  # nudge once, then keep searching
-                    if lost >= max_lost:
-                        print("[skills] follow_target: lost the target past the search budget")
-                        reason = "lost"
-                        break
-                    rotate_by(ctx, last_dir * search_step)
-                # Nav cadence — the "higher delay" between commands. The event
-                # wait returns the instant the stopper flags a place command.
-                (placed or idle).wait(nav_period)
-            if placed is not None and placed.is_set():
-                reason = "stopped"
-                if on_stopped is not None:
-                    on_stopped()  # speak while the threads wind down
+                    draw_box, color, state = None, (255, 60, 60), "SEARCH"
+                tx = f"({target[0]:.2f},{target[1]:.2f})" if target is not None else "-"
+                sd = f"{side:+.2f}" if side is not None else "-"
+                _draw_follow_viz(
+                    snap.img, draw_box, color=color, save_path=viz_path,
+                    label=f"{state} side={sd} target={tx} lost={lost}",
+                )
+            if debug:
+                n += 1
+                state = "drive" if target is not None else f"search(lost={lost})"
+                print(f"[follow_person] {state} box={'Y' if box is not None else 'N'} "
+                      f"snap={1e3 * (t_snap - now):.0f}ms select={1e3 * (t_sel - t_snap):.0f}ms "
+                      f"lift+nav={1e3 * (time.monotonic() - t_sel):.0f}ms")
+                if time.monotonic() - t_log >= 3.0:
+                    print(f"[follow_person] {n / (time.monotonic() - t_log):.1f} Hz")
+                    n, t_log = 0, time.monotonic()
+            # Optional extra inter-command delay; 0 = flat out (snapshot+lift paces).
+            (placed or idle).wait(nav_period)
+        if placed is not None and placed.is_set():
+            reason = "stopped"
+            if on_stopped is not None:
+                on_stopped()  # speak while the threads wind down
     return reason
 
 
@@ -731,43 +944,17 @@ def nearest_person_bbox(ctx: TaskContext, img: Image.Image) -> BBox | None:
     return max(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
 
 
-def nearest_person_sample(ctx: TaskContext) -> tuple[tuple[float, float] | None, float | None]:
-    """A :func:`follow_target`/:class:`HostTracker` sampler that follows whoever
-    is closest — pose only, NO identity or appearance recognition.
+def select_largest_person(ctx: TaskContext, snap) -> BBox | None:
+    """:func:`follow_person` selector: the largest (nearest) person box, no identity.
 
-    Returns ``(world_xy | None, side | None)`` exactly like ``_HostSampler.sample``
-    but with none of its two-tier recognition: just the biggest (so nearest)
-    person box this frame, lifted to a map-frame point. *side* is the box's
-    horizontal frame offset (``cx/width - 0.5``, negative = left), ``None`` only
-    when no person was detected; *world_xy* may be ``None`` if the depth lift
-    failed. Use to exercise the follow loop without enrolled identities.
-
-    Set ``HRI_FOLLOW_TRACK_DEBUG=1`` to log the per-stage cost (snapshot / pose /
-    lift) every sample, so you can see what is capping the tracker's frame rate.
+    Pose estimation only — picks the biggest body in view, the one the robot is
+    closest to. Use to exercise the follow loop without enrolling anyone. *snap*
+    is the current CameraSnapshot (the loop lifts the returned box against it);
+    ``None`` snap or no person detected → ``None``.
     """
-    debug = os.getenv("HRI_FOLLOW_TRACK_DEBUG", "0").lower() in ("1", "true", "yes")
-    t0 = time.monotonic()
-    snap = ctx.snapshot()
-    t_snap = time.monotonic()
     if snap is None:
-        return None, None
-    img = snap.img
-    box = nearest_person_bbox(ctx, img)
-    t_pose = time.monotonic()
-    if box is None:
-        if debug:
-            print(f"[nearest_person_sample] no-person "
-                  f"snap={1e3 * (t_snap - t0):.0f}ms pose={1e3 * (t_pose - t_snap):.0f}ms")
-        return None, None
-    side = (box[0] + box[2]) / 2 / img.width - 0.5
-    # Lift every tick (the follow loop drives to this point each cycle); skip the
-    # full-frame edge filter to keep the lift cheap enough to run flat out.
-    xy = lift_bbox_world_xy(ctx, snap, box, use_edge_filter=False)
-    if debug:
-        print(f"[nearest_person_sample] snap={1e3 * (t_snap - t0):.0f}ms "
-              f"pose={1e3 * (t_pose - t_snap):.0f}ms side={side:+.2f} "
-              f"lift={1e3 * (time.monotonic() - t_pose):.0f}ms")
-    return xy, side
+        return None
+    return nearest_person_bbox(ctx, snap.img)
 
 
 def classify_host_command(ctx: TaskContext, heard: str) -> str:
@@ -1014,7 +1201,21 @@ def describe_seating_scene(
             (overlap_fraction(pb, seat.bbox_xyxy) for pb in person_boxes),
             default=0.0,
         )
-        if i in occupants:
+        if seat.parts:
+            # A sofa: report each cushion so the model can offer a free one even
+            # when someone else is on it. The whole-sofa status is "free" as long
+            # as any cushion is open.
+            free_parts = [p.label for p in seat.parts if not p.occupied]
+            who = f" — {_person_label(occupants[i], person_names)} is on it" if i in occupants else ""
+            status = ("OCCUPIED (all cushions taken)" if seat.occupied
+                      else f"has free cushion(s): {', '.join(free_parts)}") + who
+            cushions = "; ".join(
+                f"{p.label} cushion (center x={p.center_px[0]:.0f}px) "
+                f"{'taken' if p.occupied else 'FREE'}"
+                for p in seat.parts
+            )
+            status += f" [{cushions}]"
+        elif i in occupants:
             status = f"OCCUPIED — {_person_label(occupants[i], person_names)} is sitting here"
         else:
             status = "OCCUPIED" if seat.occupied else "free"
@@ -1068,19 +1269,21 @@ def llm_pick_seat(
     seat_occupants: dict[int, str] | None = None,
     seatless_people: dict[str, BBox] | None = None,
     person_names: dict[str, str | None] | None = None,
-) -> tuple[SeatCandidate | None, str | None]:
+) -> tuple[SeatCandidate | None, SeatPart | None, str | None]:
     """Let the LLM choose which seat to offer and word the spoken offer.
 
-    Returns (seat, announcement). The model sees the whole frame (seats,
-    people, who is recognized in which seat, the host, the other guest's seat)
-    so it can avoid seats the overlap heuristic missed, seat guests near the
-    host, and refer to the host in the announcement. A null announcement means
-    "use the default line". An explicit null seat from the model means "nothing
-    suitable"; an extraction failure or out-of-range index degrades to the
-    deterministic pick_free_seat.
+    Returns (seat, part, announcement). *part* is the chosen sofa cushion
+    (LEFT/MIDDLE/RIGHT) when the seat is a sofa, else None — the caller faces and
+    announces that cushion rather than the whole sofa. The model sees the whole
+    frame (seats, each sofa's free cushions, who is recognized where, the host,
+    the other guest's seat) so it can offer a free cushion next to the host and
+    refer to the host in the announcement. A null announcement means "use the
+    default line". An explicit null seat from the model means "nothing suitable";
+    an extraction failure or out-of-range index degrades to the deterministic
+    pick_free_seat (whose first free cushion is then used for a sofa).
     """
     if not seats:
-        return None, None
+        return None, None, None
     scene = describe_seating_scene(
         seats, persons, img_w, guest,
         guest_name=guest_name, host_name=host_name,
@@ -1093,17 +1296,21 @@ def llm_pick_seat(
     choice = ctx.extract(prompts.SeatChoice, prompts.PICK_SEAT_INSTRUCTIONS, scene)
     if choice is None:
         print("[skills] seat choice extraction failed; using heuristic pick")
-        return pick_free_seat(seats), None
+        seat = pick_free_seat(seats)
+        return seat, resolve_free_part(seat), None
     if choice.seat_index is None:
         print(f"[skills] LLM declined to pick a seat ({choice.reason or 'no reason given'})")
-        return None, None
+        return None, None, None
     if not 0 <= choice.seat_index < len(seats):
         print(f"[skills] LLM seat index {choice.seat_index} out of range; using heuristic pick")
-        return pick_free_seat(seats), None
+        seat = pick_free_seat(seats)
+        return seat, resolve_free_part(seat), None
     seat = seats[choice.seat_index]
+    part = resolve_free_part(seat, getattr(choice, "seat_part", None))
     print(f"[skills] LLM picked seat [{choice.seat_index}] {seat.class_name}"
+          f"{f' ({part.label} cushion)' if part else ''}"
           f" ({choice.reason or 'no reason given'})")
-    return seat, (choice.announcement or "").strip() or None
+    return seat, part, (choice.announcement or "").strip() or None
 
 
 # ---------------------------------------------------------------------------
@@ -1245,43 +1452,86 @@ class FaceTracker:
         self.ctx.rotate_to(pose["heading"] + delta)
 
 
-def llm_intro_speeches(ctx: TaskContext, people: dict[str, dict]) -> dict[str, str]:
-    """Word every introduction in ONE LLM call: {person_id: spoken sentence(s)}.
+def side_relative_to_listener(
+    ctx: TaskContext,
+    listener_xy: tuple[float, float],
+    subject_xy: tuple[float, float],
+) -> str | None:
+    """Which side ("left"/"right") *subject_xy* sits on from the listener's own
+    point of view, ASSUMING the listener faces the robot (people turn toward
+    whoever is speaking to them). None when odometry has no fix.
 
-    *people* maps "host"/"guest-1"/"guest-2" to {"name", "drink", "appearance"}
-    records (fields may be None). Always returns a speech for all three —
-    on extraction failure each falls back to the per-person template.
+    The listener's facing is taken as robot - listener; the 2D cross product of
+    that facing with the listener->subject vector is positive when the subject
+    is counter-clockwise of the facing direction, i.e. on the listener's left.
     """
-    generic = {
-        "host": prompts.GENERIC_HOST,
-        "guest-1": prompts.GENERIC_FIRST_GUEST,
-        "guest-2": prompts.GENERIC_SECOND_GUEST,
-    }
+    try:
+        pose = ctx.walkie.status.get_position()
+    except Exception as exc:
+        print(f"[skills] side_relative_to_listener: odometry unavailable ({exc})")
+        return None
+    if not pose:
+        return None
+    fx, fy = pose["x"] - listener_xy[0], pose["y"] - listener_xy[1]
+    sx, sy = subject_xy[0] - listener_xy[0], subject_xy[1] - listener_xy[1]
+    cross = fx * sy - fy * sx
+    if cross == 0:
+        return None
+    return "left" if cross > 0 else "right"
 
-    def fallback(pid: str) -> str:
-        p = people.get(pid, {})
-        return prompts.PERSON_INTRO_TEMPLATE.format(
-            name=p.get("name") or generic[pid],
-            drink=p.get("drink") or prompts.GENERIC_DRINK,
+
+def _guest_intro_fallback(
+    listener_name: str | None,
+    subject_name: str | None,
+    subject_drink: str | None,
+    side: str | None,
+) -> str:
+    """Template introduction spoken to one guest about the other beside them."""
+    who = f"the person on your {side}" if side else "the guest next to you"
+    name = subject_name or prompts.GENERIC_OTHER_GUEST
+    lead = f"{listener_name}, " if listener_name else ""
+    line = f"{lead}{who} is {name}."
+    if subject_drink:
+        line += f" Their favorite drink is {subject_drink}."
+    return line
+
+
+def llm_guest_intro_speeches(ctx: TaskContext, acts: list[dict]) -> dict[int, str]:
+    """Word both guest-to-guest introductions in ONE LLM call: {listener: text}.
+
+    *acts* is one dict per spoken line — the robot FACES that listener and
+    presents the other guest beside them::
+
+        {"listener": 1|2, "listener_name": str|None,
+         "subject_name": str|None, "subject_drink": str|None,
+         "side": "left"|"right"|None}
+
+    Returns a speech keyed by listener number, each falling back to a template
+    on extraction failure.
+    """
+    fallback = {
+        a["listener"]: _guest_intro_fallback(
+            a["listener_name"], a["subject_name"], a["subject_drink"], a["side"]
         )
-
+        for a in acts
+    }
     lines = []
-    for pid, label in (("host", "Host"), ("guest-1", "First guest"), ("guest-2", "Second guest")):
-        p = people.get(pid, {})
+    for a in acts:
         lines.append(
-            f"{label}: name={p.get('name') or 'unknown'}; "
-            f"favorite drink={p.get('drink') or 'unknown'}; "
-            f"appearance={p.get('appearance') or 'unknown'}"
+            f"While facing guest {a['listener']} (name="
+            f"{a['listener_name'] or 'unknown'}), present the OTHER guest "
+            f"(name={a['subject_name'] or 'unknown'}; favorite drink="
+            f"{a['subject_drink'] or 'unknown'}), who is on guest "
+            f"{a['listener']}'s {a['side'] or 'unknown'} side."
         )
     speeches = ctx.extract(
-        prompts.IntroSpeeches, prompts.INTRO_SPEECHES_INSTRUCTIONS, "\n".join(lines)
+        prompts.GuestIntroSpeeches, prompts.GUEST_INTRO_INSTRUCTIONS, "\n".join(lines)
     )
     if speeches is None:
-        print("[skills] intro speech extraction failed; using template lines")
-        return {pid: fallback(pid) for pid in generic}
-    by_id = {
-        "host": (speeches.host or "").strip(),
-        "guest-1": (speeches.guest_1 or "").strip(),
-        "guest-2": (speeches.guest_2 or "").strip(),
+        print("[skills] guest intro speech extraction failed; using template lines")
+        return fallback
+    by_listener = {
+        1: (speeches.facing_guest_1 or "").strip(),
+        2: (speeches.facing_guest_2 or "").strip(),
     }
-    return {pid: text or fallback(pid) for pid, text in by_id.items()}
+    return {a["listener"]: by_listener.get(a["listener"], "") or fallback[a["listener"]] for a in acts}

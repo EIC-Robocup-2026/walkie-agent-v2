@@ -24,7 +24,7 @@ WALKIE_GRAPHS_INTERVAL_SEC = "2.0"
 # may contain spaces (split on commas). Grouped here by category for readability.
 
 
-WALKIE_GRAPHS_INTERESTED_CLASSES = "door,chair,table,stool,shirt,sponge,bowl,cup,fork,knife,plate,spoon,coffee creamer,coke,ice tea,milk,orange juice,red bull,water bottle,bread,cornflakes,instant noodles,potato,tomato soup,apple,avocado,lemon,orange,chips,cookies,gum,mixed nuts,pringles,hand cream,soap,toothpaste,dish rack,shelf,monitor,bed,pillow"
+WALKIE_GRAPHS_INTERESTED_CLASSES = "sofa,door,chair,armchair,table,stool,shirt,sponge,bowl,cup,fork,knife,plate,spoon,coffee creamer,coke,ice tea,milk,orange juice,red bull,water bottle,bread,cornflakes,instant noodles,potato,tomato soup,apple,avocado,lemon,orange,chips,cookies,gum,mixed nuts,pringles,hand cream,soap,toothpaste,dish rack,shelf,monitor,bed,pillow"
 
 
 # Classes to always drop before lift/embed/store — moving objects (people) can't be

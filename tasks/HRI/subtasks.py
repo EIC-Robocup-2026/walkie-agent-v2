@@ -3,9 +3,11 @@
 Flow (rulebook ch. 5.1, doorbell + torque sensing intentionally out of scope):
 two guests arrive separately at the door; for each: greet, learn name +
 favorite drink (no confirmation questions), guide to the living room, offer a
-free seat; then introduce everyone — host first, then both guests — facing
-each person while speaking their LLM-worded introduction (one LLM call words
-all three). Bag handover / follow-host are gated stubs.
+free seat. Once both are seated the robot introduces the two guests to each
+other (host not introduced): for each guest it turns to FACE THE OTHER guest
+and tells them who is beside them with a left/right cue from that listener's
+point of view ("Bob, the person on your left is Alice..."); one LLM call words
+both lines. Bag handover / follow-host are gated stubs.
 
 Blackboard layout (ctx.data):
     guests: {1: {"name", "drink", "appearance"}, 2: {...}}
@@ -15,6 +17,10 @@ Blackboard layout (ctx.data):
     host:   {"appearance": str | None}  # captured during OfferSeat(1) — the
             # only seated person then is the host; name/drink come from
             # HRI_HOST_NAME / HRI_HOST_DRINK (known from the briefing)
+    people_xy: {"host"|"guest-1"|"guest-2": (x, y)}  # last seen map-frame
+            # position of each seated person, refreshed (latest-wins) on every
+            # scan so a seat switch updates it; used to face them later (e.g.
+            # the host before the bag handover). Reset at the start of each run.
 
 Person identities (face + attire embeddings) live in ctx.people
 (perception.PeopleStore) under stable ids "guest-1"/"guest-2"/"host" —
@@ -24,14 +30,19 @@ recognized again in IntroduceGuests so seat switches can't mis-aim the robot.
 
 from __future__ import annotations
 
-import math
 import os
 import time
 
 from tasks.base import StepResult, SubTask, Task, TaskContext
 
 from . import prompts
-from .identity import enroll_guest, enroll_person_in_box, locate_people
+from .identity import (
+    enroll_guest,
+    enroll_person_in_box,
+    locate_people,
+    select_person_to_follow,
+    wait_until_seated,
+)
 from .skills import (
     CommandListener,
     FaceTracker,
@@ -39,16 +50,20 @@ from .skills import (
     describe_seated_person,
     face_point,
     find_seated_person_bbox,
-    follow_target,
+    follow_person,
     heading_to_point,
     lift_bbox_world_xy,
-    llm_intro_speeches,
+    llm_guest_intro_speeches,
     llm_pick_seat,
     match_people_to_seats,
-    nearest_person_sample,
     parse_pose,
-    person_bboxes,
+    recall_person_xy,
+    remember_located_positions,
+    remember_person_xy,
+    reset_people_positions,
     scan_seats,
+    select_largest_person,
+    side_relative_to_listener,
     sweep_snapshots,
     wait_for_person,
 )
@@ -70,6 +85,7 @@ class GoToDoor(SubTask):
         self.critical = guest == 1  # if nav is dead on step 1, nothing works
 
     def run(self, ctx: TaskContext) -> StepResult:
+        ctx.walkie.robot.arm.go_to_home(group_name="both_arms_lift", blocking=False)  # reset the arm for better nav
         x, y, heading = parse_pose(os.getenv("HRI_DOOR_POSE", "0.0,0.0,0"))
         if not ctx.goto(x, y, heading):
             return StepResult.RETRY
@@ -77,13 +93,6 @@ class GoToDoor(SubTask):
         # straight ahead so a standing person's face is in frame (nav may have
         # left the head tilted down), then poll for a face bigger than the area
         # floor; restore the tilt afterwards for the greeting/next nav.
-        original_tilt = ctx.walkie.robot.head.get_angle()
-        ctx.walkie.robot.head.tilt(0)
-        if wait_for_person(ctx):
-            print("[HRI] guest detected at the door")
-        else:
-            print("[HRI] no guest detected before timeout; greeting anyway")
-        ctx.walkie.robot.head.tilt(original_tilt if original_tilt is not None else 0.0)
         return StepResult.DONE
 
 
@@ -97,9 +106,13 @@ class GreetAndLearn(SubTask):
     def run(self, ctx: TaskContext) -> StepResult:
         record = _guest(ctx, self.guest)
         time.sleep(5) # wait for navigation to settle
+        ctx.say(prompts.LOOKING_FOR_GUEST)
 
-        original_head_tilt = ctx.walkie.robot.head.get_angle()
         ctx.walkie.robot.head.tilt(0)
+        if wait_for_person(ctx):
+            print("[HRI] guest detected at the door")
+        else:
+            print("[HRI] no guest detected before timeout; greeting anyway")
         # Keep the base turned toward the guest's face for the whole exchange:
         # a background loop tracks the biggest face in view and rotates the base
         # to re-center it while we ask questions and caption below.
@@ -109,15 +122,19 @@ class GreetAndLearn(SubTask):
             if info:
                 record["name"], record["drink"] = info.name, info.drink
 
-            # One targeted follow-up per missing field (asking for genuinely
-            # missing info is not a penalized confirmation question).
+            # Keep following up on each genuinely missing field, re-asking up to
+            # HRI_ASK_RETRIES times until we get it (asking for missing info is
+            # not a penalized confirmation question). Each attempt re-asks AND
+            # re-extracts, so an answer that was heard but unparseable also retries.
+            ask_retries = int(os.getenv("HRI_ASK_RETRIES", "4"))
             for field, question in (("name", prompts.ASK_MISSING_NAME), ("drink", prompts.ASK_MISSING_DRINK)):
-                if record[field]:
-                    continue
-                answer = ctx.ask(question, retries=0)
-                info = ctx.extract(prompts.GuestInfo, prompts.EXTRACT_GUEST_INFO_INSTRUCTIONS, answer) if answer else None
-                if info and getattr(info, field):
-                    record[field] = getattr(info, field)
+                for _ in range(ask_retries):
+                    if record[field]:
+                        break
+                    answer = ctx.ask(question, retries=0)
+                    info = ctx.extract(prompts.GuestInfo, prompts.EXTRACT_GUEST_INFO_INSTRUCTIONS, answer) if answer else None
+                    if info and getattr(info, field):
+                        record[field] = getattr(info, field)
 
             img = ctx.capture()
             # Visual description: only guest 1's is needed (told to guest 2 later).
@@ -138,7 +155,6 @@ class GreetAndLearn(SubTask):
 
             name = record["name"] or "there"
             ctx.say(f"Nice to meet you, {name}!")
-        ctx.walkie.robot.head.tilt(original_head_tilt)  # restore the head tilt for better nav
         return StepResult.DONE  # partial info still scores — never block here
 
 
@@ -191,13 +207,18 @@ class OfferSeat(SubTask):
             if pid != f"guest-{self.guest}"
         ]
         located = locate_people(ctx, [img], seated_ids) if img is not None else {}
+        # Persist where each already-seated person (the host, and any earlier
+        # guest) is right now, so later steps can face them without re-scanning.
+        # Latest-wins, so a re-scan after someone switched seats refreshes it.
+        if snap is not None:
+            remember_located_positions(ctx, located, [snap])
         seat_occupants, seatless = match_people_to_seats(located, seats)
         person_names = {
             "host": os.getenv("HRI_HOST_NAME", "").strip() or None,
             "guest-1": _guest(ctx, 1)["name"],
             "guest-2": _guest(ctx, 2)["name"],
         }
-        seat, announcement = llm_pick_seat(
+        seat, part, announcement = llm_pick_seat(
             ctx, seats, persons, img_w,
             guest=self.guest,
             guest_name=_guest(ctx, self.guest)["name"],
@@ -212,24 +233,40 @@ class OfferSeat(SubTask):
         if seat is None:
             ctx.say(prompts.OFFER_SEAT_FALLBACK)
             return StepResult.DONE
-        # Lift the seat to a map-frame point against the SCAN-TIME geometry
+        # On a sofa, face and offer the specific free cushion the picker chose
+        # (its own bbox), not the whole couch — otherwise a guest sent to a
+        # 3-seater aims at the middle, possibly onto whoever's already there.
+        target_bbox = part.bbox_xyxy if part is not None else seat.bbox_xyxy
+        # Lift the target to a map-frame point against the SCAN-TIME geometry
         # frozen in the snapshot — exact despite the slow llm_pick_seat call
         # above; facing then uses odometry + atan2.
-        world_xy = lift_bbox_world_xy(ctx, snap, seat.bbox_xyxy)
+        world_xy = lift_bbox_world_xy(ctx, snap, target_bbox)
         ctx.data.setdefault("seats", {})[self.guest] = (seat, img_w, world_xy)
-        ctx.walkie.robot.arm.go_to_pose_relative([0.3, 0, 0.2], [0, -1.57, 0], group_name="left_arm", blocking=False)
+        ctx.walkie.robot.arm.go_to_pose_relative(0.3, 0, 0.2, 0, -1.57, 0, group_name="right_arm", blocking=False)
         faced = face_point(ctx, *world_xy) if world_xy else False
         if announcement:  # LLM-worded offer (may refer to the host)
             ctx.say(announcement)
         elif faced:
-            # The rotation landed, so the seat is now centered ahead.
+            # The rotation landed, so the seat is now centered ahead. Name the
+            # cushion side on a sofa so the guest knows which spot to take.
+            seat_class = (f"{part.label.lower()} side of the {seat.class_name}"
+                          if part is not None else seat.class_name)
             ctx.say(prompts.OFFER_SEAT_TEMPLATE.format(
-                seat_class=seat.class_name, direction=prompts.OFFER_SEAT_FACING))
+                seat_class=seat_class, direction=prompts.OFFER_SEAT_FACING))
         else:
             # No map-frame point to face (3D lift failed) — name the seat
             # without a stale left/right phrase and let the guest find it.
             ctx.say(prompts.OFFER_SEAT_FALLBACK)
-        ctx.walkie.robot.arm.left.go_to_home(blocking=False)  # reset the arm for better nav after facing
+        # Before finishing, confirm the guest actually sat down: watch the seat
+        # (arm still pointing) and treat them staying recognized in the frame
+        # for HRI_SEATED_DWELL_SEC as seated. Persist wherever they ended up —
+        # their real position (which may differ from the offered seat if they
+        # picked another), falling back to the offered seat's point.
+        _seated, guest_xy = wait_until_seated(ctx, f"guest-{self.guest}")
+        final_xy = guest_xy or world_xy
+        if final_xy is not None:
+            remember_person_xy(ctx, f"guest-{self.guest}", final_xy)
+        ctx.walkie.robot.arm.right.go_to_home(blocking=False)  # reset the arm for better nav after facing
         return StepResult.DONE
 
 
@@ -259,189 +296,103 @@ class ReceiveBag(SubTask):
         ctx.data["has_bag"] = True
         ctx.say(prompts.BAG_CLOSING_WARNING)
         time.sleep(1)  # let the nav settle after the arm movement and possible wait
-        ctx.walkie.robot.arm.go_to_pose(0.3, 0.16, 1.15, -0.8, 0, -1.57, group_name="left_arm", blocking=True)
         ctx.walkie.robot.arm.left.gripper(0.0)  # close
+        ctx.walkie.robot.arm.go_to_pose(0.1413, 0.0481, 0.9640, -1.2972, -0.3040, -3.0219, group_name="left_arm", blocking=True)
         ctx.say(prompts.BAG_RECEIVED)
         return StepResult.DONE
 
 
-class IntroduceEveryone(SubTask):
-    """Introduce each person — host first, then both guests — facing each one.
+class IntroduceGuests(SubTask):
+    """Introduce the two guests to each other, once both are seated.
 
-    All three introductions are worded by ONE LLM call (llm_intro_speeches);
-    the robot then turns to the person being introduced and speaks their part.
+    For each guest the robot turns to FACE THE OTHER guest (the listener) and
+    tells them who is sitting beside them, with a left/right cue from the
+    listener's own point of view, e.g. "Bob, the person on your left is Alice,
+    and her favorite drink is cola." Both lines are worded by ONE LLM call
+    (llm_guest_intro_speeches); the host is not introduced.
+
+    Each guest is anchored to where they actually ARE (they may have switched
+    seats), then the side is a 2D cross product of the listener's facing
+    (assumed toward the robot) with the vector to the other guest.
     """
 
-    ORDER = ("host", "guest-1", "guest-2")
+    GUESTS = (1, 2)
 
     def run(self, ctx: TaskContext) -> StepResult:
-        host = ctx.data.setdefault("host", {})
-        people = {
-            "host": {
-                "name": os.getenv("HRI_HOST_NAME", "").strip() or None,
-                "drink": os.getenv("HRI_HOST_DRINK", "").strip() or None,
-                "appearance": host.get("appearance"),
-            },
-            "guest-1": _guest(ctx, 1),
-            "guest-2": _guest(ctx, 2),
-        }
+        guests = {n: _guest(ctx, n) for n in self.GUESTS}
 
-        # Anchor each person to where they actually ARE. Guests may have
-        # switched seats (the rulebook allows it), and a single forward frame
-        # can miss someone off to the side, so sweep three snapshots — left
-        # 10°, center, right 10° — and recognize the enrolled people across all
-        # of them. Faces are matched FIRST over the whole sweep; only people
-        # still missing fall back to an attire-only pass (covers a guest turned
-        # away in every view). Each match is lifted against the geometry of the
-        # very snapshot it was found in, so the slow recognition round-trips and
-        # the robot's own sweep rotations can't skew the map-frame positions. A
+        # Anchor each guest to where they actually ARE. Guests may have switched
+        # seats (the rulebook allows it), and a single forward frame can miss
+        # one off to the side, so sweep three snapshots — left 10°, center,
+        # right 10° — and recognize the enrolled guests across all of them.
+        # Faces are matched FIRST over the whole sweep; only a guest still
+        # missing falls back to an attire-only pass (covers one turned away in
+        # every view). Each match is lifted against the geometry of the very
+        # snapshot it was found in, so the slow recognition round-trips and the
+        # robot's own sweep rotations can't skew the map-frame positions. A
         # guest still not found falls back to their offered seat's stored world
         # point. World-point headings survive the robot's own rotations, so they
-        # stay valid across all three turns; a person with no anchor is
-        # introduced without rotating.
+        # stay valid across both turns; a guest with no anchor is introduced
+        # without rotating and without a left/right cue.
+        ids = [f"guest-{n}" for n in self.GUESTS]
         sweep = float(os.getenv("HRI_INTRO_SWEEP_DEG", "10"))
         snaps = sweep_snapshots(ctx, (sweep, 0.0, -sweep))
-        located = (
-            locate_people(ctx, [s.img for s in snaps], list(self.ORDER))
-            if snaps else {}
-        )
+        located = locate_people(ctx, [s.img for s in snaps], ids) if snaps else {}
+        # Refresh the persisted positions from this sweep (latest-wins), so a
+        # guest who switched seats since OfferSeat is now recorded where they are.
+        remember_located_positions(ctx, located, snaps)
         seats: dict = ctx.data.get("seats", {})
-        headings: dict[str, float] = {}
-        for pid in self.ORDER:
+        world: dict[int, tuple[float, float]] = {}
+        for n in self.GUESTS:
             world_xy = None
-            found = located.get(pid)
+            found = located.get(f"guest-{n}")
             if found is not None:
                 fi, box = found
                 world_xy = lift_bbox_world_xy(ctx, snaps[fi], box)
-            if world_xy is None and pid.startswith("guest-"):
-                stored = seats.get(int(pid.removeprefix("guest-")))
+            if world_xy is None:
+                stored = seats.get(n)
                 if stored is not None:
                     _seat, _img_w, world_xy = stored
-            if world_xy is None:
-                continue
-            heading = heading_to_point(ctx, *world_xy)
-            if heading is not None:
-                headings[pid] = heading
+            if world_xy is not None:
+                world[n] = world_xy
 
-        speeches = llm_intro_speeches(ctx, people)
-        for pid in self.ORDER:
-            if pid in headings:
-                ctx.rotate_to(headings[pid])
-            ctx.say(speeches[pid])
+        # Two acts: introduce guest 1 while facing guest 2, then guest 2 while
+        # facing guest 1. The side is where the introduced (subject) guest sits
+        # from the facing (listener) guest's perspective.
+        acts = []
+        for subject, listener in ((1, 2), (2, 1)):
+            side = None
+            if listener in world and subject in world:
+                side = side_relative_to_listener(ctx, world[listener], world[subject])
+            acts.append({
+                "listener": listener,
+                "listener_name": guests[listener]["name"],
+                "subject_name": guests[subject]["name"],
+                "subject_drink": guests[subject]["drink"],
+                "side": side,
+            })
+
+        speeches = llm_guest_intro_speeches(ctx, acts)
+        for act in acts:
+            listener = act["listener"]
+            if listener in world:
+                heading = heading_to_point(ctx, *world[listener])
+                if heading is not None:
+                    ctx.rotate_to(heading)
+            ctx.say(speeches[listener])
         return StepResult.DONE
-
-
-def _box_area(b) -> float:
-    return (b[2] - b[0]) * (b[3] - b[1])
-
-
-class _HostSampler:
-    """Two-tier host-position sampler for :class:`HostTracker`.
-
-    The slow part of locating the host is IDENTITY recognition: per frame,
-    :func:`identity.locate_people` runs a face embed + a pose pass + an OSNet
-    attire embed for every person (several HTTP round-trips that grow with the
-    crowd). Pose estimation alone is real-time. So this samples in two tiers:
-
-    * **fast (every tick)** — one snapshot + pose only; the host is tracked by
-      spatial continuity (the person box nearest the last locked box, within a
-      jump gate). Runs at pose-estimation rate.
-    * **confirm (every ``HRI_FOLLOW_CONFIRM_EVERY_N`` ticks, or whenever
-      continuity is lost)** — full ``locate_people`` to re-lock onto the real
-      host and correct drift / a wrong-person lock.
-
-    :meth:`sample` returns ``(world_xy | None, side | None)`` exactly like the
-    loop expects. *side* is the box's horizontal frame offset (``cx/width -
-    0.5``, negative = left); it is ``None`` only when no person box was found,
-    while *world_xy* may be ``None`` if the depth lift failed. Lives here, not in
-    skills.py, because it calls ``locate_people`` (skills importing identity
-    would be a cycle).
-    """
-
-    def __init__(self) -> None:
-        self.confirm_every_n = int(os.getenv("HRI_FOLLOW_CONFIRM_EVERY_N", "8"))
-        self.gate_frac = float(os.getenv("HRI_FOLLOW_TRACK_GATE_FRAC", "0.2"))
-        self.debug = os.getenv("HRI_FOLLOW_TRACK_DEBUG", "0").lower() in ("1", "true", "yes")
-        self._locked: tuple | None = None      # last host box (xyxy)
-        self._since_confirm = 1 << 30          # force a confirm on the first sample
-
-    def sample(self, ctx: TaskContext):
-        t0 = time.monotonic()
-        snap = ctx.snapshot()
-        t_snap = time.monotonic()
-        if snap is None:
-            return None, None
-        img = snap.img
-        boxes = person_bboxes(ctx, img)        # fast: pose only
-        t_pose = time.monotonic()
-
-        # Re-identify periodically or whenever we have no lock; otherwise just
-        # follow the locked box by spatial continuity (cheap).
-        confirm = self._locked is None or self._since_confirm >= self.confirm_every_n
-        mode = "confirm" if confirm else "track"
-        if confirm:
-            box = self._identify(ctx, img, boxes)
-            self._since_confirm = 0
-        else:
-            box = self._track_box(boxes, img.width)
-            self._since_confirm += 1
-            if box is None:  # lost continuity early — re-identify now
-                box = self._identify(ctx, img, boxes)
-                self._since_confirm = 0
-                mode = "track->confirm"
-        t_id = time.monotonic()
-
-        if box is None:
-            self._locked = None
-            if self.debug:
-                print(f"[HostSampler] {mode} no-host "
-                      f"snap={1e3 * (t_snap - t0):.0f}ms pose={1e3 * (t_pose - t_snap):.0f}ms "
-                      f"id={1e3 * (t_id - t_pose):.0f}ms")
-            return None, None
-        self._locked = box
-        side = (box[0] + box[2]) / 2 / img.width - 0.5
-        # Lift every tick (the follow loop drives to this point each cycle); skip
-        # the full-frame edge filter to keep the lift cheap enough to run flat out.
-        xy = lift_bbox_world_xy(ctx, snap, box, use_edge_filter=False)
-        if self.debug:
-            print(f"[HostSampler] {mode} snap={1e3 * (t_snap - t0):.0f}ms "
-                  f"pose={1e3 * (t_pose - t_snap):.0f}ms id={1e3 * (t_id - t_pose):.0f}ms "
-                  f"lift={1e3 * (time.monotonic() - t_id):.0f}ms")
-        return xy, side
-
-    def _identify(self, ctx: TaskContext, img, boxes):
-        """The host's box via full recognition; nearest person as the fallback."""
-        if ctx.people is not None and ctx.people.count() > 0:
-            found = locate_people(ctx, [img], ["host"]).get("host")
-            if found is not None:
-                return found[1]
-        return max(boxes, key=_box_area) if boxes else None
-
-    def _track_box(self, boxes, width):
-        """The pose box nearest the locked one, if within the per-tick jump gate."""
-        if self._locked is None or not boxes:
-            return None
-        lcx = (self._locked[0] + self._locked[2]) / 2
-        lcy = (self._locked[1] + self._locked[3]) / 2
-
-        def center_dist(b):
-            return math.hypot((b[0] + b[2]) / 2 - lcx, (b[1] + b[3]) / 2 - lcy)
-
-        best = min(boxes, key=center_dist)
-        return best if center_dist(best) <= self.gate_frac * width else None
 
 
 class FollowHostAndDropBag(SubTask):
     """Ask the host where the bag goes, follow them there, then place it.
 
-    The host answers by walking off ("follow me"); a :class:`_HostSampler`
-    tracks them in two tiers — pose-only every tick (real-time) plus a periodic
-    full identity re-lock — lifts the host's box to a map-frame point, and the
-    robot drives to within ``HRI_FOLLOW_DISTANCE_M`` so it never bumps them.
-    When the host slips out of view, a :class:`MotionPredictor` extrapolates
-    their recent map-frame trajectory so the robot drives to where they were
-    heading (re-acquiring fast) instead of scanning blindly. It keeps following
-    until the host tells it to put the bag down.
+    The host answers by walking off ("follow me"); :func:`skills.follow_person`
+    drives the base to the host's map-frame point every tick — the host is picked
+    out of the crowd by FACE first, falling back to ATTIRE
+    (:func:`identity.select_person_to_follow`), and nav's heading-alignment keeps
+    the robot facing them, biased toward the nearest match. When the
+    host briefly drops from view the loop coasts on its :class:`MotionPredictor`
+    estimate, then rotate-searches. It follows until told to put the bag down.
 
     Voice runs in parallel: while the loop drives, a :class:`CommandListener`
     records, transcribes, and LLM-classifies in the background so the mic is
@@ -457,21 +408,25 @@ class FollowHostAndDropBag(SubTask):
 
         listen_timeout = float(os.getenv("HRI_FOLLOW_LISTEN_TIMEOUT_SEC", "5"))
 
+        # Turn to face the host before talking to them, using their last known
+        # seated position (persisted during the seat offers / introduction).
+        host_xy = recall_person_xy(ctx, "host")
+        if host_xy is not None:
+            face_point(ctx, *host_xy)
+
         # Ask where the bag goes — one synchronous turn (the robot isn't moving
         # yet, so blocking on the answer is fine). The host may point at a spot
         # right here, or lead off.
         ctx.say(prompts.BAG_ASK_WHERE)
         if classify_host_command(ctx, ctx.listen(timeout=listen_timeout)) == "place":
             return self._place_bag(ctx)
-        # Hand the drive-toward / predict / rotate-search loop to follow_target,
-        # tracking the host by identity via _HostSampler (two-tier: pose every
-        # tick + a periodic full re-lock). The CommandListener is the stopper:
-        # follow_target enters it AFTER the warmup ack (so neither thread
-        # transcribes the robot's own voice) and ends the moment it hears
-        # "place". on_stopped speaks the place ack while the threads wind down.
-        reason = follow_target(
+        # Follow the host (selected by face first, attire fallback). The CommandListener is the
+        # stopper: follow_person enters it AFTER the warmup ack (so neither thread
+        # transcribes the robot's own voice) and ends the moment it hears "place".
+        # on_stopped speaks the place ack while the threads wind down.
+        reason = follow_person(
             ctx,
-            _HostSampler().sample,
+            lambda c, snap: select_person_to_follow(c, snap, "host"),
             stopper=CommandListener(ctx),
             on_warmup=lambda: ctx.say(prompts.FOLLOW_HOST_ACK),
             on_lost=lambda: ctx.say(prompts.FOLLOW_HOST_LOST),
@@ -485,6 +440,7 @@ class FollowHostAndDropBag(SubTask):
         """Lower the left arm, open the gripper to release the bag, reset."""
         try:
             ctx.walkie.robot.arm.right.go_to_home(pose_name="standby", blocking=False)  # get the arm out of the way for better nav while following
+            ctx.walkie.robot.arm.go_to_pose(0.45, 0.16, 1.15, -0.8, 0, -1.57, group_name="left_arm", blocking=True)
             ctx.walkie.robot.arm.left.go_to_pose([0.38, 0.16, 0.5299], [-2.6230, -0.0326, -1.4681], blocking=True)
             ctx.walkie.robot.arm.left.gripper(1.0)  # open: release the bag
             ctx.walkie.robot.arm.go_to_home(group_name="both_arms_lift", blocking=True)  # reset the arm for better nav after releasing the bag
@@ -492,24 +448,24 @@ class FollowHostAndDropBag(SubTask):
         except Exception as exc:
             print(f"[HRI] bag release failed ({exc})")
         ctx.data["has_bag"] = False
+        ctx.say(prompts.FINISH_TASK)
         return StepResult.DONE
 
 
 class FollowNearestPerson(SubTask):
     """Test task: follow whoever is closest — pose only, NO identity/appearance.
 
-    Drives :func:`skills.follow_target` with the identity-free
-    :func:`skills.nearest_person_sample`, so the whole follow loop (track /
-    predict / rotate-search, sampling decoupled from the nav cadence) can be
-    exercised on the robot without enrolling anyone or running the bag handover.
-    No stopper, so it follows until the person is lost past the search budget or
-    ``HRI_FOLLOW_TIMEOUT_SEC`` elapses. Ungated — runnable on its own.
+    Drives :func:`skills.follow_person` with :func:`skills.select_largest_person`,
+    so the whole follow loop (snapshot → lift → drive, with motion prediction to
+    coast over dropouts) can be exercised on the robot without enrolling anyone
+    or running the bag handover. No stopper, so it follows until the person is
+    lost past the search budget or ``HRI_FOLLOW_TIMEOUT_SEC`` elapses. Ungated.
     """
 
     def run(self, ctx: TaskContext) -> StepResult:
-        reason = follow_target(
+        reason = follow_person(
             ctx,
-            nearest_person_sample,
+            select_largest_person,
             on_warmup=lambda: ctx.say("Okay, please lead the way and walk slowly, and I will follow you."),
             on_lost=lambda: ctx.say(prompts.FOLLOW_HOST_LOST),
         )
@@ -536,21 +492,23 @@ def build_hri_task(ctx: TaskContext) -> Task:
             print("[HRI] people memory cleared for a fresh run")
         except Exception as exc:
             print(f"[HRI] people memory reset failed ({exc})")
+    # Positions are map-frame and run-local; never carry them across runs.
+    reset_people_positions(ctx)
     return Task(
         "HRI",
         [
-            # GoToDoor(1),
-            # GreetAndLearn(1),
-            # GuideToLivingRoom(1),
-            # OfferSeat(1),
-            # GoToDoor(2),
-            # GreetAndLearn(2),
-            # ReceiveBag(),
-            # GuideToLivingRoom(2),
-            # OfferSeat(2),
-            # IntroduceEveryone(),
-            # FollowHostAndDropBag(),
-            FollowNearestPerson(),  # follow-loop test: no identity, no bag
+            GoToDoor(1),
+            GreetAndLearn(1),
+            GuideToLivingRoom(1),
+            OfferSeat(1),
+            GoToDoor(2),
+            GreetAndLearn(2),
+            ReceiveBag(),
+            GuideToLivingRoom(2),
+            OfferSeat(2),
+            IntroduceGuests(),  # introduce the two guests to each other
+            FollowHostAndDropBag(),
+            # FollowNearestPerson(),  # follow-loop test: no identity, no bag
             # TestTask(),
         ],
         ctx,

@@ -1,4 +1,4 @@
-"""Pure-geometry unit tests for the Pick and Place grasp planner.
+"""Pure-geometry unit tests for the shared manipulation grasp planner.
 
 No robot, no AI server — just the map->base transform and the grasp-pose stub,
 exercised against a fake TaskContext (only ``current_pose`` is needed).
@@ -8,7 +8,7 @@ import math
 
 import pytest
 
-from tasks.PickAndPlace.skills import (
+from tasks.manipulation import (
     DetectedObject,
     plan_grasp,
     world_to_base,
@@ -60,10 +60,10 @@ def test_plan_grasp_none_without_3d():
 
 
 def test_plan_grasp_topdown_base_frame(monkeypatch):
-    monkeypatch.setenv("PNP_ARM_FRAME", "base_footprint")
-    monkeypatch.setenv("PNP_GRASP_APPROACH", "top_down")
-    monkeypatch.setenv("PNP_GRASP_RPY_TOPDOWN", "0.1,0.2,0.3")
-    monkeypatch.setenv("PNP_GRASP_Z_OFFSET_M", "0.05")
+    monkeypatch.setenv("WALKIE_ARM_FRAME", "base_footprint")
+    monkeypatch.setenv("WALKIE_GRASP_APPROACH", "top_down")
+    monkeypatch.setenv("WALKIE_GRASP_RPY_TOPDOWN", "0.1,0.2,0.3")
+    monkeypatch.setenv("WALKIE_GRASP_Z_OFFSET_M", "0.05")
     # Robot at origin facing +x -> base == map; object 0.6 m ahead, 0.8 m high.
     plan = plan_grasp(FakeCtx(), _obj((0.6, 0.0, 0.8)))
     assert plan is not None
@@ -74,10 +74,10 @@ def test_plan_grasp_topdown_base_frame(monkeypatch):
 
 
 def test_plan_grasp_map_frame_passthrough(monkeypatch):
-    monkeypatch.setenv("PNP_ARM_FRAME", "map")
-    monkeypatch.setenv("PNP_GRASP_APPROACH", "front")
-    monkeypatch.setenv("PNP_GRASP_RPY_FRONT", "0.0,0.0,0.0")
-    monkeypatch.setenv("PNP_GRASP_Z_OFFSET_M", "0.0")
+    monkeypatch.setenv("WALKIE_ARM_FRAME", "map")
+    monkeypatch.setenv("WALKIE_GRASP_APPROACH", "front")
+    monkeypatch.setenv("WALKIE_GRASP_RPY_FRONT", "0.0,0.0,0.0")
+    monkeypatch.setenv("WALKIE_GRASP_Z_OFFSET_M", "0.0")
     # In map frame the robot pose is ignored — centroid passes straight through.
     plan = plan_grasp(FakeCtx(5.0, 5.0, 1.0), _obj((1.0, 2.0, 3.0)))
     assert plan is not None

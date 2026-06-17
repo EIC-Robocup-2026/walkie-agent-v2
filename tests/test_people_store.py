@@ -208,6 +208,39 @@ def test_clear_empties_both_collections(store):
 
 
 # ---------------------------------------------------------------------------
+# fused_scores — every id's score, unthresholded, for margin comparisons
+# (the follow-loop host selector compares host vs. the best guest).
+# ---------------------------------------------------------------------------
+
+
+def test_fused_scores_returns_every_enrolled_id(store):
+    store.enroll("Alice", "cola", ALICE, app_embedding=ALICE_ATTIRE)
+    store.enroll("Bob", "milk", BOB, app_embedding=BOB_ATTIRE)
+    scores = store.fused_scores(None, ALICE_ATTIRE_2)
+    assert set(scores) == {"alice", "bob"}
+    # Alice's outfit scores far above Bob's — the basis for a margin gate.
+    assert scores["alice"] > scores["bob"]
+    assert scores["alice"] > 0.9
+
+
+def test_fused_scores_ignores_min_score_threshold(store):
+    """Unlike recognize_fused, fused_scores never drops a low score — the caller
+    compares them, so a weak guest match must still appear to be subtracted."""
+    store.enroll("Alice", "cola", ALICE, app_embedding=ALICE_ATTIRE)
+    store.enroll("Stranger", "", CAROL, app_embedding=STRANGER_ATTIRE)
+    scores = store.fused_scores(None, ALICE_ATTIRE_2)
+    assert set(scores) == {"alice", "stranger"}
+    # The stranger is below APPEARANCE_MATCH_THRESHOLD yet still reported.
+    assert scores["stranger"] < PeopleStore.fused_min_score()
+
+
+def test_fused_scores_empty_when_no_query_or_empty_store(store):
+    assert store.fused_scores(None, ALICE_ATTIRE) == {}  # empty store
+    store.enroll("Alice", "cola", ALICE, app_embedding=ALICE_ATTIRE)
+    assert store.fused_scores(None, None) == {}  # nothing to match on
+
+
+# ---------------------------------------------------------------------------
 # Local adjustments to Chalk's design: caller-chosen ids + env construction.
 # ---------------------------------------------------------------------------
 
