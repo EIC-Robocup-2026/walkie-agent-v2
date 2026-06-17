@@ -48,3 +48,87 @@ HRI_ENABLE_BAG = "1"
 HRI_BAG_EFFORT_THRESHOLD = "0.7"
 # Max seconds to wait for the bag's effort spike before giving up (no-show guest).
 HRI_BAG_WAIT_TIMEOUT_SEC = "20"
+# --- Follow host & place the bag ---------------------------------------------
+# How far (m) the base stops short of the host when following, so it never
+# bumps them (the host's lifted body point minus this along the approach line).
+HRI_FOLLOW_DISTANCE_M = "1"
+# Window (s) for the ONE synchronous listen right after asking where the bag
+# goes (the robot is still then). The follow loop itself does not block-listen.
+HRI_FOLLOW_LISTEN_TIMEOUT_SEC = "5"
+# Background CommandListener: max length (s) of one record cycle. Also bounds
+# how long stop() waits for the recorder to wind down, so keep it modest.
+HRI_FOLLOW_RECORD_TIMEOUT_SEC = "5"
+# Sampling and nav commanding are DECOUPLED. The HostTracker thread samples the
+# host's position as fast as the detector allows; this control loop only issues
+# a nav goal every NAV_PERIOD_SEC (the "higher delay" — re-commanding faster
+# just thrashes nav). The wait also returns instantly when a place command lands.
+HRI_FOLLOW_NAV_PERIOD_SEC = "0.2"
+# Min seconds between HostTracker samples; 0 = sample flat out (the detector
+# latency itself paces it). Raise to throttle the camera/detector load.
+HRI_FOLLOW_SAMPLE_INTERVAL_SEC = "0.0"
+# The host counts as in-view for this long (s) after the last sighting, so a
+# single dropped detection frame doesn't flip the loop into "lost"/search.
+HRI_FOLLOW_VIEW_GRACE_SEC = "2"
+# --- Pixel-offset centering servo (keep the target framed while in view) ------
+# When the target is in view but off-center, the base rotates toward it using
+# its horizontal frame offset (cx/width - 0.5) instead of the depth-lifted map
+# point — the offset stays reliable at point-blank range, where the lift fails
+# and the robot would otherwise freeze as the target strafes out of frame. Same
+# control law as the FaceTracker: delta = -offset * HFOV * GAIN, clamped to
+# MAX_STEP_DEG per tick. GAIN up / MAX_STEP_DEG up = snappier turns (raise if it
+# lags fast sidesteps); down = calmer (lower if it oscillates around center).
+HRI_FOLLOW_CENTER_GAIN = "0.8"
+HRI_FOLLOW_CENTER_MAX_STEP_DEG = "30"
+# Dead-band: a target within this fraction of frame-center counts as "centered"
+# and the loop switches to the forward-approach path instead of rotating.
+HRI_FOLLOW_CENTER_DEADBAND_FRAC = "0.07"
+# The depth lift (full-frame edge mask + deproject, ~hundreds of ms) is the
+# costliest per-sample step, and the loop only needs the lifted map point to
+# APPROACH — i.e. when the target is roughly centered. The sampler skips the
+# lift when |offset| exceeds this fraction, so while the target moves sideways
+# the tracker stays at the fast pose-only rate (only `side` is needed to
+# re-center). Keep this >= the centering dead-band so centered samples still
+# lift. Raise toward 0.5 to lift more often (slower); lower to lift less.
+HRI_FOLLOW_LIFT_GATE_FRAC = "0.15"
+# --- Two-tier sampling (fast pose tracking + periodic identity re-lock) -------
+# Full identity recognition (face + attire embeds) is the slow part, so it runs
+# only every Nth sample; between confirms the host is tracked by pose alone
+# (real-time), following the box nearest the last lock. 1 = identify every tick
+# (slow, the old behaviour). Lower it if the wrong person gets followed in a crowd.
+HRI_FOLLOW_CONFIRM_EVERY_N = "8"
+# Continuity gate: a tracked box may jump at most this fraction of the frame
+# width between samples, else the lock is dropped and identity is re-run.
+HRI_FOLLOW_TRACK_GATE_FRAC = "0.2"
+# 1 = log the achieved sample rate (Hz) and per-stage timings (snapshot / pose /
+# identify / lift) so you can see what's actually capping the frame rate.
+HRI_FOLLOW_TRACK_DEBUG = "1"
+# When the host leaves the frame AND there is no usable motion prediction,
+# turn this many degrees toward the side they were last seen on, each lost
+# frame, until they reappear.
+HRI_FOLLOW_SEARCH_STEP_DEG = "10"
+# Overall time budget (s) for the follow loop before placing the bag anyway.
+HRI_FOLLOW_TIMEOUT_SEC = "150"
+# Consecutive lost frames (each predicting or turning to look for the host)
+# before giving up the search and placing the bag here.
+HRI_FOLLOW_MAX_LOST = "8"
+# --- Predictive re-acquisition (MotionPredictor) -----------------------------
+# 1 = when the host leaves the frame, extrapolate their recent map-frame
+# trajectory and drive to the predicted spot before falling back to rotating.
+HRI_FOLLOW_PREDICT = "1"
+# Sliding window (s) of recent sightings used to fit the host's velocity, and
+# the minimum number of sightings in it before a velocity is trusted.
+HRI_FOLLOW_PREDICT_WINDOW_SEC = "4.0"
+HRI_FOLLOW_PREDICT_MIN_SAMPLES = "3"
+# Max seconds since the last real sighting that the extrapolation is trusted —
+# past this the host has likely turned, so fall back to the rotate-search.
+HRI_FOLLOW_PREDICT_HORIZON_SEC = "3.0"
+# Speed clamps (m/s): ignore jitter below MIN (treat as standing still, no
+# direction to chase) and cap the fitted speed at MAX (human walking pace).
+HRI_FOLLOW_PREDICT_MIN_SPEED = "0.15"
+HRI_FOLLOW_PREDICT_MAX_SPEED = "1.5"
+# Cap (m) on how far ahead of the last real sighting a predicted goal may sit,
+# so a noisy velocity fit can't fling the target across the room.
+HRI_FOLLOW_PREDICT_MAX_DIST = "3.0"
+# A gap (s) between sightings longer than this clears the trajectory history —
+# after a long blackout the old velocity is stale and must not be reused.
+HRI_FOLLOW_PREDICT_GAP_RESET_SEC = "3.0"

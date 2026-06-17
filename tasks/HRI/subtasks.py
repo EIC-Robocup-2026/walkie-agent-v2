@@ -24,6 +24,7 @@ recognized again in IntroduceGuests so seat switches can't mis-aim the robot.
 
 from __future__ import annotations
 
+import math
 import os
 import time
 
@@ -32,16 +33,21 @@ from tasks.base import StepResult, SubTask, Task, TaskContext
 from . import prompts
 from .identity import enroll_guest, enroll_person_in_box, locate_people
 from .skills import (
+    CommandListener,
     FaceTracker,
+    classify_host_command,
     describe_seated_person,
     face_point,
     find_seated_person_bbox,
+    follow_target,
     heading_to_point,
     lift_bbox_world_xy,
     llm_intro_speeches,
     llm_pick_seat,
     match_people_to_seats,
+    nearest_person_sample,
     parse_pose,
+    person_bboxes,
     scan_seats,
     sweep_snapshots,
     wait_for_person,
@@ -235,7 +241,7 @@ class ReceiveBag(SubTask):
             return StepResult.DONE
         ctx.say(prompts.BAG_ASK_HANDOVER)
         ctx.walkie.robot.arm.left.gripper(1.0, blocking=False)  # open: ready to receive
-        ctx.walkie.robot.arm.go_to_pose(0.45, 0.15, 1.15, -0.8, 0, -1.57, group_name="left_arm", blocking=True)
+        ctx.walkie.robot.arm.go_to_pose(0.45, 0.16, 1.15, -0.8, 0, -1.57, group_name="left_arm", blocking=True)
 
         _, _, efforts = ctx.walkie.robot.arm.left.get_joint_states()
         initial_effort = efforts[3] if efforts else 0.0
@@ -250,11 +256,11 @@ class ReceiveBag(SubTask):
             # print(f"[HRI] waiting for bag handover... joint 4 effort: {abs(efforts[3] - initial_effort) if efforts else 'N/A'}")
             if abs(efforts[3] - initial_effort) > threshold:
                 break
-
         ctx.data["has_bag"] = True
-        time.sleep(1.5)  # let the nav settle after the arm movement and possible wait
-        ctx.walkie.robot.arm.go_to_pose(0.3, 0.15, 1.15, -0.8, 0, -1.57, group_name="left_arm", blocking=True)
-        ctx.walkie.robot.arm.left.gripper(0.0)  # open: ready to receive
+        ctx.say(prompts.BAG_CLOSING_WARNING)
+        time.sleep(1)  # let the nav settle after the arm movement and possible wait
+        ctx.walkie.robot.arm.go_to_pose(0.3, 0.16, 1.15, -0.8, 0, -1.57, group_name="left_arm", blocking=True)
+        ctx.walkie.robot.arm.left.gripper(0.0)  # close
         ctx.say(prompts.BAG_RECEIVED)
         return StepResult.DONE
 
@@ -325,23 +331,206 @@ class IntroduceEveryone(SubTask):
         return StepResult.DONE
 
 
+def _box_area(b) -> float:
+    return (b[2] - b[0]) * (b[3] - b[1])
+
+
+class _HostSampler:
+    """Two-tier host-position sampler for :class:`HostTracker`.
+
+    The slow part of locating the host is IDENTITY recognition: per frame,
+    :func:`identity.locate_people` runs a face embed + a pose pass + an OSNet
+    attire embed for every person (several HTTP round-trips that grow with the
+    crowd). Pose estimation alone is real-time. So this samples in two tiers:
+
+    * **fast (every tick)** — one snapshot + pose only; the host is tracked by
+      spatial continuity (the person box nearest the last locked box, within a
+      jump gate). Runs at pose-estimation rate.
+    * **confirm (every ``HRI_FOLLOW_CONFIRM_EVERY_N`` ticks, or whenever
+      continuity is lost)** — full ``locate_people`` to re-lock onto the real
+      host and correct drift / a wrong-person lock.
+
+    :meth:`sample` returns ``(world_xy | None, side | None)`` exactly like the
+    loop expects. *side* is the box's horizontal frame offset (``cx/width -
+    0.5``, negative = left); it is ``None`` only when no person box was found,
+    while *world_xy* may be ``None`` if the depth lift failed. Lives here, not in
+    skills.py, because it calls ``locate_people`` (skills importing identity
+    would be a cycle).
+    """
+
+    def __init__(self) -> None:
+        self.confirm_every_n = int(os.getenv("HRI_FOLLOW_CONFIRM_EVERY_N", "8"))
+        self.gate_frac = float(os.getenv("HRI_FOLLOW_TRACK_GATE_FRAC", "0.2"))
+        self.lift_gate = float(os.getenv("HRI_FOLLOW_LIFT_GATE_FRAC", "0.15"))
+        self.debug = os.getenv("HRI_FOLLOW_TRACK_DEBUG", "0").lower() in ("1", "true", "yes")
+        self._locked: tuple | None = None      # last host box (xyxy)
+        self._since_confirm = 1 << 30          # force a confirm on the first sample
+
+    def sample(self, ctx: TaskContext):
+        t0 = time.monotonic()
+        snap = ctx.snapshot()
+        t_snap = time.monotonic()
+        if snap is None:
+            return None, None
+        img = snap.img
+        boxes = person_bboxes(ctx, img)        # fast: pose only
+        t_pose = time.monotonic()
+
+        # Re-identify periodically or whenever we have no lock; otherwise just
+        # follow the locked box by spatial continuity (cheap).
+        confirm = self._locked is None or self._since_confirm >= self.confirm_every_n
+        mode = "confirm" if confirm else "track"
+        if confirm:
+            box = self._identify(ctx, img, boxes)
+            self._since_confirm = 0
+        else:
+            box = self._track_box(boxes, img.width)
+            self._since_confirm += 1
+            if box is None:  # lost continuity early — re-identify now
+                box = self._identify(ctx, img, boxes)
+                self._since_confirm = 0
+                mode = "track->confirm"
+        t_id = time.monotonic()
+
+        if box is None:
+            self._locked = None
+            if self.debug:
+                print(f"[HostSampler] {mode} no-host "
+                      f"snap={1e3 * (t_snap - t0):.0f}ms pose={1e3 * (t_pose - t_snap):.0f}ms "
+                      f"id={1e3 * (t_id - t_pose):.0f}ms")
+            return None, None
+        self._locked = box
+        side = (box[0] + box[2]) / 2 / img.width - 0.5
+        # The ~depth lift is the expensive per-sample step (full-frame edge mask
+        # + deproject). The control loop only needs the map point to APPROACH,
+        # i.e. when the host is roughly centered; while they're off-center it just
+        # rotates to re-center off `side`. So skip the lift when off-center —
+        # keeping the tracker at the fast pose-only rate exactly when the host is
+        # moving sideways. See HRI_FOLLOW_LIFT_GATE_FRAC.
+        xy = lift_bbox_world_xy(ctx, snap, box) if abs(side) <= self.lift_gate else None
+        if self.debug:
+            print(f"[HostSampler] {mode} snap={1e3 * (t_snap - t0):.0f}ms "
+                  f"pose={1e3 * (t_pose - t_snap):.0f}ms id={1e3 * (t_id - t_pose):.0f}ms "
+                  f"lift={1e3 * (time.monotonic() - t_id):.0f}ms")
+        return xy, side
+
+    def _identify(self, ctx: TaskContext, img, boxes):
+        """The host's box via full recognition; nearest person as the fallback."""
+        if ctx.people is not None and ctx.people.count() > 0:
+            found = locate_people(ctx, [img], ["host"]).get("host")
+            if found is not None:
+                return found[1]
+        return max(boxes, key=_box_area) if boxes else None
+
+    def _track_box(self, boxes, width):
+        """The pose box nearest the locked one, if within the per-tick jump gate."""
+        if self._locked is None or not boxes:
+            return None
+        lcx = (self._locked[0] + self._locked[2]) / 2
+        lcy = (self._locked[1] + self._locked[3]) / 2
+
+        def center_dist(b):
+            return math.hypot((b[0] + b[2]) / 2 - lcx, (b[1] + b[3]) / 2 - lcy)
+
+        best = min(boxes, key=center_dist)
+        return best if center_dist(best) <= self.gate_frac * width else None
+
+
 class FollowHostAndDropBag(SubTask):
-    """Extension point: needs a person-following primitive that doesn't exist
-    yet. For now, announces the limitation and releases the bag in place."""
+    """Ask the host where the bag goes, follow them there, then place it.
+
+    The host answers by walking off ("follow me"); a :class:`_HostSampler`
+    tracks them in two tiers — pose-only every tick (real-time) plus a periodic
+    full identity re-lock — lifts the host's box to a map-frame point, and the
+    robot drives to within ``HRI_FOLLOW_DISTANCE_M`` so it never bumps them.
+    When the host slips out of view, a :class:`MotionPredictor` extrapolates
+    their recent map-frame trajectory so the robot drives to where they were
+    heading (re-acquiring fast) instead of scanning blindly. It keeps following
+    until the host tells it to put the bag down.
+
+    Voice runs in parallel: while the loop drives, a :class:`CommandListener`
+    records, transcribes, and LLM-classifies in the background so the mic is
+    never dark during a nav step or an STT/LLM round-trip. The room is full of
+    people, so every utterance is classified (:func:`skills.classify_host_command`)
+    — only a clear host instruction acts; crowd chatter is ignored. Then it runs
+    the same arm release as before. Gated by ``HRI_ENABLE_BAG`` + ``has_bag``.
+    """
 
     def run(self, ctx: TaskContext) -> StepResult:
         if not (_bag_enabled() and ctx.data.get("has_bag")):
             return StepResult.DONE
-        ctx.say(prompts.FOLLOW_HOST_NOT_AVAILABLE)
+
+        listen_timeout = float(os.getenv("HRI_FOLLOW_LISTEN_TIMEOUT_SEC", "5"))
+
+        # Ask where the bag goes — one synchronous turn (the robot isn't moving
+        # yet, so blocking on the answer is fine). The host may point at a spot
+        # right here, or lead off.
+        ctx.say(prompts.BAG_ASK_WHERE)
+        if classify_host_command(ctx, ctx.listen(timeout=listen_timeout)) == "place":
+            return self._place_bag(ctx)
+        # Hand the drive-toward / predict / rotate-search loop to follow_target,
+        # tracking the host by identity via _HostSampler (two-tier: pose every
+        # tick + a periodic full re-lock). The CommandListener is the stopper:
+        # follow_target enters it AFTER the warmup ack (so neither thread
+        # transcribes the robot's own voice) and ends the moment it hears
+        # "place". on_stopped speaks the place ack while the threads wind down.
+        reason = follow_target(
+            ctx,
+            _HostSampler().sample,
+            stopper=CommandListener(ctx),
+            on_warmup=lambda: ctx.say(prompts.FOLLOW_HOST_ACK),
+            on_lost=lambda: ctx.say(prompts.FOLLOW_HOST_LOST),
+            on_stopped=lambda: ctx.say(prompts.BAG_PLACE_ACK),
+        )
+        if reason == "lost":
+            print("[HRI] lost the host past the search budget; placing here")
+        return self._place_bag(ctx)
+
+    def _place_bag(self, ctx: TaskContext) -> StepResult:
+        """Lower the left arm, open the gripper to release the bag, reset."""
         try:
             ctx.walkie.robot.arm.right.go_to_home(pose_name="standby", blocking=False)  # get the arm out of the way for better nav while following
-            ctx.walkie.robot.arm.left.go_to_pose([0.38, 0.1558, 0.5299], [-2.6230, -0.0326, -1.4681], blocking=True)
+            ctx.walkie.robot.arm.left.go_to_pose([0.38, 0.16, 0.5299], [-2.6230, -0.0326, -1.4681], blocking=True)
             ctx.walkie.robot.arm.left.gripper(1.0)  # open: release the bag
             ctx.walkie.robot.arm.go_to_home(group_name="both_arms_lift", blocking=True)  # reset the arm for better nav after releasing the bag
             ctx.walkie.robot.arm.left.gripper(0, blocking=False)  # close the gripper after releasing the bag, so it's not just hanging open while following
         except Exception as exc:
             print(f"[HRI] bag release failed ({exc})")
+        ctx.data["has_bag"] = False
         return StepResult.DONE
+
+
+class FollowNearestPerson(SubTask):
+    """Test task: follow whoever is closest — pose only, NO identity/appearance.
+
+    Drives :func:`skills.follow_target` with the identity-free
+    :func:`skills.nearest_person_sample`, so the whole follow loop (track /
+    predict / rotate-search, sampling decoupled from the nav cadence) can be
+    exercised on the robot without enrolling anyone or running the bag handover.
+    No stopper, so it follows until the person is lost past the search budget or
+    ``HRI_FOLLOW_TIMEOUT_SEC`` elapses. Ungated — runnable on its own.
+    """
+
+    def run(self, ctx: TaskContext) -> StepResult:
+        reason = follow_target(
+            ctx,
+            nearest_person_sample,
+            on_warmup=lambda: ctx.say("Okay, please lead the way and walk slowly, and I will follow you."),
+            on_lost=lambda: ctx.say(prompts.FOLLOW_HOST_LOST),
+        )
+        print(f"[HRI] follow-nearest-person finished ({reason})")
+        ctx.say("Okay, I will stop following you now.")
+        return StepResult.DONE
+
+
+class TestTask(SubTask):
+    def run(self, ctx: TaskContext) -> StepResult:
+        ctx.say("This is a test task. It does nothing.")
+        while True:
+            ctx.snapshot()  # keep the camera warms
+        return StepResult.DONE
+
+
 
 
 def build_hri_task(ctx: TaskContext) -> Task:
@@ -355,17 +544,19 @@ def build_hri_task(ctx: TaskContext) -> Task:
     return Task(
         "HRI",
         [
-#            GoToDoor(1),
-#            GreetAndLearn(1),
-#            GuideToLivingRoom(1),
-#            OfferSeat(1),
-#            GoToDoor(2),
-#            GreetAndLearn(2),
-            ReceiveBag(),
-#            GuideToLivingRoom(2),
-#            OfferSeat(2),
-#            IntroduceEveryone(),
-            FollowHostAndDropBag(),
+            # GoToDoor(1),
+            # GreetAndLearn(1),
+            # GuideToLivingRoom(1),
+            # OfferSeat(1),
+            # GoToDoor(2),
+            # GreetAndLearn(2),
+            # ReceiveBag(),
+            # GuideToLivingRoom(2),
+            # OfferSeat(2),
+            # IntroduceEveryone(),
+            # FollowHostAndDropBag(),
+            FollowNearestPerson(),  # follow-loop test: no identity, no bag
+            # TestTask(),
         ],
         ctx,
     )

@@ -38,7 +38,7 @@ WALKIE_AI_BASE_URL = "http://10.0.0.202:5000"
 # walkie-sdk robot transport. ROS services over rosbridge (default), camera over
 # zenoh. Force zenoh services only if you've shipped the perception/srv into
 # zenoh_ros2_sdk. Port defaults: 9090 for rosbridge, 7447 for zenoh.
-WALKIE_ROS_PROTOCOL = "rosbridge"
+WALKIE_ROS_PROTOCOL = "hybrid"
 WALKIE_ROS_PORT = "9090"
 # IP of the robot for the walkie-sdk transport (rosbridge + zenoh camera). Leave
 # 127.0.0.1 when running on the robot itself; set to walkie's own LAN IP (e.g.

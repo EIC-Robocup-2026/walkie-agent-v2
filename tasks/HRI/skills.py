@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import math
 import os
+import queue
 import threading
 import time
 from collections.abc import Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 from PIL import Image
@@ -291,6 +293,623 @@ def face_point(ctx: TaskContext, x: float, y: float) -> bool:
     """Rotate the base to face a map-frame point. Best-effort one-shot."""
     heading = heading_to_point(ctx, x, y)
     return ctx.rotate_to(heading) if heading is not None else False
+
+
+def approach_point(
+    ctx: TaskContext,
+    x: float,
+    y: float,
+    *,
+    stop_distance: float,
+    blocking: bool = True,
+    settle: float = 0.0,
+) -> bool:
+    """Drive toward a map-frame point, halting *stop_distance* m short of it.
+
+    The goal is computed on the line from the robot's current position to
+    (x, y), pulled back by *stop_distance*, and the base is left facing the
+    target — so it approaches a person without driving onto them. If already
+    within *stop_distance*, it only rotates to face the point (no forward
+    creep). False when odometry has no fix (current_pose's zeros fallback would
+    send the base to an arbitrary goal, so it's not used here) or nav fails.
+
+    With *blocking* False the base is commanded but not waited on
+    (``nav.go_to(blocking=False)``) and control returns after *settle* seconds
+    — so a follow loop can keep re-targeting a moving person every tick instead
+    of committing a full blocking drive to an already-stale position.
+    """
+    try:
+        pose = ctx.walkie.status.get_position()
+    except Exception as exc:
+        print(f"[skills] approach_point: odometry unavailable ({exc})")
+        return False
+    if not pose:
+        return False
+    rx, ry = pose["x"], pose["y"]
+    dx, dy = x - rx, y - ry
+    dist = math.hypot(dx, dy)
+    heading = math.atan2(dy, dx)
+    if dist <= stop_distance:
+        gx, gy = rx, ry  # already close enough: rotate in place to face them
+    else:
+        ux, uy = dx / dist, dy / dist
+        gx, gy = x - ux * stop_distance, y - uy * stop_distance
+    if blocking:
+        return ctx.goto(gx, gy, heading)
+    try:
+        ctx.walkie.nav.go_to(gx, gy, heading, blocking=False)
+    except Exception as exc:
+        print(f"[skills] approach_point: non-blocking go_to failed ({exc})")
+        return False
+    if settle > 0:
+        time.sleep(settle)  # let the base make progress before re-targeting
+    return True
+
+
+def rotate_by(ctx: TaskContext, delta_rad: float, *, blocking: bool = True) -> bool:
+    """Rotate the base by *delta_rad* relative to its current heading.
+
+    Reads the real odometry heading (not ``current_pose``'s zeros fallback,
+    which would make a relative turn meaningless) and no-ops without a fix.
+    Positive = CCW / left, matching the frame-offset convention used elsewhere
+    (a target left of center needs a positive turn to re-center it).
+
+    With *blocking* False the turn is commanded but not waited on
+    (``nav.go_to(blocking=False)``, the goal preempting any in-flight one), so a
+    fast control loop can re-issue a fresh correction every tick — closed-loop,
+    since the new target heading is recomputed from the latest odometry each
+    time. Default True keeps the one-shot "look toward" behaviour.
+    """
+    try:
+        pose = ctx.walkie.status.get_position()
+    except Exception as exc:
+        print(f"[skills] rotate_by: odometry unavailable ({exc})")
+        return False
+    if not pose:
+        return False
+    target = pose["heading"] + delta_rad
+    if blocking:
+        return ctx.rotate_to(target)
+    try:
+        ctx.walkie.nav.go_to(pose["x"], pose["y"], target, blocking=False)
+    except Exception as exc:
+        print(f"[skills] rotate_by: non-blocking go_to failed ({exc})")
+        return False
+    return True
+
+
+class MotionPredictor:
+    """Estimate a tracked person's map-frame velocity and extrapolate where they
+    went when they briefly leave the camera frame.
+
+    Sightings are ``(t, x, y)`` map-frame points (``lift_bbox_world_xy`` output).
+    Because they live in the fixed map frame, differencing them gives the
+    person's true ground velocity — the robot's own motion doesn't pollute it.
+    :meth:`velocity` is a least-squares linear fit over a sliding time window
+    (robust to the per-frame depth-lift jitter a two-point difference would
+    amplify); :meth:`predict` extrapolates from the last sighting, clamped to a
+    human-plausible speed and a max horizon + distance so a noisy fit can't
+    fling the goal across the room.
+
+    :meth:`predict` returns ``None`` — telling the follow loop to fall back to a
+    rotate-search — when there is too little history, the person was essentially
+    stationary (no direction to extrapolate), or the last sighting is too stale
+    to trust. All tunables come from ``HRI_FOLLOW_PREDICT_*`` env vars.
+    """
+
+    def __init__(self) -> None:
+        self.window_sec = float(os.getenv("HRI_FOLLOW_PREDICT_WINDOW_SEC", "4.0"))
+        self.min_samples = int(os.getenv("HRI_FOLLOW_PREDICT_MIN_SAMPLES", "3"))
+        self.horizon_sec = float(os.getenv("HRI_FOLLOW_PREDICT_HORIZON_SEC", "3.0"))
+        self.max_speed = float(os.getenv("HRI_FOLLOW_PREDICT_MAX_SPEED", "1.5"))
+        self.min_speed = float(os.getenv("HRI_FOLLOW_PREDICT_MIN_SPEED", "0.15"))
+        self.max_dist = float(os.getenv("HRI_FOLLOW_PREDICT_MAX_DIST", "3.0"))
+        self.gap_reset_sec = float(os.getenv("HRI_FOLLOW_PREDICT_GAP_RESET_SEC", "3.0"))
+        self._hist: list[tuple[float, float, float]] = []
+
+    def update(self, t: float, xy: tuple[float, float]) -> None:
+        """Record a fresh map-frame sighting at monotonic time *t*."""
+        if self._hist and t - self._hist[-1][0] > self.gap_reset_sec:
+            self._hist.clear()  # long blackout: the old trajectory is stale
+        self._hist.append((t, xy[0], xy[1]))
+        cutoff = t - self.window_sec
+        self._hist = [s for s in self._hist if s[0] >= cutoff]
+
+    def velocity(self) -> tuple[float, float] | None:
+        """Least-squares ``(vx, vy)`` over the window, or None if degenerate."""
+        if len(self._hist) < self.min_samples:
+            return None
+        ts = [s[0] for s in self._hist]
+        t0 = ts[0]
+        tu = [t - t0 for t in ts]
+        n = len(tu)
+        mean_t = sum(tu) / n
+        denom = sum((t - mean_t) ** 2 for t in tu)
+        if denom <= 1e-6:  # all samples ~same timestamp: no usable slope
+            return None
+
+        def slope(vals: list[float]) -> float:
+            mean_v = sum(vals) / n
+            return sum((tu[i] - mean_t) * (vals[i] - mean_v) for i in range(n)) / denom
+
+        return slope([s[1] for s in self._hist]), slope([s[2] for s in self._hist])
+
+    def predict(self, t: float) -> tuple[float, float] | None:
+        """Extrapolated map-frame point at time *t*, or None to fall back to search."""
+        if not self._hist:
+            return None
+        v = self.velocity()
+        if v is None:
+            return None
+        vx, vy = v
+        speed = math.hypot(vx, vy)
+        if speed < self.min_speed:
+            return None  # essentially stationary — no heading to extrapolate
+        if speed > self.max_speed:  # clamp to a human-plausible walking speed
+            vx, vy = vx / speed * self.max_speed, vy / speed * self.max_speed
+        lt, lx, ly = self._hist[-1]
+        dt = t - lt
+        if dt > self.horizon_sec:
+            return None  # last sighting too old to trust the extrapolation
+        dt = max(0.0, dt)
+        px, py = lx + vx * dt, ly + vy * dt
+        ddx, ddy = px - lx, py - ly
+        dist = math.hypot(ddx, ddy)
+        if dist > self.max_dist:  # cap displacement from the last real sighting
+            px, py = lx + ddx / dist * self.max_dist, ly + ddy / dist * self.max_dist
+        return px, py
+
+    def reset(self) -> None:
+        self._hist.clear()
+
+
+@dataclass
+class HostEstimate:
+    """A control-loop's-eye view of the host, computed at read time.
+
+    *in_view*: a sighting landed within the view-grace window (a brief detector
+    dropout does not flip this false). *xy*: the freshly lifted map-frame point
+    when in view, else None. *predicted*: the MotionPredictor's extrapolation
+    for when the host is out of view (None if not trustworthy). *side*: the last
+    horizontal frame offset, for the rotate-search fallback direction.
+    """
+
+    in_view: bool
+    xy: tuple[float, float] | None
+    predicted: tuple[float, float] | None
+    side: float | None
+
+
+class HostTracker:
+    """Background perception loop that samples the host's map-frame position as
+    fast as the camera + detector allow, feeding a :class:`MotionPredictor` — so
+    the control loop can issue navigation goals at its OWN, slower cadence off a
+    dense, always-fresh estimate.
+
+    This decouples the *sampling rate* from the *nav-command rate*. The detector
+    runs flat out in a daemon thread (or every ``HRI_FOLLOW_SAMPLE_INTERVAL_SEC``
+    if a floor is set); the caller polls :meth:`read` only when it is ready to
+    command the base — a much longer period, because re-issuing nav goals too
+    fast just thrashes the stack and the base can't react that quickly anyway.
+    A short detection dropout does not read as "lost": :attr:`HostEstimate.in_view`
+    stays true for ``HRI_FOLLOW_VIEW_GRACE_SEC`` after the last sighting, which
+    also absorbs single-frame detector flicker.
+
+    *locate* is a callable ``(ctx) -> (world_xy | None, side | None)`` (the
+    subtask's sampler). Set ``HRI_FOLLOW_TRACK_DEBUG=1`` to log the achieved
+    sample rate every few seconds. Thread-safe — all predictor + shared-state
+    access is under one lock; every camera/detector failure is swallowed so a
+    glitch never crashes the step. Context manager, like :class:`FaceTracker`.
+    """
+
+    def __init__(self, ctx: TaskContext, locate, *, predict_on: bool = True) -> None:
+        self.ctx = ctx
+        self._locate = locate
+        self.predictor = MotionPredictor() if predict_on else None
+        self.interval = float(os.getenv("HRI_FOLLOW_SAMPLE_INTERVAL_SEC", "0.0"))
+        self.view_grace = float(os.getenv("HRI_FOLLOW_VIEW_GRACE_SEC", "0.6"))
+        self.debug = os.getenv("HRI_FOLLOW_TRACK_DEBUG", "0").lower() in ("1", "true", "yes")
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._last_xy: tuple[float, float] | None = None
+        self._last_lift_t: float | None = None
+        self._last_seen_t: float | None = None
+        self._last_side: float | None = None
+
+    def start(self) -> "HostTracker":
+        if self._thread is None:
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._loop, daemon=True)
+            self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(2.0, self.interval + 1.0))
+            self._thread = None
+
+    def __enter__(self) -> "HostTracker":
+        return self.start()
+
+    def __exit__(self, *exc) -> None:
+        self.stop()
+
+    def _loop(self) -> None:
+        n, t_log = 0, time.monotonic()
+        while not self._stop.is_set():
+            try:
+                world_xy, side = self._locate(self.ctx)
+            except Exception as exc:
+                print(f"[skills] HostTracker sample failed ({exc})")
+                world_xy, side = None, None
+            now = time.monotonic()
+            if self.debug:
+                n += 1
+                if now - t_log >= 3.0:
+                    print(f"[HostTracker] sampling at {n / (now - t_log):.1f} Hz")
+                    n, t_log = 0, now
+            with self._lock:
+                if side is not None:  # a person box was found this sample
+                    self._last_seen_t = now
+                    self._last_side = side
+                    if world_xy is not None:  # ...and it lifted to a map point
+                        self._last_xy = world_xy
+                        self._last_lift_t = now
+                        if self.predictor is not None:
+                            self.predictor.update(now, world_xy)
+            if self.interval > 0:
+                self._stop.wait(self.interval)  # else loop flat out (detector paces)
+
+    def read(self, now: float | None = None) -> HostEstimate:
+        """Best current view of the host: in-view flag, fresh point, prediction."""
+        if now is None:
+            now = time.monotonic()
+        with self._lock:
+            seen_t, lift_t = self._last_seen_t, self._last_lift_t
+            xy, side = self._last_xy, self._last_side
+            predicted = self.predictor.predict(now) if self.predictor is not None else None
+        in_view = seen_t is not None and (now - seen_t) <= self.view_grace
+        fresh_xy = xy if (lift_t is not None and now - lift_t <= self.view_grace) else None
+        return HostEstimate(in_view=in_view, xy=fresh_xy, predicted=predicted, side=side)
+
+
+def follow_target(
+    ctx: TaskContext,
+    sample,
+    *,
+    stopper=None,
+    on_warmup=None,
+    on_lost=None,
+    on_stopped=None,
+    follow_distance: float | None = None,
+    timeout: float | None = None,
+    nav_period: float | None = None,
+    search_step_deg: float | None = None,
+    max_lost: int | None = None,
+    predict_on: bool | None = None,
+) -> str:
+    """Drive the base after a moving person until stopped, lost, or timed out.
+
+    The reusable core of the follow behaviour. A :class:`HostTracker` samples
+    the target's map-frame position flat out in its own thread (feeding a
+    :class:`MotionPredictor` a dense trajectory); this control loop reads the
+    freshest estimate and issues a nav goal every *nav_period* s.
+
+    While the target is in view it is kept FRAMED by a pixel-offset centering
+    servo (the :class:`FaceTracker` control law on the body box): when the target
+    is off-center, the base rotates proportionally to its horizontal frame offset
+    (``est.side``) — a signal that stays reliable even at point-blank range,
+    where the depth lift that yields ``est.xy`` goes noisy or empty. Only once
+    the target is roughly centered (so the map-point heading ≈ the current one)
+    does the loop approach to within *follow_distance* m via the lifted point, so
+    it never bumps them. When they slip out of frame the predictor extrapolates
+    where they were heading and the robot drives there to re-acquire, falling
+    back to rotating toward the last-seen side only when there is no usable
+    prediction. Returns the exit reason: ``'stopped'`` | ``'lost'`` |
+    ``'timeout'``.
+
+    *sample* is a ``(ctx) -> (world_xy | None, side | None)`` callable the
+    tracker polls each tick — e.g. ``_HostSampler().sample`` for identity-based
+    host following, or :func:`nearest_person_sample` for an identity-free
+    "follow whoever's closest". *stopper*, when given, is a context manager
+    carrying a ``.placed`` :class:`threading.Event` (a :class:`CommandListener`);
+    it is entered AFTER *on_warmup* — so a background mic listener never
+    transcribes the warmup speech — and its event ends the loop the instant it
+    is set. *on_warmup* runs once right after the tracker starts (e.g. a spoken
+    ack, so the tracker warms up during the TTS); *on_lost* runs once the first
+    time the target drops out of view; *on_stopped* runs after a
+    *stopper*-triggered exit, before the threads are torn down, so a closing
+    speech overlaps the join cost instead of adding a silent gap. Every tunable
+    defaults from the ``HRI_FOLLOW_*`` env vars.
+    """
+    if follow_distance is None:
+        follow_distance = float(os.getenv("HRI_FOLLOW_DISTANCE_M", "1.0"))
+    if timeout is None:
+        timeout = float(os.getenv("HRI_FOLLOW_TIMEOUT_SEC", "90"))
+    if nav_period is None:
+        nav_period = float(os.getenv("HRI_FOLLOW_NAV_PERIOD_SEC", "1.0"))
+    if search_step_deg is None:
+        search_step_deg = float(os.getenv("HRI_FOLLOW_SEARCH_STEP_DEG", "10"))
+    search_step = math.radians(search_step_deg)
+    if max_lost is None:
+        max_lost = int(os.getenv("HRI_FOLLOW_MAX_LOST", "8"))
+    if predict_on is None:
+        predict_on = os.getenv("HRI_FOLLOW_PREDICT", "1").lower() in ("1", "true", "yes")
+
+    # Pixel-offset centering servo (mirrors FaceTracker): rotate proportionally
+    # to the target's horizontal frame offset, clamped per tick, with a deadband
+    # so a roughly-centered target switches to the forward-approach path.
+    hfov = math.radians(float(os.getenv("HRI_CAMERA_HFOV_DEG", "110")))
+    center_gain = float(os.getenv("HRI_FOLLOW_CENTER_GAIN", "0.8"))
+    center_max_step = math.radians(float(os.getenv("HRI_FOLLOW_CENTER_MAX_STEP_DEG", "30")))
+    center_deadband = float(os.getenv("HRI_FOLLOW_CENTER_DEADBAND_FRAC", "0.07"))
+
+    idle = threading.Event()  # never set — an interruptible sleep when no stopper
+    lost = 0
+    last_dir = 1.0  # default search direction (left) until first seen
+    deadline = time.monotonic() + timeout
+    reason = "timeout"
+    with HostTracker(ctx, sample, predict_on=predict_on) as tracker:
+        if on_warmup is not None:
+            on_warmup()  # tracker warms up during this (e.g. a TTS ack)
+        with (stopper if stopper is not None else nullcontext()) as listener:
+            placed = getattr(listener, "placed", None)
+            while time.monotonic() < deadline and not (placed is not None and placed.is_set()):
+                est = tracker.read()
+                if est.side is not None:
+                    # Left of center (side < 0) -> turn left (+) to re-center.
+                    last_dir = 1.0 if est.side < 0 else -1.0
+                if est.in_view:
+                    lost = 0
+                    if est.side is not None and abs(est.side) > center_deadband:
+                        # Off-center: keep the target framed using the reliable
+                        # pixel offset, NOT the close-range depth lift. side < 0
+                        # (left of center) -> turn left (+). Non-blocking so the
+                        # loop stays responsive and re-centers closed-loop.
+                        delta = max(-center_max_step,
+                                    min(center_max_step, -est.side * hfov * center_gain))
+                        rotate_by(ctx, delta, blocking=False)
+                    else:
+                        # Roughly centered: the map-point heading ~= current
+                        # heading, so a forward approach is safe. With no usable
+                        # point (close-range lift failed) just hold and re-center
+                        # next tick rather than driving blind.
+                        target = est.xy or est.predicted
+                        if target is not None:
+                            approach_point(ctx, *target, stop_distance=follow_distance,
+                                           blocking=False)
+                else:
+                    lost += 1
+                    if lost == 1 and on_lost is not None:
+                        on_lost()  # nudge once, then keep searching
+                    if lost >= max_lost:
+                        print("[skills] follow_target: lost the target past the search budget")
+                        reason = "lost"
+                        break
+                    if est.predicted is not None:
+                        # Chase where the target was heading, not where they were.
+                        print(f"[skills] follow_target: target out of frame; driving to "
+                              f"predicted ({est.predicted[0]:.2f}, {est.predicted[1]:.2f})")
+                        approach_point(ctx, *est.predicted, stop_distance=follow_distance,
+                                       blocking=False)
+                    else:
+                        # No usable prediction: turn toward the last-seen side
+                        # and keep turning until the target comes back in view.
+                        rotate_by(ctx, last_dir * search_step)
+                # Nav cadence — the "higher delay" between commands. The event
+                # wait returns the instant the stopper flags a place command.
+                (placed or idle).wait(nav_period)
+            if placed is not None and placed.is_set():
+                reason = "stopped"
+                if on_stopped is not None:
+                    on_stopped()  # speak while the threads wind down
+    return reason
+
+
+def person_bboxes(ctx: TaskContext, img: Image.Image) -> list[BBox]:
+    """All detected person boxes (xyxy) in *img* via pose estimation; [] on failure.
+
+    This is the *fast*, real-time path: pose estimation only, with NO face or
+    attire recognition. Those per-person embeddings (run by ``locate_people``)
+    are the expensive part — keeping them out of the per-tick loop is what lets
+    the tracker sample at pose-estimation rate.
+    """
+    try:
+        persons = ctx.walkieAI.pose_estimation.estimate(img)
+    except Exception as exc:
+        print(f"[skills] person_bboxes: pose estimation failed ({exc})")
+        return []
+    return [cxcywh_to_xyxy(p.bbox) for p in persons]
+
+
+def nearest_person_bbox(ctx: TaskContext, img: Image.Image) -> BBox | None:
+    """The largest (so nearest) detected person box in *img*, or None.
+
+    Fallback target for following when no enrolled identity is matched — the
+    biggest body in view is the one the robot is closest to.
+    """
+    boxes = person_bboxes(ctx, img)
+    if not boxes:
+        return None
+    return max(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+
+
+def nearest_person_sample(ctx: TaskContext) -> tuple[tuple[float, float] | None, float | None]:
+    """A :func:`follow_target`/:class:`HostTracker` sampler that follows whoever
+    is closest — pose only, NO identity or appearance recognition.
+
+    Returns ``(world_xy | None, side | None)`` exactly like ``_HostSampler.sample``
+    but with none of its two-tier recognition: just the biggest (so nearest)
+    person box this frame, lifted to a map-frame point. *side* is the box's
+    horizontal frame offset (``cx/width - 0.5``, negative = left), ``None`` only
+    when no person was detected; *world_xy* may be ``None`` if the depth lift
+    failed. Use to exercise the follow loop without enrolled identities.
+
+    Set ``HRI_FOLLOW_TRACK_DEBUG=1`` to log the per-stage cost (snapshot / pose /
+    lift) every sample, so you can see what is capping the tracker's frame rate.
+    """
+    debug = os.getenv("HRI_FOLLOW_TRACK_DEBUG", "0").lower() in ("1", "true", "yes")
+    lift_gate = float(os.getenv("HRI_FOLLOW_LIFT_GATE_FRAC", "0.15"))
+    t0 = time.monotonic()
+    snap = ctx.snapshot()
+    t_snap = time.monotonic()
+    if snap is None:
+        return None, None
+    img = snap.img
+    box = nearest_person_bbox(ctx, img)
+    t_pose = time.monotonic()
+    if box is None:
+        if debug:
+            print(f"[nearest_person_sample] no-person "
+                  f"snap={1e3 * (t_snap - t0):.0f}ms pose={1e3 * (t_pose - t_snap):.0f}ms")
+        return None, None
+    side = (box[0] + box[2]) / 2 / img.width - 0.5
+    # The ~depth lift is the expensive per-sample step (full-frame edge mask +
+    # deproject). The control loop only needs the map point to APPROACH (target
+    # roughly centered); off-center it just rotates to re-center off `side`. So
+    # skip the lift when off-center, keeping the tracker at the fast pose-only
+    # rate exactly when the target is moving sideways. See HRI_FOLLOW_LIFT_GATE_FRAC.
+    xy = lift_bbox_world_xy(ctx, snap, box) if abs(side) <= lift_gate else None
+    if debug:
+        print(f"[nearest_person_sample] snap={1e3 * (t_snap - t0):.0f}ms "
+              f"pose={1e3 * (t_pose - t_snap):.0f}ms side={side:+.2f} "
+              f"lift={1e3 * (time.monotonic() - t_pose):.0f}ms"
+              f"{'' if abs(side) <= lift_gate else ' (skipped, off-center)'}")
+    return xy, side
+
+
+def classify_host_command(ctx: TaskContext, heard: str) -> str:
+    """LLM intent of a heard utterance: ``'follow'``, ``'place'``, or ``'other'``.
+
+    Filters genuine host instructions from the party-crowd chatter the mic
+    picks up during the bag handover. An empty/garbled transcript or an
+    extraction failure maps to ``'other'`` so the robot never acts on noise.
+    """
+    if not heard.strip():
+        return "other"
+    cmd = ctx.extract(
+        prompts.HostCommand, prompts.CLASSIFY_HOST_COMMAND_INSTRUCTIONS, heard
+    )
+    return cmd.intent if cmd is not None else "other"
+
+
+class CommandListener:
+    """Background mic loop that catches a host command without ever going deaf.
+
+    While the robot drives after the host it must still hear "put the bag
+    here". Doing record -> transcribe -> classify serially on the nav thread
+    would leave the microphone dark during every drive step AND during every
+    STT + LLM round-trip — precisely when the host is most likely to speak. So
+    this splits the work across two daemon threads:
+
+    * a *recorder* that loops ``record_until_silence`` and re-arms IMMEDIATELY,
+      pushing each captured clip onto a queue without waiting for STT or the
+      LLM (so the mic is re-listening within milliseconds of a phrase ending);
+    * a *worker* that drains the queue, transcribes + classifies each clip
+      (:func:`classify_host_command`) and sets :attr:`placed` when the host
+      says to put the bag down.
+
+    The follow loop polls :attr:`placed` instead of calling ``ctx.listen``.
+    Only this listener may touch the microphone while it runs — one
+    ``sd.InputStream`` can be open at a time, so the loop must not call
+    ``ctx.listen`` concurrently. Best-effort: every mic / STT / model failure
+    is swallowed so a glitch never crashes the step. Use as a context manager::
+
+        with CommandListener(ctx) as listener:
+            while ...:
+                ... drive toward the host ...
+                if listener.placed.is_set():
+                    break
+    """
+
+    def __init__(self, ctx: TaskContext, *, record_timeout: float | None = None) -> None:
+        self.ctx = ctx
+        self.placed = threading.Event()      # set once a 'place' command is heard
+        self.last_text = ""                  # most recent transcript (debug/inspection)
+        self.last_intent: str | None = None  # most recent classified intent
+        self.record_timeout = (
+            record_timeout
+            if record_timeout is not None
+            else float(os.getenv("HRI_FOLLOW_RECORD_TIMEOUT_SEC", "5"))
+        )
+        self._stop = threading.Event()
+        self._queue: "queue.Queue[bytes | None]" = queue.Queue()
+        self._threads: list[threading.Thread] = []
+
+    def start(self) -> "CommandListener":
+        if self._threads:
+            return self
+        self._stop.clear()
+        self.placed.clear()
+        self._threads = [
+            threading.Thread(target=self._record_loop, daemon=True),
+            threading.Thread(target=self._work_loop, daemon=True),
+        ]
+        for t in self._threads:
+            t.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._queue.put(None)  # wake the worker so it can see the stop flag
+        for t in self._threads:
+            # The recorder may be mid-capture (blocked up to record_timeout);
+            # give it that long plus a margin to wind down its InputStream.
+            t.join(timeout=max(2.0, self.record_timeout + 1.0))
+        self._threads = []
+
+    def __enter__(self) -> "CommandListener":
+        return self.start()
+
+    def __exit__(self, *exc) -> None:
+        self.stop()
+
+    def _record_loop(self) -> None:
+        # Dev/CI path (DISABLE_LISTENING): no mic — read typed lines and feed
+        # them straight to the classifier (no latency to hide, so no queue).
+        if self.ctx.disable_listening:
+            while not self._stop.is_set():
+                try:
+                    line = input("[listen] > ")
+                except EOFError:
+                    return
+                self._handle_text(line)
+            return
+        while not self._stop.is_set():
+            try:
+                audio = self.ctx.walkie.microphone.record_until_silence(
+                    timeout=self.record_timeout
+                )
+            except Exception as exc:
+                print(f"[skills] CommandListener record failed ({exc})")
+                self._stop.wait(0.2)
+                continue
+            if audio and not self._stop.is_set():
+                self._queue.put(audio)  # hand off; re-arm the mic right away
+
+    def _work_loop(self) -> None:
+        while not self._stop.is_set():
+            audio = self._queue.get()
+            if audio is None:  # stop sentinel
+                return
+            try:
+                text = self.ctx.walkieAI.stt.transcribe(audio)
+            except Exception as exc:
+                print(f"[skills] CommandListener STT failed ({exc})")
+                continue
+            self._handle_text(text)
+
+    def _handle_text(self, text: str) -> None:
+        text = (text or "").strip()
+        if not text:
+            return
+        print(f"[heard] {text}")
+        intent = classify_host_command(self.ctx, text)
+        self.last_text, self.last_intent = text, intent
+        if intent == "place":
+            self.placed.set()
 
 
 def match_people_to_seats(

@@ -7,6 +7,8 @@ Rulebook notes baked into the wording:
 - Missing info degrades to the GENERIC_* fallbacks rather than blocking.
 """
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -160,8 +162,53 @@ BAG_ASK_HANDOVER = (
     "I see you brought a bag. I will open my gripper now — please hang the bag "
     "on it."
 )
-BAG_CLOSING_WARNING = "I will close my gripper in three seconds, please be careful."
+BAG_CLOSING_WARNING = "I will close my gripper in 1 second, please be careful."
 BAG_RECEIVED = "Thank you, I have the bag."
 FOLLOW_HOST_NOT_AVAILABLE = (
     "I am sorry, I cannot follow the host yet. I will leave the bag here."
+)
+
+# --- Follow host & place the bag ---------------------------------------------
+
+# Asked once the robot is holding the bag: the host answers by walking off
+# ("follow me") or, if the spot is right here, by telling it to put it down.
+BAG_ASK_WHERE = "Where would you like me to put the bag? You can say follow me, and I will come with you."
+# Acknowledgement before following — also coaches the host to walk slowly,
+# since each follow step costs a detect + recognize + listen round-trip.
+FOLLOW_HOST_ACK = (
+    "Okay, please lead the way and walk slowly. Tell me to put the bag down when we get there."
+)
+# Spoken when the host can't be found in the frame for a while.
+FOLLOW_HOST_LOST = "I have lost sight of you. Please stand in front of me so I can follow."
+# Acknowledgement right before lowering the bag.
+BAG_PLACE_ACK = "Okay, I will put the bag down right here."
+
+
+class HostCommand(BaseModel):
+    """LLM classification of one heard utterance during the bag handover."""
+
+    intent: Literal["follow", "place", "other"] = Field(
+        description=(
+            "What the host is telling the robot to do. 'follow' = come with "
+            "me / this way / over here / keep following. 'place' = put the bag "
+            "down here / this is the spot / stop / leave it here. 'other' = "
+            "anything that is not a clear instruction to the robot, including "
+            "background party chatter and empty or garbled transcripts."
+        )
+    )
+
+
+CLASSIFY_HOST_COMMAND_INSTRUCTIONS = (
+    "A receptionist robot is holding a guest's bag, and the party host is "
+    "leading it to where the bag should be left. The room is full of people "
+    "talking, so the robot's microphone often picks up background chatter that "
+    "is NOT addressed to it. You are given a single speech-to-text transcript "
+    "(it may contain recognition errors). Decide what, if anything, the host "
+    "is instructing the robot to do:\n"
+    "- 'follow': follow me, come this way, over here, this way, keep coming.\n"
+    "- 'place': put the bag (down) here, this is the spot, right here, leave "
+    "it here, stop, that's far enough.\n"
+    "- 'other': small talk, questions, unrelated chatter, anything not a clear "
+    "command to the robot, or an empty/garbled transcript.\n"
+    "When in doubt, answer 'other' so the robot never acts on crowd noise."
 )
