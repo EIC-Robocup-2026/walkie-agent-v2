@@ -14,6 +14,8 @@ Type instructions at the prompt; ``quit`` / ``exit`` / Ctrl-D to leave.
 Needs OPENROUTER_API_KEY in .env (or LLM_USE_LOCAL=1 + a local endpoint).
 """
 
+# BUG: Bash log script currently logs to currently open kernel, please fix to log to same dir as this script
+
 from __future__ import annotations
 
 import logging
@@ -24,6 +26,9 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 
 from walkie_config import load_config
+import json
+
+StREAMING = True  # set True to see the model's token stream in real time (debugging)
 
 
 def _stub_walkie() -> types.SimpleNamespace:
@@ -86,7 +91,6 @@ def main() -> None:
     print("Watch [THINK]/[STUB]/[SPEAK] lines for the agent's reasoning.")
     print("Type an instruction; 'quit'/'exit'/Ctrl-D to leave.")
     print("=" * 70)
-
     while True:
         try:
             text = input("\nYou: ").strip()
@@ -101,10 +105,31 @@ def main() -> None:
 
         print(f"\n--- turn: {text!r} ---")
         try:
-            walkie_agent.invoke(
-                {"messages": [HumanMessage(content=text)]},
-                config={"configurable": {"thread_id": "main"}},
-            )
+            if StREAMING:
+                tokens = []
+                for chunk in walkie_agent.stream(
+                    {"messages": [HumanMessage(content=text)]},
+                    config={"configurable": {"thread_id": "main"}},
+                    stream_mode="messages",
+                    version="v2",
+                ):
+                    if chunk["type"] == "messages":
+                        token, metadata = chunk["data"]
+                        if token.content_blocks:
+                            tokens.append(token.content_blocks[-1])
+                            if token.content_blocks[-1].get('text', ''):
+                                print(f"{token.content_blocks[-1].get('text', '')}",end='', flush=True)
+                                tokens.append(token.content_blocks[-1].get('text', ''))
+                            else:
+                                print(f"{token.content_blocks}")
+                                tokens.append('\n')
+                                tokens.append(json.dumps(token.content_blocks))
+            else:
+                events = walkie_agent.invoke(
+                    {"messages": [HumanMessage(content=text)]},
+                    config={"configurable": {"thread_id": "main"}},
+                )
+                print(f"Token used {events["messages"][-1].usage_metadata}")
         except Exception as exc:  # noqa: BLE001 — keep the REPL alive across failures
             print(f"[error] turn failed: {exc!r}")
         print("--- end turn ---")

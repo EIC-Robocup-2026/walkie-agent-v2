@@ -64,16 +64,16 @@ def create_walkie_agent(
         middleware.append(
             SummarizationMiddleware(
                 model=model,
-                trigger=("tokens", int(os.getenv("WALKIE_SUMMARIZE_AT_TOKENS", "6000"))),
+                trigger=("tokens", int(os.getenv("WALKIE_SUMMARIZE_AT_TOKENS", "18000"))),
                 keep=("messages", int(os.getenv("WALKIE_SUMMARIZE_KEEP_MSGS", "12"))),
             )
         )
-    if enable_todos:
-        middleware.append(TodoListMiddleware())
+    # if enable_todos:
+    #     middleware.append(TodoListMiddleware())
     middleware.extend(
         [
-            PerceptionContextMiddleware(),
-            RobotContextMiddleware(),
+            # PerceptionContextMiddleware(),
+            # RobotContextMiddleware(),
             grouping,
             *extra_middleware,
         ]
