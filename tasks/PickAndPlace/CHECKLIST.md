@@ -35,16 +35,20 @@ Status legend: `[x]` done / real · `[~]` real motion but **needs on-robot calib
 ## Implementation status (this repo)
 
 - [x] Task scaffold + flow ordering, dishwasher open-before / close-after (`subtasks.py`).
-- [x] Perception 3D lift — full map-frame centroid `world_xyz` (`perceive_surface`).
-- [x] Map → base_footprint frame transform (`skills.world_to_base`, unit-tested).
-- [x] Grasp planner stub — top-down (default) / front (`skills.plan_grasp`, unit-tested).
-- [x] Place pose stub — per-destination + breakfast slots (`skills.plan_place` / `place_at`).
+- [x] Perception 3D lift — full map-frame centroid `world_xyz` (`manipulation.perceive_surface`).
+- [x] Map → base_footprint frame transform (`manipulation.world_to_base`, unit-tested).
+- [x] Grasp planner stub — top-down (default) / front (`manipulation.plan_grasp`, unit-tested).
+- [x] Place pose stub — per-destination (`skills.place_object`) + breakfast slots (`place_at`).
 - [x] Real pick motion — open → pre-grasp → grasp → close (`arm.grasp`) → lift → carry.
 - [x] Real place motion — pre-place → place → open (release) → carry → close.
 - [x] LLM destination sorting + cabinet grouping (`sort_object` → `prompts.ObjectSort`).
 - [x] Spoken narration for perception / pick / place / help requests (`prompts.py`).
-- [x] Config knobs for arm, frame, grasp approach/orientation, offsets, poses (`config.toml`).
-- [x] Pure-geometry unit tests (`tests/test_pickandplace_geometry.py`).
+- [x] Config knobs — robot-wide grasp/arm in root `config.toml` `[manipulation]` (`WALKIE_*`);
+      PickAndPlace waypoints + place poses in `tasks/PickAndPlace/config.toml` (`PNP_*`).
+- [x] Pure-geometry unit tests (`tests/test_manipulation_geometry.py`).
+
+> The grasp/pick/place primitives now live in the shared `tasks/manipulation.py`
+> (reused by Restaurant); `skills.py` is the PickAndPlace-specific facade.
 
 ## Calibration TODO (before a real run) — the `[~]` items above depend on this
 

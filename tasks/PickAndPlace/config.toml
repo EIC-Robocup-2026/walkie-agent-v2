@@ -24,24 +24,13 @@ PNP_BREAKFAST_CABINET_CLASSES = "milk,cereal,box,carton"
 # The object category treated as trash this run (announced during Setup Days).
 PNP_TRASH_CATEGORY = ""
 
-# --- Manipulation (grasp planner is a stub; the arm motion is real) ----------
-# CALIBRATE all of the poses/orientations below on the real robot + arena.
-PNP_ARM = "left"                  # which arm group: "left" or "right"
-PNP_ARM_FRAME = "base_footprint"  # arm planning frame: "base_footprint" or "map"
-PNP_GRASP_APPROACH = "top_down"   # "top_down" (overhead) or "front" (horizontal)
-
-# End-effector orientation (roll,pitch,yaw rad) for each grasp approach. Defaults
-# are borrowed from the HRI reach/place poses on this robot — VERIFY on the arm.
-PNP_GRASP_RPY_TOPDOWN = "-2.623,-0.033,-1.468"
-PNP_GRASP_RPY_FRONT = "-0.8,0.0,-1.5708"
-
-PNP_GRASP_Z_OFFSET_M = "0.0"      # vertical nudge added to the object centroid
-PNP_PREGRASP_OFFSET_M = "0.10"    # pre-grasp standoff (above for top-down, back for front)
-PNP_LIFT_HEIGHT_M = "0.15"        # how far to lift after grasping
-PNP_CARRY_POSE = "standby"        # go_to_home preset to tuck the arm for nav
-
-# Per-destination drop poses "x,y,z,roll,pitch,yaw" in PNP_ARM_FRAME. Empty -> the
-# robot navigates to the furniture and opens the gripper to drop in front.
+# --- Manipulation -----------------------------------------------------------
+# The robot-wide grasp/arm knobs (WALKIE_ARM, WALKIE_GRASP_*, WALKIE_CARRY_POSE,
+# ...) now live in the ROOT config.toml [manipulation] block, shared with the
+# other manipulation tasks. Only the PickAndPlace-specific place poses are here.
+#
+# Per-destination drop poses "x,y,z,roll,pitch,yaw" in WALKIE_ARM_FRAME. Empty ->
+# the robot navigates to the furniture and opens the gripper to drop in front.
 PNP_PLACE_POSE_DISHWASHER = ""
 PNP_PLACE_POSE_CABINET = ""
 PNP_PLACE_POSE_TRASH = ""
