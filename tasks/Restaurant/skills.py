@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import time
 from dataclasses import dataclass
 
@@ -175,6 +176,31 @@ def nearest_caller(ctx: TaskContext, callers: list[Caller]) -> Caller | None:
     )
 
 
+def exclude_handled(callers: list[Caller], handled_xys: list[tuple[float, float]],
+                    radius_m: float | None = None) -> list[Caller]:
+    """Drop callers within *radius_m* of any already-handled customer.
+
+    Anti-double-serve: the serial loop re-scans the room after each order, so a
+    customer who keeps waving (impatient, didn't notice the robot) would otherwise
+    be re-selected and counted a second time — exiting the loop having served one
+    distinct person when the rulebook needs >= 2 (the whole no-arm tier). We anchor
+    "already handled" on position because the tables are well separated; telling
+    apart two people at ONE table is left to ``order.appearance`` (captured + logged)
+    as a future disambiguator — see design §5.1.
+    """
+    if radius_m is None:
+        radius_m = _f("RESTAURANT_HANDLED_RADIUS_M", "1.0")
+    if not handled_xys:
+        return callers
+    out: list[Caller] = []
+    for c in callers:
+        if any(math.hypot(c.world_xy[0] - hx, c.world_xy[1] - hy) <= radius_m
+               for hx, hy in handled_xys):
+            continue
+        out.append(c)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Approach + facing (SLAM-backed: lift -> go_to a stand-off point)
 # ---------------------------------------------------------------------------
@@ -305,14 +331,29 @@ def find_person_near(ctx: TaskContext, world_xy: tuple[float, float], *,
     return best
 
 
+_NEGATIVE_CUES = {"no", "nope", "nah", "not", "wrong", "incorrect", "isn't", "isnt"}
+
+
+def _said_no(text: str) -> bool:
+    """Loose 'the customer rejected the confirmation' check (biased to accept).
+
+    Only an explicit negative word flips this true; an empty/garbled reply reads
+    as acceptance, so venue noise never silently discards a correctly-heard order.
+    """
+    words = set(re.findall(r"[a-z']+", text.lower()))
+    return bool(words & _NEGATIVE_CUES)
+
+
 def take_order(ctx: TaskContext, world_xy: tuple[float, float] | None = None) -> list[str]:
     """Greet the customer, capture and confirm their order. Real dialogue today.
 
     Gaze (rulebook-scored): if *world_xy* is given, the robot re-faces the
     customer before each utterance — MVP "look at the person" without a full
-    continuous-tracking thread (design doc §5.2). The order is asked in one
-    question (no penalised confirmation questions); re-asking on a misheard reply
-    is allowed and not penalised.
+    continuous-tracking thread (design doc §5.2). The confirmation is a real
+    question the robot LISTENS to: an explicit "no" triggers one re-take (so a
+    misheard order can be corrected — that step scores 2×160), while a silent/
+    garbled reply is treated as agreement so noise can't drop a good order.
+    Re-asking is allowed and not penalised.
     """
     def recenter():
         if world_xy is not None:
@@ -327,7 +368,18 @@ def take_order(ctx: TaskContext, world_xy: tuple[float, float] | None = None) ->
     items = parsed.items if parsed else []
     if items:
         recenter()
-        ctx.say(prompts.CONFIRM_ORDER.format(items=", ".join(items)))
+        reply = ctx.ask(prompts.CONFIRM_ORDER.format(items=", ".join(items)), retries=0)
+        if reply and _said_no(reply):
+            recenter()
+            answer = ctx.ask(prompts.ASK_REPEAT, retries=0)
+            reparsed = ctx.extract(prompts.Order, prompts.EXTRACT_ORDER_INSTRUCTIONS, answer or "")
+            if reparsed and reparsed.items:
+                items = reparsed.items
+                recenter()
+                ctx.say(prompts.CONFIRM_ORDER.format(items=", ".join(items)))
+            # else: the correction itself was unparseable (same venue noise). We
+            # keep the first parse and proceed — a best-effort order earns more than
+            # dropping the customer, and downstream relay/serve still run.
         ctx.say(prompts.ORDER_TAKEN)
     return items
 
@@ -537,23 +589,25 @@ def serve_item(ctx: TaskContext, item: str) -> bool:
     return True
 
 
-def collect_items(ctx: TaskContext, items: list[str]) -> bool:
-    """Pick every ordered item from the Kitchen-bar. True only if all succeeded.
+def collect_items(ctx: TaskContext, items: list[str]) -> list[str]:
+    """Pick the ordered items from the Kitchen-bar; return the ones actually picked.
 
-    FAIL-SAFE until calibrated (see pick_item). NOTE: a single gripper holds one
-    item — multi-item carry/tray batching is a Phase-3 concern; for now each item
-    is picked in turn (and, uncalibrated, none actually move).
+    PER-ITEM (the rulebook scores picking 4×100 per object): one item failing must
+    not forfeit the credit for the others, so this never short-circuits. FAIL-SAFE
+    until calibrated (see pick_item) — uncalibrated it returns ``[]``.
+
+    NOTE / Phase-2 gap: a single gripper holds ONE item, so picking *every* item
+    before any delivery only works with a tray/holder (transport_with_tray, a
+    Phase-3 bonus). The real no-tray flow is pick→deliver→return→pick→deliver per
+    item; this all-then-serve shape is left for the on-robot calibration pass to
+    restructure once the arm is validated. See docs/RESTAURANT_DESIGN.md §12.
     """
-    if not items:
-        return False
-    return all(pick_item(ctx, it) for it in items)
+    return [it for it in items if pick_item(ctx, it)]
 
 
-def serve_order(ctx: TaskContext, items: list[str]) -> bool:
-    """Place every item on the customer's table. True only if all succeeded."""
-    if not items:
-        return False
-    return all(serve_item(ctx, it) for it in items)
+def serve_order(ctx: TaskContext, items: list[str]) -> list[str]:
+    """Place items on the customer's table; return the ones actually served (per-item)."""
+    return [it for it in items if serve_item(ctx, it)]
 
 
 def transport_with_tray(ctx: TaskContext, items: list[str]) -> bool:

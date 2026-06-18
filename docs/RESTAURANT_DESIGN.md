@@ -319,10 +319,20 @@ RESTAURANT_GAZE_TRACK         # 0 = re-center between utterances, 1 = background
 - **Phase 1 — DONE (off-robot verified):** gaze re-center in `take_order`,
   `capture_appearance`, `find_person_near`, `return_to_bar` / `return_to_customer`
   (re-detect on arrival), full serial `ServeCustomers` loop (order + relay real).
+  `take_order` confirms **and listens** — an explicit "no" triggers one re-take
+  (protects the 2×160 confirm score); silence reads as agreement so venue noise
+  can't drop a good order. The serial loop counts **distinct** customers via
+  `exclude_handled` (`RESTAURANT_HANDLED_RADIUS_M`) — see the design-review note.
 - **Phase 2 — CALIBRATION-READY SCAFFOLD (NOT VALIDATED):** `_map_to_base` (pure,
   unit-tested), `_in_reach`, `locate_item`, `pick_item` / `serve_item` /
   `collect_items` / `serve_order`. **Fail-safe by default** — they compute and log
   the target pose but DO NOT move the arm unless `RESTAURANT_ARM_CALIBRATED=1`.
+  `collect_items`/`serve_order` are **per-item** (return the items actually
+  picked/served) so one failed object doesn't forfeit the others' 4×100 credit.
+  ⚠️ **Structural gap (calibration-gated):** the current flow picks *all* items
+  then serves *all* — physically possible only with a tray (one gripper holds one
+  object). The real no-tray flow is pick→deliver→return→pick→deliver per item;
+  restructure `_pick_and_serve` during the on-robot pass once the arm is validated.
 - **Phase 3 — PARTIAL:** batched order-taking (`ServeCustomersBatched`, opt-in via
   `RESTAURANT_BATCH`; pure scheduling, off-robot verified) DONE; tray
   (`transport_with_tray`) is a logged no-move stub (bonus, bimanual — needs
@@ -352,3 +362,46 @@ Do these with the robot stationary and a clear bench before setting
 9. Dry-run `pick_item` UNCALIBRATED first and eyeball every logged pose; only then
    flip `RESTAURANT_ARM_CALIBRATED=1` and test pick → serve on the bench, then in
    the loop.
+
+### Design-review follow-ups (2026-06-18)
+
+**Fixed (off-robot, verified):**
+- **Distinct-customer serving.** `ServeCustomers` previously re-scanned after each
+  order with no memory and incremented a raw `served` counter on the *relay* path;
+  a still-waving customer could be re-selected and counted twice, exiting the loop
+  having served ONE distinct person (failing the rulebook's "≥ 2 customers" on the
+  ~960-pt no-arm tier). Now it loops on `len(handled)` distinct customers and skips
+  callers within `RESTAURANT_HANDLED_RADIUS_M` of an already-ordered one.
+  (`ServeCustomersBatched` never had this — it takes distinct callers from one
+  dedup'd sweep.)
+- **Failure-retry starvation (sibling bug).** A customer whose order never parsed
+  (venue-noise STT failure, §11) was never marked handled, so the loop could spend
+  all `max_attempts` retrying the same nearest caller while a second waving customer
+  went unreached → 0–1 distinct served. Now a spot is abandoned after
+  `RESTAURANT_MAX_FAILS_PER_SPOT` (default 2) failures — a transient retry is still
+  allowed, but it can't monopolize the loop.
+- **Per-item partial credit.** `collect_items`/`serve_order` no longer `all()`-gate;
+  they return the items actually handled so a single failure keeps the rest.
+- **Confirm-and-listen** in `take_order` (see Phase 1 above). Deliberate choice: if
+  the customer rejects but the correction is *also* unparseable, keep the first
+  parse and proceed (best-effort order > dropping the customer).
+
+**Verified correct against the real SDK (was feared broken):** `walkie.arm.go_to_pose`
+/ `control_gripper` / `go_to_home` / `robot.lift.set` signatures, and both bbox
+conventions (`PersonPose.bbox` is `cxcywh`; object detections + the depth lift are
+`xyxy`). The fail-safe arm gate is sound.
+
+**Still open — validate ON ROBOT (not code defects):**
+- The Phase-2 no-tray flow restructure (above) — calibration-gated.
+- **Eye-contact via Nav2 rotation:** `face_person`→`rotate_to`→`go_to(same x,y, new
+  heading)` — confirm Nav2 spins in place rather than refusing/path-planning; fall
+  back to `cmd_vel` spin if jerky.
+- **Scan-sweep timing:** 5 steps × (blocking rotate + settle + pose round-trip) per
+  sweep, multiple sweeps — time it against the 15-min budget.
+
+**Deliberately not built:**
+- **Restart (5.5.1):** human-initiated — an operator procedure + a `ctx.data` reset,
+  not a code path.
+- **"Show a picture" partial credit:** hardware-blocked (no screen — camera/mic/
+  speaker only); speaking the appearance would count but draws the Alternative-HRI
+  −80 penalty.

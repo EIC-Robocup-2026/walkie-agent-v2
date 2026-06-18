@@ -32,6 +32,7 @@ from .skills import (
     approach_to_standoff,
     capture_appearance,
     collect_items,
+    exclude_handled,
     nearest_caller,
     relay_to_barman,
     return_to_bar,
@@ -74,6 +75,29 @@ def _pose(env_key: str, default: str = "0.0,0.0,0.0") -> tuple[float, float, flo
 
 def _int(env_key: str, default: str) -> int:
     return int(os.getenv(env_key, default))
+
+
+def _pick_and_serve(ctx: TaskContext, order: Order) -> None:
+    """Phase 2: pick the order, re-acquire the customer, serve what we picked.
+
+    Per-item partial credit (pick + serve are scored per object): a failed item
+    doesn't forfeit the others, and we only ever try to serve what we actually
+    picked. All arm motion is gated off until RESTAURANT_ARM_CALIBRATED=1, so
+    uncalibrated this picks/serves nothing and leaves the order at its relay
+    status. Shared by the serial and batched loops so they can't drift apart.
+    """
+    picked = collect_items(ctx, order.items)
+    if not picked:
+        return
+    order.status = OrderStatus.PICKED
+    # Re-acquire the customer visually rather than trusting the stale point (§5.1).
+    fresh = return_to_customer(ctx, order.world_xy) if order.world_xy else None
+    if fresh is None:
+        ctx.say(prompts.SERVE_NO_CUSTOMER)
+        return
+    order.world_xy = fresh
+    if serve_order(ctx, picked):
+        order.status = OrderStatus.SERVED
 
 
 # ---------------------------------------------------------------------------
@@ -143,15 +167,35 @@ class ServeCustomers(SubTask):
     def run(self, ctx: TaskContext) -> StepResult:
         target = _int("RESTAURANT_TARGET_CUSTOMERS", "2")
         max_attempts = target + _int("RESTAURANT_EXTRA_ATTEMPTS", "3")
+        max_fails = _int("RESTAURANT_MAX_FAILS_PER_SPOT", "2")
+        radius = float(os.getenv("RESTAURANT_HANDLED_RADIUS_M", "1.0"))
         orders: dict[int, Order] = ctx.data.setdefault("orders", {})
-        served = 0
+        # Map points of customers we've already taken an order from. We loop until
+        # this many DISTINCT customers are handled — NOT a raw counter — so a
+        # still-waving customer re-seen on a later sweep can't be served twice and
+        # falsely satisfy the rulebook's "at least two customers" (design review).
+        handled: list[tuple[float, float]] = []
+        # Spots we keep failing at (approach refused, or order never parsed): [x, y,
+        # fails]. Once fails >= max_fails the spot is skipped too, so one uncooperative
+        # caller can't burn every attempt while a second waving customer goes unreached.
+        giveups: list[list[float]] = []
         attempts = 0
 
-        while served < target and attempts < max_attempts:
+        def note_failure(xy: tuple[float, float]) -> None:
+            for g in giveups:
+                if math.hypot(g[0] - xy[0], g[1] - xy[1]) <= radius:
+                    g[2] += 1
+                    return
+            giveups.append([xy[0], xy[1], 1.0])
+
+        while len(handled) < target and attempts < max_attempts:
             attempts += 1
 
-            # 1. Detect + approach (Phase 0).
-            caller = nearest_caller(ctx, scan_for_callers(ctx))
+            # 1. Detect + approach (Phase 0), skipping anyone already handled and any
+            # spot we've given up on (failed max_fails times).
+            blocked = handled + [(g[0], g[1]) for g in giveups if g[2] >= max_fails]
+            callers = exclude_handled(scan_for_callers(ctx), blocked, radius)
+            caller = nearest_caller(ctx, callers)
             if caller is None:
                 ctx.say(prompts.NO_CUSTOMER)
                 continue
@@ -159,6 +203,7 @@ class ServeCustomers(SubTask):
             orders[order.id] = order
             if not approach_to_standoff(ctx, caller.world_xy):
                 order.status = OrderStatus.FAILED
+                note_failure(caller.world_xy)
                 continue
             order.status = OrderStatus.APPROACHED
             order.appearance = capture_appearance(ctx, caller.world_xy)  # for re-ID/logging
@@ -167,28 +212,22 @@ class ServeCustomers(SubTask):
             items = take_order(ctx, world_xy=order.world_xy)
             if not items:
                 order.status = OrderStatus.FAILED
+                note_failure(caller.world_xy)
                 continue
             order.items = items
             order.status = OrderStatus.ORDERED
+            # Mark this customer handled NOW (order secured) so the next sweep
+            # won't re-select them even if they keep waving.
+            handled.append(caller.world_xy)
 
             # 3. Relay at the bar — go_to the anchor, then re-acquire the barman.
             return_to_bar(ctx)
             if relay_to_barman(ctx, items):
                 order.status = OrderStatus.RELAYED
 
-            # 4. Pick + serve (Phase 2 stubs — degrade, order still counts as handled).
-            if collect_items(ctx, items):
-                order.status = OrderStatus.PICKED
-                # Re-acquire the customer visually (don't trust the stale point, §5.1).
-                fresh = return_to_customer(ctx, order.world_xy) if order.world_xy else None
-                if fresh is not None:
-                    order.world_xy = fresh
-                    if serve_order(ctx, items):
-                        order.status = OrderStatus.SERVED
-                else:
-                    ctx.say(prompts.SERVE_NO_CUSTOMER)
+            # 4. Pick + serve (Phase 2 — gated off until the arm is calibrated).
+            _pick_and_serve(ctx, order)
 
-            served += 1
             return_to_bar(ctx)  # back to the bar for the next caller
 
         ctx.say(prompts.ALL_DONE)
@@ -245,15 +284,7 @@ class ServeCustomersBatched(SubTask):
             return_to_bar(ctx)
             if relay_to_barman(ctx, order.items):
                 order.status = OrderStatus.RELAYED
-            if collect_items(ctx, order.items):
-                order.status = OrderStatus.PICKED
-                fresh = return_to_customer(ctx, order.world_xy) if order.world_xy else None
-                if fresh is not None:
-                    order.world_xy = fresh
-                    if serve_order(ctx, order.items):
-                        order.status = OrderStatus.SERVED
-                else:
-                    ctx.say(prompts.SERVE_NO_CUSTOMER)
+            _pick_and_serve(ctx, order)
 
         ctx.say(prompts.ALL_DONE)
         print("[restaurant] batched orders: " + ", ".join(

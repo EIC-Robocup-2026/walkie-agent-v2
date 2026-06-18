@@ -45,6 +45,16 @@ RESTAURANT_APPROACH_SPEED = "0.3"
 RESTAURANT_REACQUIRE_RADIUS_M = "1.5"
 # When back at the bar, treat a person within this distance of the anchor as the barman.
 RESTAURANT_BARMAN_RADIUS_M = "2.5"
+# Treat a fresh caller within this distance of a customer we already took an order
+# from as the SAME person, and skip them — so a still-waving customer isn't served
+# twice (the loop needs >= 2 DISTINCT customers, rulebook 5.5). Set between the
+# caller-dedup radius (0.6) and the typical table spacing so two real customers at
+# separate tables stay distinct.
+RESTAURANT_HANDLED_RADIUS_M = "1.0"
+# Give up on a spot after this many failed attempts (approach refused, or order
+# never parsed in venue noise) so one uncooperative caller can't monopolize every
+# attempt while a second waving customer is never reached. < this = transient retry.
+RESTAURANT_MAX_FAILS_PER_SPOT = "2"
 
 # --- Phase 2: manipulation (CALIBRATION-READY, NOT VALIDATED) ----------------
 # MASTER SAFETY GATE. 0 = pick/serve compute + log the target pose but DO NOT move
