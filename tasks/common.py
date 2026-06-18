@@ -53,10 +53,12 @@ def initialize_llm_model():
     """OpenRouter via the OpenAI-compatible endpoint."""
     use_local = os.getenv("LLM_USE_LOCAL", "0").lower() in ("1", "true", "yes")
     if use_local:
+        print("[main] Using local LLM provider")
         base_url = os.getenv("LOCAL_BASE_URL", "http://10.0.0.210:8000/v1")
         api_key = os.getenv("MODEL_API_KEY", "your api key goes here")
         model = os.getenv("LOCAL_MODEL", "qwen3.5-9b")
     else:
+        print("[main] Using OpenRouter LLM provider")
         base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         api_key = os.getenv("OPENROUTER_API_KEY")
         if not api_key:
