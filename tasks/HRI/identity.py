@@ -14,14 +14,67 @@ from __future__ import annotations
 import math
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from PIL import Image
 
 from client.face_recognition import FaceEmbedding
 from client.pose_estimation import PersonPose
+from perception.people_store import _cosine_sim, _mean_unit
 from tasks.base import TaskContext
 
 from .skills import BBox, cxcywh_to_xyxy, lift_bbox_world_xy
+
+
+def _avg_unit(vectors: list[list[float]]) -> list[float] | None:
+    """L2-normalized mean of unit vectors, or None when the list is empty.
+
+    Thin empty-guarded wrapper over ``people_store._mean_unit`` (which assumes a
+    non-empty list), so callers can average a best-effort burst that may have
+    yielded nothing.
+    """
+    if not vectors:
+        return None
+    return _mean_unit(vectors)
+
+
+def _outlier_rejection_enabled() -> bool:
+    return os.getenv("HRI_BURST_OUTLIER_REJECT", "1").lower() in ("1", "true", "yes")
+
+
+def _reject_outliers(vectors: list[list[float]]) -> list[list[float]]:
+    """Drop burst frames whose embedding is cosine-far from the burst centroid.
+
+    A multi-frame capture can catch a bystander, a half-turned head, or a
+    motion-blurred body in ONE frame; averaging that in corrupts the stored
+    vector. So: compute the unit-mean centroid, score each vector's cosine
+    similarity to it, and drop vectors below BOTH an absolute floor
+    (``HRI_BURST_OUTLIER_MIN_SIM``) AND a robust ``median - K*MAD`` gate
+    (``HRI_BURST_OUTLIER_MAD_K``; MAD, not std, so the very outlier we want gone
+    can't inflate the spread). Conservative: only clear outliers go, at least one
+    vector (the closest to the centroid) is always kept, and it is a no-op for
+    fewer than 3 vectors (too few to tell signal from outlier) or when disabled.
+    """
+    if not vectors:
+        return vectors
+    if len(vectors) < 3 or not _outlier_rejection_enabled():
+        return list(vectors)
+    centroid = _mean_unit(vectors)
+    sims = [_cosine_sim(v, centroid) for v in vectors]
+    srt = sorted(sims)
+    med = srt[len(srt) // 2]
+    devs = sorted(abs(s - med) for s in sims)
+    mad = devs[len(devs) // 2]
+    k = float(os.getenv("HRI_BURST_OUTLIER_MAD_K", "3.0"))
+    min_sim = float(os.getenv("HRI_BURST_OUTLIER_MIN_SIM", "0.5"))
+    mad_gate = med - k * mad
+    keep = [v for v, s in zip(vectors, sims) if s >= min_sim and s >= mad_gate]
+    if not keep:  # never strip a modality to nothing — keep the most central frame
+        best_i = max(range(len(sims)), key=lambda i: sims[i])
+        return [vectors[best_i]]
+    if len(keep) < len(vectors):
+        print(f"[identity] burst outlier rejection: kept {len(keep)}/{len(vectors)}")
+    return keep
 
 
 def _expand_face_to_person(face_xyxy: BBox, img_w: int, img_h: int) -> BBox:
@@ -87,6 +140,19 @@ def _detect_persons(ctx: TaskContext, img: Image.Image) -> list[PersonPose]:
 
 def _detect_persons_xyxy(ctx: TaskContext, img: Image.Image) -> list[BBox]:
     return [cxcywh_to_xyxy(p.bbox) for p in _detect_persons(ctx, img)]
+
+
+def _largest_person_box(ctx: TaskContext, img: Image.Image) -> BBox | None:
+    """The largest pose-detected person box in *img*, or None.
+
+    Used for the attire crop when the head is tilted DOWN and the face may be out
+    of frame, so the box can't be anchored on a face: the nearest (largest) body
+    is the guest standing right in front of the robot.
+    """
+    boxes = _detect_persons_xyxy(ctx, img)
+    if not boxes:
+        return None
+    return max(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
 
 
 # COCO keypoint indices for the body-scale proximity proxy (see _person_scale_px).
@@ -223,6 +289,156 @@ def enroll_person_in_box(
     )
 
 
+def enroll_guest_frames(
+    ctx: TaskContext,
+    face_imgs: list[Image.Image],
+    app_imgs: list[Image.Image],
+    person_id: str,
+    *,
+    name: str = "",
+    drink: str = "",
+    attributes: str = "",
+) -> bool:
+    """Enroll one person from MULTIPLE frames, averaging embeddings, ONCE.
+
+    *face_imgs* are head-level frames (the most reliable face shot); *app_imgs*
+    are head-down frames that frame the body (the best OSNet attire crop). The
+    largest face per face-frame is embedded and the unit-mean of those vectors is
+    stored; the largest pose-detected person box per app-frame is embedded and
+    the unit-mean of those attire vectors is stored. Averaging WITHIN a single
+    capture burst (same outfit, same moment) is safe — it does not blur
+    identities the way the store's cross-session appearance averaging would — so
+    we enroll ONCE with the burst-averaged vectors instead of N latest-wins
+    overwrites. Outlier frames are dropped per modality first (:func:`_reject_outliers`).
+
+    Degrades on every failure (never raises): no face in any face-frame → enroll
+    attire-only (zero face vector, treated by the store as "no face known"); no
+    person box in any app-frame → fall back to the best face-frame's person box.
+    Returns False only when neither modality produced any vector (or no store).
+    """
+    if ctx.people is None:
+        return False
+
+    # Face: largest face per face frame, averaged.
+    face_embs: list[list[float]] = []
+    best_face: FaceEmbedding | None = None  # kept for the thumbnail bbox
+    best_face_img: Image.Image | None = None
+    best_face_area = -1.0
+    for img in face_imgs:
+        faces = _detect_faces(ctx, img)
+        if not faces:
+            continue
+        f = max(faces, key=lambda f: f.area())
+        face_embs.append(list(f.embedding))
+        if f.area() > best_face_area:
+            best_face, best_face_img, best_face_area = f, img, f.area()
+    face_embs = _reject_outliers(face_embs)
+    avg_face = _avg_unit(face_embs)
+
+    # Appearance: largest person box per app frame, averaged.
+    app_embs: list[list[float]] = []
+    for img in app_imgs:
+        box = _largest_person_box(ctx, img)
+        if box is None:
+            continue
+        emb = _appearance_embedding(ctx, img, box)
+        if emb is not None:
+            app_embs.append(list(emb))
+    # Fallback: no body box in any app frame — use the best face frame's person
+    # box (which itself falls back to an expanded-face crop), so attire is never
+    # empty when we at least saw a face.
+    if not app_embs and best_face is not None and best_face_img is not None:
+        box = _person_bbox_for_face(
+            best_face,
+            _detect_persons_xyxy(ctx, best_face_img),
+            best_face_img.width, best_face_img.height,
+        )
+        emb = _appearance_embedding(ctx, best_face_img, box)
+        if emb is not None:
+            app_embs.append(list(emb))
+    app_embs = _reject_outliers(app_embs)
+    avg_app = _avg_unit(app_embs)
+
+    if avg_face is None and avg_app is None:
+        print(f"[identity] enroll_guest_frames {person_id}: no usable vectors; skipping")
+        return False
+
+    # Thumbnail: the best face frame/bbox when we have a face, else the first app
+    # frame (no face bbox → the archive step is skipped, which is fine).
+    thumb_img = best_face_img if best_face is not None else (app_imgs[0] if app_imgs else None)
+    thumb_bbox = best_face.bbox_xyxy if best_face is not None else None
+    try:
+        ctx.people.enroll(
+            name, drink,
+            avg_face if avg_face is not None else [0.0] * 512,
+            person_id=person_id,
+            attributes=attributes,
+            app_embedding=avg_app,
+            frame=thumb_img,
+            face_bbox_xyxy=thumb_bbox,
+        )
+        modal = (
+            "face+appearance" if (avg_face and avg_app)
+            else ("face" if avg_face else "appearance")
+        )
+        print(
+            f"[identity] enrolled {person_id} from {len(face_imgs)}f/{len(app_imgs)}a frames "
+            f"({modal}; faces={len(face_embs)}, attire={len(app_embs)})"
+        )
+        return True
+    except Exception as exc:
+        print(f"[identity] enroll_guest_frames {person_id} failed ({exc})")
+        return False
+
+
+def audit_identity_collisions(ctx: TaskContext) -> list[tuple[str, str, str, float]]:
+    """Flag pairs of enrolled people whose face OR attire vectors are too alike.
+
+    Compares every pair among the enrolled ids (host, guest-1, guest-2, ...) on
+    both modalities with the store's own cosine metric. A pair at/above
+    ``HRI_DUP_FACE_SIM`` (face) or ``HRI_DUP_APP_SIM`` (attire) is reported as
+    ``(id_a, id_b, "face"|"appearance", sim)`` and logged as a WARNING. Two
+    DISTINCT guests cannot be merged (that would lose a real identity), so this
+    only DETECTS — the caller decides what to do (e.g. widen the attire margin so
+    recognition leans on the more discriminative face). Read-only on the store;
+    best-effort (returns [] on any failure or with fewer than 2 people).
+    """
+    if ctx.people is None:
+        return []
+    try:
+        people = ctx.people.list_people()
+    except Exception as exc:
+        print(f"[identity] collision audit: list_people failed ({exc})")
+        return []
+    if len(people) < 2:
+        return []
+    try:
+        app_by_id = ctx.people.appearance_vectors()
+    except Exception as exc:
+        print(f"[identity] collision audit: appearance read failed ({exc})")
+        app_by_id = {}
+
+    face_gate = float(os.getenv("HRI_DUP_FACE_SIM", "0.75"))
+    app_gate = float(os.getenv("HRI_DUP_APP_SIM", "0.85"))
+    collisions: list[tuple[str, str, str, float]] = []
+    for i in range(len(people)):
+        for j in range(i + 1, len(people)):
+            a, b = people[i], people[j]
+            fa, fb = list(a.embedding), list(b.embedding)
+            if fa and fb and any(fa) and any(fb):
+                fs = _cosine_sim(fa, fb)
+                if fs >= face_gate:
+                    print(f"[identity] WARNING near-duplicate FACE: {a.id} vs {b.id} (sim {fs:.2f})")
+                    collisions.append((a.id, b.id, "face", fs))
+            aa, ab = app_by_id.get(a.id), app_by_id.get(b.id)
+            if aa is not None and ab is not None:
+                aps = _cosine_sim(aa, ab)
+                if aps >= app_gate:
+                    print(f"[identity] WARNING near-duplicate ATTIRE: {a.id} vs {b.id} (sim {aps:.2f})")
+                    collisions.append((a.id, b.id, "appearance", aps))
+    return collisions
+
+
 def locate_people(
     ctx: TaskContext, frames: list[Image.Image], person_ids: list[str]
 ) -> dict[str, tuple[int, BBox]]:
@@ -297,17 +513,15 @@ def locate_people(
     return {rid: v for rid, v in located.items() if rid in wanted}
 
 
-def _candidate_persons(
-    ctx: TaskContext, img: Image.Image
+def _persons_to_candidates(
+    persons: list[PersonPose],
 ) -> list[tuple[BBox, float | None]]:
-    """Person boxes (xyxy) paired with a pose-keypoint closeness proxy.
+    """Pair each pose with its closeness proxy, capped by config (pure, no I/O).
 
-    To bound the per-tick embed cost in a crowd, only the largest
-    ``HRI_FOLLOW_APPEARANCE_MAX_CANDIDATES`` person boxes are kept; 0 (the
-    default) keeps all, so a host who has walked off and shrunk below a guest
-    isn't dropped from the candidate set.
+    The local half of :func:`_candidate_persons`, split out so the parallel
+    follow path can build candidates from a pose result fetched on a worker
+    thread without re-detecting.
     """
-    persons = _detect_persons(ctx, img)
     max_cand = int(os.getenv("HRI_FOLLOW_APPEARANCE_MAX_CANDIDATES", "0"))
     if max_cand > 0:
         persons = sorted(
@@ -318,6 +532,19 @@ def _candidate_persons(
         (cxcywh_to_xyxy(p.bbox), _person_scale_px(p, min_kp_conf=min_kp_conf))
         for p in persons
     ]
+
+
+def _candidate_persons(
+    ctx: TaskContext, img: Image.Image
+) -> list[tuple[BBox, float | None]]:
+    """Person boxes (xyxy) paired with a pose-keypoint closeness proxy.
+
+    To bound the per-tick embed cost in a crowd, only the largest
+    ``HRI_FOLLOW_APPEARANCE_MAX_CANDIDATES`` person boxes are kept; 0 (the
+    default) keeps all, so a host who has walked off and shrunk below a guest
+    isn't dropped from the candidate set.
+    """
+    return _persons_to_candidates(_detect_persons(ctx, img))
 
 
 def _cand_for_face(
@@ -367,23 +594,18 @@ def _pick_closest_qualifier(
     return box
 
 
-def _select_by_face(
+def _match_by_face(
     ctx: TaskContext,
     img: Image.Image,
+    faces: list[FaceEmbedding],
     cands: list[tuple[BBox, float | None]],
     person_id: str,
 ) -> BBox | None:
-    """Face pass: the closest box whose face is recognized as *person_id*.
+    """Score pre-detected *faces* against the store and pick *person_id*'s box.
 
-    Faces are far more discriminative than clothing, so this locks onto the
-    right person even when the crowd dresses alike. Each detected face is scored
-    (face only) against every enrolled person; a box qualifies only when
-    *person_id* clears the fused-match floor AND out-scores every OTHER enrolled
-    person by ``HRI_FOLLOW_FACE_MARGIN``. ``None`` when no face in view is the
-    target (turned away / too far / occluded, or *person_id* enrolled without a
-    face) — the caller then falls back to attire.
+    The local (no-I/O) half of :func:`_select_by_face`, split out so the parallel
+    follow path can hand in faces fetched concurrently with the pose detection.
     """
-    faces = _detect_faces(ctx, img)
     if not faces:
         return None
     min_score = ctx.people.fused_min_score()
@@ -402,6 +624,56 @@ def _select_by_face(
     return _pick_closest_qualifier(qualifying, person_id, "face")
 
 
+def _select_by_face(
+    ctx: TaskContext,
+    img: Image.Image,
+    cands: list[tuple[BBox, float | None]],
+    person_id: str,
+) -> BBox | None:
+    """Face pass: the closest box whose face is recognized as *person_id*.
+
+    Faces are far more discriminative than clothing, so this locks onto the
+    right person even when the crowd dresses alike. Each detected face is scored
+    (face only) against every enrolled person; a box qualifies only when
+    *person_id* clears the fused-match floor AND out-scores every OTHER enrolled
+    person by ``HRI_FOLLOW_FACE_MARGIN``. ``None`` when no face in view is the
+    target (turned away / too far / occluded, or *person_id* enrolled without a
+    face) — the caller then falls back to attire.
+    """
+    return _match_by_face(ctx, img, _detect_faces(ctx, img), cands, person_id)
+
+
+def _score_attire_candidates(
+    ctx: TaskContext,
+    cands: list[tuple[BBox, float | None]],
+    embeds: list[list[float] | None],
+    person_id: str,
+) -> BBox | None:
+    """Pick *person_id*'s box from candidate attire *embeds* aligned with *cands*.
+
+    The local (no-I/O) half of :func:`_select_by_attire`, split out so the
+    parallel follow path can fan the per-candidate OSNet embeds across threads
+    and hand the results in. ``embeds[i]`` is the vector for ``cands[i]`` (or
+    ``None`` if that embed failed). Scoring (``fused_scores``) runs here on the
+    calling thread, so the local Chroma store is never touched concurrently.
+    """
+    min_score = ctx.people.fused_min_score()
+    margin = float(os.getenv("HRI_FOLLOW_APPEARANCE_MARGIN", "0.05"))
+    qualifying: list[tuple[float, BBox, float | None]] = []
+    for (box, scale), app_emb in zip(cands, embeds):
+        if app_emb is None:
+            continue
+        scores = ctx.people.fused_scores(None, app_emb)
+        host_sim = scores.get(person_id)
+        if host_sim is None or host_sim < min_score:
+            continue
+        best_other = max((s for rid, s in scores.items() if rid != person_id), default=0.0)
+        if host_sim - best_other < margin:
+            continue
+        qualifying.append((host_sim, box, scale))
+    return _pick_closest_qualifier(qualifying, person_id, "appearance")
+
+
 def _select_by_attire(
     ctx: TaskContext,
     img: Image.Image,
@@ -417,22 +689,47 @@ def _select_by_attire(
     dress alike, so a bare top-1 lead flips onto a guest on embedding noise; the
     margin demands the host clearly win. ``None`` when nobody qualifies.
     """
-    min_score = ctx.people.fused_min_score()
-    margin = float(os.getenv("HRI_FOLLOW_APPEARANCE_MARGIN", "0.05"))
-    qualifying: list[tuple[float, BBox, float | None]] = []
-    for box, scale in cands:
-        app_emb = _appearance_embedding(ctx, img, box)
-        if app_emb is None:
-            continue
-        scores = ctx.people.fused_scores(None, app_emb)
-        host_sim = scores.get(person_id)
-        if host_sim is None or host_sim < min_score:
-            continue
-        best_other = max((s for rid, s in scores.items() if rid != person_id), default=0.0)
-        if host_sim - best_other < margin:
-            continue
-        qualifying.append((host_sim, box, scale))
-    return _pick_closest_qualifier(qualifying, person_id, "appearance")
+    embeds = [_appearance_embedding(ctx, img, box) for box, _scale in cands]
+    return _score_attire_candidates(ctx, cands, embeds, person_id)
+
+
+def _follow_parallel_enabled() -> bool:
+    return os.getenv("HRI_FOLLOW_PARALLEL", "0").lower() in ("1", "true", "yes")
+
+
+def _select_person_to_follow_parallel(
+    ctx: TaskContext, img: Image.Image, person_id: str
+) -> BBox | None:
+    """Overlap one follow tick's independent server round-trips (HRI_FOLLOW_PARALLEL=1).
+
+    Pose estimation and face detection each need only the full frame and hit
+    different sub-clients (separate ``requests.Session``s, designed for
+    concurrent use), so they run on worker threads at the same time. The
+    attire-fallback embeds — one OSNet call per candidate box, the costly part in
+    a crowd — are likewise fanned out. All identity scoring (:meth:`fused_scores`,
+    which reads the local Chroma store) stays on the calling thread, so no Chroma
+    access is concurrent. Returns exactly the box the serial path would.
+
+    Whether this lowers per-tick latency depends on the server handling
+    concurrent requests; with one GPU serializing inference the gain is limited
+    to overlapping encode/transfer/pre-post. Measure with HRI_FOLLOW_TRACK_DEBUG.
+    """
+    workers = max(2, int(os.getenv("HRI_FOLLOW_PARALLEL_WORKERS", "8")))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        fut_persons = ex.submit(_detect_persons, ctx, img)  # pose, own session
+        fut_faces = ex.submit(_detect_faces, ctx, img)      # face, own session
+        cands = _persons_to_candidates(fut_persons.result())
+        faces = fut_faces.result()
+        if not cands:
+            return None
+        box = _match_by_face(ctx, img, faces, cands, person_id)
+        if box is not None:
+            return box  # face match: never pay for the attire embeds (as serial)
+        # Attire fallback: embed every candidate crop concurrently. Bounded by
+        # `workers` so the shared appearance session's connection pool isn't
+        # exhausted; ex.map preserves order, so embeds[i] aligns with cands[i].
+        embeds = list(ex.map(lambda bs: _appearance_embedding(ctx, img, bs[0]), cands))
+    return _score_attire_candidates(ctx, cands, embeds, person_id)
 
 
 def select_person_to_follow(ctx: TaskContext, snap, person_id: str) -> BBox | None:
@@ -451,12 +748,18 @@ def select_person_to_follow(ctx: TaskContext, snap, person_id: str) -> BBox | No
     nearest body wins. ``None`` when nobody qualifies — the follow loop then
     coasts on its motion prediction.
 
+    With ``HRI_FOLLOW_PARALLEL=1`` the independent per-tick server calls run
+    concurrently (:func:`_select_person_to_follow_parallel`); the result is
+    identical, only the latency differs.
+
     *person_id* must already be enrolled (the host is, at ``OfferSeat``); the
     face pass needs a face embedding, the attire fallback an attire one.
     """
     if snap is None or ctx.people is None or ctx.people.count() == 0:
         return None
     img = snap.img
+    if _follow_parallel_enabled():
+        return _select_person_to_follow_parallel(ctx, img, person_id)
     cands = _candidate_persons(ctx, img)
     if not cands:
         return None

@@ -13,6 +13,7 @@ import queue
 import threading
 import time
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import dataclass
 
@@ -248,7 +249,11 @@ def find_persons(ctx: TaskContext) -> list[PersonPose]:
         return []
 
 
-def scan_seats(ctx: TaskContext):
+def scan_seats(
+    ctx: TaskContext,
+    timings: dict | None = None,
+    detect_per_class: bool | None = None,
+):
     """One frame: detect seats (open-vocab) + people, mark occupancy.
 
     Returns (seats, persons, snap) where ``snap`` is the CameraSnapshot the
@@ -258,64 +263,160 @@ def scan_seats(ctx: TaskContext):
     on detection failure. A whole sofa counts as one seat for now. Seats,
     persons, and snap.img all come from the same capture, so pixel coordinates
     are comparable and crops line up.
-    """
-    snap = ctx.snapshot()
-    if snap is None:
-        return [], [], None
-    img = snap.img
-    seat_classes = [
-        c.strip()
-        for c in os.getenv("HRI_SEAT_CLASSES", "chair,sofa,armchair,stool").split(",")
-        if c.strip()
-    ]
-    # Occupancy is decided from where people actually sit (their hip anchor); the
-    # overlap floor is only a fallback for a person whose hips weren't detected,
-    # so it's set high enough that a neighbour's box clipping a free seat's edge
-    # no longer marks it taken.
-    hard_overlap = float(os.getenv("HRI_SEAT_OCCUPIED_HARD_OVERLAP", "0.5"))
-    conf_thresh = float(os.getenv("HRI_POSE_KP_CONF", "0.3"))
-    sofa_has_middle = os.getenv("HRI_SOFA_HAS_MIDDLE", "1").lower() in ("1", "true", "yes")
-    try:
-        detections = ctx.walkieAI.object_detection.detect(img, prompts=seat_classes)
-    except Exception as exc:
-        print(f"[skills] seat detection failed ({exc})")
-        return [], [], snap
-    try:
-        persons = ctx.walkieAI.pose_estimation.estimate(img)
-    except Exception as exc:
-        print(f"[skills] pose estimation failed ({exc}); assuming all seats free")
-        persons = []
 
-    seats: list[SeatCandidate] = []
-    for det in detections:
-        if det.class_name and det.class_name.lower() not in [c.lower() for c in seat_classes]:
-            continue
-        x1, y1, x2, y2 = det.bbox
-        bbox = (x1, y1, x2, y2)
-        if is_sofa_class(det.class_name):
-            # A sofa is parsed into cushions; it only counts as fully occupied
-            # when every cushion is taken — otherwise a free cushion is offered.
-            parts = parse_sofa_parts(
-                bbox, persons, has_middle=sofa_has_middle,
-                hard_overlap=hard_overlap, conf_thresh=conf_thresh,
-            )
-            occupied = bool(parts) and all(p.occupied for p in parts)
+    Per-stage wall-clock in seconds (``snapshot`` / ``detect`` / ``pose`` /
+    ``assemble`` / ``total``) is written into *timings* when a dict is passed,
+    and printed when ``HRI_SCAN_TIMING=1`` — so a caller can benchmark which
+    stage of the scan dominates. A stage that didn't run (e.g. detect after a
+    capture failure) is simply absent from the dict.
+
+    *detect_per_class* (defaults to ``HRI_SCAN_DETECT_PER_CLASS``) splits the
+    single batched detect into one open-vocab call per seat class, timing each
+    into ``detect:<class>`` keys (the plain ``detect`` key still holds the wall
+    time of the whole detect stage). This is a benchmark aid — N round-trips are
+    slower than the one batched call and detections from different prompts are
+    just concatenated (a real object may appear under more than one class), so
+    leave it off for the production path.
+
+    Detection and pose estimation are independent remote calls (each AI sub-client
+    has its own HTTP session), so by default (``HRI_SCAN_PARALLEL=1``) they run
+    concurrently and assembly waits for both — the pose round-trip overlaps detect.
+    With parallelism on, ``detect`` and ``pose`` are each true per-call wall-times
+    but ``total ≈ snapshot + max(detect, pose) + assemble``, so ``detect + pose``
+    no longer sums to ``total``; that gap is the saved time. ``HRI_SCAN_PARALLEL=0``
+    restores serial execution.
+
+    Seat-detection frames can be downscaled before sending via
+    ``HRI_SEAT_DETECT_MAX_SIZE`` (empty = full resolution); the client scales the
+    returned bbox back to input-image coords, so geometry is unchanged.
+    """
+    if detect_per_class is None:
+        detect_per_class = os.getenv("HRI_SCAN_DETECT_PER_CLASS", "0").lower() in ("1", "true", "yes")
+    parallel = os.getenv("HRI_SCAN_PARALLEL", "1").lower() in ("1", "true", "yes")
+    _sm = os.getenv("HRI_SEAT_DETECT_MAX_SIZE", "").strip()
+    seat_max_size = int(_sm) if _sm else None
+    stages: dict[str, float] = {}
+    t_total = time.perf_counter()
+    try:
+        t0 = time.perf_counter()
+        snap = ctx.snapshot()
+        stages["snapshot"] = time.perf_counter() - t0
+        if snap is None:
+            return [], [], None
+        img = snap.img
+        seat_classes = [
+            c.strip()
+            for c in os.getenv("HRI_SEAT_CLASSES", "chair,sofa,armchair,stool").split(",")
+            if c.strip()
+        ]
+        # Occupancy is decided from where people actually sit (their hip anchor); the
+        # overlap floor is only a fallback for a person whose hips weren't detected,
+        # so it's set high enough that a neighbour's box clipping a free seat's edge
+        # no longer marks it taken.
+        hard_overlap = float(os.getenv("HRI_SEAT_OCCUPIED_HARD_OVERLAP", "0.5"))
+        conf_thresh = float(os.getenv("HRI_POSE_KP_CONF", "0.3"))
+        sofa_has_middle = os.getenv("HRI_SOFA_HAS_MIDDLE", "1").lower() in ("1", "true", "yes")
+
+        # Detect + pose are independent; each closure owns its own perf_counter span
+        # and writes DISJOINT keys into ``stages`` (detect → detect/detect:*, pose →
+        # pose), so they can run on two threads with no lock. A detect hard-fail is
+        # signalled back via the flag (not a bare return from the worker thread),
+        # so the calling thread still does the ([], [], snap) early-out below.
+        def _run_detect():
+            t_d = time.perf_counter()
+            if detect_per_class:
+                # Benchmark mode: one call per class, each timed into detect:<class>.
+                # Best-effort per class so a single failing prompt can't abort the scan.
+                dets = []
+                for cls in seat_classes:
+                    tc = time.perf_counter()
+                    try:
+                        found = ctx.walkieAI.object_detection.detect(
+                            img, prompts=[cls], max_size=seat_max_size)
+                    except Exception as exc:
+                        print(f"[skills] seat detection failed for {cls!r} ({exc})")
+                        found = []
+                    stages[f"detect:{cls}"] = time.perf_counter() - tc
+                    dets.extend(found)
+                stages["detect"] = time.perf_counter() - t_d
+                return dets, False
+            try:
+                dets = ctx.walkieAI.object_detection.detect(
+                    img, prompts=seat_classes, max_size=seat_max_size)
+            except Exception as exc:
+                print(f"[skills] seat detection failed ({exc})")
+                stages["detect"] = time.perf_counter() - t_d
+                return None, True
+            stages["detect"] = time.perf_counter() - t_d
+            return dets, False
+
+        def _run_pose():
+            t_p = time.perf_counter()
+            try:
+                ppl = ctx.walkieAI.pose_estimation.estimate(img)
+            except Exception as exc:
+                print(f"[skills] pose estimation failed ({exc}); assuming all seats free")
+                ppl = []
+            finally:
+                stages["pose"] = time.perf_counter() - t_p
+            return ppl
+
+        if parallel:
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                fut_detect = ex.submit(_run_detect)
+                fut_pose = ex.submit(_run_pose)
+                detections, detect_failed = fut_detect.result()
+                persons = fut_pose.result()
         else:
-            parts = None
-            occupied = bool(_occupied_region_indices(
-                persons, [bbox], hard_overlap=hard_overlap, conf_thresh=conf_thresh,
-            ))
-        seats.append(
-            SeatCandidate(
-                bbox_xyxy=bbox,
-                class_name=det.class_name or "seat",
-                confidence=det.confidence or 0.0,
-                center_px=((x1 + x2) / 2, (y1 + y2) / 2),
-                occupied=occupied,
-                parts=parts,
+            detections, detect_failed = _run_detect()
+            persons = _run_pose()
+        if detect_failed:
+            return [], [], snap
+
+        t0 = time.perf_counter()
+        seats: list[SeatCandidate] = []
+        for det in detections:
+            if det.class_name and det.class_name.lower() not in [c.lower() for c in seat_classes]:
+                continue
+            x1, y1, x2, y2 = det.bbox
+            bbox = (x1, y1, x2, y2)
+            if is_sofa_class(det.class_name):
+                # A sofa is parsed into cushions; it only counts as fully occupied
+                # when every cushion is taken — otherwise a free cushion is offered.
+                parts = parse_sofa_parts(
+                    bbox, persons, has_middle=sofa_has_middle,
+                    hard_overlap=hard_overlap, conf_thresh=conf_thresh,
+                )
+                occupied = bool(parts) and all(p.occupied for p in parts)
+            else:
+                parts = None
+                occupied = bool(_occupied_region_indices(
+                    persons, [bbox], hard_overlap=hard_overlap, conf_thresh=conf_thresh,
+                ))
+            seats.append(
+                SeatCandidate(
+                    bbox_xyxy=bbox,
+                    class_name=det.class_name or "seat",
+                    confidence=det.confidence or 0.0,
+                    center_px=((x1 + x2) / 2, (y1 + y2) / 2),
+                    occupied=occupied,
+                    parts=parts,
+                )
             )
-        )
-    return seats, persons, snap
+        stages["assemble"] = time.perf_counter() - t0
+        return seats, persons, snap
+    finally:
+        stages["total"] = time.perf_counter() - t_total
+        if timings is not None:
+            timings.update(stages)
+        if os.getenv("HRI_SCAN_TIMING", "0").lower() in ("1", "true", "yes"):
+            order = ("snapshot", "detect", "pose", "assemble", "total")
+            print("[skills] scan_seats timing: " + "  ".join(
+                f"{k}={stages[k] * 1000:.0f}ms" for k in order if k in stages))
+            per_class = {k: v for k, v in stages.items() if k.startswith("detect:")}
+            if per_class:
+                print("[skills]   detect breakdown: " + "  ".join(
+                    f"{k.split(':', 1)[1]}={v * 1000:.0f}ms" for k, v in per_class.items()))
 
 
 def sweep_snapshots(
@@ -636,6 +737,62 @@ def rotate_by(ctx: TaskContext, delta_rad: float, *, blocking: bool = True) -> b
         print(f"[skills] rotate_by: non-blocking go_to failed ({exc})")
         return False
     return True
+
+
+def move_base_relative(
+    ctx: TaskContext,
+    dx: float,
+    dy: float = 0.0,
+    dheading_rad: float = 0.0,
+    *,
+    blocking: bool = True,
+) -> bool:
+    """Move the base relative to its CURRENT pose (robot-local frame).
+
+    +dx = forward, +dy = left (matching the actuator agent's convention); a
+    backward step is a negative dx. *dheading_rad* adds to the current heading
+    (positive = CCW / left). Reads the real odometry heading (not
+    ``current_pose``'s zeros fallback, which would turn a "relative" move into an
+    absolute one toward the map origin) and no-ops without a fix. Best-effort:
+    False on no fix or nav failure, never raises.
+
+    Example: ``move_base_relative(ctx, -0.30)`` steps the base 30 cm straight back.
+    """
+    try:
+        pose = ctx.walkie.status.get_position()
+    except Exception as exc:
+        print(f"[skills] move_base_relative: odometry unavailable ({exc})")
+        return False
+    if not pose:
+        return False
+    x_cur, y_cur, h = pose["x"], pose["y"], pose["heading"]
+    x_global = x_cur + dx * math.cos(h) - dy * math.sin(h)
+    y_global = y_cur + dx * math.sin(h) + dy * math.cos(h)
+    target_heading = h + dheading_rad
+    if blocking:
+        return ctx.goto(x_global, y_global, target_heading)
+    try:
+        ctx.walkie.nav.go_to(x_global, y_global, target_heading, blocking=False)
+        return True
+    except Exception as exc:
+        print(f"[skills] move_base_relative: non-blocking go_to failed ({exc})")
+        return False
+
+
+def tilt_head(ctx: TaskContext, angle_rad: float, *, settle: float = 0.0) -> None:
+    """Tilt the head servo best-effort; optional settle sleep before a capture.
+
+    POSITIVE angle = camera tilts DOWN, negative = up (walkie-sdk convention).
+    The servo publish is asynchronous (it returns before the head arrives), so
+    pass *settle* > 0 when the next action depends on the new tilt. Never raises
+    — an off-robot stub may lack ``robot.head`` entirely.
+    """
+    try:
+        ctx.walkie.robot.head.tilt(angle_rad)
+    except Exception as exc:
+        print(f"[skills] head tilt failed ({exc})")
+    if settle > 0:
+        time.sleep(settle)
 
 
 class MotionPredictor:

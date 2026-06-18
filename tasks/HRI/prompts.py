@@ -118,6 +118,11 @@ APPEARANCE_CAPTION_PROMPT = (
     "and any other distinctive feature."
 )
 
+PHOTO_SAY_CHEESE = (
+    "Let me take a picture so I can recognize you later. "
+    "Please look at me and stand still — say cheese!"
+)
+
 HOST_APPEARANCE_CAPTION_PROMPT = (
     "Describe the visible appearance of the SEATED person in this image in one "
     "sentence for someone who must recognize them at a party: clothing and its "

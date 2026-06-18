@@ -41,7 +41,41 @@ class _Failing:
         return fail
 
 
+class _Arm:
+    """Non-raising arm stub (local hardware): every method prints. The top arm
+    exposes ``left``/``right`` sub-arms; ``get_joint_states`` returns a plausible
+    triple so the bag-handover step can read an effort without crashing."""
+
+    def __init__(self, label="arm"):
+        self._label = label
+        if label == "arm":
+            self.left = _Arm("arm.left")
+            self.right = _Arm("arm.right")
+
+    def __getattr__(self, name):
+        def method(*a, **k):
+            print(f"  [stub {self._label}] {name}()")
+            if name == "get_joint_states":
+                return ([], [], [0.0, 0.0, 0.0, 0.0])
+            return None
+
+        return method
+
+
+class _Head:
+    def tilt(self, angle_rad):
+        print(f"  [stub head] tilt({angle_rad})")
+
+
+class _Robot:
+    """Mirrors WalkieInterface.robot — local arm/head, non-raising like _Nav."""
+
+    arm = _Arm()
+    head = _Head()
+
+
 class _Walkie:
+    robot = _Robot()
     nav = _Nav()
     status = _Status()
     camera = _Failing()

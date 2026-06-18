@@ -471,6 +471,20 @@ class PeopleStore:
         records = [self._to_record(rid, emb, meta) for rid, emb, meta in rows]
         return sorted(records, key=lambda r: r.last_seen_ts, reverse=True)
 
+    def appearance_vectors(self) -> dict[str, list[float]]:
+        """``{id: attire_embedding}`` for everyone with an appearance vector.
+
+        The face vectors are exposed through :meth:`list_people` (``.embedding``),
+        but the OSNet attire vectors live in the second collection; this surfaces
+        them by id so callers can compare attire across people (e.g. a cross-guest
+        near-duplicate audit) without reaching into the private collection.
+        """
+        return {
+            rid: list(emb)
+            for rid, emb, _doc in get_rows(self._app_collection.get(include=["embeddings"]))
+            if emb is not None
+        }
+
     def count(self) -> int:
         return self._collection.count()
 

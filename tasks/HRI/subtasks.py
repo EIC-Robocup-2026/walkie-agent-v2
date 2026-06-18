@@ -37,7 +37,8 @@ from tasks.base import StepResult, SubTask, Task, TaskContext
 
 from . import prompts
 from .identity import (
-    enroll_guest,
+    audit_identity_collisions,
+    enroll_guest_frames,
     enroll_person_in_box,
     locate_people,
     select_person_to_follow,
@@ -47,6 +48,7 @@ from .skills import (
     CommandListener,
     FaceTracker,
     classify_host_command,
+    cxcywh_to_xyxy,
     describe_seated_person,
     face_point,
     find_seated_person_bbox,
@@ -56,7 +58,9 @@ from .skills import (
     llm_guest_intro_speeches,
     llm_pick_seat,
     match_people_to_seats,
+    move_base_relative,
     parse_pose,
+    person_seat_anchor,
     recall_person_xy,
     remember_located_positions,
     remember_person_xy,
@@ -65,6 +69,7 @@ from .skills import (
     select_largest_person,
     side_relative_to_listener,
     sweep_snapshots,
+    tilt_head,
     wait_for_person,
 )
 
@@ -97,7 +102,12 @@ class GoToDoor(SubTask):
 
 
 class GreetAndLearn(SubTask):
-    """Greet at the door, learn name + drink, capture guest 1's appearance."""
+    """Greet at the door, learn name + drink, then take a posed photo.
+
+    After the Q&A the robot steps back ~30 cm, says "say cheese", and captures a
+    burst of face frames (head level) plus body/attire frames (head tilted down)
+    that are averaged into one robust enrollment for BOTH guests. Only guest 1's
+    appearance is also captioned in text (told to guest 2 at the introduction)."""
 
     def __init__(self, guest: int):
         super().__init__(f"GreetAndLearn(guest {guest})")
@@ -108,14 +118,16 @@ class GreetAndLearn(SubTask):
         time.sleep(5) # wait for navigation to settle
         ctx.say(prompts.LOOKING_FOR_GUEST)
 
-        ctx.walkie.robot.head.tilt(0)
+        tilt_head(ctx, -0.15)
         if wait_for_person(ctx):
             print("[HRI] guest detected at the door")
         else:
             print("[HRI] no guest detected before timeout; greeting anyway")
         # Keep the base turned toward the guest's face for the whole exchange:
         # a background loop tracks the biggest face in view and rotates the base
-        # to re-center it while we ask questions and caption below.
+        # to re-center it while we ask questions. The base must be still and free
+        # for the posed photo afterward, so the capture runs AFTER this block —
+        # moving the base inside it would fight the tracker's nav goals.
         with FaceTracker(ctx):
             answer = ctx.ask(prompts.GREET_ASK_BOTH)
             info = ctx.extract(prompts.GuestInfo, prompts.EXTRACT_GUEST_INFO_INSTRUCTIONS, answer) if answer else None
@@ -136,26 +148,72 @@ class GreetAndLearn(SubTask):
                     if info and getattr(info, field):
                         record[field] = getattr(info, field)
 
-            img = ctx.capture()
-            # Visual description: only guest 1's is needed (told to guest 2 later).
-            if self.guest == 1 and img is not None:
-                try:
-                    record["appearance"] = ctx.walkieAI.image_caption.caption(
-                        img, prompt=prompts.APPEARANCE_CAPTION_PROMPT
-                    )
-                except Exception as exc:
-                    print(f"[HRI] appearance caption failed ({exc})")
-            # Remember this guest's face + attire under a stable id, so the
-            # introduction step can find them again even after a seat switch.
-            if img is not None:
-                enroll_guest(
-                    ctx, img, f"guest-{self.guest}",
-                    name=record["name"] or "", drink=record["drink"] or "",
-                )
-
             name = record["name"] or "there"
             ctx.say(f"Nice to meet you, {name}!")
+        # FaceTracker has now stopped: the base is free to move for the photo.
+        self._posed_capture(ctx, record)
         return StepResult.DONE  # partial info still scores — never block here
+
+    def _posed_capture(self, ctx: TaskContext, record: dict) -> None:
+        """Step back, warn the guest, capture face (level) + body (tilted-down)
+        frames, caption guest-1's appearance, and enroll the averaged embeddings.
+
+        Runs AFTER FaceTracker exits (it moves the base, which would fight the
+        tracker's concurrent nav goals). Stepping back ~30 cm frames the whole
+        body so the OSNet attire embedding is strong; the face is shot head-level
+        and the body with the head tilted down. Everything is best-effort: a
+        failure leaves whatever was already captured/enrolled and never blocks.
+        """
+        count = int(os.getenv("HRI_GREET_CAPTURE_COUNT", "3"))
+        backup_m = float(os.getenv("HRI_GREET_BACKUP_M", "0.30"))
+        face_tilt = float(os.getenv("HRI_GREET_FACE_TILT", "0.0"))
+        app_tilt = float(os.getenv("HRI_GREET_APPEARANCE_TILT", "0.15"))
+        tilt_settle = float(os.getenv("HRI_GREET_TILT_SETTLE_SEC", "0.8"))
+        cap_gap = float(os.getenv("HRI_GREET_CAPTURE_GAP_SEC", "0.3"))
+
+        def _burst() -> list:
+            imgs = []
+            for _ in range(count):
+                img = ctx.capture()
+                if img is not None:
+                    imgs.append(img)
+                if cap_gap > 0:
+                    time.sleep(cap_gap)
+            return imgs
+
+        # Step back first so the whole body fits, then cue the guest right before
+        # the face burst (so the "cheese" smile is fresh when the shutter fires).
+        move_base_relative(ctx, -backup_m)  # blocking goto; no extra settle needed
+
+        # FACE frames: head level (needs the face for the embedding + the caption).
+        tilt_head(ctx, face_tilt, settle=tilt_settle)
+        ctx.say(prompts.PHOTO_SAY_CHEESE)
+        face_imgs = _burst()
+        # ATTIRE frames: head tilted down to frame the body for a strong OSNet crop.
+        tilt_head(ctx, app_tilt, settle=tilt_settle)
+        app_imgs = _burst()
+        # Restore the level head for the next nav step.
+        tilt_head(ctx, 0.0)
+
+        # Guest-1 only: TEXT appearance description told to guest 2 later. Use a
+        # head-LEVEL face frame (it needs hair/glasses/face), not a tilted-down one.
+        if self.guest == 1 and face_imgs:
+            try:
+                record["appearance"] = ctx.walkieAI.image_caption.caption(
+                    face_imgs[0], prompt=prompts.APPEARANCE_CAPTION_PROMPT
+                )
+            except Exception as exc:
+                print(f"[HRI] appearance caption failed ({exc})")
+
+        # Remember this guest's face + attire under a stable id (averaged over the
+        # burst), so the introduction step can find them again after a seat switch.
+        if face_imgs or app_imgs:
+            enroll_guest_frames(
+                ctx, face_imgs, app_imgs, f"guest-{self.guest}",
+                name=record["name"] or "", drink=record["drink"] or "",
+            )
+        else:
+            print("[HRI] posed capture produced no frames; skipping enrollment")
 
 
 class GuideToLivingRoom(SubTask):
@@ -302,6 +360,32 @@ class ReceiveBag(SubTask):
         return StepResult.DONE
 
 
+class AuditIdentities(SubTask):
+    """Cross-guest near-duplicate audit, run once after everyone is enrolled.
+
+    Compares the stored face and attire embeddings of every enrolled pair
+    (guest-1, guest-2, host) and logs a WARNING for any pair that is suspiciously
+    similar (likely the same person, or two guests hard to tell apart). Two
+    DISTINCT guests can't be safely merged, so this never deletes a record; with
+    ``HRI_DUP_ACTION=widen`` it raises the attire-match margin for the rest of the
+    run on an ATTIRE collision, pushing recognition to lean on the more
+    discriminative FACE. Cheap (pure vector math, no camera/LLM); best-effort.
+    """
+
+    def run(self, ctx: TaskContext) -> StepResult:
+        collisions = audit_identity_collisions(ctx)
+        if not collisions:
+            return StepResult.DONE
+        action = os.getenv("HRI_DUP_ACTION", "log").lower()
+        if action == "widen" and any(kind == "appearance" for *_ids, kind, _s in collisions):
+            cur = float(os.getenv("HRI_FOLLOW_APPEARANCE_MARGIN", "0.05"))
+            widened = float(os.getenv("HRI_DUP_WIDENED_APP_MARGIN", "0.10"))
+            if widened > cur:
+                os.environ["HRI_FOLLOW_APPEARANCE_MARGIN"] = str(widened)
+                print(f"[HRI] attire collision: widened HRI_FOLLOW_APPEARANCE_MARGIN {cur}->{widened}")
+        return StepResult.DONE
+
+
 class IntroduceGuests(SubTask):
     """Introduce the two guests to each other, once both are seated.
 
@@ -405,7 +489,7 @@ class FollowHostAndDropBag(SubTask):
     def run(self, ctx: TaskContext) -> StepResult:
         if not (_bag_enabled() and ctx.data.get("has_bag")):
             return StepResult.DONE
-
+        tilt_head(ctx, -0.15)
         listen_timeout = float(os.getenv("HRI_FOLLOW_LISTEN_TIMEOUT_SEC", "5"))
 
         # Turn to face the host before talking to them, using their last known
@@ -474,11 +558,275 @@ class FollowNearestPerson(SubTask):
         return StepResult.DONE
 
 
+class TestRememberAndFollowHost(SubTask):
+    """Test harness: remember the host in front, then follow them + drop the bag.
+
+    A focused exercise of the follow-host path (:class:`FollowHostAndDropBag`)
+    WITHOUT the full receptionist run — for debugging when the robot "won't
+    follow anyone". Two phases:
+
+    1. *Remember the host.* The host stands in front; the robot takes a posed
+       burst — face frames (head level) then attire frames (head tilted down to
+       frame the body) — and enrolls the burst-averaged face + OSNet attire
+       embeddings under the id ``"host"`` via :func:`enroll_guest_frames` (the
+       SAME id and path the real OfferSeat host enrollment uses), tagged with
+       the host's name/drink from ``HRI_HOST_NAME`` / ``HRI_HOST_DRINK``. Those
+       two modalities are exactly what :func:`identity.select_person_to_follow`
+       scores each tick — FACE first, ATTIRE fallback — so a weak enrollment
+       here is the usual reason the follow loop never locks on.
+    2. *Follow + drop.* "Assume we have a bag": mark ``has_bag`` and force
+       ``HRI_ENABLE_BAG`` on, then delegate to :class:`FollowHostAndDropBag`, so
+       the ask-where -> follow -> place-bag sequence runs completely unchanged.
+
+    Run it on its own with ``HRI_TEST_FOLLOW_HOST=1`` (see :func:`build_hri_task`).
+    ``HRI_FOLLOW_TRACK_DEBUG=1`` / ``HRI_FOLLOW_VIZ=1`` (both already on in
+    config.toml) log the per-tick stage costs and write follow_viz.jpg showing
+    which body the loop is locked onto.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("TestRememberAndFollowHost")
+
+    def run(self, ctx: TaskContext) -> StepResult:
+        self._remember_host(ctx)
+        # Assume the bag is already in hand: skip ReceiveBag's handover but mark
+        # the bag held and force the gate on, so FollowHostAndDropBag runs end
+        # to end instead of short-circuiting on the _bag_enabled()/has_bag check.
+        os.environ["HRI_ENABLE_BAG"] = "1"
+        ctx.data["has_bag"] = True
+        return FollowHostAndDropBag().run(ctx)
+
+    def _remember_host(self, ctx: TaskContext) -> None:
+        """Posed burst of the standing host -> enroll face + attire under "host".
+
+        Mirrors GreetAndLearn's posed capture (same ``HRI_GREET_*`` knobs): step
+        back so the whole body fits, shoot face frames head-level, then attire
+        frames head-down, and enroll the burst-averaged embeddings. Best-effort —
+        a capture/enroll failure logs and leaves whatever was already captured.
+        """
+        count = int(os.getenv("HRI_GREET_CAPTURE_COUNT", "3"))
+        backup_m = float(os.getenv("HRI_GREET_BACKUP_M", "0.30"))
+        face_tilt = float(os.getenv("HRI_GREET_FACE_TILT", "0.0"))
+        app_tilt = float(os.getenv("HRI_GREET_APPEARANCE_TILT", "0.15"))
+        tilt_settle = float(os.getenv("HRI_GREET_TILT_SETTLE_SEC", "0.8"))
+        cap_gap = float(os.getenv("HRI_GREET_CAPTURE_GAP_SEC", "0.3"))
+
+        def _burst() -> list:
+            imgs = []
+            for _ in range(count):
+                img = ctx.capture()
+                if img is not None:
+                    imgs.append(img)
+                if cap_gap > 0:
+                    time.sleep(cap_gap)
+            return imgs
+
+        ctx.say("Hello! I am going to remember you as the host. "
+                "Please stand in front of me and look at me.")
+        tilt_head(ctx, face_tilt, settle=tilt_settle)
+        if not wait_for_person(ctx):
+            print("[HRI] no host face detected before timeout; capturing anyway")
+        move_base_relative(ctx, -backup_m)  # frame the whole body for the attire crop
+        # FACE frames: head level (needs the face for the embedding + caption).
+        ctx.say(prompts.PHOTO_SAY_CHEESE)
+        face_imgs = _burst()
+        # ATTIRE frames: head tilted down to frame the body for a strong OSNet crop.
+        tilt_head(ctx, app_tilt, settle=tilt_settle)
+        app_imgs = _burst()
+        tilt_head(ctx, 0.0)  # restore the level head for the follow
+
+        # Text appearance (best-effort), kept on the blackboard + as the record's
+        # attributes, mirroring the real host capture in OfferSeat.
+        appearance = None
+        if face_imgs:
+            try:
+                appearance = ctx.walkieAI.image_caption.caption(
+                    face_imgs[0], prompt=prompts.APPEARANCE_CAPTION_PROMPT
+                )
+            except Exception as exc:
+                print(f"[HRI] host appearance caption failed ({exc})")
+        ctx.data.setdefault("host", {})["appearance"] = appearance
+
+        if face_imgs or app_imgs:
+            enroll_guest_frames(
+                ctx, face_imgs, app_imgs, "host",
+                name=os.getenv("HRI_HOST_NAME", "").strip(),
+                drink=os.getenv("HRI_HOST_DRINK", "").strip(),
+                attributes=appearance or "",
+            )
+        else:
+            print("[HRI] host posed capture produced no frames; nothing enrolled")
+        ctx.say("Got it, I will remember you. Now lead the way and I will follow.")
+
+
+def _label(draw, x: int, y: int, text: str, color) -> None:
+    """Draw *text* with a black backing box at (x, y) so it stays readable."""
+    ty = max(0, y - 14)
+    draw.rectangle((x, ty, x + 7 * len(text) + 4, ty + 13), fill=(0, 0, 0))
+    draw.text((x + 2, ty + 1), text, fill=color)
+
+
+_SCAN_TIMING_ORDER = ("snapshot", "detect", "pose", "assemble", "total")
+
+
+def _fmt_scan_timings(timings: dict) -> str:
+    """One-line 'snapshot=..ms detect=..ms ...' from a scan_seats timing dict."""
+    return "  ".join(
+        f"{k}={timings[k] * 1000:.0f}ms" for k in _SCAN_TIMING_ORDER if k in timings
+    )
+
+
+def _fmt_detect_breakdown(timings: dict) -> str:
+    """Per-class detect split 'chair=..ms sofa=..ms ...' (the detect:<class>
+    keys scan_seats records in detect_per_class mode), or '' when absent."""
+    return "  ".join(
+        f"{k.split(':', 1)[1]}={v * 1000:.0f}ms"
+        for k, v in timings.items() if k.startswith("detect:")
+    )
+
+
+def _annotate_scan(snap, seats, persons, timings=None):
+    """Draw scan_seats() output onto the captured frame and return a PIL image.
+
+    Seats are boxed green (free) / red (occupied), each sofa cushion is boxed
+    with its own occupancy and LEFT/MIDDLE/RIGHT label, and every detected person
+    is boxed blue with a dot at their seating anchor (the point scan_seats uses to
+    decide which seat they hold). A top banner sums the counts and, when
+    *timings* is given, the per-stage benchmark on a second line plus the
+    per-class detect split (if recorded) on a third.
+    """
+    from PIL import ImageDraw
+
+    FREE, OCC, PERSON = (0, 200, 0), (220, 30, 30), (40, 120, 255)
+    vis = snap.img.convert("RGB").copy()
+    draw = ImageDraw.Draw(vis)
+    for i, s in enumerate(seats):
+        color = OCC if s.occupied else FREE
+        x1, y1, x2, y2 = (int(v) for v in s.bbox_xyxy)
+        draw.rectangle((x1, y1, x2, y2), outline=color, width=3)
+        _label(draw, x1, y1,
+               f"#{i} {s.class_name} {s.confidence:.2f} "
+               f"{'OCC' if s.occupied else 'FREE'}", color)
+        for p in s.parts or []:  # sofa cushions: each shows its own occupancy
+            pc = OCC if p.occupied else FREE
+            px1, py1, px2, py2 = (int(v) for v in p.bbox_xyxy)
+            draw.rectangle((px1, py1, px2, py2), outline=pc, width=1)
+            draw.text((px1 + 3, py2 - 14),
+                      f"{p.label} {'X' if p.occupied else 'o'}", fill=pc)
+    for p in persons:
+        x1, y1, x2, y2 = (int(v) for v in cxcywh_to_xyxy(p.bbox))
+        draw.rectangle((x1, y1, x2, y2), outline=PERSON, width=2)
+        ax, ay = person_seat_anchor(p)
+        draw.ellipse((ax - 4, ay - 4, ax + 4, ay + 4), fill=PERSON)
+    free = sum(1 for s in seats if not s.occupied)
+    lines = [(f"seats: {len(seats)} ({free} free)   persons: {len(persons)}",
+              (255, 255, 255))]
+    if timings:
+        lines.append((_fmt_scan_timings(timings), (255, 210, 80)))
+        breakdown = _fmt_detect_breakdown(timings)
+        if breakdown:
+            lines.append(("detect: " + breakdown, (255, 210, 80)))
+    draw.rectangle((0, 0, vis.width, 6 + 14 * len(lines)), fill=(0, 0, 0))
+    for i, (text, color) in enumerate(lines):
+        draw.text((6, 5 + 14 * i), text, fill=color)
+    return vis
+
+
+class TestScanSeats(SubTask):
+    """Test task: scan for seats + people each tick and show what's detected.
+
+    Calls :func:`skills.scan_seats` in a loop and renders the result with
+    :func:`_annotate_scan` — seats green (free) / red (occupied), per-cushion
+    occupancy on sofas, and every detected person with their seating anchor. The
+    annotated frame is shown live in a cv2 window when a display is available and
+    ALWAYS written to ``HRI_SCAN_VIZ_PATH`` (default ``seat_scan_viz.jpg``) so it
+    works headless too; a one-line summary is printed each tick. Each scan is also
+    benchmarked per stage (snapshot / detect / pose / assemble / total) — printed
+    each tick and overlaid on the frame — to show which part of scan_seats
+    dominates. Press ``q``/Esc in the window to stop. Ungated; run standalone with
+    ``HRI_TEST_SCAN_SEATS=1`` (see :func:`build_hri_task`).
+    """
+
+    def __init__(self) -> None:
+        super().__init__("TestScanSeats")
+
+    def run(self, ctx: TaskContext) -> StepResult:
+        interval = float(os.getenv("HRI_SCAN_INTERVAL_SEC", "0.5"))
+        viz_path = os.getenv("HRI_SCAN_VIZ_PATH", "seat_scan_viz.jpg")
+        window = "Walkie seat scan"
+        # cv2 gives a live, self-updating window; missing or headless falls back
+        # to writing the annotated JPEG every tick (can_show flips off on the
+        # first imshow failure so we don't retry a dead display each frame).
+        try:
+            import cv2
+            import numpy as np
+        except Exception as exc:
+            print(f"[HRI] scan viz: cv2/numpy unavailable ({exc}); writing file only")
+            cv2 = None
+        can_show = cv2 is not None
+        try:
+            while True:
+                timings: dict = {}
+                # detect_per_class (HRI_SCAN_DETECT_PER_CLASS, default off) splits
+                # the detect stage into one timed call per seat class. The detector
+                # cost is mostly a fixed per-CALL overhead, so per-class is ~N times
+                # slower than the single batched call the production path uses —
+                # leave it off to see realistic timing, on only to attribute cost.
+                seats, persons, snap = scan_seats(ctx, timings=timings)
+                print(f"[HRI] scan timing: {_fmt_scan_timings(timings)}")
+                breakdown = _fmt_detect_breakdown(timings)
+                if breakdown:
+                    print(f"[HRI]   detect breakdown: {breakdown}")
+                if snap is None:
+                    print("[HRI] scan_seats: capture failed; retrying")
+                    time.sleep(interval)
+                    continue
+                free = sum(1 for s in seats if not s.occupied)
+                print(f"[HRI] scan: {len(seats)} seats ({free} free), {len(persons)} persons")
+                for i, s in enumerate(seats):
+                    cushions = ("  cushions: " + ", ".join(
+                        f"{p.label}={'occ' if p.occupied else 'free'}" for p in s.parts
+                    )) if s.parts else ""
+                    print(f"        #{i} {s.class_name} conf={s.confidence:.2f} "
+                          f"{'OCCUPIED' if s.occupied else 'free'}{cushions}")
+
+                vis = _annotate_scan(snap, seats, persons, timings=timings)
+                vis.save(viz_path, "JPEG", quality=80)
+                if can_show:
+                    try:
+                        bgr = cv2.cvtColor(np.array(vis), cv2.COLOR_RGB2BGR)
+                        cv2.imshow(window, bgr)
+                        # waitKey both pumps the window and provides the inter-tick
+                        # delay; q/Esc ends the test.
+                        if (cv2.waitKey(max(1, int(interval * 1000))) & 0xFF) in (ord("q"), 27):
+                            break
+                        continue
+                    except Exception as exc:
+                        print(f"[HRI] scan viz: no display ({exc}); writing {viz_path} only")
+                        can_show = False
+                # time.sleep(interval)
+        finally:
+            if cv2 is not None:
+                try:
+                    cv2.destroyAllWindows()
+                except Exception:
+                    pass
+        return StepResult.DONE
+
+
 class TestTask(SubTask):
     def run(self, ctx: TaskContext) -> StepResult:
-        ctx.say("This is a test task. It does nothing.")
+        # ctx.say("This is a test task. It does nothing.")
         while True:
-            ctx.snapshot()  # keep the camera warms
+            snap = ctx.snapshot()  # keep the camera warms
+            seat_classes = [
+                c.strip()
+                for c in os.getenv("HRI_SEAT_CLASSES", "chair,sofa,armchair,stool").split(",")
+                if c.strip()
+            ]
+            dets = ctx.walkieAI.object_detection.detect(
+                snap.img, prompts=seat_classes)
+            print("[HRI] test task snapshot taken")
         return StepResult.DONE
 
 
@@ -494,21 +842,37 @@ def build_hri_task(ctx: TaskContext) -> Task:
             print(f"[HRI] people memory reset failed ({exc})")
     # Positions are map-frame and run-local; never carry them across runs.
     reset_people_positions(ctx)
+    # Standalone follow-host harness (HRI_TEST_FOLLOW_HOST=1): remember the host
+    # standing in front, then follow + drop the bag — the FollowHostAndDropBag
+    # path on its own, without walking the full 12-step receptionist flow.
+    if os.getenv("HRI_TEST_FOLLOW_HOST", "0").lower() in ("1", "true", "yes"):
+        print("[HRI] HRI_TEST_FOLLOW_HOST=1 — running the follow-host test only")
+        return Task("HRI-follow-host-test", [TestRememberAndFollowHost()], ctx)
+    # Standalone seat-scan harness (HRI_TEST_SCAN_SEATS=1): loop scan_seats and
+    # show the detected seats/occupancy/people, for tuning seat detection without
+    # walking the full receptionist flow.
+    if os.getenv("HRI_TEST_SCAN_SEATS", "0").lower() in ("1", "true", "yes"):
+        print("[HRI] HRI_TEST_SCAN_SEATS=1 — running the seat-scan test only")
+        return Task("HRI-scan-seats-test", [TestScanSeats()], ctx)
     return Task(
         "HRI",
         [
-            GoToDoor(1),
-            GreetAndLearn(1),
-            GuideToLivingRoom(1),
-            OfferSeat(1),
-            GoToDoor(2),
-            GreetAndLearn(2),
-            ReceiveBag(),
-            GuideToLivingRoom(2),
-            OfferSeat(2),
-            IntroduceGuests(),  # introduce the two guests to each other
-            FollowHostAndDropBag(),
+            # GoToDoor(1),
+            # GreetAndLearn(1),
+            # GuideToLivingRoom(1),
+            # OfferSeat(1),
+            # GoToDoor(2),
+            # GreetAndLearn(2),
+            # ReceiveBag(),
+            # GuideToLivingRoom(2),
+            # OfferSeat(2),
+            # AuditIdentities(),  # flag cross-guest near-duplicate face/attire, lean on face
+            # IntroduceGuests(),  # introduce the two guests to each other
+            # FollowHostAndDropBag(),
+            # Tests
+            TestRememberAndFollowHost(),  # enroll host here, then follow+drop bag (or HRI_TEST_FOLLOW_HOST=1)
             # FollowNearestPerson(),  # follow-loop test: no identity, no bag
+            # TestScanSeats(),  # scan seats + people, draw/show detections (or HRI_TEST_SCAN_SEATS=1)
             # TestTask(),
         ],
         ctx,

@@ -466,7 +466,7 @@ created here.
 <details>
 <summary>Visualize the map live</summary>
 
-Set `WALKIE_GRAPHS_VIZ = "rerun"` in `config.toml` (needs `uv sync --extra graphs`) to stream the
+Set `WALKIE_GRAPHS_VIZ = "rerun"` in `config.toml` to stream the
 point clouds, bounding boxes, relations, and the robot/camera pose to a [Rerun](https://rerun.io)
 viewer — a local window on the robot, or a browser viewer over the LAN
 (`WALKIE_GRAPHS_RERUN_SERVE = "1"`).

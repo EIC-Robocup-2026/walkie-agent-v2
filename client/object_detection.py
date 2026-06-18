@@ -39,18 +39,25 @@ class ObjectDetectionClient(WalkieBaseClient):
     def detect(
         self,
         image: Image.Image | np.ndarray,
-        max_size: int = 640,
+        max_size: int | None = None,
         jpeg_quality: int = 85,
         prompts: list[str] | None = None,
         return_mask: bool = False,
+        provider: str | None = None,
     ) -> list[DetectedObject]:
         """Detect objects in *image*.
 
         Args:
             image: A PIL Image (RGB) or BGR numpy array to run detection on.
-            max_size: Longest edge is scaled down to this before sending.
-                      YOLO resizes internally anyway, so full resolution adds
-                      no accuracy but costs encoding time and bandwidth.
+            max_size: When set to a positive int, the image's longest edge is
+                      downscaled to this many pixels before sending (cutting
+                      JPEG-encode + transfer time). The returned bbox and mask
+                      are scaled back to the ORIGINAL input resolution, so this
+                      is transparent to callers — coords are always in input-image
+                      pixel space. ``None`` (default) / ``<= 0`` sends full
+                      resolution and never resizes. Leave it ``None`` for any
+                      path whose masks feed depth/3D projection (small objects
+                      and mask precision suffer from downscaling).
             jpeg_quality: JPEG quality (1-95). 85 is a good balance of speed
                           vs. detection accuracy.
             prompts: Optional open-vocabulary text prompts (noun phrases). Used
@@ -59,6 +66,9 @@ class ObjectDetectionClient(WalkieBaseClient):
                      each :class:`DetectedObject.mask` is a 2D uint8 {0,1} numpy
                      array (where the provider/model supports masks); otherwise
                      ``mask`` is ``None``.
+            provider: Optional provider/model name. Only sent when set; requires
+                     the server to support per-call provider selection (a no-op
+                     otherwise).
 
         Returns:
             List of :class:`~services.object_detection.base.DetectedObject`.
@@ -66,17 +76,25 @@ class ObjectDetectionClient(WalkieBaseClient):
         Raises:
             WalkieAPIError: If the server returns a failure response.
         """
+        # Downscale for transport, remembering the factor so we can restore the
+        # detector's bbox/mask to the original resolution afterward. ``scale`` < 1
+        # only when an explicit max_size is smaller than the longest edge; we
+        # never upscale.
+        scale = 1.0
         if isinstance(image, np.ndarray):
-            # h, w = image.shape[:2]
-            # if max(w, h) > max_size:
-            #     scale = max_size / max(w, h)
-            #     image = cv2.resize(image, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_LINEAR)
+            h, w = image.shape[:2]
+            if max_size and max_size > 0 and max(w, h) > max_size:
+                scale = max_size / max(w, h)
+                image = cv2.resize(
+                    image, (round(w * scale), round(h * scale)),
+                    interpolation=cv2.INTER_AREA,
+                )
             image_bytes = _numpy_to_bytes(image, fmt="JPEG", quality=jpeg_quality)
         else:
-            # w, h = image.size
-            # if max(w, h) > max_size:
-            #     scale = max_size / max(w, h)
-            #     image = image.resize((int(w * scale), int(h * scale)), Image.BILINEAR)
+            w, h = image.size
+            if max_size and max_size > 0 and max(w, h) > max_size:
+                scale = max_size / max(w, h)
+                image = image.resize((round(w * scale), round(h * scale)), Image.BILINEAR)
             image_bytes = _pil_to_bytes(image, fmt="JPEG", quality=jpeg_quality)
 
         # Repeated "prompts" fields (the server also accepts a comma-separated
@@ -84,13 +102,31 @@ class ObjectDetectionClient(WalkieBaseClient):
         form: list[tuple] = [("return_mask", "true" if return_mask else "false")]
         if prompts:
             form.extend(("prompts", p) for p in prompts)
+        if provider:
+            form.append(("provider", provider))
 
         data = self._post_files(
             "/object-detection/detect",
             files={"image": ("image.jpg", image_bytes, "image/jpeg")},
             data=form,
         )
-        return [_deserialize_detection(d) for d in data]
+        results = [_deserialize_detection(d) for d in data]
+        if scale != 1.0:
+            # Map the detector's downscaled bbox/mask back to the input image's
+            # coords so every caller sees input-resolution geometry. area_ratio
+            # is a ratio of image area and so is scale-invariant — left as-is.
+            inv = 1.0 / scale
+            for obj in results:
+                x1, y1, x2, y2 = obj.bbox
+                obj.bbox = (
+                    int(round(x1 * inv)), int(round(y1 * inv)),
+                    int(round(x2 * inv)), int(round(y2 * inv)),
+                )
+                if obj.mask is not None:
+                    obj.mask = cv2.resize(
+                        obj.mask, (w, h), interpolation=cv2.INTER_NEAREST,
+                    ).astype(np.uint8)
+        return results
 
     def available_providers(self) -> list[str]:
         """List all providers registered on the server."""
