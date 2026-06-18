@@ -35,7 +35,7 @@ WALKIE_GRAPHS_INTERESTED_CLASSES = "sofa,door,chair,armchair,table,stool,shirt,s
 WALKIE_GRAPHS_EXCLUDE_CLASSES = "person"
 # Classes to caption (server image-caption). Empty = same as interested classes.
 WALKIE_GRAPHS_CAPTION_CLASSES = "shirt"
-# Live 3D visualization backend: none | rerun. rerun needs `uv sync --extra graphs`.
+# Live 3D visualization backend: none | rerun.
 WALKIE_GRAPHS_VIZ = "rerun"
 # What to draw in the Rerun viewer. Point clouds are always shown.
 WALKIE_GRAPHS_VIZ_BOXES = "0"   # 0 = hide per-object bounding boxes

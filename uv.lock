@@ -4491,6 +4491,7 @@ dependencies = [
     { name = "pydub" },
     { name = "pytest" },
     { name = "python-dotenv" },
+    { name = "rerun-sdk" },
     { name = "scikit-learn" },
     { name = "scipy" },
     { name = "silero-vad" },
@@ -4506,9 +4507,6 @@ clip = [
 dev = [
     { name = "pytest" },
     { name = "requests" },
-]
-graphs = [
-    { name = "rerun-sdk" },
 ]
 
 [package.metadata]
@@ -4530,7 +4528,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "requests", marker = "extra == 'dev'", specifier = ">=2.32.0" },
-    { name = "rerun-sdk", marker = "extra == 'graphs'", specifier = ">=0.20" },
+    { name = "rerun-sdk", specifier = ">=0.20" },
     { name = "scikit-learn", specifier = ">=1.9.0" },
     { name = "scipy", specifier = ">=1.17.1" },
     { name = "silero-vad", specifier = ">=6.2.1" },
@@ -4539,12 +4537,12 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'clip'", specifier = ">=4.45" },
     { name = "walkie-sdk", git = "https://github.com/EIC-Robocup-2026/walkie-sdk.git" },
 ]
-provides-extras = ["dev", "clip", "graphs"]
+provides-extras = ["dev", "clip"]
 
 [[package]]
 name = "walkie-sdk"
 version = "0.2.0"
-source = { git = "https://github.com/EIC-Robocup-2026/walkie-sdk.git#5d1052910ee3f67b258d3f0096ea5d07e342cb8a" }
+source = { git = "https://github.com/EIC-Robocup-2026/walkie-sdk.git#396ebf46de2709bc87e46f1026ea75b8e6ed1b72" }
 dependencies = [
     { name = "eclipse-zenoh" },
     { name = "matplotlib" },

@@ -20,6 +20,7 @@ dependencies = [
     "pydub>=0.25.1",
     "pytest>=9.0.2",
     "python-dotenv>=1.2.2",
+    "rerun-sdk>=0.20",
     "scikit-learn>=1.9.0",
     "scipy>=1.17.1",
     "silero-vad>=6.2.1",
@@ -41,12 +42,6 @@ clip = [
     "torch>=2.7",
     "transformers>=4.45",
 ]
-# Real-time 3D visualization for walkie_graphs (rerun.io). Imported lazily, so
-# the module + tests run without it; install with `uv sync --extra graphs`.
-graphs = [
-    "rerun-sdk>=0.20",
-]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Put the repo root on sys.path so tests can `import services.walkie_graphs` / `client` etc.
