@@ -2,7 +2,7 @@
 
 GPSR commands reference people by gesture/pose ("the waving person", "the person
 raising their left arm", "how many people are sitting"). The detector gives 17
-named COCO keypoints per person (client.pose_estimation.PersonPose); these
+named COCO keypoints per person (client.image.PersonPose); these
 heuristics turn keypoints into the canonical gesture ids the world model uses
 (world.toml [gestures]). No robot, no network — `PersonPose` is a plain
 dataclass — so the rules are unit-tested directly.
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import os
 
-from client.pose_estimation import PersonPose, PoseKeypoint
+from client.image import PersonPose, PoseKeypoint
 
 
 def _conf() -> float:

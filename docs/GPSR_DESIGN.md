@@ -526,3 +526,14 @@ flat string — decide alongside the CompetitionTemplate import.)
   no-match, absent → honest negative). The clothing path adds a per-find LLM
   dependency (N captions + 1 disambiguation call) — fine against the clock for
   the usual handful of people; wants an on-robot latency spot-check.
+- **`follow` primitive + `origin/main` merge** — *resolved (integration):* merged
+  main into `feat/GPSR`, bringing the **unified image API** (`walkieAI.image.*`
+  replacing the per-task `object_detection`/`pose_estimation`/`image_caption`
+  sub-clients) plus the HRI/Restaurant/PickAndPlace work. GPSR's three perception
+  helpers + test fakes were ported to `walkieAI.image.detect/estimate_poses/
+  caption`. `follow` is now a **Tier-1 skill** reusing HRI's `follow_person` +
+  `select_largest_person` (GPSR enrolls nobody, so it tracks whoever is in front
+  — the commander). Open: a **destination-arrival stopper** ("follow me to X"
+  still ends on `HRI_FOLLOW_TIMEOUT_SEC`, not on reaching X) and on-robot
+  validation of the loop. **Live status is now tracked in
+  [`tasks/GPSR/CHECKLIST.md`](../tasks/GPSR/CHECKLIST.md).**

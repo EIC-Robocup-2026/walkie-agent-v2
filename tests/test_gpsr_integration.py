@@ -20,8 +20,7 @@ import textwrap
 
 import pytest
 
-from client.object_detection import DetectedObject
-from client.pose_estimation import PersonPose, PoseKeypoint
+from client.image import DetectedObject, PersonPose, PoseKeypoint
 from tasks.GPSR import skills
 from tasks.GPSR.dispatch import execute_plan
 from tasks.GPSR.parse import ground_step
@@ -97,37 +96,29 @@ class _FakeModel:
         return _FakeMsg(self.reply)
 
 
-class _FakeDetector:
-    def __init__(self, dets):
-        self.dets = dets
+class _FakeImage:
+    """Stand-in for the unified ImageClient (walkieAI.image)."""
+
+    def __init__(self, dets=(), people=(), caption="a blue striped shirt"):
+        self.dets = list(dets)
+        self.people = list(people)
+        self.caption_text = caption
         self.prompts_seen: list = []
 
-    def detect(self, img, prompts=None, return_mask=False):
+    def detect(self, img, *, prompts=None, return_mask=False):
         self.prompts_seen.append(prompts)
         return list(self.dets)
 
-
-class _FakePoseEst:
-    def __init__(self, people):
-        self.people = people
-
-    def estimate(self, img):
+    def estimate_poses(self, img):
         return list(self.people)
 
-
-class _FakeCaptioner:
-    def __init__(self, text="a blue striped shirt"):
-        self.text = text
-
-    def caption(self, img, prompt=None):
-        return self.text
+    def caption(self, img, *, prompt=None):
+        return self.caption_text
 
 
 class _FakeAI:
     def __init__(self, dets=(), people=(), caption="a blue striped shirt"):
-        self.object_detection = _FakeDetector(list(dets))
-        self.pose_estimation = _FakePoseEst(list(people))
-        self.image_caption = _FakeCaptioner(caption)
+        self.image = _FakeImage(dets, people, caption)
 
 
 class _FakeBrain:
@@ -332,6 +323,30 @@ def test_find_person_by_clothing_no_match_is_honest(world):
         descriptor_kind="clothing", raw="find the person in a red shirt"))
     assert status is CmdStatus.DONE
     assert any("could not find" in s.lower() for s in ctx.saids)
+
+
+def test_follow_dispatches_tier1_to_hri_follow_loop(world, monkeypatch):
+    """`follow` is now a Tier-1 skill (was Tier-2): it drives HRI's follow_person
+    with select_largest_person. We stub the loop (it's HRI's to test) and assert
+    GPSR wired it — selector, warmup speech, arrival line — with NO brain set, so
+    a Tier-2 fall-through would FAIL instead of DONE."""
+    calls = {}
+
+    def _fake_follow(ctx, select, *, on_warmup=None, **kw):
+        calls["select"] = select
+        if on_warmup:
+            on_warmup()
+        return "timeout"
+
+    monkeypatch.setattr(skills, "follow_person", _fake_follow)
+    ctx = _FakeCtx(ai=_FakeAI(people=[_plain_person((100, 100, 40, 120))]))
+    _, status = _run(ctx, world, RawStep(
+        primitive="follow", person="me", to_location="kitchen",
+        raw="follow me to the kitchen"))
+    assert status is CmdStatus.DONE                       # Tier-1, not a Tier-2 miss
+    assert calls["select"] is skills.select_largest_person
+    assert any("follow you" in s.lower() for s in ctx.saids)   # warmup ack
+    assert any("kitchen" in s.lower() for s in ctx.saids)      # arrival line
 
 
 def test_get_object_property_category_uses_world_model_no_perception(world):

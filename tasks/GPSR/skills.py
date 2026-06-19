@@ -29,7 +29,13 @@ from datetime import datetime
 from langchain.messages import HumanMessage
 
 from tasks.base import TaskContext
-from tasks.HRI.skills import cxcywh_to_xyxy, face_point, lift_bbox_world_xy
+from tasks.HRI.skills import (
+    cxcywh_to_xyxy,
+    face_point,
+    follow_person,
+    lift_bbox_world_xy,
+    select_largest_person,
+)
 
 from . import gestures
 from .plan import PlanStep, _person_phrase
@@ -40,7 +46,7 @@ from .world import WorldModel
 
 def _detect(ctx: TaskContext, img, classes: list[str], *, return_mask: bool = False):
     try:
-        return ctx.walkieAI.object_detection.detect(img, prompts=classes, return_mask=return_mask)
+        return ctx.walkieAI.image.detect(img, prompts=classes, return_mask=return_mask)
     except Exception as exc:
         print(f"[gpsr.skill] object detection failed ({exc})")
         return []
@@ -48,7 +54,7 @@ def _detect(ctx: TaskContext, img, classes: list[str], *, return_mask: bool = Fa
 
 def _people(ctx: TaskContext, img):
     try:
-        return ctx.walkieAI.pose_estimation.estimate(img)
+        return ctx.walkieAI.image.estimate_poses(img)
     except Exception as exc:
         print(f"[gpsr.skill] pose estimation failed ({exc})")
         return []
@@ -56,7 +62,7 @@ def _people(ctx: TaskContext, img):
 
 def _caption(ctx: TaskContext, crop, prompt: str) -> str | None:
     try:
-        return ctx.walkieAI.image_caption.caption(crop, prompt=prompt)
+        return ctx.walkieAI.image.caption(crop, prompt=prompt)
     except Exception as exc:
         print(f"[gpsr.skill] caption failed ({exc})")
         return None
@@ -354,12 +360,40 @@ def get_object_property(ctx: TaskContext, step: PlanStep, world: WorldModel, sta
     return True
 
 
-# primitive value -> skill. Manipulation primitives are intentionally absent:
-# they fall through to the Tier-2 agent fallback until Phase 2.
+def follow(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
+    """Follow a person, reusing HRI's ``follow_person`` tracking loop (off main).
+
+    GPSR enrolls nobody, so we track whoever is in front via
+    ``select_largest_person`` — i.e. the person who just issued the command.
+    The loop ends on lost/timeout. There is **no destination-arrival stopper
+    yet** (see tasks/GPSR/CHECKLIST.md), so "follow me to X" is bounded by
+    ``HRI_FOLLOW_TIMEOUT_SEC``, not by actually reaching X — the arrival line is
+    best-effort. Returns True (it ran) unless follow_person raises.
+    """
+    to = step.args.get("to")
+    reason = follow_person(
+        ctx,
+        select_largest_person,
+        on_warmup=lambda: ctx.say("Okay, please lead the way slowly and I will follow you."),
+    )
+    print(f"[gpsr.skill] follow exit reason: {reason}")
+    if reason == "lost":
+        ctx.say("I lost track of you.")
+    elif to:
+        ctx.say(f"We have arrived at {to.replace('_', ' ')}.")
+    else:
+        ctx.say("I have stopped following.")
+    return True
+
+
+# primitive value -> skill. `guide` and the manipulation primitives
+# (pick/place/deliver) are intentionally absent: they fall through to the Tier-2
+# agent fallback until their phases land. `follow` reuses HRI's follow_person.
 SKILLS = {
     "navigate": navigate,
     "find_object": find_object,
     "find_person": find_person,
+    "follow": follow,
     "count": count,
     "say": say,
     "greet": greet,

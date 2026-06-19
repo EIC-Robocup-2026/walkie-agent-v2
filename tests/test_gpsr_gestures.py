@@ -6,7 +6,7 @@ raised hand has a SMALLER y than the shoulder.
 
 from __future__ import annotations
 
-from client.pose_estimation import PersonPose, PoseKeypoint
+from client.image import PersonPose, PoseKeypoint
 from tasks.GPSR import gestures
 
 
