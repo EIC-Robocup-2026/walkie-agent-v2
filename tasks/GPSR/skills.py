@@ -43,6 +43,7 @@ from tasks.skills import (
 
 from . import gestures
 from .plan import PlanStep, _person_phrase
+from .tracking import ArrivalStopper
 from .world import WorldModel
 
 
@@ -368,24 +369,32 @@ def follow(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> 
     """Follow a person, reusing HRI's ``follow_person`` tracking loop (off main).
 
     GPSR enrolls nobody, so we track whoever is in front via
-    ``select_largest_person`` — i.e. the person who just issued the command.
-    The loop ends on lost/timeout. There is **no destination-arrival stopper
-    yet** (see tasks/GPSR/CHECKLIST.md), so "follow me to X" is bounded by
-    ``HRI_FOLLOW_TIMEOUT_SEC``, not by actually reaching X — the arrival line is
-    best-effort. Returns True (it ran) unless follow_person raises.
+    ``select_largest_person`` — i.e. the person who just issued the command. When
+    the command names a destination (``follow me to X``), an
+    :class:`tracking.ArrivalStopper` ends the loop the moment the robot reaches
+    X's pose (``follow_person`` returns ``'stopped'``); otherwise it runs until
+    the person is lost or ``HRI_FOLLOW_TIMEOUT_SEC``. Returns True unless
+    follow_person raises.
     """
     to = step.args.get("to")
+    target_xy = None
+    if to:
+        pose = world.location_pose(to)
+        if pose is not None:
+            target_xy = (pose[0], pose[1])
+    stopper = ArrivalStopper(ctx, target_xy) if target_xy is not None else None
     reason = follow_person(
         ctx,
         select_largest_person,
+        stopper=stopper,
         on_warmup=lambda: ctx.say("Okay, please lead the way slowly and I will follow you."),
     )
     print(f"[gpsr.skill] follow exit reason: {reason}")
-    if reason == "lost":
-        ctx.say("I lost track of you.")
-    elif to:
+    if reason == "stopped" and to:  # the arrival stopper fired -> we reached `to`
         ctx.say(f"We have arrived at {to.replace('_', ' ')}.")
-    else:
+    elif reason == "lost":
+        ctx.say("I lost track of you.")
+    else:  # timed out, or stopped with no named destination
         ctx.say("I have stopped following.")
     return True
 
@@ -394,10 +403,11 @@ def guide(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> b
     """Guide (lead) a person to a destination — nav + best-effort person confirm.
 
     Optionally goes to ``from`` first (where the person is), confirms/faces them,
-    then leads to ``to`` and announces arrival. The person is expected to follow;
-    there is **no active "wait if they fall behind" tracking yet** (see
-    tasks/GPSR/CHECKLIST.md). Returns False (→ Tier-2) only when the destination
-    is missing or unreachable — matching `navigate`.
+    then leads to ``to`` and announces arrival. We lead with our back to the person,
+    so confirming they arrived with us needs **mid-route re-acquire** (looking back
+    at the trailing follower), the open follow-back TODO — a forward-facing arrival
+    frame can't see them. Returns False (→ Tier-2) only when the destination is
+    missing or unreachable — matching `navigate`.
     """
     to = step.args.get("to")
     frm = step.args.get("from")
@@ -418,6 +428,10 @@ def guide(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> b
     if not to or not go_to_named(ctx, to, world, state):
         ctx.say("I am sorry, I could not find the way there.")
         return False
+    # We led with our back to the person (they trail behind), so the forward camera
+    # frame here CANNOT confirm they arrived — checking it would false-negative on a
+    # compliant follower. Confirming the companion needs looking back / mid-route
+    # re-acquire (tracking.companion_present; the open follow-back TODO). Announce.
     ctx.say(f"We have arrived at {dest}.")
     return True
 

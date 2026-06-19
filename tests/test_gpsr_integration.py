@@ -325,18 +325,18 @@ def test_find_person_by_clothing_no_match_is_honest(world):
     assert any("could not find" in s.lower() for s in ctx.saids)
 
 
-def test_follow_dispatches_tier1_to_hri_follow_loop(world, monkeypatch):
-    """`follow` is now a Tier-1 skill (was Tier-2): it drives HRI's follow_person
-    with select_largest_person. We stub the loop (it's HRI's to test) and assert
-    GPSR wired it — selector, warmup speech, arrival line — with NO brain set, so
-    a Tier-2 fall-through would FAIL instead of DONE."""
+def test_follow_with_destination_uses_arrival_stopper(world, monkeypatch):
+    """`follow ... to X` is Tier-1 (no brain) over HRI's follow_person with
+    select_largest_person, and passes an ArrivalStopper so the loop ends on
+    arrival ('stopped') -> arrival announce. We stub the loop (it's HRI's to test)."""
     calls = {}
 
-    def _fake_follow(ctx, select, *, on_warmup=None, **kw):
+    def _fake_follow(ctx, select, *, stopper=None, on_warmup=None, **kw):
         calls["select"] = select
+        calls["stopper"] = stopper
         if on_warmup:
             on_warmup()
-        return "timeout"
+        return "stopped"  # simulate the arrival stopper firing
 
     monkeypatch.setattr(skills, "follow_person", _fake_follow)
     ctx = _FakeCtx(ai=_FakeAI(people=[_plain_person((100, 100, 40, 120))]))
@@ -345,8 +345,25 @@ def test_follow_dispatches_tier1_to_hri_follow_loop(world, monkeypatch):
         raw="follow me to the kitchen"))
     assert status is CmdStatus.DONE                       # Tier-1, not a Tier-2 miss
     assert calls["select"] is skills.select_largest_person
-    assert any("follow you" in s.lower() for s in ctx.saids)   # warmup ack
-    assert any("kitchen" in s.lower() for s in ctx.saids)      # arrival line
+    assert calls["stopper"] is not None                   # ArrivalStopper wired for the destination
+    assert any("follow you" in s.lower() for s in ctx.saids)         # warmup ack
+    assert any("arrived at kitchen" in s.lower() for s in ctx.saids)  # arrival on 'stopped'
+
+
+def test_follow_without_destination_has_no_stopper(world, monkeypatch):
+    """`follow me` (no destination) passes no stopper and does not claim arrival."""
+    calls = {}
+
+    def _fake_follow(ctx, select, *, stopper=None, on_warmup=None, **kw):
+        calls["stopper"] = stopper
+        return "timeout"
+
+    monkeypatch.setattr(skills, "follow_person", _fake_follow)
+    ctx = _FakeCtx(ai=_FakeAI(people=[_plain_person((100, 100, 40, 120))]))
+    _, status = _run(ctx, world, RawStep(primitive="follow", person="me", raw="follow me"))
+    assert status is CmdStatus.DONE
+    assert calls["stopper"] is None                       # no destination -> no arrival stopper
+    assert any("stopped following" in s.lower() for s in ctx.saids)  # not a false 'arrived'
 
 
 def test_guide_leads_person_from_start_to_destination(world, _patch_geometry):

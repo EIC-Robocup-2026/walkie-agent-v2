@@ -38,6 +38,11 @@ GPSR_WORLD_FILE = "tasks/GPSR/world.toml"
 # Manipulation is gated until the arm is calibrated (mirrors
 # RESTAURANT_ARM_CALIBRATED). Phase 1 is navigation-class; Phase 2 flips this on.
 GPSR_ENABLE_MANIPULATION = "0"
+# follow/guide tracking (tasks/GPSR/tracking.py): how close (m) the robot must get
+# to a "follow me to X" destination before the ArrivalStopper ends the follow, and
+# how often (s) it polls the robot pose.
+GPSR_ARRIVAL_RADIUS_M = "1.0"
+GPSR_ARRIVAL_POLL_SEC = "0.5"
 # Minimum parser coverage the Phase-0 gate (tests/test_gpsr_coverage.py) requires.
 GPSR_COVERAGE_MIN = "0.85"
 # Identity facts the 'say/tell' skill grounds answers with (the day/time are read

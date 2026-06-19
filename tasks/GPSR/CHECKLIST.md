@@ -22,17 +22,18 @@ or real poses** · `[ ]` stub / Tier-2 fallback / not implemented.
   - [~] `navigate` — world-model pose + `ctx.goto`; **needs real poses** (`world.toml`
         is all `[0,0,0]`) + nav stack.
   - [~] `find_object` — `walkie_graphs` memory + live re-detect; needs perception/robot.
-  - [~] `follow` — **reuses HRI `follow_person` + `select_largest_person`** (landed via
-        the main merge). Tracks whoever is in front (GPSR enrolls nobody). **No
-        destination-arrival stopper yet** → "follow me to X" is bounded by
-        `HRI_FOLLOW_TIMEOUT_SEC`, not by reaching X; arrival line is best-effort.
+  - [~] `follow` — reuses HRI `follow_person` + `select_largest_person` (tracks
+        whoever is in front; GPSR enrolls nobody). "follow me to X" now ends the
+        moment the robot reaches X via a `tracking.ArrivalStopper` (returns
+        'stopped'), not on `HRI_FOLLOW_TIMEOUT_SEC`. Needs perception/robot.
   - [~] `count` — navigate + detect/pose + `len()`; needs perception/robot.
   - [~] `greet` — `find_person` + spoken greeting; needs perception/robot.
   - [~] `get_person_info` — pose/gesture keypoints, clothing caption, name-by-ask.
   - [~] `get_object_property` — world-model category, else caption/measure.
   - [~] `guide` — lead a person to a destination (drive to `from` → confirm/face
-        the person → lead to `to` → arrival announce). **No active follow-back
-        tracking** yet (doesn't pause if they fall behind); needs perception/robot.
+        the person → lead to `to` → announce arrival). Confirming the person arrived
+        needs **mid-route re-acquire** (the robot leads with its back to them, so a
+        forward arrival frame can't see a trailing follower) — still open; needs robot.
   - [ ] `pick` / `place` / `deliver` — **gated off** (`GPSR_ENABLE_MANIPULATION=0`)
         until the arm is calibrated; promote Restaurant's grasp (`tasks/manipulation.py`).
         Falls through to Tier-2.
@@ -64,14 +65,17 @@ or real poses** · `[ ]` stub / Tier-2 fallback / not implemented.
 - [x] Shared helpers imported from the **global `tasks.skills` package** (geometry /
       lift / navigation / people), per the skills-refactor policy — not via
       `tasks.HRI.skills`.
-- [x] Offline test suite: 76 GPSR tests (`tests/test_gpsr_*`) + coverage/split LLM gates.
+- [x] Shared follow/guide tracking (`tracking.py`): `ArrivalStopper` (follow ends on
+      arrival — wired) + `companion_present` (building block for guide's mid-route
+      re-acquire — not yet wired). Pure bits offline-tested; poll thread is robot-side.
+- [x] Interleave scheduler (`schedule.py`) + per-command-isolated interleaved executor.
+- [x] Offline test suite: 83 GPSR tests (`tests/test_gpsr_*`) + coverage/split LLM gates.
 
 ## TODO (next, roughly in priority)
 
-- [ ] **`follow` destination stopper** — end the loop on arrival at `to`, not on timeout
-      (a pose-watching stopper for `follow_person`); then on-robot validate.
-- [ ] **`guide` follow-back tracking** — pause/re-acquire if the guided person falls
-      behind (periodic pose check between nav segments); currently leads open-loop.
+- [ ] **`guide` mid-route re-acquire** — pause/re-acquire if the guided person falls
+      behind *during* the lead (needs interruptible/segmented nav; today it confirms
+      only at arrival via `companion_present`).
 - [ ] **Real arena poses** in `world.toml` (announced ~2 h before the test).
 - [ ] **Manipulation** (`pick`/`place`/`deliver`) once the arm is calibrated.
 - [ ] **Interleave on-robot tuning** — the room-batching lands the bonus's
