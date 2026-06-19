@@ -30,7 +30,9 @@ or real poses** · `[ ]` stub / Tier-2 fallback / not implemented.
   - [~] `greet` — `find_person` + spoken greeting; needs perception/robot.
   - [~] `get_person_info` — pose/gesture keypoints, clothing caption, name-by-ask.
   - [~] `get_object_property` — world-model category, else caption/measure.
-  - [ ] `guide` — **greenfield**, not implemented → Tier-2 agent fallback.
+  - [~] `guide` — lead a person to a destination (drive to `from` → confirm/face
+        the person → lead to `to` → arrival announce). **No active follow-back
+        tracking** yet (doesn't pause if they fall behind); needs perception/robot.
   - [ ] `pick` / `place` / `deliver` — **gated off** (`GPSR_ENABLE_MANIPULATION=0`)
         until the arm is calibrated; promote Restaurant's grasp (`tasks/manipulation.py`).
         Falls through to Tier-2.
@@ -62,7 +64,8 @@ or real poses** · `[ ]` stub / Tier-2 fallback / not implemented.
 
 - [ ] **`follow` destination stopper** — end the loop on arrival at `to`, not on timeout
       (a pose-watching stopper for `follow_person`); then on-robot validate.
-- [ ] **`guide`** primitive — reuse the follow tracking + arrival announce.
+- [ ] **`guide` follow-back tracking** — pause/re-acquire if the guided person falls
+      behind (periodic pose check between nav segments); currently leads open-loop.
 - [ ] **Real arena poses** in `world.toml` (announced ~2 h before the test).
 - [ ] **Manipulation** (`pick`/`place`/`deliver`) once the arm is calibrated.
 - [ ] **Interleave scheduler** (bonus 200), last.

@@ -349,6 +349,47 @@ def test_follow_dispatches_tier1_to_hri_follow_loop(world, monkeypatch):
     assert any("kitchen" in s.lower() for s in ctx.saids)      # arrival line
 
 
+def test_guide_leads_person_from_start_to_destination(world, _patch_geometry):
+    """guide: drive to `from`, confirm/face the person, lead to `to`, announce."""
+    ctx = _FakeCtx(ai=_FakeAI(people=[_plain_person((100, 100, 40, 120))]))
+    _, status = _run(ctx, world, RawStep(
+        primitive="guide", person="Charlie", descriptor_kind="name",
+        from_location="office", to_location="kitchen",
+        raw="guide Charlie from the office to the kitchen"))
+    assert status is CmdStatus.DONE
+    assert ctx.gotos == [(7.0, 8.0, 0.0), (1.0, 2.0, 0.0)]  # office (from) then kitchen (to)
+    assert _patch_geometry == [(9.0, 9.0)]                  # faced the person
+    assert any("hello charlie" in s.lower() for s in ctx.saids)
+    assert any("guide you to kitchen" in s.lower() for s in ctx.saids)
+    assert any("arrived at kitchen" in s.lower() for s in ctx.saids)
+
+
+def test_guide_unreachable_destination_falls_back_to_tier2(world):
+    """If the lead-nav fails, guide returns False so the agent stack (Tier-2) tries."""
+    brain = _FakeBrain()
+    ctx = _FakeCtx(ai=_FakeAI(people=[_plain_person((100, 100, 40, 120))]), goto_ok=False)
+    _, status = _run(ctx, world, RawStep(
+        primitive="guide", person="Charlie", descriptor_kind="name",
+        to_location="kitchen", raw="guide Charlie to the kitchen"), brain=brain)
+    assert brain.clauses                       # clause handed to Tier-2
+    assert status is CmdStatus.DONE            # Tier-2 stub 'handled' it
+
+
+def test_guide_with_no_person_visible_still_leads_open_loop(world, _patch_geometry):
+    """Person not in the first frame (the realistic case): guide leads anyway —
+    no facing, but still announces and reaches `to` (DONE). This locks the
+    documented 'no follow-back tracking' degraded behaviour as intended."""
+    ctx = _FakeCtx(ai=_FakeAI(people=[]))
+    _, status = _run(ctx, world, RawStep(
+        primitive="guide", person="Charlie", descriptor_kind="name",
+        to_location="kitchen", raw="guide Charlie to the kitchen"))
+    assert status is CmdStatus.DONE
+    assert ctx.gotos == [(1.0, 2.0, 0.0)]      # led to kitchen (no `from` given)
+    assert _patch_geometry == []                # nobody seen -> nobody faced
+    assert any("guide you to kitchen" in s.lower() for s in ctx.saids)
+    assert any("arrived at kitchen" in s.lower() for s in ctx.saids)
+
+
 def test_get_object_property_category_uses_world_model_no_perception(world):
     """category is known from the world model — answered with zero detections."""
     ctx = _FakeCtx(ai=_FakeAI(dets=[]))

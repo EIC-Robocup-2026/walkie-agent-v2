@@ -386,14 +386,47 @@ def follow(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> 
     return True
 
 
-# primitive value -> skill. `guide` and the manipulation primitives
-# (pick/place/deliver) are intentionally absent: they fall through to the Tier-2
-# agent fallback until their phases land. `follow` reuses HRI's follow_person.
+def guide(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
+    """Guide (lead) a person to a destination — nav + best-effort person confirm.
+
+    Optionally goes to ``from`` first (where the person is), confirms/faces them,
+    then leads to ``to`` and announces arrival. The person is expected to follow;
+    there is **no active "wait if they fall behind" tracking yet** (see
+    tasks/GPSR/CHECKLIST.md). Returns False (→ Tier-2) only when the destination
+    is missing or unreachable — matching `navigate`.
+    """
+    to = step.args.get("to")
+    frm = step.args.get("from")
+    descriptor = step.args.get("descriptor")
+    kind = step.args.get("kind")
+    # Meet the person at the start beacon, if one was named.
+    if frm:
+        go_to_named(ctx, frm, world, state)
+    # Confirm + face the person (best-effort; GPSR enrolls nobody).
+    snap, bbox = _find_person_match(ctx, step)
+    if snap is not None and bbox is not None:
+        xy = lift_bbox_world_xy(ctx, snap, bbox)
+        if xy:
+            face_point(ctx, *xy)
+    dest = (to or "").replace("_", " ")
+    addr = f"Hello {descriptor}, " if kind == "name" and descriptor else ""
+    ctx.say(f"{addr}please follow me, and I will guide you to {dest}.")
+    if not to or not go_to_named(ctx, to, world, state):
+        ctx.say("I am sorry, I could not find the way there.")
+        return False
+    ctx.say(f"We have arrived at {dest}.")
+    return True
+
+
+# primitive value -> skill. The manipulation primitives (pick/place/deliver) are
+# intentionally absent: they fall through to the Tier-2 agent fallback until
+# Phase 2. `follow`/`guide` reuse HRI's follow_person / nav helpers.
 SKILLS = {
     "navigate": navigate,
     "find_object": find_object,
     "find_person": find_person,
     "follow": follow,
+    "guide": guide,
     "count": count,
     "say": say,
     "greet": greet,
