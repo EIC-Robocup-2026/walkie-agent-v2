@@ -505,3 +505,24 @@ flat string — decide alongside the CompetitionTemplate import.)
   literal fallback. Open answer quality (jokes, trivia) still wants on-robot/real-
   LLM spot-checks, but the brittle keyword heuristic and the "nothing answers it"
   gap are gone.
+- **`find_person` descriptor matching** — *resolved (was a stub):* `_find_person_match`
+  (used by both `find_person` and `greet`) now matches per descriptor *kind*
+  instead of always grabbing the nearest person:
+  - **gesture/pose** → COCO-keypoint heuristics (`gestures.matches_gesture`);
+    nobody matching → honest "could not find", not a false positive.
+  - **clothing** → caption each candidate's crop, then **one LLM call picks the
+    best-matching index (or none)**. This deliberately **departs from §7's
+    "reuse HRI `locate_people`"**: that path is *re-ID against an enrolled
+    gallery*, and **GPSR has no enrollment phase** (`ctx.people` is always empty,
+    `count()==0` → it returns nothing). Clothing is attribute-matching, not
+    re-ID, so captioning is the right tool; OSNet appearance embeddings only help
+    re-find the *same* person (the `follow`/`guide` tracking case).
+  - **name** → still best-effort nearest, because identity can't be verified
+    without a gallery; the robot addresses them by the spoken name. (A real
+    verify would need an enroll-on-first-sight or a known-faces load — open.)
+  Spoken results are now descriptor-specific & honest (`plan._person_phrase`):
+  "I found the waving person" / "I could not find Charlie". Offline-tested in
+  `tests/test_gpsr_integration.py` (gesture match, clothing LLM-pick, clothing
+  no-match, absent → honest negative). The clothing path adds a per-find LLM
+  dependency (N captions + 1 disambiguation call) — fine against the clock for
+  the usual handful of people; wants an on-robot latency spot-check.

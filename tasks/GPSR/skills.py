@@ -23,6 +23,7 @@ gestures.py / plan.py.
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 
 from langchain.messages import HumanMessage
@@ -31,7 +32,7 @@ from tasks.base import TaskContext
 from tasks.HRI.skills import cxcywh_to_xyxy, face_point, lift_bbox_world_xy
 
 from . import gestures
-from .plan import PlanStep
+from .plan import PlanStep, _person_phrase
 from .world import WorldModel
 
 
@@ -159,8 +160,53 @@ def find_object(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict
     return True
 
 
+def _pick_index(reply: str | None, n: int) -> int | None:
+    """First integer in *reply*, if it is a valid 0..n-1 candidate index."""
+    m = re.search(r"-?\d+", reply or "")
+    if not m:
+        return None
+    i = int(m.group())
+    return i if 0 <= i < n else None
+
+
+def _match_attire(ctx: TaskContext, snap, people, descriptor: str):
+    """Pick the person whose clothing best matches a free-text descriptor.
+
+    Clothing is NOT a re-ID problem — GPSR enrolls no face/appearance gallery,
+    so the HRI people store is empty and ``locate_people`` can't help. It's
+    attribute matching: caption each candidate's crop, then let the LLM choose
+    the index that matches '<descriptor>' (or none). Returns the chosen person,
+    or None when nobody matches — so the caller can honestly report a miss
+    instead of grabbing a bystander.
+    """
+    captions = [
+        _caption(ctx, _crop(snap.img, cxcywh_to_xyxy(p.bbox)),
+                 "Describe this person's clothing and its colors in one short phrase.") or ""
+        for p in people
+    ]
+    listing = "\n".join(f"{i}: {c}" for i, c in enumerate(captions))
+    reply = _llm_line(
+        ctx,
+        f'A person is described as: "{descriptor}".\n'
+        f"People currently visible, by index and their clothing:\n{listing}\n"
+        "Reply with ONLY the index of the best match, or -1 if none clearly matches.",
+    )
+    idx = _pick_index(reply, len(people))
+    return people[idx] if idx is not None else None
+
+
 def _find_person_match(ctx: TaskContext, step: PlanStep):
-    """Return (snap, person_bbox_xyxy) for the descriptor, or (snap, None)."""
+    """Return (snap, person_bbox_xyxy) for the descriptor, or (snap, None).
+
+    Matching is per descriptor *kind* (parse._ground_person):
+      gesture/pose -> COCO-keypoint heuristics (gestures.py);
+      clothing     -> caption each candidate and LLM-pick the best attire match;
+      name         -> GPSR enrolls no face gallery, so identity can't be
+                      verified; fall back to the nearest person (best effort) and
+                      let the caller address them by name;
+      (none given) -> the nearest person.
+    snap is None only on a camera failure; bbox is None when nobody matches.
+    """
     snap = ctx.snapshot()
     if snap is None:
         return None, None
@@ -169,12 +215,17 @@ def _find_person_match(ctx: TaskContext, step: PlanStep):
         return snap, None
     kind = step.args.get("kind")
     descriptor = step.args.get("descriptor")
+
     if kind in ("gesture", "pose") and descriptor:
-        matches = [p for p in people if gestures.matches_gesture(p, descriptor)]
-        people = matches or []
-    # name / clothing / no-match: best-effort nearest (largest bbox = closest).
-    if not people:
-        return snap, None
+        people = [p for p in people if gestures.matches_gesture(p, descriptor)]
+        if not people:
+            return snap, None  # nobody is doing that gesture/pose
+
+    elif kind == "clothing" and descriptor:
+        match = _match_attire(ctx, snap, people, descriptor)
+        return snap, (cxcywh_to_xyxy(match.bbox) if match is not None else None)
+
+    # name / no descriptor / gesture-matched: nearest person (largest = closest).
     target = max(people, key=lambda p: p.bbox[2] * p.bbox[3])
     return snap, cxcywh_to_xyxy(target.bbox)
 
@@ -185,8 +236,8 @@ def find_person(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict
         go_to_named(ctx, room, world, state)
     snap, bbox = _find_person_match(ctx, step)
     if snap is None:
-        return False
-    who = step.args.get("descriptor") or "person"
+        return False  # no camera frame -> let Tier-2 try
+    who = _person_phrase(step.args.get("descriptor"), step.args.get("kind"))
     if bbox is None:
         ctx.say(f"I could not find {who}.")
         return True
@@ -194,7 +245,7 @@ def find_person(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict
     if xy:
         state["target_xy"] = xy
         face_point(ctx, *xy)
-    ctx.say("I found you.")
+    ctx.say(f"I found {who}.")
     return True
 
 

@@ -211,6 +211,11 @@ def _waving_person(bbox=(320, 240, 80, 160)):
     )
 
 
+def _plain_person(bbox):
+    """A pose with no informative keypoints (clothing match ignores gesture)."""
+    return PersonPose(bbox=bbox, confidence=0.9, keypoints=[])
+
+
 def _det(bbox=(0, 0, 10, 10), conf=0.9, name="cola"):
     return DetectedObject(mask=None, bbox=bbox, area_ratio=0.01, class_name=name, confidence=conf)
 
@@ -283,7 +288,8 @@ def test_find_person_by_gesture_matches_and_faces(world, _patch_geometry):
     ctx = _FakeCtx(ai=_FakeAI(people=[_waving_person()]))
     _, status = _run(ctx, world, RawStep(primitive="find_person", person="waving person", descriptor_kind="gesture", raw="find the waving person"))
     assert status is CmdStatus.DONE
-    assert any("found you" in s.lower() for s in ctx.saids)
+    # Speech is now descriptor-specific (honest), not a generic "found you".
+    assert any("found the waving person" in s.lower() for s in ctx.saids)
     assert _patch_geometry == [(9.0, 9.0)]  # faced the lifted point
 
 
@@ -291,6 +297,39 @@ def test_find_person_absent_is_an_honest_negative_not_a_failure(world):
     """No people detected → the skill still 'ran' (speaks, returns True → DONE)."""
     ctx = _FakeCtx(ai=_FakeAI(people=[]))
     _, status = _run(ctx, world, RawStep(primitive="find_person", person="Charlie", descriptor_kind="name", raw="find Charlie"))
+    assert status is CmdStatus.DONE
+    assert any("could not find" in s.lower() for s in ctx.saids)
+
+
+def test_find_person_by_clothing_picks_the_llm_chosen_candidate(world, monkeypatch):
+    """Clothing isn't re-ID (no gallery): caption each person, LLM picks the index.
+
+    Two visible people; the model replies '1' → the *second* person's box is the
+    one faced. Asserts the bbox lifted is candidate 1's, not just the nearest.
+    """
+    lifted: list[tuple] = []
+    monkeypatch.setattr(skills, "lift_bbox_world_xy",
+                        lambda ctx, snap, bbox: lifted.append(tuple(bbox)) or (9.0, 9.0))
+    p0 = _plain_person((100, 100, 40, 120))
+    p1 = _plain_person((400, 100, 40, 120))
+    ctx = _FakeCtx(ai=_FakeAI(people=[p0, p1]), model=_FakeModel(reply="1"))
+    _, status = _run(ctx, world, RawStep(
+        primitive="find_person", person="person in a red shirt",
+        descriptor_kind="clothing", raw="find the person in a red shirt"))
+    assert status is CmdStatus.DONE
+    assert lifted == [skills.cxcywh_to_xyxy(p1.bbox)]  # candidate 1, by LLM choice
+    assert any("found" in s.lower() for s in ctx.saids)
+
+
+def test_find_person_by_clothing_no_match_is_honest(world):
+    """People are present but none match the attire → '-1' → honest negative."""
+    ctx = _FakeCtx(
+        ai=_FakeAI(people=[_plain_person((100, 100, 40, 120))]),
+        model=_FakeModel(reply="-1"),
+    )
+    _, status = _run(ctx, world, RawStep(
+        primitive="find_person", person="person in a red shirt",
+        descriptor_kind="clothing", raw="find the person in a red shirt"))
     assert status is CmdStatus.DONE
     assert any("could not find" in s.lower() for s in ctx.saids)
 
