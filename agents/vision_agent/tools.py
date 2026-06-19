@@ -55,7 +55,7 @@ def make_vision_tools(
         Use when the user asks "what objects do you see?" or "list all items in view".
         """
         img = _capture()
-        objects = walkieAI.object_detection.detect(img)
+        objects = walkieAI.image.detect(img)
         if not objects:
             return "No objects detected."
         lines = []
@@ -78,7 +78,7 @@ def make_vision_tools(
             A free-text caption.
         """
         img = _capture()
-        caption = walkieAI.image_caption.caption(img, prompt=prompt)
+        caption = walkieAI.image.caption(img, prompt=prompt)
         return f"Scene: {caption}"
 
     @parallelable_tool
@@ -89,7 +89,7 @@ def make_vision_tools(
         Use when checking for waves, hand-raises, or who is standing/sitting.
         """
         img = _capture()
-        people = walkieAI.pose_estimation.estimate(img)
+        people = walkieAI.image.estimate_poses(img)
         if not people:
             return "No people visible."
         lines = []
@@ -109,9 +109,11 @@ def make_vision_tools(
         emitting multiple separate tool calls.
         """
         img = _capture()
-        objects = walkieAI.object_detection.detect(img)
-        caption = walkieAI.image_caption.caption(img)
-        people = walkieAI.pose_estimation.estimate(img)
+        # One upload, three tasks fused server-side.
+        res = walkieAI.image.process(img, detection=True, caption=True, pose=True)
+        objects = res.detection or []
+        caption = res.caption or ""
+        people = res.pose or []
         parts = [f"Scene caption: {caption}"]
         if objects:
             parts.append(

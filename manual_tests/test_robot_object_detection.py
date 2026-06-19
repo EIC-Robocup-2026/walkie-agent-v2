@@ -46,7 +46,7 @@ def test_object_detection():
 
         frame = walkie.camera.capture_pil()
 
-        detections = walkieAI.object_detection.detect(frame)
+        detections = walkieAI.image.detect(frame)
         # Show the detections
         # for detection in detections:
         #     cv2.rectangle(frame, (detection.bbox[0], detection.bbox[1]), (detection.bbox[2], detection.bbox[3]), (0, 0, 255), 2)

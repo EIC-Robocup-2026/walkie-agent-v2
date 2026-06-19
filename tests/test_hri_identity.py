@@ -10,8 +10,7 @@ import math
 import pytest
 from PIL import Image
 
-from client.face_recognition import FaceEmbedding
-from client.pose_estimation import PersonPose
+from client import FaceEmbedding, PersonPose
 from perception import PeopleStore
 from perception.people_store import _mean_unit
 from tasks.HRI.identity import (
@@ -92,11 +91,26 @@ class _Appearance:
         return self._seq.next()
 
 
+class _ImageFacade:
+    """Unified image facade over the old per-task fakes, exposing the
+    client.ImageClient method names that tasks.HRI.identity now calls."""
+
+    def __init__(self, face=None, pose=None, appearance=None):
+        self._face, self._pose, self._app = face, pose, appearance
+
+    def faces(self, img):
+        return self._face.embed(img)
+
+    def estimate_poses(self, img):
+        return self._pose.estimate(img)
+
+    def appearance(self, crop):
+        return self._app.embed(crop)
+
+
 class _AI:
     def __init__(self, face_recognition=None, pose_estimation=None, appearance=None):
-        self.face_recognition = face_recognition
-        self.pose_estimation = pose_estimation
-        self.appearance = appearance
+        self.image = _ImageFacade(face_recognition, pose_estimation, appearance)
 
 
 class _Ctx:

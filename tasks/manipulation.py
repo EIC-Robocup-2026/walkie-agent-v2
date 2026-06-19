@@ -101,7 +101,7 @@ def perceive_surface(ctx: TaskContext, classes: list[str]) -> list[DetectedObjec
     if snap is None:
         return []
     try:
-        detections = ctx.walkieAI.object_detection.detect(snap.img, prompts=classes)
+        detections = ctx.walkieAI.image.detect(snap.img, prompts=classes)
     except Exception as exc:
         print(f"[manipulation] detection failed ({exc})")
         return []

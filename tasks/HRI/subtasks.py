@@ -199,7 +199,7 @@ class GreetAndLearn(SubTask):
         # head-LEVEL face frame (it needs hair/glasses/face), not a tilted-down one.
         if self.guest == 1 and face_imgs:
             try:
-                record["appearance"] = ctx.walkieAI.image_caption.caption(
+                record["appearance"] = ctx.walkieAI.image.caption(
                     face_imgs[0], prompt=prompts.APPEARANCE_CAPTION_PROMPT
                 )
             except Exception as exc:
@@ -642,7 +642,7 @@ class TestRememberAndFollowHost(SubTask):
         appearance = None
         if face_imgs:
             try:
-                appearance = ctx.walkieAI.image_caption.caption(
+                appearance = ctx.walkieAI.image.caption(
                     face_imgs[0], prompt=prompts.APPEARANCE_CAPTION_PROMPT
                 )
             except Exception as exc:
@@ -826,7 +826,7 @@ class TestTask(SubTask):
                 for c in os.getenv("HRI_SEAT_CLASSES", "chair,sofa,armchair,stool").split(",")
                 if c.strip()
             ]
-            dets = ctx.walkieAI.object_detection.detect(
+            dets = ctx.walkieAI.image.detect(
                 snap.img, prompts=seat_classes)
             print("[HRI] test task snapshot taken")
         return StepResult.DONE

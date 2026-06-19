@@ -1,20 +1,20 @@
-"""Unit tests for ObjectDetectionClient.detect()'s opt-in downscale.
+"""Unit tests for ImageClient.detect()'s opt-in downscale.
 
 No server: a stub overrides ``_post_files`` to capture the bytes that would be
-sent and to return canned detections in the *downscaled* coordinate frame. The
-tests assert the client (a) downscales the sent image when ``max_size`` is set,
-(b) scales the returned bbox/mask back to the ORIGINAL input resolution, and
-(c) is byte-for-byte identity when ``max_size`` is None (the default).
+sent and to return canned detections (in the unified ``/image/process``
+envelope) in the *downscaled* coordinate frame. The tests assert the client
+(a) downscales the sent image when ``max_size`` is set, (b) scales the returned
+bbox/mask back to the ORIGINAL input resolution, and (c) is byte-for-byte
+identity when ``max_size`` is None (the default).
 """
 
 import base64
 import io
 
 import numpy as np
-import pytest
 from PIL import Image
 
-from client.object_detection import ObjectDetectionClient
+from client.image import ImageClient
 
 
 def _mask_b64(w: int, h: int) -> str:
@@ -27,24 +27,25 @@ def _mask_b64(w: int, h: int) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
-class _StubClient(ObjectDetectionClient):
-    """ObjectDetectionClient whose HTTP POST is replaced by a canned response.
+class _StubClient(ImageClient):
+    """ImageClient whose HTTP POST is replaced by a canned response.
 
     Records the image bytes + form it was handed so a test can inspect what the
-    real client would have sent over the wire.
+    real client would have sent over the wire. ``detections`` are returned in the
+    unified ``{"detection": [...]}`` envelope that ``process`` parses.
     """
 
-    def __init__(self, data):
+    def __init__(self, detections):
         super().__init__(base_url="http://stub")
-        self._data = data
+        self._detections = detections
         self.sent_size: tuple[int, int] | None = None  # (w, h) of the sent JPEG
-        self.sent_form: list | None = None
+        self.sent_form: dict | None = None
 
     def _post_files(self, path, files, data):  # type: ignore[override]
         image_bytes = files["image"][1]
         self.sent_size = Image.open(io.BytesIO(image_bytes)).size
-        self.sent_form = list(data)
-        return self._data
+        self.sent_form = dict(data)
+        return {"detection": self._detections}
 
 
 def test_downscale_scales_bbox_and_mask_back_to_input_resolution():
@@ -107,12 +108,13 @@ def test_downscale_numpy_path():
     assert out[0].bbox == (20, 40, 200, 400)
 
 
-def test_provider_form_field_only_sent_when_set():
+def test_spec_carries_detection_task():
+    import json
+
     client = _StubClient([])
     img = Image.new("RGB", (320, 240), (0, 0, 0))
 
-    client.detect(img)
-    assert all(k != "provider" for k, _v in client.sent_form)
-
-    client.detect(img, provider="yolo")
-    assert ("provider", "yolo") in client.sent_form
+    client.detect(img, prompts=["chair"], return_mask=True)
+    spec = json.loads(client.sent_form["spec"])
+    assert spec["detection"]["return_mask"] is True
+    assert spec["detection"]["prompts"] == ["chair"]

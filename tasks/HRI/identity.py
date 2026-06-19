@@ -18,8 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from PIL import Image
 
-from client.face_recognition import FaceEmbedding
-from client.pose_estimation import PersonPose
+from client import FaceEmbedding, PersonPose
 from perception.people_store import _cosine_sim, _mean_unit
 from tasks.base import TaskContext
 
@@ -115,7 +114,7 @@ def _appearance_embedding(ctx: TaskContext, img: Image.Image, person_xyxy: BBox)
     try:
         x1, y1, x2, y2 = (int(v) for v in person_xyxy)
         crop = img.crop((max(0, x1), max(0, y1), min(img.width, x2), min(img.height, y2)))
-        return ctx.walkieAI.appearance.embed(crop)
+        return ctx.walkieAI.image.appearance(crop)
     except Exception as exc:
         print(f"[identity] appearance embed failed ({exc})")
         return None
@@ -123,7 +122,7 @@ def _appearance_embedding(ctx: TaskContext, img: Image.Image, person_xyxy: BBox)
 
 def _detect_faces(ctx: TaskContext, img: Image.Image) -> list[FaceEmbedding]:
     try:
-        return ctx.walkieAI.face_recognition.embed(img)
+        return ctx.walkieAI.image.faces(img)
     except Exception as exc:
         print(f"[identity] face embed failed ({exc})")
         return []
@@ -132,7 +131,7 @@ def _detect_faces(ctx: TaskContext, img: Image.Image) -> list[FaceEmbedding]:
 def _detect_persons(ctx: TaskContext, img: Image.Image) -> list[PersonPose]:
     """Pose-detected people in *img* (with keypoints); [] on any failure."""
     try:
-        return ctx.walkieAI.pose_estimation.estimate(img)
+        return ctx.walkieAI.image.estimate_poses(img)
     except Exception as exc:
         print(f"[identity] pose estimate failed ({exc})")
         return []

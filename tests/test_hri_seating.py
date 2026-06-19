@@ -6,7 +6,7 @@ cushion parser fixes: a person on part of a sofa wrongly hiding its free
 cushions, and a neighbour's box clipping a free seat wrongly marking it taken.
 """
 
-from client.pose_estimation import PersonPose, PoseKeypoint
+from client import PersonPose, PoseKeypoint
 from tasks.HRI.skills import (
     SeatCandidate,
     find_seated_person_bbox,

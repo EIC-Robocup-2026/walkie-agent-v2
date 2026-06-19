@@ -221,11 +221,9 @@ WALKIE_GRAPHS_MIN_MASK_AREA_PX = "64"
 # crop, so containers don't absorb the objects resting on/in them. 1 = on.
 WALKIE_GRAPHS_MASK_SUBTRACT = "1"
 # Context margin (px) around the bbox for the CLIP/caption crop (CG pads 20).
+# Must match the server's per_detection crop margin so the stored thumbnail
+# matches what was captioned/embedded in the fused /image/process call.
 WALKIE_GRAPHS_CROP_MARGIN_PX = "20"
-# Per-object CLIP embeds have no batch endpoint, so the round-trips are fanned out
-# across this many threads (I/O-bound). 1 = sequential. Raise toward the object count
-# if the embed server handles concurrent requests well.
-WALKIE_GRAPHS_EMBED_WORKERS = "8"
 
 [graphs.maintenance]
 # Periodic ConceptGraphs post-processing, each on its own cadence (in ingest ticks,

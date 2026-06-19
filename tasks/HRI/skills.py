@@ -19,8 +19,7 @@ from dataclasses import dataclass
 
 from PIL import Image
 
-from client.face_recognition import FaceEmbedding
-from client.pose_estimation import PersonPose
+from client import FaceEmbedding, PersonPose
 from tasks.base import TaskContext
 
 from . import prompts
@@ -243,7 +242,7 @@ def find_persons(ctx: TaskContext) -> list[PersonPose]:
     if img is None:
         return []
     try:
-        return ctx.walkieAI.pose_estimation.estimate(img)
+        return ctx.walkieAI.image.estimate_poses(img)
     except Exception as exc:
         print(f"[skills] pose estimation failed ({exc})")
         return []
@@ -331,7 +330,7 @@ def scan_seats(
                 for cls in seat_classes:
                     tc = time.perf_counter()
                     try:
-                        found = ctx.walkieAI.object_detection.detect(
+                        found = ctx.walkieAI.image.detect(
                             img, prompts=[cls], max_size=seat_max_size)
                     except Exception as exc:
                         print(f"[skills] seat detection failed for {cls!r} ({exc})")
@@ -341,7 +340,7 @@ def scan_seats(
                 stages["detect"] = time.perf_counter() - t_d
                 return dets, False
             try:
-                dets = ctx.walkieAI.object_detection.detect(
+                dets = ctx.walkieAI.image.detect(
                     img, prompts=seat_classes, max_size=seat_max_size)
             except Exception as exc:
                 print(f"[skills] seat detection failed ({exc})")
@@ -353,7 +352,7 @@ def scan_seats(
         def _run_pose():
             t_p = time.perf_counter()
             try:
-                ppl = ctx.walkieAI.pose_estimation.estimate(img)
+                ppl = ctx.walkieAI.image.estimate_poses(img)
             except Exception as exc:
                 print(f"[skills] pose estimation failed ({exc}); assuming all seats free")
                 ppl = []
@@ -530,7 +529,7 @@ def describe_seated_person(
             min(img.width, int(x2 + m)), min(img.height, int(y2 + m)),
         ))
     try:
-        return ctx.walkieAI.image_caption.caption(
+        return ctx.walkieAI.image.caption(
             crop, prompt=prompts.HOST_APPEARANCE_CAPTION_PROMPT
         )
     except Exception as exc:
@@ -1082,7 +1081,7 @@ def person_bboxes(ctx: TaskContext, img: Image.Image) -> list[BBox]:
     the tracker sample at pose-estimation rate.
     """
     try:
-        persons = ctx.walkieAI.pose_estimation.estimate(img)
+        persons = ctx.walkieAI.image.estimate_poses(img)
     except Exception as exc:
         print(f"[skills] person_bboxes: pose estimation failed ({exc})")
         return []
@@ -1493,7 +1492,7 @@ def biggest_face(
     if img is None:
         return None
     try:
-        faces = ctx.walkieAI.face_recognition.embed(img)
+        faces = ctx.walkieAI.image.faces(img)
     except Exception as exc:
         print(f"[skills] face detection failed ({exc})")
         return None

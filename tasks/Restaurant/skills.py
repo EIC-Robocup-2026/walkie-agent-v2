@@ -13,7 +13,7 @@ import math
 import os
 from dataclasses import dataclass
 
-from client.pose_estimation import PersonPose
+from client import PersonPose
 from tasks.base import TaskContext
 from tasks.manipulation import perceive_surface, pick_object, place_at_pose
 
@@ -70,7 +70,7 @@ def detect_calling_customer(ctx: TaskContext) -> CallingCustomer | None:
         return None
     img = snap.img
     try:
-        persons = ctx.walkieAI.pose_estimation.estimate(img)
+        persons = ctx.walkieAI.image.estimate_poses(img)
     except Exception as exc:
         print(f"[restaurant.skills] pose estimation failed ({exc})")
         return None
@@ -148,7 +148,7 @@ def identify_customer(ctx: TaskContext, cust: CallingCustomer) -> None:
     desc = None
     if cust.crop is not None:
         try:
-            desc = ctx.walkieAI.image_caption.caption(cust.crop, prompt=prompts.IDENTIFY_CAPTION_PROMPT)
+            desc = ctx.walkieAI.image.caption(cust.crop, prompt=prompts.IDENTIFY_CAPTION_PROMPT)
         except Exception as exc:
             print(f"[restaurant.skills] identify caption failed ({exc})")
     ctx.say(prompts.IDENTIFY_CUSTOMER.format(desc=desc or "the person who is calling"))

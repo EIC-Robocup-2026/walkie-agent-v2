@@ -104,7 +104,7 @@ class WalkieGraphs:
         embed_text = None
         if walkieAI is not None:
             def embed_text(query: str, _ai=walkieAI):
-                return _ai.image_embed.embed_text(query)
+                return _ai.image.embed_text(query)
 
         self.memory = memory if memory is not None else GraphMemory.from_env(embed_text=embed_text)
         self.viz = viz if viz is not None else _build_viz()

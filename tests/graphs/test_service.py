@@ -236,9 +236,8 @@ def test_flag_for_refine_called_on_rejected_registration(monkeypatch):
     det = SimpleNamespace(
         class_name="cup", class_id=0, confidence=0.9,
         bbox=(0, 0, 20, 20), mask=_np.ones((40, 40), dtype=bool),
+        caption="a cup", embedding=[0.1, 0.1, 0.1],
     )
-    monkeypatch.setattr(svc, "_embed_batch", lambda crops: [[0.1] * 3])
-    monkeypatch.setattr(svc, "_caption", lambda *a: {})
     monkeypatch.setattr(svc, "_maybe_tick", lambda *a, **kw: None)
 
     svc.ingest_frame(frame, [det], tick=False)
@@ -439,33 +438,6 @@ def test_default_camera_frame_is_optical():
     _, w = _svc_with_walkie(None)
     camera_pose(w)  # lookup fails (tf None) but records the requested frames
     assert w.robot.transform.calls == [("map", "zed_head_left_camera_frame_optical")]
-
-
-def test_embed_batch_preserves_order_and_runs_concurrently():
-    import time as _time
-
-    class Embed:
-        def embed_image(self, crop):
-            _time.sleep(0.05)  # simulate a network round-trip
-            return [float(crop)]  # echo the crop id so we can check ordering
-
-    s, _ = _svc_with_walkie(None)
-    s.walkieAI = SimpleNamespace(image_embed=Embed())
-    s._embed_workers = 8
-    crops = list(range(8))
-    t = _time.perf_counter()
-    out = s._embed_batch(crops)
-    elapsed = _time.perf_counter() - t
-    assert out == [[float(c)] for c in crops]  # order preserved
-    assert elapsed < 0.05 * 8 * 0.6  # 8 x 50ms ran concurrently, not serially
-
-
-def test_embed_batch_empty_and_single():
-    s, _ = _svc_with_walkie(None)
-    s.walkieAI = SimpleNamespace(image_embed=SimpleNamespace(embed_image=lambda c: [1.0]))
-    assert s._embed_batch([]) == []
-    s._embed_workers = 1
-    assert s._embed_batch(["a"]) == [[1.0]]
 
 
 # ---------------------------------------------------------------------------
