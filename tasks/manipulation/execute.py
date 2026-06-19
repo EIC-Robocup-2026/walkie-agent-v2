@@ -46,6 +46,39 @@ def _rich() -> bool:
     return os.getenv("WALKIE_GRASP_PLANNER", "graspnet").strip().lower() != "stub"
 
 
+# --- tester confirmation gate -----------------------------------------------
+class _AbortManipulation(Exception):
+    """Raised by the confirm gate when the tester aborts the sequence ('q')."""
+
+
+def _confirm(label: str) -> bool:
+    """Tester gate before a robot action (enabled by WALKIE_MANIP_CONFIRM=1).
+
+    Prints what is about to happen and waits for the tester: Enter performs the
+    action, ``s`` skips just this action, ``q`` aborts the whole pick/place. A
+    no-op (always True) when the gate is off, so normal runs are unaffected.
+    """
+    if os.getenv("WALKIE_MANIP_CONFIRM", "0").strip().lower() not in ("1", "true", "yes"):
+        return True
+    try:
+        ans = input(f"[confirm] about to {label} — Enter=do, s=skip, q=abort: ").strip().lower()
+    except EOFError:
+        return True
+    if ans == "q":
+        raise _AbortManipulation(label)
+    if ans == "s":
+        print(f"[manipulation] tester skipped: {label}")
+        return False
+    return True
+
+
+def _gated(label: str, fn, *args, **kwargs):
+    """Run *fn* only if the tester confirms *label*; otherwise skip it."""
+    if _confirm(label):
+        return fn(*args, **kwargs)
+    return None
+
+
 # --- perception -------------------------------------------------------------
 def perceive_surface(ctx: TaskContext, classes: list[str]) -> list[DetectedObject]:
     """Detect objects on the surface in front of the robot (open-vocab).
@@ -132,40 +165,45 @@ def _stage_table(ctx: TaskContext, obj: DetectedObject) -> None:
 # --- grasp execution --------------------------------------------------------
 def _execute_grasp(ctx: TaskContext, group, plan: GraspPlan, *, rich: bool) -> bool:
     """Open -> pre-grasp -> grasp -> close(+attach) -> lift -> carry. Returns grasped."""
-    group.gripper(1.0, blocking=True)  # open, ready to receive
-    _move_ee(group, _pregrasp(plan), plan)
+    _gated("open gripper", group.gripper, 1.0, blocking=True)  # ready to receive
+    _gated("move to pre-grasp", _move_ee, group, _pregrasp(plan), plan)
     if rich:
         scene.allow_gripper_vs_octomap(ctx, True)  # grasp inside sensed voxels
-    _move_ee(group, plan.position, plan, cartesian=True)
+    _gated("move to grasp pose", _move_ee, group, plan.position, plan, cartesian=True)
     if rich:
         scene.attach_grasped_object(ctx)  # next close attaches the box to the hand
     grasped = True
-    try:
-        result = group.grasp()  # close on the object; judge by 'grasped'
-        grasped = bool(result.get("grasped", True))
-    except Exception as exc:  # noqa: BLE001
-        print(f"[manipulation] grasp() failed ({exc}); closing gripper directly")
-        group.gripper(0.0, blocking=True)
+    if _confirm("close gripper to grasp"):
+        try:
+            result = group.grasp()  # close on the object; judge by 'grasped'
+            grasped = bool(result.get("grasped", True))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[manipulation] grasp() failed ({exc}); closing gripper directly")
+            group.gripper(0.0, blocking=True)
     if rich:
         scene.allow_gripper_vs_octomap(ctx, False)  # re-enforce once grasped
     lift = _envf("WALKIE_LIFT_HEIGHT_M", "0.15")
-    group.go_to_pose_relative([0.0, 0.0, lift], [0.0, 0.0, 0.0], blocking=True)
-    _carry_arm(ctx, group)
+    _gated(f"lift object {lift:.2f} m", group.go_to_pose_relative,
+           [0.0, 0.0, lift], [0.0, 0.0, 0.0], blocking=True)
+    if _confirm("tuck arm to carry"):
+        _carry_arm(ctx, group)
     return grasped
 
 
 def _execute_place(ctx: TaskContext, group, plan: GraspPlan, *, rich: bool) -> bool:
     """Pre-place -> (hover) -> place -> open(+detach) -> carry -> close. Returns True."""
-    _move_ee(group, _pregrasp(plan), plan)
+    _gated("move to pre-place", _move_ee, group, _pregrasp(plan), plan)
     if rich:
         clearance = _envf("WALKIE_PLACE_Z_CLEARANCE_M", "0.10")
         x, y, z = plan.position
-        _move_ee(group, (x, y, z + clearance), plan)  # hover above the surface
-    _move_ee(group, plan.position, plan, cartesian=True)
+        _gated(f"hover {clearance:.2f} m above surface", _move_ee,
+               group, (x, y, z + clearance), plan)
+    _gated("move to place pose", _move_ee, group, plan.position, plan, cartesian=True)
     if rich:
         scene.release_object_scene(ctx)  # next open detaches + removes the box
-    group.gripper(1.0, blocking=True)  # open: release the object
-    _carry_arm(ctx, group)
+    _gated("open gripper to release", group.gripper, 1.0, blocking=True)
+    if _confirm("tuck arm to carry"):
+        _carry_arm(ctx, group)
     group.gripper(0.0, blocking=False)  # close so the gripper isn't left hanging open
     return True
 
@@ -182,25 +220,32 @@ def pick_object(ctx: TaskContext, obj: DetectedObject) -> bool:
     """
     rich = _rich()
     group = _arm_group(ctx)
-    if rich and obj.world_xy is not None:
-        drive_to_object(ctx, obj.world_xy, _envf("WALKIE_PICK_STANDOFF_FAR_M", "0.35"))
-        aim_camera_at_object(ctx, obj.world_xyz)
-    plan = plan_grasp(ctx, obj)
-    if plan is None:
-        ctx.say(PICK_NO_PLAN.format(obj=obj.class_name))
-        print(f"[manipulation] pick_object({obj.class_name}) — no grasp plan")
-        return False
-    ctx.say(PICKING.format(obj=obj.class_name))  # also the perception signal
-    print(f"[manipulation] grasp plan for {obj.class_name}: pos={plan.position} "
-          f"quat={plan.quaternion} rpy={plan.rotation} frame={plan.frame_id} "
-          f"approach={plan.approach} score={plan.score}")
-    if rich:
-        _carry_arm(ctx, group)  # arm to standby before staging the scene
-        _stage_table(ctx, obj)
-        if obj.world_xy is not None:
-            refine_approach(ctx, obj.world_xy, _envf("WALKIE_PICK_STANDOFF_NEAR_M", "0.10"))
     try:
+        if rich and obj.world_xy is not None:
+            _gated("drive to far standoff", drive_to_object,
+                   ctx, obj.world_xy, _envf("WALKIE_PICK_STANDOFF_FAR_M", "0.35"))
+            _gated("aim camera (lift + head tilt)", aim_camera_at_object, ctx, obj.world_xyz)
+        plan = plan_grasp(ctx, obj)
+        if plan is None:
+            ctx.say(PICK_NO_PLAN.format(obj=obj.class_name))
+            print(f"[manipulation] pick_object({obj.class_name}) — no grasp plan")
+            return False
+        ctx.say(PICKING.format(obj=obj.class_name))  # also the perception signal
+        print(f"[manipulation] grasp plan for {obj.class_name}: pos={plan.position} "
+              f"quat={plan.quaternion} rpy={plan.rotation} frame={plan.frame_id} "
+              f"approach={plan.approach} score={plan.score}")
+        if rich:
+            if _confirm("tuck arm to standby"):
+                _carry_arm(ctx, group)  # arm to standby before staging the scene
+            _stage_table(ctx, obj)
+            if obj.world_xy is not None:
+                _gated("refine approach to near standoff", refine_approach,
+                       ctx, obj.world_xy, _envf("WALKIE_PICK_STANDOFF_NEAR_M", "0.10"))
         return _execute_grasp(ctx, group, plan, rich=rich)
+    except _AbortManipulation as ab:
+        print(f"[manipulation] pick_object({obj.class_name}) aborted by tester at: {ab}")
+        _carry_arm(ctx, group)
+        return False
     except Exception as exc:  # noqa: BLE001
         print(f"[manipulation] pick_object({obj.class_name}) arm motion failed ({exc})")
         _carry_arm(ctx, group)
@@ -227,6 +272,10 @@ def place_at_pose(ctx: TaskContext, pose6: str) -> bool:
     group = _arm_group(ctx)
     try:
         return _execute_place(ctx, group, plan, rich=_rich())
+    except _AbortManipulation as ab:
+        print(f"[manipulation] place_at_pose aborted by tester at: {ab}")
+        _carry_arm(ctx, group)
+        return False
     except Exception as exc:  # noqa: BLE001
         print(f"[manipulation] place_at_pose arm motion failed ({exc})")
         _carry_arm(ctx, group)
@@ -243,7 +292,10 @@ def release_in_front(ctx: TaskContext) -> bool:
     if _rich():
         scene.release_object_scene(ctx)  # detach the carried box on the open
     try:
-        group.gripper(1.0, blocking=True)  # release best-effort
+        if _confirm("open gripper to release in front"):
+            group.gripper(1.0, blocking=True)  # release best-effort
+    except _AbortManipulation as ab:
+        print(f"[manipulation] release_in_front aborted by tester at: {ab}")
     except Exception as exc:  # noqa: BLE001
         print(f"[manipulation] release_in_front gripper failed ({exc})")
     _carry_arm(ctx, group)

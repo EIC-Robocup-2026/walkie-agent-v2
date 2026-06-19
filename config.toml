@@ -117,6 +117,11 @@ WALKIE_PICK_HEAD_TILT_RAD = "0.5"    # +ve = camera DOWN to see the surface
 WALKIE_PICK_LIFT_NORM = "0.5"        # lift height (normalized 0–1) to reach the table
 WALKIE_PICK_CAMERA_SETTLE_SEC = "1.0" # wait after lift/tilt before capture
 
+# --- testing ---
+# Step-through gate: when "1", every arm/base motion waits for the tester to press
+# Enter (s=skip that action, q=abort the sequence). Off for normal/autonomous runs.
+WALKIE_MANIP_CONFIRM = "0"
+
 # --- common motion ---
 WALKIE_PREGRASP_OFFSET_M = "0.10"    # heuristic pre-grasp standoff (stub path only)
 WALKIE_LIFT_HEIGHT_M = "0.15"        # how far to lift after grasping

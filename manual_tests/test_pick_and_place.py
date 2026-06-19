@@ -11,7 +11,8 @@ Run as a module so the repo root is on sys.path:
     SOURCE=cloud uv run python -m manual_tests.test_pick_and_place "water bottle"
     SOURCE=mask  uv run python -m manual_tests.test_pick_and_place "water bottle"
     SOURCE=pos   uv run python -m manual_tests.test_pick_and_place "water bottle"
-    # Then perform the pick with the chosen source:
+    # Then perform the pick with the chosen source. With EXECUTE the tester steps
+    # through every arm/base motion (Enter=do, s=skip, q=abort); CONFIRM=0 disables.
     SOURCE=pos EXECUTE=1 uv run python -m manual_tests.test_pick_and_place "water bottle"
 
 RViz markers are published by default (VIZ=0 to disable): the ranked grasp
@@ -151,6 +152,10 @@ def main() -> None:
     os.environ["WALKIE_GRASP_SOURCE"] = source  # so plan_grasp/pick_object agree
     execute = os.getenv("EXECUTE", "0").lower() in ("1", "true", "yes")
     viz = os.getenv("VIZ", "1").lower() in ("1", "true", "yes")
+    # CONFIRM=1 -> step through every arm/base motion (Enter=do, s=skip, q=abort).
+    # Default on when EXECUTE so a tester gates each real move; CONFIRM=0 disables.
+    if os.getenv("CONFIRM", "1" if execute else "0").lower() in ("1", "true", "yes"):
+        os.environ["WALKIE_MANIP_CONFIRM"] = "1"
 
     walkie = initialize_robot()
     model = initialize_llm_model()
