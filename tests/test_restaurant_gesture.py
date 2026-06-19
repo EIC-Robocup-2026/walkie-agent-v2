@@ -4,7 +4,7 @@ No robot, no AI server — synthetic COCO keypoints fed to is_calling_gesture.
 """
 
 from client import PersonPose, PoseKeypoint
-from tasks.Restaurant.skills import is_calling_gesture
+from tasks.skills import is_calling_gesture
 
 # COCO indices used by the classifier.
 _NAMES = {5: "left_shoulder", 6: "right_shoulder", 9: "left_wrist", 10: "right_wrist"}

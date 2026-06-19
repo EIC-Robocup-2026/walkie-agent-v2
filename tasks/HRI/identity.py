@@ -22,7 +22,7 @@ from client import FaceEmbedding, PersonPose
 from perception.people_store import _cosine_sim, _mean_unit
 from tasks.base import TaskContext
 
-from .skills import BBox, cxcywh_to_xyxy, lift_bbox_world_xy
+from tasks.skills import BBox, cxcywh_to_xyxy, lift_bbox_world_xy
 
 
 def _avg_unit(vectors: list[list[float]]) -> list[float] | None:

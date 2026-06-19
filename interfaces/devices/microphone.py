@@ -1,6 +1,9 @@
 """Microphone input with Voice Activity Detection using Silero VAD."""
 
+import threading
 import time
+from contextlib import contextmanager
+from typing import Iterator
 
 import numpy as np
 import sounddevice as sd
@@ -118,6 +121,48 @@ class Microphone:
         self.model = load_silero_vad(onnx=True)
         self._reset_vad()
 
+        # Pause state: while paused, an in-flight record_until_silence drops every
+        # captured chunk (so nothing is recorded and the VAD never triggers) and
+        # stops counting the paused span against its timeout. Re-entrant via a
+        # depth counter so overlapping pause()/resume() calls (e.g. nested speech)
+        # don't un-pause early. The speaker holds this paused while it plays so the
+        # robot never transcribes its own voice.
+        self._pause_lock = threading.Lock()
+        self._pause_depth = 0
+        self._paused = threading.Event()
+
+    def pause(self) -> None:
+        """Suspend feeding captured audio to any active recording until resume().
+
+        Re-entrant: nested pause() calls stack, and the mic only un-pauses once a
+        matching number of resume() calls arrive. Cheap and safe to call when no
+        recording is running — it just sets a flag.
+        """
+        with self._pause_lock:
+            self._pause_depth += 1
+            self._paused.set()
+
+    def resume(self) -> None:
+        """Undo one pause(); the mic resumes once every pause() has been matched."""
+        with self._pause_lock:
+            if self._pause_depth > 0:
+                self._pause_depth -= 1
+            if self._pause_depth == 0:
+                self._paused.clear()
+
+    @contextmanager
+    def paused(self) -> Iterator[None]:
+        """Context manager: pause() on enter, resume() on exit (exception-safe)."""
+        self.pause()
+        try:
+            yield
+        finally:
+            self.resume()
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused.is_set()
+
     def _reset_vad(self) -> None:
         """Reset VAD iterator for new recording session."""
         self.vad_iterator = VADIterator(
@@ -181,23 +226,41 @@ class Microphone:
         speech_started = False
         speech_ended = False
         recording_start_time = None
+        pause_started = None   # time.time() of the current pause span, or None
+        paused_total = 0.0     # accumulated paused seconds (excluded from timeout)
 
         def callback(indata, frames, time_info, status):
             nonlocal speech_started, speech_ended, recording_start_time
+            nonlocal pause_started, paused_total
             if speech_ended:
                 return
-            
+
+            if self._paused.is_set():
+                # Paused (e.g. the robot is speaking): drop this chunk so its own
+                # voice is neither recorded nor seen by the VAD, and note when the
+                # pause began so the loop can exclude it from the timeout.
+                if pause_started is None:
+                    pause_started = time.time()
+                return
+            if pause_started is not None:
+                # Just resumed: bank the paused span and reset the VAD so any
+                # trailing playback doesn't bleed into the next detection.
+                paused_total += time.time() - pause_started
+                pause_started = None
+                self._reset_vad()
+                speech_started = False
+
             # Track when recording actually starts
             if recording_start_time is None:
                 recording_start_time = time.time()
-            
+
             # Store original audio
             chunk = indata[:, 0].copy()
             audio_chunks.append(chunk)
-            
+
             # Resample to exactly 512 samples for VAD
             vad_chunk = self._resample_to_vad_chunk(chunk)
-            
+
             # Process with VAD
             result = self.vad_iterator(vad_chunk)
             if result:
@@ -221,7 +284,12 @@ class Microphone:
             callback=callback,
         ):
             start_time = time.time()
-            while not speech_ended and (time.time() - start_time) < timeout:
+            while not speech_ended:
+                # Don't let paused time (the robot speaking) eat the timeout — a
+                # phrase spoken right after resume() should still get its full window.
+                in_pause = (time.time() - pause_started) if pause_started is not None else 0.0
+                if (time.time() - start_time - paused_total - in_pause) >= timeout:
+                    break
                 sd.sleep(10)
 
         # Combine chunks and resample to 16kHz for output

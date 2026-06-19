@@ -45,18 +45,20 @@ from .identity import (
     wait_until_seated,
 )
 from .skills import (
-    CommandListener,
-    FaceTracker,
     classify_host_command,
-    cxcywh_to_xyxy,
     describe_seated_person,
+    host_command_listener,
+    llm_guest_intro_speeches,
+    llm_pick_seat,
+)
+from tasks.skills import (
+    FaceTracker,
+    cxcywh_to_xyxy,
     face_point,
     find_seated_person_bbox,
     follow_person,
     heading_to_point,
     lift_bbox_world_xy,
-    llm_guest_intro_speeches,
-    llm_pick_seat,
     match_people_to_seats,
     move_base_relative,
     parse_pose,
@@ -478,7 +480,7 @@ class FollowHostAndDropBag(SubTask):
     host briefly drops from view the loop coasts on its :class:`MotionPredictor`
     estimate, then rotate-searches. It follows until told to put the bag down.
 
-    Voice runs in parallel: while the loop drives, a :class:`CommandListener`
+    Voice runs in parallel: while the loop drives, a :func:`skills.host_command_listener`
     records, transcribes, and LLM-classifies in the background so the mic is
     never dark during a nav step or an STT/LLM round-trip. The room is full of
     people, so every utterance is classified (:func:`skills.classify_host_command`)
@@ -505,14 +507,15 @@ class FollowHostAndDropBag(SubTask):
         ctx.say(prompts.BAG_ASK_WHERE)
         if classify_host_command(ctx, ctx.listen(timeout=listen_timeout)) == "place":
             return self._place_bag(ctx)
-        # Follow the host (selected by face first, attire fallback). The CommandListener is the
-        # stopper: follow_person enters it AFTER the warmup ack (so neither thread
+        # Follow the host (selected by face first, attire fallback). The command
+        # listener is the stopper: follow_person enters it AFTER the warmup ack
+        # (and the speaker pauses the mic while it talks, so neither thread
         # transcribes the robot's own voice) and ends the moment it hears "place".
         # on_stopped speaks the place ack while the threads wind down.
         reason = follow_person(
             ctx,
             make_follow_selector("host"),
-            stopper=CommandListener(ctx),
+            stopper=host_command_listener(ctx),
             on_warmup=lambda: ctx.say(prompts.FOLLOW_HOST_ACK),
             on_lost=lambda: ctx.say(prompts.FOLLOW_HOST_LOST),
             on_stopped=lambda: ctx.say(prompts.BAG_PLACE_ACK),

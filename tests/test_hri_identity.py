@@ -22,7 +22,7 @@ from tasks.HRI.identity import (
     enroll_guest_frames,
     make_follow_selector,
 )
-from tasks.HRI.skills import cxcywh_to_xyxy
+from tasks.skills import cxcywh_to_xyxy
 
 
 def _u(*v):

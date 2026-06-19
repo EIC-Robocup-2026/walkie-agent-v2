@@ -1,0 +1,104 @@
+"""Global, prompt-free perception / geometry / navigation / people primitives.
+
+Themed submodules (geometry, lift, seating, navigation, people) hold the plain
+functions split out of the per-task skills.py files; this package re-exports
+them all flat so callers do `from tasks.skills import <name>`.
+"""
+
+from __future__ import annotations
+
+from .geometry import (
+    BBox,
+    cxcywh_to_xyxy,
+    overlap_fraction,
+    parse_pose,
+    person_hip_anchor,
+    person_seat_anchor,
+)
+from .listening import CommandListener
+from .lift import (
+    bboxes_world_position,
+    lift_bbox_world_xy,
+    recall_person_xy,
+    remember_located_positions,
+    remember_person_xy,
+    reset_people_positions,
+)
+from .seating import (
+    SeatCandidate,
+    SeatPart,
+    find_persons,
+    find_seated_person_bbox,
+    is_sofa_class,
+    match_people_to_seats,
+    parse_sofa_parts,
+    pick_free_seat,
+    resolve_free_part,
+    scan_seats,
+    split_seat_regions,
+)
+from .navigation import (
+    MotionPredictor,
+    approach_point,
+    face_point,
+    follow_person,
+    heading_to_point,
+    move_base_relative,
+    rotate_by,
+    side_relative_to_listener,
+    sweep_snapshots,
+    tilt_head,
+)
+from .people import (
+    FaceTracker,
+    biggest_face,
+    is_calling_gesture,
+    nearest_person_bbox,
+    person_bboxes,
+    select_largest_person,
+    wait_for_person,
+)
+
+__all__ = [
+    "CommandListener",
+    "BBox",
+    "cxcywh_to_xyxy",
+    "overlap_fraction",
+    "parse_pose",
+    "person_hip_anchor",
+    "person_seat_anchor",
+    "bboxes_world_position",
+    "lift_bbox_world_xy",
+    "recall_person_xy",
+    "remember_located_positions",
+    "remember_person_xy",
+    "reset_people_positions",
+    "SeatCandidate",
+    "SeatPart",
+    "find_persons",
+    "find_seated_person_bbox",
+    "is_sofa_class",
+    "match_people_to_seats",
+    "parse_sofa_parts",
+    "pick_free_seat",
+    "resolve_free_part",
+    "scan_seats",
+    "split_seat_regions",
+    "MotionPredictor",
+    "approach_point",
+    "face_point",
+    "follow_person",
+    "heading_to_point",
+    "move_base_relative",
+    "rotate_by",
+    "side_relative_to_listener",
+    "sweep_snapshots",
+    "tilt_head",
+    "FaceTracker",
+    "biggest_face",
+    "is_calling_gesture",
+    "nearest_person_bbox",
+    "person_bboxes",
+    "select_largest_person",
+    "wait_for_person",
+]

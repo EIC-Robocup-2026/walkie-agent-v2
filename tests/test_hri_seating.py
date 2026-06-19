@@ -7,7 +7,7 @@ cushions, and a neighbour's box clipping a free seat wrongly marking it taken.
 """
 
 from client import PersonPose, PoseKeypoint
-from tasks.HRI.skills import (
+from tasks.skills import (
     SeatCandidate,
     find_seated_person_bbox,
     is_sofa_class,

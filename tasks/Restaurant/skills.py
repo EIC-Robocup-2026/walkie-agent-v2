@@ -13,15 +13,11 @@ import math
 import os
 from dataclasses import dataclass
 
-from client import PersonPose
 from tasks.base import TaskContext
 from tasks.manipulation import perceive_surface, pick_object, place_at_pose
+from tasks.skills import cxcywh_to_xyxy, is_calling_gesture
 
 from . import prompts
-
-# COCO keypoint indices (same convention as agents/vision_agent/tools.py).
-_LEFT_SHOULDER, _RIGHT_SHOULDER = 5, 6
-_LEFT_WRIST, _RIGHT_WRIST = 9, 10
 
 BBox = tuple[float, float, float, float]
 
@@ -34,27 +30,6 @@ class CallingCustomer:
     heading: float            # map-frame heading to turn toward them
     world_xy: tuple[float, float] | None  # map-frame table position when lifted
     crop: object | None = None  # PIL crop of the person, for the identify fallback
-
-
-def _cxcywh_to_xyxy(bbox) -> BBox:
-    """Pose-estimation bboxes are (cx, cy, w, h); detections/crops want xyxy."""
-    cx, cy, w, h = bbox
-    return (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
-
-
-def is_calling_gesture(pose: PersonPose, conf_thresh: float = 0.3) -> bool:
-    """True when either wrist is raised above the same-side shoulder.
-
-    Pure function (no ctx/network) so it is unit-testable. Image y grows
-    downward, so "raised" means ``wrist.y < shoulder.y``. Mirrors the
-    arm-raised heuristic in agents/vision_agent/tools.py.
-    """
-    kpts = {kp.index: kp for kp in pose.keypoints}
-    ls, lw = kpts.get(_LEFT_SHOULDER), kpts.get(_LEFT_WRIST)
-    rs, rw = kpts.get(_RIGHT_SHOULDER), kpts.get(_RIGHT_WRIST)
-    left = ls and lw and lw.confidence > conf_thresh and ls.confidence > conf_thresh and lw.y < ls.y
-    right = rs and rw and rw.confidence > conf_thresh and rs.confidence > conf_thresh and rw.y < rs.y
-    return bool(left or right)
 
 
 def detect_calling_customer(ctx: TaskContext) -> CallingCustomer | None:
@@ -80,7 +55,7 @@ def detect_calling_customer(ctx: TaskContext) -> CallingCustomer | None:
         return None
     img_w = img.width
     target = min(callers, key=lambda p: abs(p.bbox[0] - img_w / 2))  # most central
-    xyxy = _cxcywh_to_xyxy(target.bbox)
+    xyxy = cxcywh_to_xyxy(target.bbox)
 
     world_xy = None
     if getattr(snap, "has_geometry", False):
