@@ -6,6 +6,7 @@ cross-guest near-duplicate audit added for the posed-capture flow.
 """
 
 import math
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -106,6 +107,16 @@ class _ImageFacade:
 
     def appearance(self, crop):
         return self._app.embed(crop)
+
+    def process(self, image, *, pose=False, face=False, **_kwargs):
+        """Mirror ImageClient.process for the combined pose+face follow call:
+        run only the requested tasks (so per-tick face/pose call counts stay
+        exactly what the serial single-task path used to make) and return an
+        ImageResult-shaped object with .pose / .face populated."""
+        return SimpleNamespace(
+            pose=(self.estimate_poses(image) if pose else None),
+            face=(self.faces(image) if face else None),
+        )
 
 
 class _AI:

@@ -517,9 +517,9 @@ def _persons_to_candidates(
 ) -> list[tuple[BBox, float | None]]:
     """Pair each pose with its closeness proxy, capped by config (pure, no I/O).
 
-    The local half of :func:`_candidate_persons`, split out so the parallel
-    follow path can build candidates from a pose result fetched on a worker
-    thread without re-detecting.
+    Builds the follow candidate list from a pose result already fetched by the
+    unified :func:`_detect_pose_and_face` call, so the selection logic never
+    re-detects.
     """
     max_cand = int(os.getenv("HRI_FOLLOW_APPEARANCE_MAX_CANDIDATES", "0"))
     if max_cand > 0:
@@ -531,19 +531,6 @@ def _persons_to_candidates(
         (cxcywh_to_xyxy(p.bbox), _person_scale_px(p, min_kp_conf=min_kp_conf))
         for p in persons
     ]
-
-
-def _candidate_persons(
-    ctx: TaskContext, img: Image.Image
-) -> list[tuple[BBox, float | None]]:
-    """Person boxes (xyxy) paired with a pose-keypoint closeness proxy.
-
-    To bound the per-tick embed cost in a crowd, only the largest
-    ``HRI_FOLLOW_APPEARANCE_MAX_CANDIDATES`` person boxes are kept; 0 (the
-    default) keeps all, so a host who has walked off and shrunk below a guest
-    isn't dropped from the candidate set.
-    """
-    return _persons_to_candidates(_detect_persons(ctx, img))
 
 
 def _cand_for_face(
@@ -602,8 +589,15 @@ def _match_by_face(
 ) -> BBox | None:
     """Score pre-detected *faces* against the store and pick *person_id*'s box.
 
-    The local (no-I/O) half of :func:`_select_by_face`, split out so the parallel
-    follow path can hand in faces fetched concurrently with the pose detection.
+    Pure (no I/O of its own): the faces arrive alongside the poses from the
+    single :func:`_detect_pose_and_face` round-trip. Faces are far more
+    discriminative than clothing, so a face match holds the right person even in
+    a similarly-dressed crowd. Each detected face is scored (face only) against
+    every enrolled person; a box qualifies only when *person_id* clears the
+    fused-match floor AND out-scores every OTHER enrolled person by
+    ``HRI_FOLLOW_FACE_MARGIN``. ``None`` when no face in view is the target
+    (turned away / too far / occluded, or *person_id* enrolled without a face) —
+    the caller then falls back to attire.
     """
     if not faces:
         return None
@@ -621,25 +615,6 @@ def _match_by_face(
             continue
         qualifying.append((host_sim, box, scale))
     return _pick_closest_qualifier(qualifying, person_id, "face")
-
-
-def _select_by_face(
-    ctx: TaskContext,
-    img: Image.Image,
-    cands: list[tuple[BBox, float | None]],
-    person_id: str,
-) -> BBox | None:
-    """Face pass: the closest box whose face is recognized as *person_id*.
-
-    Faces are far more discriminative than clothing, so this locks onto the
-    right person even when the crowd dresses alike. Each detected face is scored
-    (face only) against every enrolled person; a box qualifies only when
-    *person_id* clears the fused-match floor AND out-scores every OTHER enrolled
-    person by ``HRI_FOLLOW_FACE_MARGIN``. ``None`` when no face in view is the
-    target (turned away / too far / occluded, or *person_id* enrolled without a
-    face) — the caller then falls back to attire.
-    """
-    return _match_by_face(ctx, img, _detect_faces(ctx, img), cands, person_id)
 
 
 def _score_attire_candidates(
@@ -774,50 +749,55 @@ def _embed_and_score_attire_parallel(
     return _score_attire_candidates(ctx, cands, embeds, person_id)
 
 
-def _select_person_to_follow_parallel(
+def _attire_pass_parallel(
     ctx: TaskContext,
     img: Image.Image,
+    cands: list[tuple[BBox, float | None]],
     person_id: str,
-    *,
     hint_box: BBox | None,
-    run_face: bool,
 ) -> BBox | None:
-    """Overlap one follow tick's independent server round-trips (HRI_FOLLOW_PARALLEL=1).
+    """Parallel sibling of :func:`_attire_pass` (HRI_FOLLOW_PARALLEL=1).
 
-    Pose estimation and face detection each need only the full frame and hit
-    different sub-clients (separate ``requests.Session``s, designed for
-    concurrent use), so they run on worker threads at the same time. The
-    attire-fallback embeds — one OSNet call per candidate box, the costly part in
-    a crowd — are likewise fanned out, but only over the candidates *gated* to
-    *hint_box*. All identity scoring (:meth:`fused_scores`, which reads the local
-    Chroma store) stays on the calling thread, so no Chroma access is concurrent.
-    Returns exactly the box the serial path would for the same *hint_box* /
-    *run_face*.
-
-    Whether this lowers per-tick latency depends on the server handling
-    concurrent requests; with one GPU serializing inference the gain is limited
-    to overlapping encode/transfer/pre-post. Measure with HRI_FOLLOW_TRACK_DEBUG.
+    Gates the per-candidate OSNet embeds to *hint_box*, fans them across a thread
+    pool — the costly part in a crowd is one OSNet call per candidate box — then
+    widens to the full set on a miss, exactly as the serial pass does. Only the
+    attire embeds parallelise: pose + face now arrive together from the single
+    :func:`_detect_pose_and_face` request, so there is no longer a second
+    detection round-trip to overlap. Identity scoring (:meth:`fused_scores`,
+    which reads the local Chroma store) stays on the calling thread, so no Chroma
+    access is concurrent. Returns exactly the box :func:`_attire_pass` would.
     """
     workers = max(2, int(os.getenv("HRI_FOLLOW_PARALLEL_WORKERS", "8")))
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        fut_persons = ex.submit(_detect_persons, ctx, img)  # pose, own session
-        # Skip the face round-trip on throttled ticks (the host's back is to the
-        # camera while following, so the face pass matches ~never — see
-        # HRI_FOLLOW_FACE_EVERY_N).
-        fut_faces = ex.submit(_detect_faces, ctx, img) if run_face else None
-        cands = _persons_to_candidates(fut_persons.result())
-        if not cands:
-            return None
-        if fut_faces is not None:
-            box = _match_by_face(ctx, img, fut_faces.result(), cands, person_id)
-            if box is not None:
-                return box  # face match: never pay for the attire embeds (as serial)
-        # Attire fallback: gate to the last tracked box, widen on a miss.
         gated = _gate_candidates(cands, hint_box, radius_scale=_gate_radius_scale())
         box = _embed_and_score_attire_parallel(ex, ctx, img, gated, person_id)
         if box is None and len(gated) != len(cands):
             box = _embed_and_score_attire_parallel(ex, ctx, img, cands, person_id)
         return box
+
+
+def _detect_pose_and_face(
+    ctx: TaskContext, img: Image.Image, *, run_face: bool
+) -> tuple[list[PersonPose], list[FaceEmbedding]]:
+    """Pose (always) + face (only when *run_face*) for *img* in ONE round-trip.
+
+    The unified ``/image/process`` endpoint uploads and decodes the frame once
+    and runs both models server-side, so a follow tick pays a single JPEG encode
+    + transfer instead of the two it cost when pose and face were separate
+    sub-client calls (:meth:`estimate_poses` then :meth:`faces`). That collapses
+    one whole-frame round-trip per tick — a guaranteed win even when the server
+    serializes inference on a single GPU, since the saved cost is the duplicate
+    encode/transfer/decode, not the model time. Throttled ticks (``run_face`` is
+    False) request pose only, so the face model is never run server-side then.
+    Best-effort: a failed request degrades to ``([], [])`` and the tick coasts on
+    the follow loop's motion prediction.
+    """
+    try:
+        res = ctx.walkieAI.image.process(img, pose=True, face=run_face)
+    except Exception as exc:
+        print(f"[identity] follow pose/face detect failed ({exc})")
+        return [], []
+    return (res.pose or []), (res.face or [])
 
 
 def select_person_to_follow(
@@ -831,9 +811,10 @@ def select_person_to_follow(
     """:func:`skills.follow_person` selector: the person box matching *person_id*,
     FACE first then ATTIRE, biased toward the nearest qualifying candidate.
 
-    Per tick: pose-estimate the people in view, each box paired with a
-    pose-keypoint closeness proxy (:func:`_person_scale_px`). A FACE pass runs
-    first (:func:`_select_by_face`, only when *run_face*) — faces are far more
+    Per tick: ONE :func:`_detect_pose_and_face` request returns the poses (each
+    box paired with a pose-keypoint closeness proxy, :func:`_person_scale_px`)
+    and — when *run_face* — the faces, from a single uploaded frame. A FACE pass
+    runs first (:func:`_match_by_face`, only when *run_face*) — faces are far more
     discriminative than clothing, so a face match holds the right person in a
     similarly-dressed crowd. Only when no face in view is recognized as
     *person_id* this tick (turned away, too far, occluded, enrolled without a
@@ -846,14 +827,16 @@ def select_person_to_follow(
     *hint_box* is the last tracked host box: when given, the attire fallback only
     embeds the candidate(s) near it (re-embedding the full set on a miss), which
     is what cuts the per-tick OSNet cost from N to ~1. *run_face* throttles the
-    (usually fruitless, while following) face round-trip. Both default to the
-    pre-tracking behaviour (no hint, face every tick), so direct callers and the
-    enrollment paths are unaffected — the stateful :class:`FollowSelector`
-    supplies them during a follow.
+    (usually fruitless, while following) face inference: a throttled tick asks
+    the unified call for pose only. Both default to the pre-tracking behaviour
+    (no hint, face every tick), so direct callers and the enrollment paths are
+    unaffected — the stateful :class:`FollowSelector` supplies them during a
+    follow.
 
-    With ``HRI_FOLLOW_PARALLEL=1`` the independent per-tick server calls run
-    concurrently (:func:`_select_person_to_follow_parallel`); the result is
-    identical, only the latency differs.
+    With ``HRI_FOLLOW_PARALLEL=1`` the attire-fallback embeds are fanned across a
+    thread pool (:func:`_attire_pass_parallel`); the result is identical, only
+    the latency differs. (Pose + face no longer need overlapping — the unified
+    ``process`` call already returns both from one round-trip.)
 
     *person_id* must already be enrolled (the host is, at ``OfferSeat``); the
     face pass needs a face embedding, the attire fallback an attire one.
@@ -861,17 +844,16 @@ def select_person_to_follow(
     if snap is None or ctx.people is None or ctx.people.count() == 0:
         return None
     img = snap.img
-    if _follow_parallel_enabled():
-        return _select_person_to_follow_parallel(
-            ctx, img, person_id, hint_box=hint_box, run_face=run_face
-        )
-    cands = _candidate_persons(ctx, img)
+    persons, faces = _detect_pose_and_face(ctx, img, run_face=run_face)
+    cands = _persons_to_candidates(persons)
     if not cands:
         return None
     if run_face:
-        box = _select_by_face(ctx, img, cands, person_id)
+        box = _match_by_face(ctx, img, faces, cands, person_id)
         if box is not None:
-            return box
+            return box  # face match: never pay for the attire embeds
+    if _follow_parallel_enabled():
+        return _attire_pass_parallel(ctx, img, cands, person_id, hint_box)
     return _attire_pass(ctx, img, cands, person_id, hint_box)
 
 
