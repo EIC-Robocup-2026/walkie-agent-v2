@@ -26,19 +26,19 @@ LLM_USE_LOCAL = "0"
 WALKIE_MODEL = "anthropic/claude-sonnet-4.5"
 WALKIE_TEMPERATURE = "0.5"
 # Local LLM endpoint (OpenAI-compatible), used when LLM_USE_LOCAL=1.
-LOCAL_BASE_URL = "http://10.0.0.210:8000/v1"
+LOCAL_BASE_URL = "http://10.0.0.202:8000/v1"
 LOCAL_MODEL = "qwen3.5-9b"
 
 [services]
 # Remote AI inference server (walkie-ai-server): STT, TTS, object detection,
 # image captioning, pose estimation, CLIP image-embed.
-WALKIE_AI_BASE_URL = "http://10.0.0.213:5000"
+WALKIE_AI_BASE_URL = "http://10.0.0.202:5000"
 
 [transport]
 # walkie-sdk robot transport. ROS services over rosbridge (default), camera over
 # zenoh. Force zenoh services only if you've shipped the perception/srv into
 # zenoh_ros2_sdk. Port defaults: 9090 for rosbridge, 7447 for zenoh.
-WALKIE_ROS_PROTOCOL = "rosbridge"
+WALKIE_ROS_PROTOCOL = "hybrid"
 WALKIE_ROS_PORT = "9090"
 # IP of the robot for the walkie-sdk transport (rosbridge + zenoh camera). Leave
 # 127.0.0.1 when running on the robot itself; set to walkie's own LAN IP (e.g.
@@ -70,4 +70,21 @@ WALKIE_SUMMARIZE_KEEP_MSGS = "12"
 [robot]
 # 1 = pause after each movement / arm action (debugging).
 PAUSE_AFTER_WALK = "0"
+
+[manipulation]
+# Robot-wide grasp/arm knobs shared by every manipulation task (Pick and Place,
+# Restaurant, ...). Read by tasks/manipulation.py. The grasp PLANNER is a stub
+# (centroid + a fixed orientation), but the arm motion is real. CALIBRATE every
+# orientation/offset below on the real robot before a competition run.
+WALKIE_ARM = "left"                  # which arm group: "left" or "right"
+WALKIE_ARM_FRAME = "base_footprint"  # arm planning frame: "base_footprint" or "map"
+WALKIE_GRASP_APPROACH = "top_down"   # "top_down" (overhead) or "front" (horizontal)
+# End-effector orientation (roll,pitch,yaw rad) per approach. Defaults are borrowed
+# from the HRI reach/place poses on this robot — VERIFY on the arm for grasping.
+WALKIE_GRASP_RPY_TOPDOWN = "-2.623,-0.033,-1.468"
+WALKIE_GRASP_RPY_FRONT = "-0.8,0.0,-1.5708"
+WALKIE_GRASP_Z_OFFSET_M = "0.0"      # vertical nudge added to the object centroid
+WALKIE_PREGRASP_OFFSET_M = "0.10"    # pre-grasp standoff (above for top-down, back for front)
+WALKIE_LIFT_HEIGHT_M = "0.15"        # how far to lift after grasping
+WALKIE_CARRY_POSE = "standby"        # go_to_home preset to tuck the arm for nav
 

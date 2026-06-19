@@ -40,3 +40,6 @@ chroma_db_scene/
 chroma_db_people/
 chroma_db_graph/
 .thumb_cache/
+people_frames/
+graph_background.npz
+graph_captures/

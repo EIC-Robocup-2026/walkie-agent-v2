@@ -20,7 +20,7 @@ def test_captioning():
         print("Error: Can't receive frame. Exiting...")
 
     start_time = time.time()
-    result = walkieAI.image_caption.caption(frame)
+    result = walkieAI.image.caption(frame)
     end_time = time.time()
     print(result)
     print(f"Time taken: {end_time - start_time} seconds")

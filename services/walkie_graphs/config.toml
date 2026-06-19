@@ -24,7 +24,7 @@ WALKIE_GRAPHS_INTERVAL_SEC = "2.0"
 # may contain spaces (split on commas). Grouped here by category for readability.
 
 
-WALKIE_GRAPHS_INTERESTED_CLASSES = "door,chair,table,stool,shirt,sponge,bowl,cup,fork,knife,plate,spoon,coffee creamer,coke,ice tea,milk,orange juice,red bull,water bottle,bread,cornflakes,instant noodles,potato,tomato soup,apple,avocado,lemon,orange,chips,cookies,gum,mixed nuts,pringles,hand cream,soap,toothpaste,dish rack,shelf,monitor,bed,pillow"
+WALKIE_GRAPHS_INTERESTED_CLASSES = "sofa,door,chair,armchair,table,stool,shirt,sponge,bowl,cup,fork,knife,plate,spoon,coffee creamer,coke,ice tea,milk,orange juice,red bull,water bottle,bread,cornflakes,instant noodles,potato,tomato soup,apple,avocado,lemon,orange,chips,cookies,gum,mixed nuts,pringles,hand cream,soap,toothpaste,dish rack,shelf,monitor,bed,pillow"
 
 
 # Classes to always drop before lift/embed/store — moving objects (people) can't be
@@ -35,7 +35,7 @@ WALKIE_GRAPHS_INTERESTED_CLASSES = "door,chair,table,stool,shirt,sponge,bowl,cup
 WALKIE_GRAPHS_EXCLUDE_CLASSES = "person"
 # Classes to caption (server image-caption). Empty = same as interested classes.
 WALKIE_GRAPHS_CAPTION_CLASSES = "shirt"
-# Live 3D visualization backend: none | rerun. rerun needs `uv sync --extra graphs`.
+# Live 3D visualization backend: none | rerun.
 WALKIE_GRAPHS_VIZ = "rerun"
 # What to draw in the Rerun viewer. Point clouds are always shown.
 WALKIE_GRAPHS_VIZ_BOXES = "0"   # 0 = hide per-object bounding boxes
@@ -221,11 +221,9 @@ WALKIE_GRAPHS_MIN_MASK_AREA_PX = "64"
 # crop, so containers don't absorb the objects resting on/in them. 1 = on.
 WALKIE_GRAPHS_MASK_SUBTRACT = "1"
 # Context margin (px) around the bbox for the CLIP/caption crop (CG pads 20).
+# Must match the server's per_detection crop margin so the stored thumbnail
+# matches what was captioned/embedded in the fused /image/process call.
 WALKIE_GRAPHS_CROP_MARGIN_PX = "20"
-# Per-object CLIP embeds have no batch endpoint, so the round-trips are fanned out
-# across this many threads (I/O-bound). 1 = sequential. Raise toward the object count
-# if the embed server handles concurrent requests well.
-WALKIE_GRAPHS_EMBED_WORKERS = "8"
 
 [graphs.maintenance]
 # Periodic ConceptGraphs post-processing, each on its own cadence (in ingest ticks,

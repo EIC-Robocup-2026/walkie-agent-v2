@@ -1,68 +1,164 @@
-"""Reusable perception / interaction skills for the Restaurant task (rulebook 5.5).
+"""Reusable perception / interaction / manipulation skills for Restaurant (rulebook 5.5).
 
-PLACEHOLDER. Gesture (waving/calling) detection, online navigation to a table,
-and item manipulation are the hard parts and are honest stubs. Order-taking
-dialogue is real (ask + STT + LLM extract).
+Gesture (waving/calling) detection and customer approach are real heuristics;
+order-taking dialogue is real (ask + STT + LLM extract); item collection and
+serving reuse the shared grasp planner in tasks/manipulation.py (the planner is
+the stub, the arm motion is real). The unattached-tray optional goal is left to
+the subtask as a gated stub.
 """
 
 from __future__ import annotations
 
 import math
 import os
+from dataclasses import dataclass
 
+from client import PersonPose
 from tasks.base import TaskContext
+from tasks.manipulation import perceive_surface, pick_object, place_at_pose
 
 from . import prompts
 
+# COCO keypoint indices (same convention as agents/vision_agent/tools.py).
+_LEFT_SHOULDER, _RIGHT_SHOULDER = 5, 6
+_LEFT_WRIST, _RIGHT_WRIST = 9, 10
 
-def detect_calling_customer(ctx: TaskContext) -> float | None:
-    """Find a customer calling/waving and return a map-frame heading toward them.
+BBox = tuple[float, float, float, float]
 
-    STUB heuristic: detect people with pose estimation and return the heading to
-    the nearest one as a placeholder for real wave/gesture recognition. Returns
-    None when nobody is detected. TODO: classify an actual waving gesture from the
-    pose keypoints (arm raised + motion) rather than "any person".
+
+@dataclass
+class CallingCustomer:
+    """A customer detected calling/waving, with where to drive and how to face them."""
+
+    bbox_xyxy: BBox           # person box in the snapshot (xyxy pixels)
+    heading: float            # map-frame heading to turn toward them
+    world_xy: tuple[float, float] | None  # map-frame table position when lifted
+    crop: object | None = None  # PIL crop of the person, for the identify fallback
+
+
+def _cxcywh_to_xyxy(bbox) -> BBox:
+    """Pose-estimation bboxes are (cx, cy, w, h); detections/crops want xyxy."""
+    cx, cy, w, h = bbox
+    return (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
+
+
+def is_calling_gesture(pose: PersonPose, conf_thresh: float = 0.3) -> bool:
+    """True when either wrist is raised above the same-side shoulder.
+
+    Pure function (no ctx/network) so it is unit-testable. Image y grows
+    downward, so "raised" means ``wrist.y < shoulder.y``. Mirrors the
+    arm-raised heuristic in agents/vision_agent/tools.py.
     """
-    img = ctx.capture()
-    if img is None:
+    kpts = {kp.index: kp for kp in pose.keypoints}
+    ls, lw = kpts.get(_LEFT_SHOULDER), kpts.get(_LEFT_WRIST)
+    rs, rw = kpts.get(_RIGHT_SHOULDER), kpts.get(_RIGHT_WRIST)
+    left = ls and lw and lw.confidence > conf_thresh and ls.confidence > conf_thresh and lw.y < ls.y
+    right = rs and rw and rw.confidence > conf_thresh and rs.confidence > conf_thresh and rw.y < rs.y
+    return bool(left or right)
+
+
+def detect_calling_customer(ctx: TaskContext) -> CallingCustomer | None:
+    """Find a customer waving/calling and return where to go + how to face them.
+
+    Real heuristic: pose-estimate everyone, keep those with a raised wrist, pick
+    the most central one, lift their box to a map-frame table position via the
+    depth snapshot, and compute a heading toward them. Returns None when nobody
+    is clearly calling. Never raises.
+    """
+    snap = ctx.snapshot()
+    if snap is None:
         return None
+    img = snap.img
     try:
-        persons = ctx.walkieAI.pose_estimation.estimate(img)
+        persons = ctx.walkieAI.image.estimate_poses(img)
     except Exception as exc:
         print(f"[restaurant.skills] pose estimation failed ({exc})")
         return None
-    if not persons:
+    conf = float(os.getenv("RESTAURANT_WAVE_CONF", "0.3"))
+    callers = [p for p in persons if is_calling_gesture(p, conf)]
+    if not callers:
         return None
-    # TODO: real gesture classification. For now, aim at the most central person
-    # (closest to the image centre x) as a stand-in for "the one calling".
-    hfov = math.radians(float(os.getenv("RESTAURANT_CAMERA_HFOV_DEG", "110")))
     img_w = img.width
-    target = min(persons, key=lambda p: abs(p.bbox[0] - img_w / 2))
-    # Pixel x -> heading offset from the robot's current facing.
-    offset = (target.bbox[0] / img_w - 0.5) * hfov
+    target = min(callers, key=lambda p: abs(p.bbox[0] - img_w / 2))  # most central
+    xyxy = _cxcywh_to_xyxy(target.bbox)
+
+    world_xy = None
+    if getattr(snap, "has_geometry", False):
+        try:
+            pt = snap.bbox_world_point(xyxy)
+            world_xy = tuple(pt[:2]) if pt is not None else None
+        except Exception:
+            world_xy = None
+
     pose = ctx.current_pose()
-    print(f"[restaurant.skills] TODO gesture detection stub — aiming at central person")
-    return pose["heading"] - offset  # +x to the right -> turn right (negative)
+    if world_xy is not None:
+        heading = math.atan2(world_xy[1] - pose["y"], world_xy[0] - pose["x"])
+    else:
+        # Fallback: pixel x -> heading offset from the robot's current facing.
+        hfov = math.radians(float(os.getenv("RESTAURANT_CAMERA_HFOV_DEG", "110")))
+        offset = (target.bbox[0] / img_w - 0.5) * hfov
+        heading = pose["heading"] - offset
+
+    crop = None
+    try:
+        m = 20  # px padding so the person isn't clipped
+        x1, y1, x2, y2 = xyxy
+        crop = img.crop((
+            max(0, int(x1 - m)), max(0, int(y1 - m)),
+            min(img.width, int(x2 + m)), min(img.height, int(y2 + m)),
+        ))
+    except Exception:
+        crop = None
+    return CallingCustomer(bbox_xyxy=xyxy, heading=heading, world_xy=world_xy, crop=crop)
 
 
-def navigate_to_customer(ctx: TaskContext, heading: float) -> bool:
-    """Drive to the calling customer's table (online nav in an unknown venue).
+def navigate_to_customer(ctx: TaskContext, cust: CallingCustomer) -> bool:
+    """Drive to the calling customer's table (online nav in an unmapped venue).
 
-    STUB: rotates toward the customer and reports partial progress. Real version
-    needs online mapping + approach planning (no prior map is allowed). Returns
-    False until implemented so the caller can claim partial points by clearly
-    identifying the person instead (rulebook remark).
+    With a lifted map-frame position, drive to a stop-short goal on the
+    robot->customer line and face them; otherwise just rotate to face. Returns
+    whether the navigation reported success (False triggers the identify
+    fallback so partial points can still be claimed).
     """
-    ctx.rotate_to(heading)
-    print("[restaurant.skills] TODO navigate_to_customer — online nav not implemented")
-    return False
+    if cust.world_xy is None:
+        ctx.rotate_to(cust.heading)
+        print("[restaurant.skills] no 3D fix on the customer; rotated to face only")
+        return False
+    stop = float(os.getenv("RESTAURANT_APPROACH_DISTANCE_M", "0.8"))
+    pose = ctx.current_pose()
+    wx, wy = cust.world_xy
+    dx, dy = wx - pose["x"], wy - pose["y"]
+    dist = math.hypot(dx, dy)
+    heading = math.atan2(dy, dx)
+    if dist <= stop:
+        return ctx.goto(pose["x"], pose["y"], heading)  # already close: just face
+    frac = (dist - stop) / dist
+    return ctx.goto(pose["x"] + dx * frac, pose["y"] + dy * frac, heading)
+
+
+def identify_customer(ctx: TaskContext, cust: CallingCustomer) -> None:
+    """Partial-credit fallback: clearly identify the detected customer.
+
+    The rulebook awards partial points when a detected customer isn't reached if
+    the robot clearly identifies the person. Face them and announce a visual
+    description (captioned from their crop). Best-effort, never raises.
+    """
+    if cust.heading is not None:
+        ctx.rotate_to(cust.heading)
+    desc = None
+    if cust.crop is not None:
+        try:
+            desc = ctx.walkieAI.image.caption(cust.crop, prompt=prompts.IDENTIFY_CAPTION_PROMPT)
+        except Exception as exc:
+            print(f"[restaurant.skills] identify caption failed ({exc})")
+    ctx.say(prompts.IDENTIFY_CUSTOMER.format(desc=desc or "the person who is calling"))
 
 
 def take_order(ctx: TaskContext) -> list[str]:
     """Greet the customer, capture and confirm their order. Real dialogue today.
 
-    The rulebook scores 'understand and confirm the order' and penalises not
-    making eye contact — a real version should face the customer while talking.
+    The caller faces the customer first (eye contact is scored). The rulebook
+    scores 'understand and confirm the order'.
     """
     answer = ctx.ask(prompts.GREET_CUSTOMER)
     if not answer:
@@ -75,21 +171,34 @@ def take_order(ctx: TaskContext) -> list[str]:
     return items
 
 
-# --- Manipulation primitives (EXTENSION POINTS — not implemented) -----------
-def collect_items(ctx: TaskContext, items: list[str]) -> bool:
-    """Pick the ordered items from the kitchen-bar (optionally onto a tray).
+def _bar_classes(item: str) -> list[str]:
+    extra = [c.strip() for c in os.getenv(
+        "RESTAURANT_BAR_CLASSES", "can,bottle,cup,snack,fruit,box,bag"
+    ).split(",") if c.strip()]
+    # The ordered item first so the open-vocab detector is biased toward it.
+    return [item] + [c for c in extra if c.lower() != item.lower()]
 
-    STUB: needs grasping. Returns False so the caller score-degrades.
+
+def pick_bar_item(ctx: TaskContext, item: str) -> bool:
+    """Perceive the kitchen-bar and pick the object matching *item*. Real arm motion.
+
+    One object per call (single-arm carry). Returns False (and announces) when the
+    item can't be found or the grasp fails, so the caller score-degrades.
     """
-    ctx.say(prompts.PICK_NOT_AVAILABLE)
-    print(f"[restaurant.skills] TODO collect_items({items}) — manipulation not implemented")
-    return False
+    objects = perceive_surface(ctx, _bar_classes(item))
+    if not objects:
+        ctx.say(prompts.ITEM_NOT_FOUND.format(item=item))
+        return False
+    matches = [o for o in objects if item.lower() in (o.class_name or "").lower()]
+    target = max(matches or objects, key=lambda o: o.confidence)
+    print(f"[restaurant.skills] picking '{item}' as {target.class_name} ({target.confidence:.2f})")
+    return pick_object(ctx, target)
 
 
-def serve_order(ctx: TaskContext, items: list[str]) -> bool:
-    """Place the items on the customer's table (or hand off the tray).
+def serve_item(ctx: TaskContext) -> bool:
+    """Place the held item on the customer's table (RESTAURANT_SERVE_POSE).
 
-    STUB: depends on collect_items. Returns False until implemented.
+    Falls back to a drop-in-front when no serve pose is configured. Returns
+    whether a located placement was done.
     """
-    print(f"[restaurant.skills] TODO serve_order({items}) — not implemented")
-    return False
+    return place_at_pose(ctx, os.getenv("RESTAURANT_SERVE_POSE", ""))

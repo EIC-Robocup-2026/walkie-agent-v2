@@ -8,15 +8,30 @@
 # relative start reference, not an absolute map waypoint. Mapping in advance is a
 # disqualification (rulebook 5.5).
 
+# Robot-wide grasp/arm knobs (WALKIE_ARM, WALKIE_GRASP_*, WALKIE_CARRY_POSE, ...)
+# used by collect/serve live in the ROOT config.toml [manipulation] block.
+
 [restaurant]
 # Relative start reference "x,y,heading_rad" (robot starts next to the kitchen-bar
 # facing the dining area). Not an arena waypoint — online nav must take over.
 RESTAURANT_KITCHEN_BAR_POSE = "0.0,0.0,0.0"
-# Horizontal FOV (deg) for the pixel->heading aim of the gesture-detection stub.
+# Horizontal FOV (deg) for the pixel->heading fallback when the depth lift fails.
 RESTAURANT_CAMERA_HFOV_DEG = "110"
 # How many customers to serve (rulebook scores up to two; tables >= 5 exist).
 RESTAURANT_TARGET_CUSTOMERS = "2"
 # Extra detect attempts beyond the target before giving up (no caller in view).
 RESTAURANT_EXTRA_ATTEMPTS = "3"
-# 1 = use an unattached tray to transport orders (optional goal, extra points).
+
+# Min keypoint confidence for the raised-wrist wave gesture.
+RESTAURANT_WAVE_CONF = "0.3"
+# How far (m) short of the customer to stop when approaching their table.
+RESTAURANT_APPROACH_DISTANCE_M = "0.8"
+# Open-vocab detector prompts for the items on the kitchen-bar (the ordered item
+# name is prepended automatically). Edible/drinkable standard objects.
+RESTAURANT_BAR_CLASSES = "can,bottle,cup,snack,fruit,box,bag"
+# Arm-frame place pose "x,y,z,roll,pitch,yaw" to set an item on the customer's
+# table. Empty -> open the gripper to drop in front. CALIBRATE on the robot.
+RESTAURANT_SERVE_POSE = ""
+# 1 = use an unattached tray to transport orders (optional goal). Not implemented
+# yet — when set, the robot logs a note and serves items individually instead.
 RESTAURANT_USE_TRAY = "0"

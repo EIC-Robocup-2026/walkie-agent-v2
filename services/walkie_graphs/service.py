@@ -29,7 +29,6 @@ from __future__ import annotations
 import os
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -166,9 +165,6 @@ class WalkieGraphsService(threading.Thread):
         self.bg_voxel_m = float(os.getenv("WALKIE_GRAPHS_BG_VOXEL_M", "0.05"))
         self.bg_mask_dilate_px = int(os.getenv("WALKIE_GRAPHS_BG_MASK_DILATE_PX", "4"))
         self.bg_save_every_n = int(os.getenv("WALKIE_GRAPHS_BG_SAVE_EVERY_N", "20"))
-        # Concurrency for the per-object CLIP embed calls (no batch endpoint exists, so
-        # fan the I/O-bound round-trips out across a thread pool). 1 = sequential.
-        self._embed_workers = int(os.getenv("WALKIE_GRAPHS_EMBED_WORKERS", "8"))
         # Periodic-maintenance cadences (in ingest ticks), staggered so two heavy
         # passes never land on the same tick. 0 disables a pass.
         self.denoise_every_n = int(os.getenv("WALKIE_GRAPHS_DENOISE_EVERY_N", "20"))
@@ -318,11 +314,29 @@ class WalkieGraphsService(threading.Thread):
         if frame is None:
             return []
         t_det = time.perf_counter()
-        detections = self.walkieAI.object_detection.detect(
-            frame.img, prompts=self.detect_prompts or None, return_mask=True
+        # One fused round-trip: detect (+masks) and, for each eligible crop,
+        # caption + CLIP-embed server-side. Caption/embed only run for kept
+        # classes at/above min_confidence (depth/point-count gates are applied
+        # below in ingest_frame; a few crops dropped there are still processed).
+        res = self.walkieAI.image.process(
+            frame.img,
+            detection={"prompts": self.detect_prompts or None, "return_mask": True},
+            per_detection={
+                "caption": {
+                    "prompt_template": "Describe the {class_name}.",
+                    "classes": sorted(self.caption_classes) or None,
+                },
+                "embed": True,
+                "exclude_classes": sorted(self.exclude),
+                "min_confidence": self.min_confidence,
+                "crop_margin_px": self.crop_margin_px,
+            },
         )
+        detections = res.detection or []
         d_det = time.perf_counter() - t_det
-        self._perf_log(f"detect: {d_det * 1000:.0f}ms ({len(detections)} detections)")
+        self._perf_log(
+            f"detect+caption+embed: {d_det * 1000:.0f}ms ({len(detections)} detections)"
+        )
         if self._moved_during(frame):
             # The robot/head moved across the capture→now window: the frame's cloud
             # would land mis-posed and smear the graph. Blank the geometry so the
@@ -545,19 +559,11 @@ class WalkieGraphsService(threading.Thread):
                 result[i]["centroid"] = (float(c[0]), float(c[1]), float(c[2]))
         d_icp = time.perf_counter() - t
 
-        # Single caption pass over the captionable kept subset (reuses _caption's policy),
-        # mapped back to original detection indices.
-        t = time.perf_counter()
-        captions = self._caption([p[1] for p in pending], [p[3] for p in pending])
-        for local, cap in captions.items():
-            result[pending[local][0]]["caption"] = cap
-        d_caption = time.perf_counter() - t
-
-        # Embed the kept crops — one network round-trip PER object, run concurrently so
-        # the per-frame embed cost is the slowest single call, not their sum.
-        t = time.perf_counter()
-        embeddings = self._embed_batch([p[3] for p in pending])
-        d_embed = time.perf_counter() - t
+        # Captions + CLIP embeds arrived fused on each detection (the server-side
+        # per_detection pass captioned/embedded each eligible crop in the same
+        # round-trip as detection); map captions onto the live-view result.
+        for i, d, _pts, _crop in pending:
+            result[i]["caption"] = d.caption or ""
 
         # Persist the capture's segments (deferred write) BEFORE upserting, so every
         # segment_ref the nodes take is already readable from the store.
@@ -569,14 +575,14 @@ class WalkieGraphsService(threading.Thread):
         touched = []
         seg_refs = {s.det_idx: s.ref for s in capture.segments}
         with self.memory.batch_writes():
-            for (i, d, pts, crop), emb in zip(pending, embeddings):
+            for i, d, pts, crop in pending:
                 det = Detection3D(
                     class_name=d.class_name or "object",
                     class_id=d.class_id,
                     confidence=float(d.confidence or 0.0),
                     bbox_xyxy=tuple(int(v) for v in d.bbox),
                     points_world=pts,
-                    clip_emb=emb,
+                    clip_emb=list(d.embedding or []),
                     caption=result[i]["caption"],
                     ts=time.time(),
                     crop=crop,
@@ -607,7 +613,7 @@ class WalkieGraphsService(threading.Thread):
         d_tick = time.perf_counter() - t
 
         total = time.perf_counter() - t_frame
-        n_cap = len(captions)
+        n_cap = sum(1 for _i, d, _p, _c in pending if d.caption)
         stats = self.memory.pop_perf_stats()
         breakdown = " ".join(f"{k}={v * 1000:.0f}ms" for k, v in sorted(stats.items()))
         icp_state = (
@@ -622,8 +628,7 @@ class WalkieGraphsService(threading.Thread):
             f"deproject={d_deproject * 1000:.0f}ms ({len(detections)} det) | "
             f"bg={d_bg * 1000:.0f}ms ({len(capture.background)} pts) "
             f"capture_icp={d_icp * 1000:.0f}ms ({icp_state}) | "
-            f"caption={d_caption * 1000:.0f}ms ({n_cap}) "
-            f"embed={d_embed * 1000:.0f}ms ({len(pending)}) "
+            f"cap+emb=fused ({n_cap}/{len(pending)}) "
             f"upsert={d_upsert * 1000:.0f}ms [{breakdown}] | "
             f"maint+viz={d_tick * 1000:.0f}ms"
         )
@@ -803,37 +808,4 @@ class WalkieGraphsService(threading.Thread):
             return False
         return True
 
-    def _should_caption(self, class_name: str) -> bool:
-        return not self.caption_classes or class_name.lower() in self.caption_classes
-
-    def _caption(self, detected: list, crops: list) -> dict[int, str]:
-        idx = [i for i, d in enumerate(detected) if self._should_caption(d.class_name or "")]
-        if not idx:
-            return {}
-        imgs = [crops[i] for i in idx]
-        prompts = [f"Describe the {detected[i].class_name}." for i in idx]
-        try:
-            out = self.walkieAI.image_caption.caption_batch(imgs, prompts=prompts)
-        except Exception as e:  # noqa: BLE001
-            self._log(f"caption failed: {e}")
-            return {}
-        return {i: (c or "") for i, c in zip(idx, out)}
-
-    def _embed(self, crop) -> list[float]:
-        try:
-            return list(self.walkieAI.image_embed.embed_image(crop))
-        except Exception as e:  # noqa: BLE001 — embed route may be disabled server-side
-            self._log(f"embed failed (degrading to spatial dedup): {e}")
-            return []
-
-    def _embed_batch(self, crops: list) -> list[list[float]]:
-        """Embed many crops concurrently — there's no batch endpoint, so fan the
-        per-crop network calls out across a small thread pool (they're I/O-bound)."""
-        if not crops:
-            return []
-        workers = min(len(crops), max(1, self._embed_workers))
-        if workers <= 1:
-            return [self._embed(c) for c in crops]
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            return list(ex.map(self._embed, crops))
 

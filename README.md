@@ -33,7 +33,7 @@ uv run python main.py                      # run the robot — ready for command
 - `.env` holds **only** secrets/endpoints (`OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`). All tuning lives in version-controlled TOML — no edit needed to start.
 - Needs **`walkie-ai-server`** reachable at `WALKIE_AI_BASE_URL` (default in `config.toml`) for STT/TTS/detection/caption/embeddings.
 - No microphone? Type prompts instead: `DISABLE_LISTENING=1 uv run python main.py`.
-- Optional extras: `uv sync --extra graphs` adds [Rerun](https://rerun.io) for live 3D scene-graph visualization (imported lazily; everything else runs without it).
+- [Rerun](https://rerun.io) (live 3D scene-graph visualization) ships as a core dependency; it's imported lazily, so everything else runs even if it's unavailable.
 
 The unified launcher wraps the common operations:
 

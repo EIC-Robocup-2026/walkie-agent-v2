@@ -301,6 +301,12 @@ class CameraSnapshot:
         image is unavailable (both mandatory); ``cam``/``intr`` may be ``None`` and
         degrade lifting to "no geometry".
         """
+        # Per-stage timing (WALKIE_SNAPSHOT_TIMING=1): get_depth/get_frame are
+        # cached reads, but camera_pose() does a synchronous ROS TF service
+        # round-trip every call — this prints which stage actually dominates a
+        # snapshot, e.g. when a follow loop's sample rate is capped.
+        timing = os.getenv("WALKIE_SNAPSHOT_TIMING", "0").lower() in ("1", "true", "yes")
+        t0 = time.monotonic()
         try:
             depth = walkie.robot.camera.get_depth()
         except Exception as e:  # noqa: BLE001
@@ -309,13 +315,16 @@ class CameraSnapshot:
         if depth is None:
             log("depth unavailable — no snapshot")
             return None
+        t_depth = time.monotonic()
         try:
             img = walkie.camera.capture_pil()  # PIL RGB
         except Exception as e:  # noqa: BLE001
             log(f"capture failed: {e}")
             return None
+        t_rgb = time.monotonic()
         ts = time.time()
-        cam = camera_pose(walkie, log=log)
+        cam = camera_pose(walkie, log=log)  # synchronous TF service round-trip
+        t_tf = time.monotonic()
         intr = (
             intrinsics_for(walkie, depth.shape[1], depth.shape[0], log=log)
             if cam is not None
@@ -326,6 +335,10 @@ class CameraSnapshot:
         except Exception as e:  # noqa: BLE001
             log(f"robot pose unavailable: {e}")
             robot_pose = None
+        if timing:
+            print(f"[CameraSnapshot] depth={1e3 * (t_depth - t0):.0f}ms "
+                  f"rgb={1e3 * (t_rgb - t_depth):.0f}ms tf={1e3 * (t_tf - t_rgb):.0f}ms "
+                  f"intr+odom={1e3 * (time.monotonic() - t_tf):.0f}ms")
         return cls(ts=ts, img=img, depth=depth, cam=cam, intr=intr, robot_pose=robot_pose)
 
     @property

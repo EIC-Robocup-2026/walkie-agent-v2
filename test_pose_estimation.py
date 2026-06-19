@@ -63,7 +63,7 @@ def test_pose_estimation():
             break
 
         start_time = time.time()
-        poses = walkieAI.pose_estimation.estimate(frame)
+        poses = walkieAI.image.estimate_poses(frame)
         end_time = time.time()
         print(f"Time taken: {end_time - start_time} seconds. (FPS: {1 / (end_time - start_time)})")
         draw_poses(frame, poses)

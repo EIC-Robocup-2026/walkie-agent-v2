@@ -2,7 +2,6 @@
 
 Run on the robot (or a dev PC with WALKIE_ROBOT_IP set) with walkie-ai-server up::
 
-    uv sync --extra graphs
     WALKIE_GRAPHS_VIZ=rerun uv run python -m manual_tests.test_graphs_live
 
 A Rerun viewer shows the accumulating point clouds, per-object boxes, and relation

@@ -1,7 +1,7 @@
 """Real-time 3D visualization of the scene graph with Rerun (rerun.io).
 
-Optional: ``rerun`` is imported lazily and only when ``WALKIE_GRAPHS_VIZ=rerun``,
-so the core module and tests never need it. Install with ``uv sync --extra graphs``.
+``rerun`` is a core dependency but imported lazily and only when
+``WALKIE_GRAPHS_VIZ=rerun``, so the core module and tests never need it loaded.
 
 Each :meth:`RerunViz.update` logs, in the ``world`` space:
 - one colored point cloud per object (colored by class),

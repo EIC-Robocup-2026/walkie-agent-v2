@@ -3,12 +3,7 @@
 from __future__ import annotations
 import os
 
-from .appearance import AppearanceClient
-from .face_recognition import FaceRecognitionClient
-from .image_caption import ImageCaptionClient
-from .image_embed import ImageEmbedClient
-from .object_detection import ObjectDetectionClient
-from .pose_estimation import PoseEstimationClient
+from .image import ImageClient
 from .stt import STTClient
 from .tts import TTSClient
 
@@ -34,19 +29,18 @@ class WalkieAIClient:
         for chunk in walkie.tts.synthesize_stream("Streaming speech."):
             speaker.write(chunk)
 
-        # Object Detection
-        detections = walkie.object_detection.detect(pil_image)
-        for obj in detections:
+        # Vision — one image upload, any combination of tasks
+        res = walkie.image.process(pil_image, detection=True, caption=True, pose=True)
+        for obj in res.detection:
             print(obj.class_name, obj.confidence)
-
-        # Pose Estimation
-        poses = walkie.pose_estimation.estimate(pil_image)
-        for person in poses:
+        print(res.caption)
+        for person in res.pose:
             print(len(person.keypoints), "keypoints detected")
 
-        # Image Captioning
-        caption = walkie.image_caption.caption(pil_image)
-        captions = walkie.image_caption.caption_batch([img_a, img_b])
+        # Single-task helpers
+        detections = walkie.image.detect(pil_image)
+        poses      = walkie.image.estimate_poses(pil_image)
+        caption    = walkie.image.caption(pil_image)
 
     Args:
         base_url: Root URL of the running walkie-agent-v2 server.
@@ -62,9 +56,4 @@ class WalkieAIClient:
             base_url = os.getenv("WALKIE_AI_BASE_URL") or "http://localhost:5000"
         self.stt = STTClient(base_url=base_url, timeout=timeout)
         self.tts = TTSClient(base_url=base_url, timeout=timeout)
-        self.object_detection = ObjectDetectionClient(base_url=base_url, timeout=timeout)
-        self.pose_estimation = PoseEstimationClient(base_url=base_url, timeout=timeout)
-        self.image_caption = ImageCaptionClient(base_url=base_url, timeout=timeout)
-        self.image_embed = ImageEmbedClient(base_url=base_url, timeout=timeout)
-        self.face_recognition = FaceRecognitionClient(base_url=base_url, timeout=timeout)
-        self.appearance = AppearanceClient(base_url=base_url, timeout=timeout)
+        self.image = ImageClient(base_url=base_url, timeout=timeout)

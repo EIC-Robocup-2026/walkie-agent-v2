@@ -57,16 +57,18 @@ def _mask(bbox):
 
 
 def _det(class_name, bbox, conf=0.9):
+    # Detections now arrive with the fused per-object caption + CLIP embed already
+    # attached (the server-side per_detection pass), mirroring client.DetectedObject.
     return SimpleNamespace(
-        class_name=class_name, class_id=0, confidence=conf, bbox=bbox, mask=_mask(bbox)
+        class_name=class_name, class_id=0, confidence=conf, bbox=bbox, mask=_mask(bbox),
+        caption="a box", embedding=[1.0, 0.0, 0.0],
     )
 
 
 def _ai():
-    return SimpleNamespace(
-        image_caption=SimpleNamespace(caption_batch=lambda imgs, prompts=None: ["a box"] * len(imgs)),
-        image_embed=SimpleNamespace(embed_image=lambda crop: [1.0, 0.0, 0.0]),
-    )
+    # ingest_frame no longer calls the AI client (caption/embed are fused onto the
+    # detections upstream); a benign stub keeps the service constructor happy.
+    return SimpleNamespace(image=SimpleNamespace())
 
 
 @pytest.fixture

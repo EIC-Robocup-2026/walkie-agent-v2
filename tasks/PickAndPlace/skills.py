@@ -1,32 +1,41 @@
-"""Reusable perception / manipulation skills for Pick and Place (rulebook 5.2).
+"""Pick-and-Place-specific skills (rulebook 5.2).
 
-PLACEHOLDER. Plain functions over a TaskContext, mirroring tasks/HRI/skills.py.
-Perception lifts and the arm primitives are stubs — fill them in as the SDK
-manipulation API lands. Anything that turns out generic enough (e.g. a real
-pick/place) should graduate to tasks/base.py so the other manipulation tasks
-(Laundry, Restaurant) can lift it.
+A thin facade over the shared manipulation layer (tasks/manipulation.py): the
+grasp planner + real pick/place + perception-lift live there and are reused by
+the other manipulation tasks (Restaurant, ...). What stays here is the
+PickAndPlace-specific glue: which classes to detect, the LLM destination sort,
+and the destination-furniture place logic.
 """
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
 
 from tasks.base import TaskContext
+from tasks.manipulation import (
+    DetectedObject,
+    perceive_surface as _perceive_surface,
+    pick_object,
+    place_at_pose,
+    plan_grasp,
+    release_in_front,
+)
 
 from . import prompts
 
-BBox = tuple[float, float, float, float]
+# Re-exported so tasks/PickAndPlace/subtasks.py keeps importing from .skills.
+__all__ = [
+    "DetectedObject",
+    "perceive_surface",
+    "pick_object",
+    "place_at",
+    "place_object",
+    "plan_grasp",
+    "sort_object",
+]
 
-
-@dataclass
-class DetectedObject:
-    """One object perceived on a surface, with its map-frame position when lifted."""
-
-    bbox_xyxy: BBox
-    class_name: str
-    confidence: float
-    world_xy: tuple[float, float] | None = None
+# ServeBreakfast drops items at fixed table slots — same as a generic placement.
+place_at = place_at_pose
 
 
 def _classes(env: str, default: str) -> list[str]:
@@ -34,41 +43,11 @@ def _classes(env: str, default: str) -> list[str]:
 
 
 def perceive_surface(ctx: TaskContext, classes: list[str] | None = None) -> list[DetectedObject]:
-    """Detect objects on the surface in front of the robot (open-vocab).
-
-    Returns DetectedObjects with bboxes; world_xy is lifted against the snapshot
-    geometry when available. Empty list on any capture/detection failure (the
-    task degrades, never raises). The rulebook requires the robot to *communicate
-    its perception* to the referee — the caller should announce the result.
-    """
-    snap = ctx.snapshot()
-    if snap is None:
-        return []
-    prompts_list = classes or _classes(
-        "PNP_TABLE_CLASSES", "cup,mug,plate,fork,knife,spoon,bottle,box,can"
+    """Detect dining-table / extra-surface objects (PNP_TABLE_CLASSES by default)."""
+    resolved = classes or _classes(
+        "PNP_TABLE_CLASSES", "cup,mug,plate,fork,knife,spoon,bottle,box,can,bowl"
     )
-    try:
-        detections = ctx.walkieAI.object_detection.detect(snap.img, prompts=prompts_list)
-    except Exception as exc:
-        print(f"[pnp.skills] detection failed ({exc})")
-        return []
-    out: list[DetectedObject] = []
-    for det in detections:
-        world_xy = None
-        if getattr(snap, "has_geometry", False):
-            try:
-                world_xy = snap.bbox_world_xy(det.bbox)
-            except Exception:
-                world_xy = None
-        out.append(
-            DetectedObject(
-                bbox_xyxy=tuple(det.bbox),
-                class_name=det.class_name or "object",
-                confidence=det.confidence or 0.0,
-                world_xy=world_xy,
-            )
-        )
-    return out
+    return _perceive_surface(ctx, resolved)
 
 
 def sort_object(ctx: TaskContext, obj: DetectedObject) -> prompts.ObjectSort | None:
@@ -86,24 +65,12 @@ def sort_object(ctx: TaskContext, obj: DetectedObject) -> prompts.ObjectSort | N
     return ctx.extract(prompts.ObjectSort, prompts.SORT_OBJECT_INSTRUCTIONS, text)
 
 
-# --- Manipulation primitives (EXTENSION POINTS — not implemented) -----------
-def pick_object(ctx: TaskContext, obj: DetectedObject) -> bool:
-    """Grasp *obj* and lift it for transport.
-
-    STUB: needs a real arm/grasp planner that does not exist yet. Announces the
-    limitation and reports failure so the caller can score-degrade gracefully
-    (the rulebook allows partial scoring). Implement against walkie.arm.
-    """
-    ctx.say(prompts.PICK_NOT_AVAILABLE.format(obj=obj.class_name))
-    print(f"[pnp.skills] TODO pick_object({obj.class_name}) — manipulation not implemented")
-    return False
-
-
 def place_object(ctx: TaskContext, destination: str, *, group: str | None = None) -> bool:
-    """Place the held object at *destination* ('dishwasher'|'trash'|'cabinet').
+    """Navigate to *destination* furniture and release the held object there.
 
-    STUB: navigation to the destination furniture is real-ish (config poses);
-    the actual place motion is not implemented. Returns False until then.
+    Navigation to the furniture waypoint is real (config poses); the place pose
+    is the stub (config PNP_PLACE_POSE_<DEST>). Falls back to a drop-in-front when
+    no place pose is configured. Returns whether a located placement was done.
     """
     pose_key = {
         "dishwasher": "PNP_DISHWASHER_POSE",
@@ -115,5 +82,20 @@ def place_object(ctx: TaskContext, destination: str, *, group: str | None = None
 
         x, y, h = _pose(pose_key)
         ctx.goto(x, y, h)
-    print(f"[pnp.skills] TODO place_object({destination}, group={group}) — not implemented")
-    return False
+    place_pose = (
+        os.getenv(
+            {
+                "dishwasher": "PNP_PLACE_POSE_DISHWASHER",
+                "trash": "PNP_PLACE_POSE_TRASH",
+                "cabinet": "PNP_PLACE_POSE_CABINET",
+            }.get(destination, ""),
+            "",
+        ).strip()
+        or os.getenv("PNP_PLACE_POSE_DEFAULT", "").strip()
+    )
+    if not place_pose:
+        print(f"[pnp.skills] place_object({destination}) — no place pose; dropping in front")
+        return release_in_front(ctx)
+    ok = place_at_pose(ctx, place_pose)
+    ctx.say(prompts.PLACED.format(destination=destination))
+    return ok

@@ -15,8 +15,14 @@ from langgraph.checkpoint.memory import InMemorySaver
 from .middleware import (
     PerceptionContextMiddleware,
     RobotContextMiddleware,
+    StubToolMiddleware,
     ToolGroupingMiddleware,
+    TraceMiddleware,
 )
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "0").lower() in ("1", "true", "yes")
 
 
 def create_walkie_agent(
@@ -58,20 +64,27 @@ def create_walkie_agent(
         middleware.append(
             SummarizationMiddleware(
                 model=model,
-                trigger=("tokens", int(os.getenv("WALKIE_SUMMARIZE_AT_TOKENS", "6000"))),
+                trigger=("tokens", int(os.getenv("WALKIE_SUMMARIZE_AT_TOKENS", "18000"))),
                 keep=("messages", int(os.getenv("WALKIE_SUMMARIZE_KEEP_MSGS", "12"))),
             )
         )
-    if enable_todos:
-        middleware.append(TodoListMiddleware())
+    # if enable_todos:
+    #     middleware.append(TodoListMiddleware())
     middleware.extend(
         [
-            PerceptionContextMiddleware(),
-            RobotContextMiddleware(),
+            # PerceptionContextMiddleware(),
+            # RobotContextMiddleware(),
             grouping,
             *extra_middleware,
         ]
     )
+
+    # Offline / dry-run mode (see manual_tests/run_stub_agent.py). Env-gated so
+    # production boot is unaffected when the flags are unset.
+    if _env_flag("WALKIE_STUB_TOOLS"):
+        middleware.append(StubToolMiddleware(agent_name=name))
+    if _env_flag("WALKIE_TRACE"):
+        middleware.append(TraceMiddleware(agent_name=name))
 
     agent = create_agent(
         model=model,
