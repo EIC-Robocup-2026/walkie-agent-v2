@@ -151,8 +151,8 @@ def _bare(name: str | None) -> str:
 def _person_phrase(descriptor: str | None, kind: str | None) -> str:
     """Spoken reference to a person from a grounded descriptor + its kind.
 
-    name -> "Charlie"; gesture/pose -> "the waving person"; clothing/other ->
-    the description as given. The plan stores the descriptor under args
+    name -> "Charlie"; gesture/pose -> "the waving person"; clothing -> "the
+    person in a red shirt". The plan stores the descriptor under args
     'descriptor' (find_person/follow/guide/greet) or 'recipient' (deliver).
     """
     desc = _bare(descriptor)
@@ -162,7 +162,22 @@ def _person_phrase(descriptor: str | None, kind: str | None) -> str:
         return desc
     if kind in ("gesture", "pose"):
         return f"the {desc} person"
-    return desc  # clothing / free description
+    # clothing / free description: turn a bare attire phrase ("red shirt") into a
+    # person reference, unless the descriptor already names a human ("the person
+    # in a red shirt") — which would otherwise double up.
+    if desc.lower().startswith(("person", "the person", "a person", "someone", "people")):
+        return desc
+    return f"the person in {desc}"
+
+
+def _count_people_phrase(descriptor: str | None, kind: str | None) -> str:
+    """Spoken noun for counting people: 'waving people' / 'people in red' / 'people'."""
+    desc = _bare(descriptor)
+    if kind in ("gesture", "pose") and desc:
+        return f"{desc} people"
+    if kind == "clothing" and desc:
+        return f"people in {desc}"
+    return "people"
 
 
 def _step_phrase(step: PlanStep) -> str:
@@ -196,8 +211,11 @@ def _step_phrase(step: PlanStep) -> str:
         who = _person_phrase(a.get("descriptor"), a.get("kind"))
         return f"guide {who} to {_the(a.get('to'))}"
     if p is Primitive.COUNT:
-        what = _bare(a.get("object") or a.get("category") or a.get("what") or "things")
         where = a.get("location") or a.get("room")
+        if a.get("what") == "persons":
+            what = _count_people_phrase(a.get("descriptor"), a.get("kind"))
+        else:
+            what = _bare(a.get("object") or a.get("category") or "objects")
         return f"count how many {what} there are" + (f" at {_the(where)}" if where else "")
     if p is Primitive.GET_PERSON_INFO:
         return f"find out the person's {_bare(a.get('which')) or 'details'}"

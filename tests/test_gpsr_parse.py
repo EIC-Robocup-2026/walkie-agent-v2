@@ -201,6 +201,30 @@ def test_render_gesture_person_as_the_x_person():
     assert "the waving person" in speech
 
 
+def test_render_clothing_person_as_person_in():
+    raw = RawPlan(steps=[RawStep(primitive="find_person", person="red shirt", descriptor_kind="clothing", raw="find the person in a red shirt")])
+    speech = render_plan_speech(ground_plan(raw, load_world()))
+    assert "find the person in red shirt" in speech  # not the bare "find red shirt"
+
+
+def test_render_clothing_person_not_double_prefixed():
+    # A descriptor that already names a human must not become "the person in the person in...".
+    raw = RawPlan(steps=[RawStep(primitive="find_person", person="the person in the red shirt", descriptor_kind="clothing", raw="x")])
+    speech = render_plan_speech(ground_plan(raw, load_world()))
+    assert "the person in the red shirt" in speech
+    assert "person in the person" not in speech
+
+
+def test_render_count_people_by_gesture():
+    raw = RawPlan(steps=[
+        RawStep(primitive="navigate", room="the living room", raw="go to the living room"),
+        RawStep(primitive="count", person="waving person", descriptor_kind="gesture", room="the living room", raw="how many are waving"),
+    ])
+    speech = render_plan_speech(ground_plan(raw, load_world()))
+    assert "waving people" in speech  # not the generic "persons", and keeps the gesture
+    assert "persons" not in speech
+
+
 def test_render_single_step():
     raw = RawPlan(steps=[RawStep(primitive="navigate", room="the bedroom", raw="go to the bedroom")])
     speech = render_plan_speech(ground_plan(raw, load_world()))
