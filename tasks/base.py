@@ -32,6 +32,7 @@ from interfaces.walkie_interface import WalkieInterface
 
 if TYPE_CHECKING:  # import-time decoupling: tasks without people memory don't pay for it
     from perception import PeopleStore
+    from services.walkie_graphs import WalkieGraphs
 
 
 class StepResult(Enum):
@@ -54,6 +55,7 @@ class TaskContext:
     data: dict[str, Any] = field(default_factory=dict)  # cross-step blackboard
     disable_listening: bool = False  # DISABLE_LISTENING: type at a TTY instead of mic
     people: "PeopleStore | None" = None  # face/appearance person memory (optional)
+    graphs: "WalkieGraphs | None" = None  # 3D scene-graph memory (manipulation grasp source)
 
     # --- conversation ---------------------------------------------------
 

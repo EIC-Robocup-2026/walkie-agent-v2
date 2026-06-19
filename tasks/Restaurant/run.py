@@ -13,7 +13,12 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from ..base import TaskContext
-from ..common import initialize_llm_model, initialize_robot, load_task_config
+from ..common import (
+    initialize_graphs,
+    initialize_llm_model,
+    initialize_robot,
+    load_task_config,
+)
 from .subtasks import build_restaurant_task
 from client import WalkieAIClient
 
@@ -25,17 +30,21 @@ def main() -> None:
     walkie_interface = initialize_robot()
     model = initialize_llm_model()
     walkie_ai = WalkieAIClient()
+    graphs = initialize_graphs(model, walkie_ai, walkie_interface)
 
     ctx = TaskContext(
         walkie=walkie_interface,
         walkieAI=walkie_ai,
         model=model,
+        graphs=graphs,
         disable_listening=os.getenv("DISABLE_LISTENING", "0").lower() in ("1", "true", "yes"),
     )
 
     try:
         build_restaurant_task(ctx).run()
     finally:
+        if graphs is not None:
+            graphs.stop()
         walkie_interface.close()
 
 

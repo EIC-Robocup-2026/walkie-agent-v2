@@ -49,6 +49,31 @@ def initialize_robot() -> WalkieRobot:
     return walkie_interface
 
 
+def initialize_graphs(model, walkie_ai, walkie_interface):
+    """Build the walkie_graphs 3D memory for manipulation, starting the observer.
+
+    The GraspNet grasp path reads each object's stored point cloud from this
+    store, so the scene must be populated. The observer thread is started unless
+    the stub planner is selected (``WALKIE_GRASP_PLANNER=stub`` needs no DB).
+    Returns the :class:`~services.walkie_graphs.WalkieGraphs` (call ``.stop()`` on
+    teardown), or ``None`` if construction fails (the grasp path then degrades to
+    the stub).
+    """
+    try:
+        from services.walkie_graphs import WalkieGraphs
+
+        graphs = WalkieGraphs(model=model, walkieAI=walkie_ai, walkie=walkie_interface)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[common] WalkieGraphs unavailable ({exc}); grasp falls back to stub")
+        return None
+    if os.getenv("WALKIE_GRASP_PLANNER", "graspnet").strip().lower() != "stub":
+        try:
+            graphs.start()  # background perception fills the scene during the run
+        except Exception as exc:  # noqa: BLE001
+            print(f"[common] graphs.start() failed ({exc})")
+    return graphs
+
+
 def initialize_llm_model():
     """OpenRouter via the OpenAI-compatible endpoint."""
     use_local = os.getenv("LLM_USE_LOCAL", "0").lower() in ("1", "true", "yes")

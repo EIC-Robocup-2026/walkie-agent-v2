@@ -5,7 +5,9 @@ exercised against a fake TaskContext (only ``current_pose`` is needed).
 """
 
 import math
+from dataclasses import dataclass
 
+import numpy as np
 import pytest
 
 from tasks.manipulation import (
@@ -13,6 +15,9 @@ from tasks.manipulation import (
     plan_grasp,
     world_to_base,
 )
+from tasks.manipulation.cloud import numpy_to_pointcloud2
+from tasks.manipulation.db import node_table_box
+from walkie_sdk.utils.converters import parse_point_cloud_xyz
 
 
 class FakeCtx:
@@ -84,3 +89,48 @@ def test_plan_grasp_map_frame_passthrough(monkeypatch):
     assert plan.frame_id == "map"
     assert plan.approach == "front"
     assert plan.position == pytest.approx((1.0, 2.0, 3.0))
+
+
+# --- numpy_to_pointcloud2 (round-trips through the SDK parser) ---------------
+def test_pointcloud2_roundtrip(monkeypatch):
+    monkeypatch.setenv("WALKIE_PC2_DATA_ENCODING", "bytes")
+    pts = np.random.default_rng(0).uniform(-2.0, 2.0, size=(64, 3)).astype(np.float32)
+    cloud = numpy_to_pointcloud2(pts, frame_id="map")
+    assert cloud["header"]["frame_id"] == "map"
+    assert cloud["width"] == 64 and cloud["height"] == 1 and cloud["point_step"] == 12
+    out = parse_point_cloud_xyz(cloud)
+    assert out is not None
+    assert out.shape == (64, 3)
+    assert out == pytest.approx(pts, abs=1e-5)
+
+
+def test_pointcloud2_base64_roundtrip(monkeypatch):
+    monkeypatch.setenv("WALKIE_PC2_DATA_ENCODING", "base64")
+    pts = np.array([[1.0, 2.0, 3.0], [-1.0, -2.0, -3.0]], dtype=np.float32)
+    out = parse_point_cloud_xyz(numpy_to_pointcloud2(pts))
+    assert out == pytest.approx(pts, abs=1e-5)
+
+
+# --- node_table_box (aabb -> set_table pose/size) ---------------------------
+@dataclass
+class _FakeNode:
+    centroid: tuple
+    aabb_min: tuple
+    aabb_max: tuple
+
+
+def test_node_table_box_from_aabb():
+    node = _FakeNode(
+        centroid=(1.0, 0.5, 0.4),
+        aabb_min=(0.5, 0.0, 0.0),
+        aabb_max=(1.5, 1.0, 0.75),
+    )
+    pose, size = node_table_box(node)
+    # pose = [center_x, center_y, top_z, yaw]
+    assert pose == pytest.approx([1.0, 0.5, 0.75, 0.0])
+    # size = [depth_x, width_y]
+    assert size == pytest.approx([1.0, 1.0])
+
+
+def test_node_table_box_none_for_none():
+    assert node_table_box(None) is None
