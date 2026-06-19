@@ -39,9 +39,11 @@ or real poses** · `[ ]` stub / Tier-2 fallback / not implemented.
 
 ## Avoiding penalties
 
-- [~] **Minimize rephrasings** (6×−30) — re-ask only on an empty parse (§5.2), never to
-      confirm. **Custom-operator / recovery escalation is NOT yet built** — on repeated
-      parse failure the run currently goes home empty-handed (see TODO below).
+- [x] **Minimize rephrasings + recovery** (rephrasing 6×−30, custom op 3×−20) — re-ask
+      only on an empty parse (§5.2), bounded by `GPSR_MAX_REPHRASINGS`; then **request a
+      custom operator** (`GPSR_USE_CUSTOM_OPERATOR`) before giving up, always leaving the
+      command list set so the robot keeps "attending"
+      (`ReceiveAndPlanCommands._receive_commands`, `tests/test_gpsr_recovery.py`).
 - [x] **No bypassing STT** (3×−50) — commands come through the mic/STT path.
 - [x] **Attending** — the fixed envelope always returns to the instruction point.
 
@@ -58,8 +60,6 @@ or real poses** · `[ ]` stub / Tier-2 fallback / not implemented.
 
 ## TODO (next, roughly in priority)
 
-- [ ] **Custom-operator / recovery flow** — escalate (bounded rephrasings → request a
-      custom operator) instead of silently forfeiting; protects the draw-independent 540.
 - [ ] **`follow` destination stopper** — end the loop on arrival at `to`, not on timeout
       (a pose-watching stopper for `follow_person`); then on-robot validate.
 - [ ] **`guide`** primitive — reuse the follow tracking + arrival announce.

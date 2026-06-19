@@ -18,6 +18,15 @@ GPSR_START_PERCEPTION = "1"
 # 1 = speak the parsed plan for each command before executing — this is what
 # scores "demonstrate a plan has been generated" (3×100). Leave on.
 GPSR_SPEAK_PLAN = "1"
+# Recovery when a command can't be parsed (rulebook 5.3). Re-ask only on an empty
+# parse and keep it small — each rephrasing request costs −30 (§5.2).
+GPSR_MAX_REPHRASINGS = "2"
+# 1 = after rephrasings are exhausted, request a custom operator (a clearer human
+# speaker; −20/command but recovers the command) rather than giving up.
+GPSR_USE_CUSTOM_OPERATOR = "1"
+# Listening attempts with the custom operator before giving up (the rulebook gives
+# the custom operator three attempts).
+GPSR_CUSTOM_OPERATOR_ATTEMPTS = "3"
 # Path to the world-model file (arena nouns the parser grounds against). The rich
 # data lives in its own TOML loaded directly (NOT flattened to env vars); only
 # the path is a knob. Relative to the repo root. Override to swap arenas.

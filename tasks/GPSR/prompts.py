@@ -123,6 +123,18 @@ GREET_OPERATOR = (
 )
 ASK_FOR_COMMANDS = "What would you like me to do?"
 ASK_REPEAT = "Sorry, I did not catch that. Could you please repeat the command?"
+# Recovery escalation (rulebook 5.3). Each rephrasing request costs −30, so we
+# re-ask only on an empty parse and only a few times; then we request a custom
+# operator (−20/command, but recovers the command) rather than silently failing.
+ASK_REPHRASE = "Sorry, I did not understand. Could you please say the command again, more simply?"
+REQUEST_CUSTOM_OPERATOR = (
+    "I am having trouble understanding the commands. Could a custom operator "
+    "please come and give me the commands?"
+)
+GIVE_UP_ON_COMMANDS = (
+    "I am sorry, I could not understand the commands. I will return to the "
+    "instruction point."
+)
 PLAN_PREAMBLE = "For command {n}, here is my plan."
 CONFIRM_RECEIVED = "Understood. I will get to work."
 COMMAND_ANNOUNCE = "Working on command {n}: {command}"

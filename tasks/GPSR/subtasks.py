@@ -77,10 +77,18 @@ class ReceiveAndPlanCommands(SubTask):
     (3×100) and doubles as the operator's confirmation. The robot *requests all
     three at once* (§5.5) to keep the interleave bonus reachable and save
     round-trips; in one-by-one mode ExecuteCommands returns between commands.
-    Re-asks only on an empty parse (§5.2 — rephrasings cost −30 each).
+
+    Recovery (rulebook 5.3): re-ask only on an empty parse (§5.2 — each
+    rephrasing costs −30), a bounded number of times, then **request a custom
+    operator** (a clearer human; −20/command but recovers the command) before
+    giving up. The receive loop is self-managed (not the SubTask retry counter)
+    so it can escalate AND always leave ``ctx.data["commands"]`` set — the old
+    behaviour silently left it unset and forfeited the whole run. On total
+    failure it returns DONE (not ABORT) so the robot still returns to the
+    instruction point and stays "attending".
     """
 
-    max_retries = 2  # the rulebook allows asking the operator to repeat
+    max_retries = 0  # recovery is handled in-loop by _receive_commands
 
     def run(self, ctx: TaskContext) -> StepResult:
         world = ctx.data.get("world")
@@ -89,16 +97,53 @@ class ReceiveAndPlanCommands(SubTask):
             ctx.say(prompts.PLAN_NOT_UNDERSTOOD)
             return StepResult.ABORT
         ctx.say(prompts.GREET_OPERATOR)
-        answer = ctx.ask(prompts.ASK_FOR_COMMANDS)
-        if not answer:
-            ctx.say(prompts.ASK_REPEAT)
-            return StepResult.RETRY
+        commands = self._receive_commands(ctx, world)
+        ctx.data["commands"] = commands
+        if commands:
+            ctx.say(prompts.CONFIRM_RECEIVED)
+        else:
+            ctx.say(prompts.GIVE_UP_ON_COMMANDS)
+        return StepResult.DONE
 
-        parsed = parse_commands(ctx.model, answer, world)
-        if not parsed:
-            ctx.say(prompts.ASK_REPEAT)
-            return StepResult.RETRY
+    def _receive_commands(self, ctx: TaskContext, world) -> list[Command]:
+        """Ask for the command(s), escalating on failure; return the planned list.
 
+        Returns as soon as one round yields at least one usable plan (a partial
+        batch is accepted — re-asking the whole batch would re-pay −30, §5.2).
+        Escalates: up to ``GPSR_MAX_REPHRASINGS`` rephrasing requests, then (if
+        ``GPSR_USE_CUSTOM_OPERATOR``) a custom-operator request plus up to
+        ``GPSR_CUSTOM_OPERATOR_ATTEMPTS`` further listens. ``[]`` once exhausted.
+        """
+        max_rephrasings = int(os.getenv("GPSR_MAX_REPHRASINGS", "2"))
+        use_custom = os.getenv("GPSR_USE_CUSTOM_OPERATOR", "1").lower() in ("1", "true", "yes")
+        max_custom = int(os.getenv("GPSR_CUSTOM_OPERATOR_ATTEMPTS", "3")) if use_custom else 0
+        rephrasings = 0
+        custom_attempts = 0
+        requested_custom = False
+        while True:
+            # retries=0 so each ask is ONE say+listen — this loop owns all
+            # re-prompting, so GPSR_MAX_REPHRASINGS is the true re-prompt bound
+            # (ctx.ask's default retries=1 would re-prompt internally and inflate
+            # the −30 count + the clock).
+            answer = ctx.ask(prompts.ASK_FOR_COMMANDS, retries=0)
+            if answer:
+                parsed = parse_commands(ctx.model, answer, world)
+                if any(plan for _, plan in parsed):  # at least one usable plan
+                    return self._build_commands(ctx, parsed)
+            # Nothing usable this round — escalate (rephrase, then custom operator).
+            if rephrasings < max_rephrasings:
+                rephrasings += 1
+                ctx.say(prompts.ASK_REPHRASE)
+            elif custom_attempts < max_custom:
+                if not requested_custom:
+                    requested_custom = True
+                    ctx.say(prompts.REQUEST_CUSTOM_OPERATOR)
+                custom_attempts += 1
+            else:
+                return []  # rephrasings + custom operator exhausted
+
+    def _build_commands(self, ctx: TaskContext, parsed) -> list[Command]:
+        """Turn parsed (text, Plan) pairs into Commands, speaking each plan."""
         commands: list[Command] = []
         for i, (text, plan) in enumerate(parsed, 1):
             cmd = Command(id=i, utterance=text, plan=plan)
@@ -112,10 +157,7 @@ class ReceiveAndPlanCommands(SubTask):
                 ctx.say(prompts.PLAN_NOT_UNDERSTOOD)
             commands.append(cmd)
             print(f"[gpsr] command {i}: {text!r} -> {[s.primitive.value for s in plan.steps]}")
-
-        ctx.data["commands"] = commands
-        ctx.say(prompts.CONFIRM_RECEIVED)
-        return StepResult.DONE
+        return commands
 
 
 class ExecuteCommands(SubTask):
