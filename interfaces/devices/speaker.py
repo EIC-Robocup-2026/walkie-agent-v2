@@ -5,9 +5,12 @@ import io
 import os
 import threading
 import time
-from typing import Callable, Iterator
+from typing import TYPE_CHECKING, Callable, Iterator
 
 import pyaudio
+
+if TYPE_CHECKING:
+    from .microphone import Microphone
 
 
 @contextlib.contextmanager
@@ -111,6 +114,7 @@ class Speaker:
         sample_rate: int = 24000,
         channels: int = 1,
         frames_per_buffer: int = 1024,
+        mic: "Microphone | None" = None,
     ) -> None:
         """Initialize speaker.
 
@@ -120,13 +124,25 @@ class Speaker:
             sample_rate: Default sample rate for playback.
             channels: Number of audio channels (1 for mono, 2 for stereo).
             frames_per_buffer: Buffer size for streaming playback.
+            mic: Microphone to pause for the duration of playback, so the robot
+                never transcribes its own voice. Optional; no-op when None.
         """
         self.device = device
         self.sample_rate = sample_rate
         self.channels = channels
         self.frames_per_buffer = frames_per_buffer
+        self.mic = mic
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+
+    @contextlib.contextmanager
+    def _mic_muted(self) -> Iterator[None]:
+        """Pause the linked mic (if any) for the duration of playback."""
+        if self.mic is None:
+            yield
+            return
+        with self.mic.paused():
+            yield
 
     def play(
         self,
@@ -184,12 +200,13 @@ class Speaker:
         bytes_per_frame = 2 * self.channels  # paInt16 = 2 bytes per sample
         chunk_bytes = self.frames_per_buffer * bytes_per_frame
         try:
-            for offset in range(0, len(audio_data), chunk_bytes):
-                if self._stop_event.is_set():
-                    break
-                stream.write(audio_data[offset:offset + chunk_bytes])
-            drain_time = (self.frames_per_buffer / sample_rate) + 0.1
-            time.sleep(drain_time)
+            with self._mic_muted():  # don't let the mic transcribe our own voice
+                for offset in range(0, len(audio_data), chunk_bytes):
+                    if self._stop_event.is_set():
+                        break
+                    stream.write(audio_data[offset:offset + chunk_bytes])
+                drain_time = (self.frames_per_buffer / sample_rate) + 0.1
+                time.sleep(drain_time)
         finally:
             stream.close()
             p.terminate()
@@ -253,15 +270,16 @@ class Speaker:
 
         audio = b""
         try:
-            for chunk in audio_stream:
-                if self._stop_event.is_set():
-                    break
-                # print(f"Playing chunk: {len(chunk)} bytes")
-                stream.write(chunk)
-                stream_handler(chunk)
-                audio += chunk
-            drain_time = (self.frames_per_buffer / sample_rate) + 0.1
-            time.sleep(drain_time)
+            with self._mic_muted():  # don't let the mic transcribe our own voice
+                for chunk in audio_stream:
+                    if self._stop_event.is_set():
+                        break
+                    # print(f"Playing chunk: {len(chunk)} bytes")
+                    stream.write(chunk)
+                    stream_handler(chunk)
+                    audio += chunk
+                drain_time = (self.frames_per_buffer / sample_rate) + 0.1
+                time.sleep(drain_time)
         finally:
             stream.close()
             p.terminate()
