@@ -69,14 +69,19 @@ or real poses** · `[ ]` stub / Tier-2 fallback / not implemented.
       arrival — wired) + `companion_present` (building block for guide's mid-route
       re-acquire — not yet wired). Pure bits offline-tested; poll thread is robot-side.
 - [x] Interleave scheduler (`schedule.py`) + per-command-isolated interleaved executor.
-- [x] Offline test suite: 83 GPSR tests (`tests/test_gpsr_*`) + coverage/split LLM gates.
+- [x] Pose-survey tool (`tools/teach_poses.py`): drive-and-capture poses into
+      `world.toml`; the in-place TOML writer is pure + offline-tested.
+- [x] Offline test suite: 88 GPSR tests (`tests/test_gpsr_*`) + coverage/split LLM gates.
 
 ## TODO (next, roughly in priority)
 
 - [ ] **`guide` mid-route re-acquire** — pause/re-acquire if the guided person falls
       behind *during* the lead (needs interruptible/segmented nav; today it confirms
       only at arrival via `companion_present`).
-- [ ] **Real arena poses** in `world.toml` (announced ~2 h before the test).
+- [ ] **Survey the real arena poses** (announced ~2 h before the test) — drive the
+      robot to each place and capture with `python -m tasks.GPSR.tools.teach_poses`
+      (writes `world.toml` in place, preserving fields), then paste the printed
+      `GPSR_INSTRUCTION_POINT_POSE` into `config.toml`.
 - [ ] **Manipulation** (`pick`/`place`/`deliver`) once the arm is calibrated.
 - [ ] **Interleave on-robot tuning** — the room-batching lands the bonus's
       movement-reduction; with real poses, consider distance-aware ordering within a
@@ -93,6 +98,9 @@ uv run pytest tests/test_gpsr_coverage.py -s
 
 # No-robot parser dry run (type a command, read back the spoken plan):
 uv run python -m tasks.GPSR.parse
+
+# Survey the arena (~2 h before the test): drive the robot to each place, Enter to capture:
+uv run python -m tasks.GPSR.tools.teach_poses        # only un-surveyed places (--all for every)
 
 # On the robot (needs walkie-ai-server; set real poses first):
 DISABLE_LISTENING=1 uv run python -m tasks.GPSR.run
