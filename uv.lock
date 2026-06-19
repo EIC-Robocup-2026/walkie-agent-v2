@@ -4542,7 +4542,7 @@ provides-extras = ["dev", "clip"]
 [[package]]
 name = "walkie-sdk"
 version = "0.2.0"
-source = { git = "https://github.com/EIC-Robocup-2026/walkie-sdk.git#396ebf46de2709bc87e46f1026ea75b8e6ed1b72" }
+source = { git = "https://github.com/EIC-Robocup-2026/walkie-sdk.git#a6afd0aa14162fc969de359d130304753de456ed" }
 dependencies = [
     { name = "eclipse-zenoh" },
     { name = "matplotlib" },

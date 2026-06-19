@@ -697,8 +697,91 @@ def _follow_parallel_enabled() -> bool:
     return os.getenv("HRI_FOLLOW_PARALLEL", "0").lower() in ("1", "true", "yes")
 
 
+def _box_center(box: BBox) -> tuple[float, float]:
+    return (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+
+
+def _gate_candidates(
+    cands: list[tuple[BBox, float | None]],
+    hint_box: BBox | None,
+    *,
+    radius_scale: float,
+) -> list[tuple[BBox, float | None]]:
+    """Candidates whose box center is near *hint_box* (the last tracked host box).
+
+    While following, the host is in nearly the same image spot tick-to-tick, so
+    only the box(es) within ``radius_scale × hint_box_width`` of *hint_box*'s
+    center need the costly per-candidate OSNet embed — usually just one. Returns
+    *cands* unchanged when there's no hint (re-acquiring) or gating is disabled
+    (``radius_scale <= 0``). May return fewer (or zero) when the host has moved /
+    is occluded; the caller then falls back to the full set so the lock is never
+    silently dropped. Pure (no I/O), so it's shared by the serial and parallel
+    paths.
+    """
+    if hint_box is None or radius_scale <= 0:
+        return cands
+    hx, hy = _box_center(hint_box)
+    radius = radius_scale * (hint_box[2] - hint_box[0])
+    return [
+        (box, scale)
+        for (box, scale) in cands
+        if math.hypot(_box_center(box)[0] - hx, _box_center(box)[1] - hy) <= radius
+    ]
+
+
+def _gate_radius_scale() -> float:
+    return float(os.getenv("HRI_FOLLOW_GATE_RADIUS_SCALE", "1.5"))
+
+
+def _attire_pass(
+    ctx: TaskContext,
+    img: Image.Image,
+    cands: list[tuple[BBox, float | None]],
+    person_id: str,
+    hint_box: BBox | None,
+) -> BBox | None:
+    """Serial attire fallback, gated to *hint_box* then widened on a miss.
+
+    Embeds only the candidates near the last tracked box first (typically one),
+    and only if none of those qualify — and gating actually narrowed the set —
+    re-embeds the full candidate list to re-acquire. The identity margin gate in
+    :func:`_select_by_attire` runs on every embedded box, so the gated shortcut
+    can never lock onto the wrong person; it just saves the embeds for the boxes
+    that obviously aren't the host.
+    """
+    gated = _gate_candidates(cands, hint_box, radius_scale=_gate_radius_scale())
+    box = _select_by_attire(ctx, img, gated, person_id)
+    if box is None and len(gated) != len(cands):
+        box = _select_by_attire(ctx, img, cands, person_id)
+    return box
+
+
+def _embed_and_score_attire_parallel(
+    ex: ThreadPoolExecutor,
+    ctx: TaskContext,
+    img: Image.Image,
+    cands: list[tuple[BBox, float | None]],
+    person_id: str,
+) -> BBox | None:
+    """Embed *cands*' crops concurrently on *ex* and score them (parallel attire).
+
+    ``ex.map`` preserves order, so ``embeds[i]`` aligns with ``cands[i]``;
+    scoring (:meth:`fused_scores`) stays on the calling thread so the local
+    Chroma store is never touched concurrently. ``None`` for an empty *cands*.
+    """
+    if not cands:
+        return None
+    embeds = list(ex.map(lambda bs: _appearance_embedding(ctx, img, bs[0]), cands))
+    return _score_attire_candidates(ctx, cands, embeds, person_id)
+
+
 def _select_person_to_follow_parallel(
-    ctx: TaskContext, img: Image.Image, person_id: str
+    ctx: TaskContext,
+    img: Image.Image,
+    person_id: str,
+    *,
+    hint_box: BBox | None,
+    run_face: bool,
 ) -> BBox | None:
     """Overlap one follow tick's independent server round-trips (HRI_FOLLOW_PARALLEL=1).
 
@@ -706,9 +789,11 @@ def _select_person_to_follow_parallel(
     different sub-clients (separate ``requests.Session``s, designed for
     concurrent use), so they run on worker threads at the same time. The
     attire-fallback embeds — one OSNet call per candidate box, the costly part in
-    a crowd — are likewise fanned out. All identity scoring (:meth:`fused_scores`,
-    which reads the local Chroma store) stays on the calling thread, so no Chroma
-    access is concurrent. Returns exactly the box the serial path would.
+    a crowd — are likewise fanned out, but only over the candidates *gated* to
+    *hint_box*. All identity scoring (:meth:`fused_scores`, which reads the local
+    Chroma store) stays on the calling thread, so no Chroma access is concurrent.
+    Returns exactly the box the serial path would for the same *hint_box* /
+    *run_face*.
 
     Whether this lowers per-tick latency depends on the server handling
     concurrent requests; with one GPU serializing inference the gain is limited
@@ -717,36 +802,55 @@ def _select_person_to_follow_parallel(
     workers = max(2, int(os.getenv("HRI_FOLLOW_PARALLEL_WORKERS", "8")))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         fut_persons = ex.submit(_detect_persons, ctx, img)  # pose, own session
-        fut_faces = ex.submit(_detect_faces, ctx, img)      # face, own session
+        # Skip the face round-trip on throttled ticks (the host's back is to the
+        # camera while following, so the face pass matches ~never — see
+        # HRI_FOLLOW_FACE_EVERY_N).
+        fut_faces = ex.submit(_detect_faces, ctx, img) if run_face else None
         cands = _persons_to_candidates(fut_persons.result())
-        faces = fut_faces.result()
         if not cands:
             return None
-        box = _match_by_face(ctx, img, faces, cands, person_id)
-        if box is not None:
-            return box  # face match: never pay for the attire embeds (as serial)
-        # Attire fallback: embed every candidate crop concurrently. Bounded by
-        # `workers` so the shared appearance session's connection pool isn't
-        # exhausted; ex.map preserves order, so embeds[i] aligns with cands[i].
-        embeds = list(ex.map(lambda bs: _appearance_embedding(ctx, img, bs[0]), cands))
-    return _score_attire_candidates(ctx, cands, embeds, person_id)
+        if fut_faces is not None:
+            box = _match_by_face(ctx, img, fut_faces.result(), cands, person_id)
+            if box is not None:
+                return box  # face match: never pay for the attire embeds (as serial)
+        # Attire fallback: gate to the last tracked box, widen on a miss.
+        gated = _gate_candidates(cands, hint_box, radius_scale=_gate_radius_scale())
+        box = _embed_and_score_attire_parallel(ex, ctx, img, gated, person_id)
+        if box is None and len(gated) != len(cands):
+            box = _embed_and_score_attire_parallel(ex, ctx, img, cands, person_id)
+        return box
 
 
-def select_person_to_follow(ctx: TaskContext, snap, person_id: str) -> BBox | None:
+def select_person_to_follow(
+    ctx: TaskContext,
+    snap,
+    person_id: str,
+    *,
+    hint_box: BBox | None = None,
+    run_face: bool = True,
+) -> BBox | None:
     """:func:`skills.follow_person` selector: the person box matching *person_id*,
     FACE first then ATTIRE, biased toward the nearest qualifying candidate.
 
     Per tick: pose-estimate the people in view, each box paired with a
     pose-keypoint closeness proxy (:func:`_person_scale_px`). A FACE pass runs
-    first (:func:`_select_by_face`) — faces are far more discriminative than
-    clothing, so a face match holds the right person in a similarly-dressed
-    crowd. Only when no face in view is recognized as *person_id* this tick
-    (turned away, too far, occluded, or enrolled without a face) does it fall
-    back to an ATTIRE pass (:func:`_select_by_attire`, the previous behaviour).
-    Either pass returns the qualifying box with the highest
-    similarity-plus-proximity score, so among equally good identity matches the
-    nearest body wins. ``None`` when nobody qualifies — the follow loop then
-    coasts on its motion prediction.
+    first (:func:`_select_by_face`, only when *run_face*) — faces are far more
+    discriminative than clothing, so a face match holds the right person in a
+    similarly-dressed crowd. Only when no face in view is recognized as
+    *person_id* this tick (turned away, too far, occluded, enrolled without a
+    face, or the face pass throttled off) does it fall back to an ATTIRE pass
+    (:func:`_attire_pass`). Either pass returns the qualifying box with the
+    highest similarity-plus-proximity score, so among equally good identity
+    matches the nearest body wins. ``None`` when nobody qualifies — the follow
+    loop then coasts on its motion prediction.
+
+    *hint_box* is the last tracked host box: when given, the attire fallback only
+    embeds the candidate(s) near it (re-embedding the full set on a miss), which
+    is what cuts the per-tick OSNet cost from N to ~1. *run_face* throttles the
+    (usually fruitless, while following) face round-trip. Both default to the
+    pre-tracking behaviour (no hint, face every tick), so direct callers and the
+    enrollment paths are unaffected — the stateful :class:`FollowSelector`
+    supplies them during a follow.
 
     With ``HRI_FOLLOW_PARALLEL=1`` the independent per-tick server calls run
     concurrently (:func:`_select_person_to_follow_parallel`); the result is
@@ -759,14 +863,66 @@ def select_person_to_follow(ctx: TaskContext, snap, person_id: str) -> BBox | No
         return None
     img = snap.img
     if _follow_parallel_enabled():
-        return _select_person_to_follow_parallel(ctx, img, person_id)
+        return _select_person_to_follow_parallel(
+            ctx, img, person_id, hint_box=hint_box, run_face=run_face
+        )
     cands = _candidate_persons(ctx, img)
     if not cands:
         return None
-    box = _select_by_face(ctx, img, cands, person_id)
-    if box is not None:
+    if run_face:
+        box = _select_by_face(ctx, img, cands, person_id)
+        if box is not None:
+            return box
+    return _attire_pass(ctx, img, cands, person_id, hint_box)
+
+
+class FollowSelector:
+    """Stateful :func:`skills.follow_person` selector: tracks the host tick-to-tick.
+
+    The follow loop calls ``select(ctx, snap)`` as a plain 2-arg callable; this
+    object satisfies that while carrying the little state that makes a follow
+    cheap — the last box it locked onto (the attire-gate hint) and a tick counter
+    (the face-pass throttle). Each call:
+
+    * runs the FACE pass only when re-acquiring (no current lock) or every
+      ``HRI_FOLLOW_FACE_EVERY_N`` ticks — while following, the host's back is to
+      the camera so the face pass otherwise burns a full-frame inference every
+      tick for ~no matches;
+    * gates the attire embed to the last box via ``hint_box`` (full scan on a
+      miss);
+    * remembers the returned box (``None`` clears the lock, so the *next* tick
+      re-acquires at full power — face on, no gate).
+
+    One instance per follow; not thread-safe (the loop is single-threaded).
+    """
+
+    def __init__(self, person_id: str) -> None:
+        self.person_id = person_id
+        self.last_box: BBox | None = None
+        self.tick = 0
+
+    def _run_face_this_tick(self) -> bool:
+        if self.last_box is None:
+            return True  # re-acquiring: use every modality
+        every_n = max(1, int(os.getenv("HRI_FOLLOW_FACE_EVERY_N", "5")))
+        return self.tick % every_n == 0
+
+    def __call__(self, ctx: TaskContext, snap) -> BBox | None:
+        box = select_person_to_follow(
+            ctx,
+            snap,
+            self.person_id,
+            hint_box=self.last_box,
+            run_face=self._run_face_this_tick(),
+        )
+        self.last_box = box
+        self.tick += 1
         return box
-    return _select_by_attire(ctx, img, cands, person_id)
+
+
+def make_follow_selector(person_id: str) -> FollowSelector:
+    """A fresh stateful follow selector for *person_id* (see :class:`FollowSelector`)."""
+    return FollowSelector(person_id)
 
 
 def wait_until_seated(

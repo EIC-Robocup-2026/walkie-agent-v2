@@ -41,7 +41,7 @@ from .identity import (
     enroll_guest_frames,
     enroll_person_in_box,
     locate_people,
-    select_person_to_follow,
+    make_follow_selector,
     wait_until_seated,
 )
 from .skills import (
@@ -489,6 +489,7 @@ class FollowHostAndDropBag(SubTask):
     def run(self, ctx: TaskContext) -> StepResult:
         if not (_bag_enabled() and ctx.data.get("has_bag")):
             return StepResult.DONE
+        ctx.walkie.robot.head.set_auto_tilt(False)  # keep the head steady during follow, so the face/attire match is stable; we'll set a fixed tilt for the handover instead
         tilt_head(ctx, -0.15)
         listen_timeout = float(os.getenv("HRI_FOLLOW_LISTEN_TIMEOUT_SEC", "5"))
 
@@ -510,12 +511,13 @@ class FollowHostAndDropBag(SubTask):
         # on_stopped speaks the place ack while the threads wind down.
         reason = follow_person(
             ctx,
-            lambda c, snap: select_person_to_follow(c, snap, "host"),
+            make_follow_selector("host"),
             stopper=CommandListener(ctx),
             on_warmup=lambda: ctx.say(prompts.FOLLOW_HOST_ACK),
             on_lost=lambda: ctx.say(prompts.FOLLOW_HOST_LOST),
             on_stopped=lambda: ctx.say(prompts.BAG_PLACE_ACK),
         )
+        ctx.walkie.robot.head.set_auto_tilt(True) 
         if reason == "lost":
             print("[HRI] lost the host past the search budget; placing here")
         return self._place_bag(ctx)
@@ -830,6 +832,13 @@ class TestTask(SubTask):
         return StepResult.DONE
 
 
+class TestMoveBase(SubTask):
+    def run(self, ctx: TaskContext) -> StepResult:
+        # ctx.say("This is a test task that moves the base. Please make sure the area in front of the robot is clear.")
+        move_base_relative(ctx, 0.5)
+        time.sleep(1)
+        move_base_relative(ctx, -0.5)
+        return StepResult.DONE
 
 
 def build_hri_task(ctx: TaskContext) -> Task:
@@ -874,6 +883,7 @@ def build_hri_task(ctx: TaskContext) -> Task:
             # FollowNearestPerson(),  # follow-loop test: no identity, no bag
             # TestScanSeats(),  # scan seats + people, draw/show detections (or HRI_TEST_SCAN_SEATS=1)
             # TestTask(),
+            # TestMoveBase(),
         ],
         ctx,
     )

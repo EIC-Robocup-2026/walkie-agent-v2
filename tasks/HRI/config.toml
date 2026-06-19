@@ -108,7 +108,7 @@ HRI_BAG_WAIT_TIMEOUT_SEC = "20"
 # --- Follow host & place the bag ---------------------------------------------
 # How far (m) the base stops short of the host when following, so it never
 # bumps them (the host's lifted body point minus this along the approach line).
-HRI_FOLLOW_DISTANCE_M = "1"
+HRI_FOLLOW_DISTANCE_M = "1.2"
 # Window (s) for the ONE synchronous listen right after asking where the bag
 # goes (the robot is still then). The follow loop itself does not block-listen.
 HRI_FOLLOW_LISTEN_TIMEOUT_SEC = "5"
@@ -136,7 +136,26 @@ HRI_FOLLOW_LEAD_GAIN = "0.9"
 # walks off shrinks below a nearer guest, so capping by size can drop the real
 # host from the candidate set). The largest-person test selector ignores this.
 # Both match floors are the perception-wide APPEARANCE_MATCH_THRESHOLD.
-HRI_FOLLOW_APPEARANCE_MAX_CANDIDATES = "0"
+# Default 3 (a crowd backstop): the stateful follow selector embeds only the
+# box(es) near the last tracked host position each tick, so the cap only bites on
+# the rare re-acquire ticks that scan the full frame; raise toward 0 (= all) if a
+# host who has walked off is being dropped on those ticks.
+HRI_FOLLOW_APPEARANCE_MAX_CANDIDATES = "2"
+# The follow selector tracks the host's last box and, on a steady-state tick,
+# only embeds the candidate(s) whose center lies within this multiple of the last
+# box's width — usually just the host, cutting the per-tick OSNet embeds from N
+# to ~1. On a miss (nobody near qualifies) it widens to the full candidate set to
+# re-acquire, so the lock is never silently dropped. <=0 disables gating (embed
+# every candidate every tick, the old behaviour); raise if a fast-moving host
+# jumps out of the gate between ticks.
+HRI_FOLLOW_GATE_RADIUS_SCALE = "2"
+# Run the FACE pass only every Nth follow tick (and always while re-acquiring,
+# i.e. with no current lock). While following, the host's back is to the camera,
+# so the face pass matches ~never yet costs a full-frame inference every tick;
+# throttling it removes that cost from most ticks while keeping a periodic
+# re-acquisition check for when the host turns around. 1 = face every tick (the
+# old behaviour).
+HRI_FOLLOW_FACE_EVERY_N = "2"
 # A box is only followed when the host's attire score beats the best GUEST's by
 # at least this margin — not just edges it out. People dress alike at a party,
 # so a bare top-1 host match flips onto a guest on embedding noise; the margin

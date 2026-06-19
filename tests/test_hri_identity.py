@@ -16,10 +16,13 @@ from perception import PeopleStore
 from perception.people_store import _mean_unit
 from tasks.HRI.identity import (
     _avg_unit,
+    _gate_candidates,
     _reject_outliers,
     audit_identity_collisions,
     enroll_guest_frames,
+    make_follow_selector,
 )
+from tasks.HRI.skills import cxcywh_to_xyxy
 
 
 def _u(*v):
@@ -280,3 +283,143 @@ def test_appearance_vectors_returns_only_enrolled_attire(tmp_path):
     av = store.appearance_vectors()
     assert set(av) == {"guest-1"}
     assert av["guest-1"] == pytest.approx(_vec(0, 1, 0), abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# _gate_candidates (pure)
+# ---------------------------------------------------------------------------
+
+
+def test_gate_candidates_keeps_only_near_hint():
+    hint = (270, 40, 370, 440)  # width 100, center (320, 240) -> radius 150
+    near = ((300, 40, 360, 440), 1.0)  # center 330 -> dist 10
+    far = ((500, 40, 600, 440), 2.0)  # center 550 -> dist 230
+    assert _gate_candidates([near, far], hint, radius_scale=1.5) == [near]
+
+
+def test_gate_candidates_no_hint_returns_all():
+    cands = [((0, 0, 10, 10), None), ((20, 20, 30, 30), None)]
+    assert _gate_candidates(cands, None, radius_scale=1.5) == cands
+
+
+def test_gate_candidates_disabled_returns_all():
+    hint = (0, 0, 10, 10)
+    far = ((100, 100, 120, 120), None)  # would be excluded if gating ran
+    assert _gate_candidates([far], hint, radius_scale=0.0) == [far]
+
+
+def test_gate_candidates_empty_when_none_near():
+    hint = (0, 0, 10, 10)  # width 10, center (5, 5) -> radius 15
+    far = ((100, 100, 120, 120), None)
+    assert _gate_candidates([far], hint, radius_scale=1.5) == []
+
+
+# ---------------------------------------------------------------------------
+# FollowSelector: spatial gating + face throttle + widen-on-miss
+# ---------------------------------------------------------------------------
+
+
+class _Snap:
+    def __init__(self, img):
+        self.img = img
+
+
+class _FaceRecCounting:
+    """Detects no faces (host's back is turned), but counts the calls."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def embed(self, img):
+        self.calls += 1
+        return []
+
+
+class _AppearanceByWidth:
+    """Maps a crop to a vector by its width, so the returned attire is keyed on
+    *which* candidate box was embedded (host vs. decoy) regardless of call order;
+    counts the calls so a test can assert how many embeds a tick paid for."""
+
+    def __init__(self, by_width):
+        self.by_width = by_width
+        self.calls = 0
+
+    def embed(self, crop):
+        self.calls += 1
+        return self.by_width[crop.width]
+
+
+def _follow_ctx(tmp_path, pose_per_call, face, appearance):
+    store = PeopleStore(persist_dir=tmp_path / "p", embedding_model="m")
+    # Host enrolled with a face vector and an attire vector; the attire is what
+    # the follow loop matches against (the face pass never matches from behind).
+    store.enroll("", "", _vec(1, 0, 0), person_id="host", app_embedding=_vec(0, 1, 0))
+    ai = _AI(face_recognition=face, pose_estimation=_Pose(pose_per_call), appearance=appearance)
+    return _Ctx(store, ai)
+
+
+def _follow_env(monkeypatch, *, face_every_n="3"):
+    monkeypatch.setenv("HRI_FOLLOW_PARALLEL", "0")  # serial path: deterministic counts
+    monkeypatch.setenv("HRI_FOLLOW_GATE_RADIUS_SCALE", "1.5")
+    monkeypatch.setenv("HRI_FOLLOW_FACE_EVERY_N", face_every_n)
+    monkeypatch.setenv("HRI_FOLLOW_APPEARANCE_MAX_CANDIDATES", "0")  # keep order; no cap
+    monkeypatch.setenv("HRI_FOLLOW_APPEARANCE_MARGIN", "0.05")
+
+
+# host box: cxcywh (320, 240, 100, 400) -> xyxy (270, 40, 370, 440), width 100,
+# center (320, 240). decoy is 180px away (center 500), outside the 150px gate.
+_HOST_A = (320, 240, 100, 400)
+_DECOY_A = (500, 240, 200, 400)  # width 200 -> non-matching attire
+
+
+def test_follow_selector_gates_and_throttles(tmp_path, monkeypatch):
+    _follow_env(monkeypatch, face_every_n="3")
+    face = _FaceRecCounting()
+    app = _AppearanceByWidth({100: _vec(0, 1, 0), 200: _vec(0, 0, 1)})  # 100=host, 200=decoy
+    ctx = _follow_ctx(tmp_path, [[_pp(_HOST_A), _pp(_DECOY_A)]], face, app)
+    sel = make_follow_selector("host")
+    snap = _Snap(_img())
+
+    ticks = []
+    for _ in range(6):
+        f0, a0 = face.calls, app.calls
+        box = sel(ctx, snap)
+        ticks.append((box is not None, face.calls - f0, app.calls - a0))
+
+    # tick 0 re-acquires (no lock): face ON, full scan embeds BOTH candidates.
+    assert ticks[0] == (True, 1, 2)
+    # steady ticks: face throttled OFF, attire gated to the host box only (1 embed).
+    assert ticks[1] == (True, 0, 1)
+    assert ticks[2] == (True, 0, 1)
+    # every-3rd tick: face ON again (re-check), still gated to the host (1 embed).
+    assert ticks[3] == (True, 1, 1)
+    assert ticks[4] == (True, 0, 1)
+    assert ticks[5] == (True, 0, 1)
+
+
+def test_follow_selector_widens_when_gated_candidate_fails(tmp_path, monkeypatch):
+    _follow_env(monkeypatch, face_every_n="3")
+    face = _FaceRecCounting()
+    app = _AppearanceByWidth({100: _vec(0, 1, 0), 200: _vec(0, 0, 1)})  # 100=host, 200=decoy
+    # tick 0: only the host (at A) is in view -> locks onto A.
+    # tick 1: a non-matching decoy (width 200) sits where the host was (near A),
+    #         while the real host (width 100) has moved far (out of the gate).
+    host_b = (560, 240, 100, 400)  # center 560: 240px from A, outside the 150px gate
+    decoy_at_a = (320, 240, 200, 400)  # width 200 (non-match), squatting on the old spot
+    ctx = _follow_ctx(
+        tmp_path,
+        [[_pp(_HOST_A)], [_pp(decoy_at_a), _pp(host_b)]],
+        face,
+        app,
+    )
+    sel = make_follow_selector("host")
+    snap = _Snap(_img())
+
+    assert sel(ctx, snap) == cxcywh_to_xyxy(_HOST_A)  # tick 0: locked onto A
+
+    a0 = app.calls
+    box = sel(ctx, snap)  # tick 1: gated decoy misses -> widen to full frame
+    # Re-acquired the real host (at B), not the decoy squatting on the old spot.
+    assert box == cxcywh_to_xyxy(host_b)
+    # 1 gated embed (the decoy, a miss) + 2 full-set embeds (decoy + host) = 3.
+    assert app.calls - a0 == 3
