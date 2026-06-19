@@ -58,7 +58,10 @@ or real poses** · `[ ]` stub / Tier-2 fallback / not implemented.
 - [x] Pure keypoint gesture heuristics (`gestures.py`, unit-tested).
 - [x] Two-tier dispatcher + partial-scoring status aggregation (`dispatch.py` / `plan.py`).
 - [x] Ported to the unified image API (`walkieAI.image.*`) after the main merge.
-- [x] Offline test suite: 58 GPSR tests (`tests/test_gpsr_*`) + coverage gate.
+- [x] Shared helpers imported from the **global `tasks.skills` package** (geometry /
+      lift / navigation / people), per the skills-refactor policy — not via
+      `tasks.HRI.skills`.
+- [x] Offline test suite: 66 GPSR tests (`tests/test_gpsr_*`) + coverage gate.
 
 ## TODO (next, roughly in priority)
 

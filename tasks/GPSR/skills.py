@@ -29,7 +29,7 @@ from datetime import datetime
 from langchain.messages import HumanMessage
 
 from tasks.base import TaskContext
-from tasks.HRI.skills import (
+from tasks.skills import (
     cxcywh_to_xyxy,
     face_point,
     follow_person,
