@@ -463,3 +463,72 @@ def test_mixed_plan_with_one_failing_step_is_partial(world):
         brain=None, manip=False,
     )
     assert status is CmdStatus.PARTIAL
+
+
+# --- interleave (the bonus path) --------------------------------------------
+
+def _kitchen_plan(world, src, second):
+    return Plan(steps=[ground_step(r, world) for r in (
+        RawStep(primitive="navigate", room="kitchen", raw="go to the kitchen"),
+        second,
+    )], source=src)
+
+
+def test_interleave_shares_nav_dedup_across_commands(world):
+    """The point of interleaving: a room entered for one command is not re-entered
+    for another. Two commands both starting in the kitchen -> kitchen driven ONCE
+    (serial gives each command its own state and would drive there twice)."""
+    from tasks.GPSR.dispatch import execute_interleaved
+    from tasks.GPSR.schedule import interleave
+
+    ctx = _FakeCtx(ai=_FakeAI(dets=[_det()], people=[_plain_person((100, 100, 40, 120))]))
+    p1 = _kitchen_plan(world, "c1", RawStep(primitive="find_object", object="cola", room="kitchen", raw="find the cola"))
+    p2 = _kitchen_plan(world, "c2", RawStep(primitive="count", object="cup", room="kitchen", raw="count the cups"))
+    indexed = [(1, p1), (2, p2)]
+    statuses = execute_interleaved(ctx, indexed, world, None, manip_enabled=False, order=interleave(indexed, world))
+    assert ctx.gotos == [(1.0, 2.0, 0.0)]            # kitchen exactly once
+    assert statuses[1] is CmdStatus.DONE
+    assert statuses[2] is CmdStatus.DONE
+
+
+def test_execute_commands_uses_interleave_when_enabled(world, monkeypatch):
+    """GPSR_INTERLEAVE=1 + >=2 planned commands -> ExecuteCommands interleaves:
+    announces it, and the shared nav-dedup drives the shared kitchen once."""
+    monkeypatch.setenv("GPSR_INTERLEAVE", "1")
+    from tasks.GPSR.subtasks import Command, ExecuteCommands
+
+    ctx = _FakeCtx(ai=_FakeAI(dets=[_det()], people=[_plain_person((100, 100, 40, 120))]))
+    p1 = _kitchen_plan(world, "c1", RawStep(primitive="find_object", object="cola", room="kitchen", raw="find the cola"))
+    p2 = _kitchen_plan(world, "c2", RawStep(primitive="find_object", object="cola", room="kitchen", raw="find the cola"))
+    cmds = [Command(1, "c1", p1), Command(2, "c2", p2)]
+    ctx.data = {"world": world, "brain": None, "commands": cmds}
+    ExecuteCommands().run(ctx)
+    assert any("interleav" in s.lower() for s in ctx.saids)   # announced the interleave
+    assert ctx.gotos == [(1.0, 2.0, 0.0)]                     # kitchen once, not per-command
+    assert all(c.status is CmdStatus.DONE for c in cmds)
+
+
+def test_interleave_isolates_per_command_scratch(world, monkeypatch):
+    """Only the nav location is global across commands; per-command scratch is
+    isolated — so an interleaved step of command B cannot clobber the target
+    command A stashed for its own next step. A probe skill records the scratch it
+    sees on entry: command 1's 2nd step sees its OWN 1st step's mark, while
+    command 2 sees nothing. (This FAILS if execute_interleaved shares one state.)"""
+    from tasks.GPSR.dispatch import execute_interleaved
+    from tasks.GPSR.schedule import interleave
+
+    seen = []
+
+    def _probe(ctx, step, world, state):
+        seen.append(state.get("mark"))
+        state["mark"] = step.args.get("info")
+        return True
+
+    monkeypatch.setitem(skills.SKILLS, "say", _probe)  # 'say' has no location -> all "here"
+    ctx = _FakeCtx()
+    p1 = Plan(steps=[ground_step(RawStep(primitive="say", info="A1", raw="x"), world),
+                     ground_step(RawStep(primitive="say", info="A2", raw="x"), world)], source="c1")
+    p2 = Plan(steps=[ground_step(RawStep(primitive="say", info="B1", raw="x"), world)], source="c2")
+    indexed = [(1, p1), (2, p2)]
+    execute_interleaved(ctx, indexed, world, None, manip_enabled=False, order=interleave(indexed, world))
+    assert seen == [None, "A1", None]  # cmd1.step2 sees cmd1.step1; cmd2 sees its own (empty)

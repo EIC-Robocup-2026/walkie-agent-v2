@@ -546,3 +546,14 @@ flat string — decide alongside the CompetitionTemplate import.)
   ONE command (with examples), biasing to FEWER when unsure. Verified: the example
   → 1 command, three distinct goals → 3. Locked by `tests/test_gpsr_split.py`
   (real-LLM, skipped offline).
+- **Interleave scheduler (the 200 bonus)** — *implemented (Phase 3), gated off by
+  default:* `GPSR_INTERLEAVE` merges all planned commands into one order via
+  `schedule.interleave` and executes it with `dispatch.execute_interleaved`, which
+  walks the merged order with **one shared nav cache** so a room entered for one
+  command is not re-entered for another — the "reduce unnecessary movements" the
+  bonus rewards. **Deliberately a deterministic room-batching greedy, NOT the
+  "LLM scheduler" §5.5 floated:** it preserves each command's internal step order,
+  visits each room once, is explainable + offline-tested, and falls back to serial
+  on any scheduling error — reliability matters more than cleverness for a bonus
+  that must not break the working serial path. Default OFF (serial MVP). Open: real
+  poses for distance-aware intra-room ordering + on-robot wall-clock validation.

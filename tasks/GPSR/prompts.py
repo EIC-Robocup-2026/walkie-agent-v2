@@ -155,5 +155,11 @@ GIVE_UP_ON_COMMANDS = (
 PLAN_PREAMBLE = "For command {n}, here is my plan."
 CONFIRM_RECEIVED = "Understood. I will get to work."
 COMMAND_ANNOUNCE = "Working on command {n}: {command}"
+# Interleaved mode (GPSR_INTERLEAVE): spoken once before the merged execution to
+# demonstrate the robot is interleaving the commands (the bonus condition).
+INTERLEAVE_ANNOUNCE = (
+    "I will carry out all the commands together, interleaving them to save time "
+    "and avoid unnecessary trips."
+)
 RETURN_ANNOUNCE = "I have finished. Returning to the instruction point."
 ALL_DONE = "I have completed all the commands."

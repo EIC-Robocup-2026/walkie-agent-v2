@@ -36,8 +36,11 @@ or real poses** · `[ ]` stub / Tier-2 fallback / not implemented.
   - [ ] `pick` / `place` / `deliver` — **gated off** (`GPSR_ENABLE_MANIPULATION=0`)
         until the arm is calibrated; promote Restaurant's grasp (`tasks/manipulation.py`).
         Falls through to Tier-2.
-- [ ] **Interleaved Task Bonus** (200) — serial MVP only; the all-3-at-once scheduler
-      is the last phase (`docs/GPSR_DESIGN.md` §5.5).
+- [~] **Interleaved Task Bonus** (200) — `GPSR_INTERLEAVE` merges all planned commands
+      into one **room-batched** order (`schedule.py`), executed with a shared nav cache
+      so each room is visited once (the "reduce movements" the bonus rewards). Serial is
+      the default + the fallback. Deterministic (not an LLM scheduler) → reliable +
+      offline-tested; needs real poses + on-robot validation.
 
 ## Avoiding penalties
 
@@ -61,7 +64,7 @@ or real poses** · `[ ]` stub / Tier-2 fallback / not implemented.
 - [x] Shared helpers imported from the **global `tasks.skills` package** (geometry /
       lift / navigation / people), per the skills-refactor policy — not via
       `tasks.HRI.skills`.
-- [x] Offline test suite: 66 GPSR tests (`tests/test_gpsr_*`) + coverage gate.
+- [x] Offline test suite: 76 GPSR tests (`tests/test_gpsr_*`) + coverage/split LLM gates.
 
 ## TODO (next, roughly in priority)
 
@@ -71,7 +74,9 @@ or real poses** · `[ ]` stub / Tier-2 fallback / not implemented.
       behind (periodic pose check between nav segments); currently leads open-loop.
 - [ ] **Real arena poses** in `world.toml` (announced ~2 h before the test).
 - [ ] **Manipulation** (`pick`/`place`/`deliver`) once the arm is calibrated.
-- [ ] **Interleave scheduler** (bonus 200), last.
+- [ ] **Interleave on-robot tuning** — the room-batching lands the bonus's
+      movement-reduction; with real poses, consider distance-aware ordering within a
+      room and verify the wall-clock saving on the robot.
 
 ## How to run / verify
 

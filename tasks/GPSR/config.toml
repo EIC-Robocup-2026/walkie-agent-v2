@@ -12,6 +12,10 @@ GPSR_MAX_COMMANDS = "3"
 # interleaved-task bonus) or "one_by_one" (return to the instruction point
 # between each).
 GPSR_ISSUE_MODE = "consecutive"
+# 1 = interleave all commands into one room-batched order to reduce movement (the
+# Interleaved Task Bonus, +200). 0 = strictly serial MVP (default — the bonus path
+# is riskier and falls back to serial on any scheduling error).
+GPSR_INTERLEAVE = "0"
 # 1 = run the walkie_graphs perception loop in the background during the task so
 # "find/bring object" commands can use long-term spatial memory.
 GPSR_START_PERCEPTION = "1"

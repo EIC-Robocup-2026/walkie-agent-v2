@@ -11,8 +11,12 @@ Phase 1 covers the no-arm primitives (navigate, find_object, find_person, count,
 say, greet, get_person_info, get_object_property). Manipulation (pick/place/
 deliver) is gated off and falls through to Tier-2 until Phase 2.
 
-`state` is the per-command scratch dict — find_object/find_person stash the
-located target's map point so a following greet/say can face it.
+`state` is the **per-command** scratch dict. `state["at"]` is the nav-dedup
+(canonical name of where the robot is; in interleaved runs only this key crosses
+commands). find_object/find_person also stash the located target's map point
+(`target_xy`/`found_object`) for a *later step of the same command* to use (e.g. a
+future place/deliver) — these are currently written but not yet read, so they must
+stay per-command (dispatch.execute_interleaved keeps them isolated).
 
 Reuses HRI's geometry helpers (lift, face, heading) and the pure gesture
 heuristics (gestures.py). Imports tasks.base, so this module is robot-side and

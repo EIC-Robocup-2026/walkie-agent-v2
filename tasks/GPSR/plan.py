@@ -180,6 +180,31 @@ def _count_people_phrase(descriptor: str | None, kind: str | None) -> str:
     return "people"
 
 
+def step_location(step: PlanStep) -> str | None:
+    """The arena location a step needs the robot to be at, or None if it acts
+    wherever the robot already is (say / get_*_info / follow / pick-after-arrival).
+
+    Used by the interleave scheduler (schedule.py) to batch steps by place. The
+    value is a canonical room or location name; the scheduler maps it to a room.
+    """
+    a = step.args
+    p = step.primitive
+    if p is Primitive.NAVIGATE:
+        return a.get("target")
+    if p is Primitive.FIND_OBJECT:
+        return a.get("location") or a.get("room")
+    if p in (Primitive.FIND_PERSON, Primitive.GREET, Primitive.DELIVER):
+        return a.get("room")
+    if p is Primitive.COUNT:
+        return a.get("location") or a.get("room")
+    if p in (Primitive.PICK, Primitive.PLACE):
+        return a.get("location")
+    if p is Primitive.GUIDE:
+        return a.get("from")  # guide starts where the person is
+    # follow / say / get_person_info / get_object_property: wherever we are.
+    return None
+
+
 def _step_phrase(step: PlanStep) -> str:
     """One imperative clause for a step, from canonical args (loose-key tolerant)."""
     a = step.args

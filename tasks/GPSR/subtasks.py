@@ -24,9 +24,10 @@ from dataclasses import dataclass
 from tasks.base import StepResult, SubTask, Task, TaskContext
 
 from . import prompts
-from .dispatch import execute_plan
+from .dispatch import execute_interleaved, execute_plan
 from .parse import parse_commands
 from .plan import CmdStatus, Plan, render_plan_speech
+from .schedule import interleave
 
 
 def _pose(env_key: str, default: str = "0.0,0.0,0.0") -> tuple[float, float, float]:
@@ -47,6 +48,10 @@ def _speak_plan_enabled() -> bool:
 
 def _manip_enabled() -> bool:
     return os.getenv("GPSR_ENABLE_MANIPULATION", "0").lower() in ("1", "true", "yes")
+
+
+def _interleave_enabled() -> bool:
+    return os.getenv("GPSR_INTERLEAVE", "0").lower() in ("1", "true", "yes")
 
 
 @dataclass
@@ -161,13 +166,19 @@ class ReceiveAndPlanCommands(SubTask):
 
 
 class ExecuteCommands(SubTask):
-    """Execute each planned command via the two-tier dispatcher.
+    """Execute the planned commands via the two-tier dispatcher.
 
-    For each command, `dispatch.execute_plan` runs every PlanStep with its
-    deterministic Tier-1 skill, falling back to the agent stack (Tier-2) for
-    ungrounded/gated/failed steps. The per-command CmdStatus reflects partial
-    scoring. In one-by-one mode the robot returns to the operator between
-    commands. Degrades to a spoken note if the brain (Tier-2) was not wired.
+    Each PlanStep runs through its deterministic Tier-1 skill, falling back to the
+    agent stack (Tier-2) for ungrounded/gated/failed steps; the per-command
+    CmdStatus reflects partial scoring. Two modes:
+
+    - **Serial (default, the MVP):** run each command's plan fully, in order. In
+      one-by-one mode the robot returns to the operator between commands.
+    - **Interleaved (`GPSR_INTERLEAVE`, the bonus):** merge all commands into one
+      room-batched order (schedule.interleave) and walk it with a shared nav cache
+      so each room is visited once — the "reduce unnecessary movements" the bonus
+      rewards. Only when ≥2 commands were planned and not one-by-one; falls back
+      to serial on any error. Degrades to a note if the brain (Tier-2) was unwired.
     """
 
     def run(self, ctx: TaskContext) -> StepResult:
@@ -178,6 +189,14 @@ class ExecuteCommands(SubTask):
             print("[gpsr] no world model on ctx.data['world'] — cannot execute")
             return StepResult.DONE
         manip = _manip_enabled()
+        planned = [c for c in commands if c.plan]
+        if _interleave_enabled() and not _one_by_one() and len(planned) >= 2:
+            if self._run_interleaved(ctx, commands, world, brain, manip):
+                return StepResult.DONE  # else fell through to serial below
+        self._run_serial(ctx, commands, world, brain, manip)
+        return StepResult.DONE
+
+    def _run_serial(self, ctx, commands: list[Command], world, brain, manip: bool) -> None:
         for cmd in commands:
             cmd.status = CmdStatus.IN_PROGRESS
             ctx.say(prompts.COMMAND_ANNOUNCE.format(n=cmd.id, command=cmd.utterance))
@@ -190,7 +209,27 @@ class ExecuteCommands(SubTask):
             if _one_by_one() and cmd.id < len(commands):
                 x, y, h = _pose("GPSR_INSTRUCTION_POINT_POSE")
                 ctx.goto(x, y, h)  # return to operator for the next command
-        return StepResult.DONE
+
+    def _run_interleaved(self, ctx, commands: list[Command], world, brain, manip: bool) -> bool:
+        """Execute all planned commands in one room-batched interleave. Returns
+        False — with NO side effects yet — only if scheduling fails, so the caller
+        can fall back to serial cleanly; once execution starts it never falls back
+        (which would double-drive the robot)."""
+        indexed = [(c.id, c.plan) for c in commands if c.plan]
+        try:
+            order = interleave(indexed, world)  # pure; the only pre-side-effect failure point
+        except Exception as exc:
+            print(f"[gpsr] interleave scheduling failed ({exc}); falling back to serial")
+            return False
+        ctx.say(prompts.INTERLEAVE_ANNOUNCE)
+        for c in commands:
+            c.status = CmdStatus.IN_PROGRESS if c.plan else CmdStatus.FAILED
+        statuses = execute_interleaved(ctx, indexed, world, brain, manip_enabled=manip, order=order)
+        for c in commands:
+            if c.id in statuses:
+                c.status = statuses[c.id]
+            print(f"[gpsr] command {c.id} -> {c.status.name}")
+        return True
 
 
 class ReturnToInstructionPoint(SubTask):

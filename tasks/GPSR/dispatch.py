@@ -40,6 +40,41 @@ def _tier2(ctx: TaskContext, brain, clause: str) -> bool:
         return False
 
 
+def execute_step(
+    ctx: TaskContext,
+    step,
+    world: WorldModel,
+    brain,
+    *,
+    manip_enabled: bool,
+    state: dict,
+    source: str = "",
+) -> bool:
+    """Run one PlanStep: Tier-1 skill if eligible, else the Tier-2 agent fallback.
+
+    Shared by the serial (`execute_plan`) and interleaved (`execute_interleaved`)
+    executors so both route identically; `state` is the per-run scratch dict
+    (nav-dedup etc.). `source` is the command clause used if the step has no raw.
+    """
+    ok = False
+    if prefer_tier1(step, manip_enabled=manip_enabled):
+        skill = SKILLS.get(step.primitive.value)
+        if skill is not None:
+            try:
+                ok = skill(ctx, step, world, state)
+            except Exception as exc:
+                print(f"[gpsr.dispatch] skill {step.primitive.value} raised ({exc})")
+                ok = False
+    if not ok:  # ungrounded, gated, no skill, or skill error -> agent fallback
+        ok = _tier2(ctx, brain, step.raw or source)
+        # The agent may have driven the robot (delegate_to_actuator), so the
+        # deterministic nav cache (state["at"]) can no longer be trusted — drop it
+        # so a following navigate to a "known" place still actually drives.
+        state.pop("at", None)
+    print(f"[gpsr.dispatch] step {step.primitive.value}: {'ok' if ok else 'failed'}")
+    return ok
+
+
 def execute_plan(
     ctx: TaskContext,
     plan: Plan,
@@ -49,27 +84,52 @@ def execute_plan(
     manip_enabled: bool,
     state: dict | None = None,
 ) -> CmdStatus:
-    """Execute every step of *plan*; return the aggregate command status."""
+    """Execute every step of *plan* in order; return the aggregate command status."""
     if not plan.steps:
         return CmdStatus.FAILED
     state = state if state is not None else {}
-    oks: list[bool] = []
-    for step in plan.steps:
-        ok = False
-        if prefer_tier1(step, manip_enabled=manip_enabled):
-            skill = SKILLS.get(step.primitive.value)
-            if skill is not None:
-                try:
-                    ok = skill(ctx, step, world, state)
-                except Exception as exc:
-                    print(f"[gpsr.dispatch] skill {step.primitive.value} raised ({exc})")
-                    ok = False
-        if not ok:  # ungrounded, gated, no skill, or skill error -> agent fallback
-            ok = _tier2(ctx, brain, step.raw or plan.source)
-            # The agent may have driven the robot (delegate_to_actuator), so the
-            # deterministic nav cache (state["at"]) can no longer be trusted — drop
-            # it so a following navigate to a "known" place still actually drives.
-            state.pop("at", None)
-        oks.append(ok)
-        print(f"[gpsr.dispatch] step {step.primitive.value}: {'ok' if ok else 'failed'}")
+    oks = [
+        execute_step(ctx, s, world, brain, manip_enabled=manip_enabled, state=state, source=plan.source)
+        for s in plan.steps
+    ]
     return summarize_status(oks)
+
+
+def execute_interleaved(
+    ctx: TaskContext,
+    indexed: list[tuple[int, Plan]],
+    world: WorldModel,
+    brain,
+    *,
+    manip_enabled: bool,
+    order: list[tuple[int, int]],
+) -> dict[int, CmdStatus]:
+    """Walk *order* (from schedule.interleave) across commands.
+
+    Only the robot's physical location (``state["at"]``, the nav-dedup) is
+    GLOBAL — a room entered for one command is not re-entered for another, which
+    is the point of interleaving. Everything else is **per-command** scratch:
+    each command keeps its own ``state`` dict, so an interleaved step of command B
+    cannot clobber the ``target_xy``/``found_object`` command A stashed for its
+    own next step. Returns each command's aggregate status (partial scoring).
+    """
+    plans = {cid: plan for cid, plan in indexed}
+    oks_by_cmd: dict[int, list[bool]] = {cid: [] for cid, _ in indexed}
+    states: dict[int, dict] = {cid: {} for cid, _ in indexed}  # per-command scratch
+    at: str | None = None  # robot's location — the ONLY state shared across commands
+    for cid, idx in order:
+        st = states[cid]
+        if at is not None:
+            st["at"] = at
+        else:
+            st.pop("at", None)
+        ok = execute_step(
+            ctx, plans[cid].steps[idx], world, brain,
+            manip_enabled=manip_enabled, state=st, source=plans[cid].source,
+        )
+        oks_by_cmd[cid].append(ok)
+        at = st.get("at")  # propagate a nav move (or Tier-2's pop -> None) globally
+    return {
+        cid: (summarize_status(oks) if oks else CmdStatus.FAILED)
+        for cid, oks in oks_by_cmd.items()
+    }
