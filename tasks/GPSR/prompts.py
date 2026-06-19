@@ -22,19 +22,36 @@ class CommandList(BaseModel):
     commands: list[str] = Field(
         default_factory=list,
         description=(
-            "Each distinct command the operator gave, verbatim and self-contained, "
-            "in the order spoken. Usually up to three. Empty if none understood."
+            "Each DISTINCT command (separate task/goal) the operator gave, "
+            "self-contained, in the order spoken. A single command that chains "
+            "several actions toward one goal stays as ONE entry — do not split it. "
+            "At most three. Empty if none understood."
         ),
     )
 
 
 SPLIT_COMMANDS_INSTRUCTIONS = (
-    "You are parsing a speech-to-text transcript of an operator giving a service "
-    "robot up to three commands at once. Split it into the individual, "
-    "self-contained commands in the order spoken, each rewritten so it stands "
-    "alone (resolve 'then', 'after that', shared objects). Do not invent commands "
-    "and do not merge two distinct ones. Return an empty list if nothing is "
-    "understandable."
+    "You receive a speech-to-text transcript of an operator giving a service robot "
+    "UP TO THREE commands. Return each DISTINCT command as one self-contained "
+    "string, in the order spoken.\n"
+    "\n"
+    "CRITICAL — do NOT over-split. A single command usually chains SEVERAL actions "
+    "toward ONE goal (go somewhere, find something, then carry/deliver it). Those "
+    "chained actions are ONE command — keep them together. Start a new command only "
+    "when the operator clearly moves on to a SEPARATE, independent task.\n"
+    "\n"
+    "Examples:\n"
+    "- 'go to the kitchen, find a coke, and bring it to me' -> ONE command (a "
+    "single goal: deliver a coke).\n"
+    "- 'navigate to the bedroom and tell me how many people are there' -> ONE "
+    "command.\n"
+    "- 'bring me a coke from the kitchen. then guide Charlie to the bedroom. finally "
+    "count the apples on the desk' -> THREE commands (three separate goals).\n"
+    "\n"
+    "Rewrite each command so it stands alone (resolve 'then'/'after that'/shared "
+    "nouns). Never return more than three commands, and do not invent or drop any. "
+    "If unsure whether something is one command or several, prefer FEWER — keeping "
+    "chained actions together. Return an empty list only if nothing is understandable."
 )
 
 

@@ -537,3 +537,12 @@ flat string — decide alongside the CompetitionTemplate import.)
   still ends on `HRI_FOLLOW_TIMEOUT_SEC`, not on reaching X) and on-robot
   validation of the loop. **Live status is now tracked in
   [`tasks/GPSR/CHECKLIST.md`](../tasks/GPSR/CHECKLIST.md).**
+- **Command splitter over-split** — *resolved (found by a real-LLM dry run):* the
+  `parse_commands` splitter was breaking a single multi-clause command ("go to the
+  kitchen, find a coke, and bring it to me" — the rulebook's own rephrasing
+  example) into THREE commands. With three real commands taken at once that would
+  push the later ones off the `GPSR_MAX_COMMANDS` cap and forfeit them.
+  `SPLIT_COMMANDS_INSTRUCTIONS` now states that chained actions toward one goal are
+  ONE command (with examples), biasing to FEWER when unsure. Verified: the example
+  → 1 command, three distinct goals → 3. Locked by `tests/test_gpsr_split.py`
+  (real-LLM, skipped offline).
