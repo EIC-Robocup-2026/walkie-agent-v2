@@ -23,11 +23,13 @@ from .grasp import plan_grasp
 from .types import (
     DetectedObject,
     GraspPlan,
+    Quat,
     Vec3,
     _arm_frame,
     _arm_group,
     _parse6,
 )
+from walkie_sdk.utils.converters import euler_to_quaternion, quaternion_multiply
 
 # Generic narration owned here so every task picks the same way. Callers narrate
 # their own place/serve lines (place_at_pose is silent).
@@ -141,6 +143,138 @@ def _move_ee(group, position: Vec3, plan: GraspPlan, *, cartesian: bool = False)
     )
 
 
+# --- grasp orientation: flip-retry + fixed (robot-frame) override -----------
+# GraspNet's returned EE orientation is frequently IK-unsolvable on OpenArm. Two
+# escape hatches, both grasp-only (the place path is untouched):
+#   * flip-retry — a parallel-jaw grasp is physically identical with the gripper
+#     rotated 180° about its approach axis (fingers swapped). On a FAILED move we
+#     retry that flipped pose, which is often IK-solvable. Decided once at the
+#     free-planning pre-grasp move and locked for the cartesian grasp descent, so
+#     the wrist never twists mid-approach.
+#   * fixed override (WALKIE_GRASP_FIX_QUAT) — a known-good wrist quaternion given
+#     in the ROBOT (base_footprint) frame and converted into the plan frame via the
+#     robot heading, so it tracks the body instead of a map-frame constant.
+def _flip_enabled() -> bool:
+    return os.getenv("WALKIE_GRASP_TRY_FLIP", "1").strip().lower() in ("1", "true", "yes")
+
+
+def _move_ok(result) -> bool:
+    """True when an SDK move result indicates success ('SUCCEEDED')."""
+    if isinstance(result, str):
+        return result.strip().upper() == "SUCCEEDED"
+    if isinstance(result, dict):
+        status = str(result.get("status", "")).upper()
+        return bool(result.get("success")) or status == "SUCCEEDED"
+    return bool(result)
+
+
+def _fix_quat() -> Quat | None:
+    """Parse WALKIE_GRASP_FIX_QUAT='qx,qy,qz,qw' (base_footprint frame); None if unset/bad."""
+    raw = os.getenv("WALKIE_GRASP_FIX_QUAT", "").strip()
+    if not raw:
+        return None
+    parts = [p.strip() for p in raw.split(",")]
+    if len(parts) != 4:
+        print(f"[manipulation] WALKIE_GRASP_FIX_QUAT ignored — expected 'qx,qy,qz,qw', got {raw!r}")
+        return None
+    try:
+        qx, qy, qz, qw = (float(p) for p in parts)
+    except ValueError:
+        print(f"[manipulation] WALKIE_GRASP_FIX_QUAT ignored — non-numeric {raw!r}")
+        return None
+    return qx, qy, qz, qw
+
+
+def _orient_in_frame(ctx: TaskContext, q_base: Quat, frame: str) -> Quat:
+    """Express a base_footprint EE orientation in *frame* (identity for base_footprint).
+
+    map and base_footprint differ only by the robot heading (yaw about shared
+    gravity-z), so base->map is a left-multiply by the heading quaternion.
+    """
+    if frame == "base_footprint":
+        return q_base
+    heading = float(ctx.current_pose().get("heading", 0.0))
+    q_yaw = euler_to_quaternion(0.0, 0.0, heading)  # base -> map orientation
+    return quaternion_multiply(q_yaw, q_base)
+
+
+def _approach_axis_world(plan: GraspPlan) -> Vec3:
+    """Unit approach direction in the plan frame: from approach_position toward the grasp.
+
+    Falls back to the coarse approach strategy (front -> +x, top_down -> -z) when
+    GraspNet gave no approach waypoint, matching :func:`_pregrasp`'s geometry.
+    """
+    if plan.approach_position is not None:
+        px, py, pz = plan.position
+        ax, ay, az = plan.approach_position
+        ux, uy, uz = px - ax, py - ay, pz - az
+        norm = math.sqrt(ux * ux + uy * uy + uz * uz)
+        if norm > 1e-9:
+            return ux / norm, uy / norm, uz / norm
+    return (1.0, 0.0, 0.0) if plan.approach == "front" else (0.0, 0.0, -1.0)
+
+
+def _flip_quat_about_approach(q: Quat, plan: GraspPlan) -> Quat:
+    """Rotate the gripper 180° about its approach axis (fingers swapped, same grasp).
+
+    The 180° flip about unit axis ``u`` is the pure quaternion ``(ux,uy,uz,0)``;
+    world pre-multiply leaves the approach direction unchanged.
+    """
+    ux, uy, uz = _approach_axis_world(plan)
+    return quaternion_multiply((ux, uy, uz, 0.0), q)
+
+
+def _base_orientation(ctx: TaskContext, plan: GraspPlan) -> Quat | None:
+    """The first orientation to try: the fixed override (converted) or GraspNet's own."""
+    q_fix = _fix_quat()
+    if q_fix is not None:
+        q = _orient_in_frame(ctx, q_fix, plan.frame_id)
+        print(f"[manipulation] fixed EE orientation override (base_footprint) {q_fix} "
+              f"-> {plan.frame_id} {q}")
+        return q
+    return plan.quaternion
+
+
+def _orient_candidates(ctx: TaskContext, plan: GraspPlan) -> list[Quat | None]:
+    """Ordered orientations to try: [base] then the flipped gripper when enabled.
+
+    Returns ``[None]`` for the stub/RPY path (orientation comes from plan.rotation).
+    """
+    base = _base_orientation(ctx, plan)
+    if base is None:
+        return [None]
+    candidates: list[Quat | None] = [base]
+    if _flip_enabled():
+        candidates.append(_flip_quat_about_approach(base, plan))
+    return candidates
+
+
+def _move_ee_oriented(group, position: Vec3, plan: GraspPlan,
+                      candidates: list[Quat | None], *, cartesian: bool = False,
+                      label: str = "move") -> str | None:
+    """Try each orientation candidate in turn; lock plan.quaternion to the first that moves.
+
+    On total failure the first candidate is restored so the (failed) orientation
+    stays consistent for the subsequent grasp descent.
+    """
+    result = None
+    multi = len(candidates) > 1
+    for i, q in enumerate(candidates):
+        plan.quaternion = q
+        tag = "graspnet" if i == 0 else f"flip#{i}"
+        if multi:
+            print(f"[manipulation] {label}: trying orientation [{tag}] {q}")
+        result = _move_ee(group, position, plan, cartesian=cartesian)
+        if _move_ok(result):
+            if i > 0:
+                print(f"[manipulation] {label}: orientation [{tag}] SUCCEEDED (flipped gripper)")
+            return result
+        if multi:
+            print(f"[manipulation] {label}: orientation [{tag}] result={result!r}")
+    plan.quaternion = candidates[0]  # keep the locked orientation consistent on failure
+    return result
+
+
 def _pregrasp(plan: GraspPlan) -> Vec3:
     """Pre-grasp/pre-place waypoint: GraspNet's approach pose, else a heuristic offset."""
     if plan.approach_position is not None:
@@ -186,7 +320,12 @@ def _stage_table(ctx: TaskContext, obj: DetectedObject) -> None:
 def _execute_grasp(ctx: TaskContext, group, plan: GraspPlan, *, rich: bool) -> bool:
     """Open -> pre-grasp -> grasp -> close(+attach) -> lift -> carry. Returns grasped."""
     _gated("open gripper", group.gripper, 1.0, blocking=True)  # ready to receive
-    _gated("move to pre-grasp", _move_ee, group, _pregrasp(plan), plan)
+    # Decide the wrist orientation at the free-planning pre-grasp move (try
+    # GraspNet's pose, then the flipped gripper / fixed override) and lock the
+    # winner into plan.quaternion for the cartesian grasp descent below.
+    candidates = _orient_candidates(ctx, plan)
+    _gated("move to pre-grasp", _move_ee_oriented,
+           group, _pregrasp(plan), plan, candidates, label="pre-grasp")
     if rich:
         scene.allow_gripper_vs_octomap(ctx, True)  # grasp inside sensed voxels
     _gated("move to grasp pose", _move_ee, group, plan.position, plan, cartesian=True)

@@ -105,6 +105,16 @@ WALKIE_GRASP_RPY_TOPDOWN = "-2.623,-0.033,-1.468"
 WALKIE_GRASP_RPY_FRONT = "-0.8,0.0,-1.5708"
 WALKIE_GRASP_Z_OFFSET_M = "0.0"      # vertical nudge added to the object centroid
 
+# --- grasp orientation: flip-retry + fixed (robot-frame) override (GraspNet path) ---
+WALKIE_GRASP_TRY_FLIP = "1"   # on a FAILED grasp move, retry with the gripper flipped
+                              # 180° about its approach axis (fingers swapped — a
+                              # physically identical parallel-jaw grasp that is often
+                              # IK-solvable when GraspNet's pose is not). "0" disables.
+WALKIE_GRASP_FIX_QUAT = ""    # optional fixed EE orientation "qx,qy,qz,qw" in the ROBOT
+                              # (base_footprint) frame; converted to the plan frame via the
+                              # robot heading so it tracks the body. ""=GraspNet's own.
+                              # e.g. "0.517,0.492,0.500,-0.491"
+
 # --- GraspNet ranking (shared by cloud/pos/mask) ---
 WALKIE_GRASP_FROM_CLOUD_SCORE_TH = "0.0"  # min grasp score (0 = no filter)
 WALKIE_GRASP_FROM_CLOUD_MAX = "20"        # max grasp poses to request
