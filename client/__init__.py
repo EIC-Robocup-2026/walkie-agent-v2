@@ -17,6 +17,7 @@ Quick start::
 """
 
 from .base import WalkieAPIError
+from .grasp import GraspClient, GraspPose
 from .image import (
     DetectedObject,
     FaceEmbedding,
@@ -40,4 +41,6 @@ __all__ = [
     "PersonPose",
     "PoseKeypoint",
     "FaceEmbedding",
+    "GraspClient",
+    "GraspPose",
 ]

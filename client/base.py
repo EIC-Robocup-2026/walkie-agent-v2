@@ -41,6 +41,18 @@ def _pil_to_bytes(image: Image.Image, fmt: str = "PNG", quality: int = 85) -> by
     return buf.getvalue()
 
 
+def _numpy_to_npy_bytes(arr: np.ndarray) -> bytes:
+    """Serialize a numpy array to ``.npy`` bytes (lossless, shape + dtype preserved).
+
+    Used to ship dense numeric arrays (e.g. an ``(N, 3)`` point cloud) over the
+    multipart file channel, the same way images go as encoded-image bytes — far
+    cheaper and exact compared to JSON lists.
+    """
+    buf = io.BytesIO()
+    np.save(buf, np.ascontiguousarray(arr), allow_pickle=False)
+    return buf.getvalue()
+
+
 def _b64_to_pil(b64: str | None) -> Image.Image | None:
     """Decode a base64 string back into a PIL Image, or return None."""
     if b64 is None:
