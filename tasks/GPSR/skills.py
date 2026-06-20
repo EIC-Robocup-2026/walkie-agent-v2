@@ -35,6 +35,7 @@ from langchain.messages import HumanMessage
 
 from tasks.base import TaskContext
 from tasks.skills import (
+    approach_point,
     cxcywh_to_xyxy,
     face_point,
     follow_person,
@@ -149,27 +150,88 @@ def navigate(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -
     return go_to_named(ctx, step.args.get("target"), world, state)
 
 
-def find_object(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
-    obj = step.args.get("object")
-    where = step.args.get("location") or step.args.get("room")
-    if where:
-        go_to_named(ctx, where, world, state)
+def _memory_graphs(ctx: TaskContext):
+    """The walkie_graphs CLIP scene memory for object recall, or None when
+    GPSR_FIND_USE_MEMORY is off / perception isn't running. Object *positions* come
+    from this scene graph — world.toml holds only fixed places, and objects move /
+    vary, so a static world lookup can't locate them."""
+    if os.getenv("GPSR_FIND_USE_MEMORY", "1") != "1":
+        return None
+    brain = getattr(ctx, "data", {}).get("brain")
+    return getattr(brain, "graphs", None) if brain is not None else None
+
+
+def _detect_here(ctx: TaskContext, obj, category, world: WorldModel):
+    """Look for `obj` in the current camera view. Returns (status, xy): status is
+    'found' | 'none' | 'no_frame'; xy is the lifted world (x, y) or None."""
     snap = ctx.snapshot()
     if snap is None:
-        return False
-    classes = _object_classes(obj, step.args.get("category"), world) or ["object"]
+        return "no_frame", None
+    classes = _object_classes(obj, category, world) or ["object"]
     dets = _detect(ctx, snap.img, classes)
-    label = (obj or "object").replace("_", " ")
     if not dets:
-        ctx.say(f"I could not find the {label}.")
-        return True  # the search ran; nothing to find is an honest result
+        return "none", None
     best = max(dets, key=lambda d: d.confidence or 0.0)
-    xy = lift_bbox_world_xy(ctx, snap, best.bbox)
+    return "found", lift_bbox_world_xy(ctx, snap, best.bbox)
+
+
+def _stash_found(state: dict, obj, xy) -> None:
+    """Record a found object's map point for a later step of the same command."""
     if xy:
         state["target_xy"] = xy
         state["found_object"] = obj
-    ctx.say(f"I found the {label}.")
-    return True
+
+
+def _find_via_memory(ctx: TaskContext, obj, category, label: str, world: WorldModel, state: dict) -> bool:
+    """Fallback (option A): recall where `obj` was last seen from the scene graph,
+    drive there, and confirm with a live detection. The position comes from the
+    CLIP scene memory, not world.toml. True only if the re-detect confirms it (so a
+    stale recall never makes a false 'found' claim)."""
+    graphs = _memory_graphs(ctx)
+    if graphs is None:
+        return False
+    try:
+        hits = graphs.query_text(obj or label, k=1)
+    except Exception as exc:
+        print(f"[gpsr.skill] scene-graph query failed ({exc})")
+        return False
+    if not hits:
+        return False
+    cx, cy = float(hits[0].centroid[0]), float(hits[0].centroid[1])
+    print(f"[gpsr.skill] find_object: memory recalls {label!r} near ({cx:.2f}, {cy:.2f}); approaching")
+    state.pop("at", None)  # we leave the named place -> nav-dedup must re-evaluate
+    approach_point(ctx, cx, cy, stop_distance=float(os.getenv("GPSR_FIND_APPROACH_M", "0.8")))
+    status, xy = _detect_here(ctx, obj, category, world)
+    if status == "found":
+        _stash_found(state, obj, xy)
+        return True
+    return False
+
+
+def find_object(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
+    """Find an object. Primary: where the command says (or the current view if it
+    named no place). On a miss — or when no place was named — fall back to the
+    scene-graph memory (option A) for where it was last seen, then confirm with a
+    live detection. Object positions come from the scene graph, not world.toml."""
+    obj = step.args.get("object")
+    category = step.args.get("category")
+    where = step.args.get("location") or step.args.get("room")
+    label = (obj or "object").replace("_", " ")
+
+    if where:
+        go_to_named(ctx, where, world, state)
+    status, xy = _detect_here(ctx, obj, category, world)
+    if status == "no_frame":
+        return False  # camera failure -> Tier-2 (don't drive blind on a recall)
+    if status == "found":
+        _stash_found(state, obj, xy)
+        ctx.say(f"I found the {label}.")
+        return True
+    if _find_via_memory(ctx, obj, category, label, world, state):
+        ctx.say(f"I found the {label}.")
+        return True
+    ctx.say(f"I could not find the {label}.")
+    return True  # the search ran; nothing to find is an honest result
 
 
 def _pick_index(reply: str | None, n: int) -> int | None:

@@ -151,6 +151,7 @@ class _FakeCtx:
         self.rotations: list[float] = []
         self.saids: list[str] = []
         self.asked: list[str] = []
+        self.data: dict = {}  # ctx.data["brain"].graphs is the scene memory (run.py)
 
     def goto(self, x, y, h):
         self.gotos.append((x, y, h))
@@ -252,6 +253,91 @@ def test_find_object_without_a_place_does_not_navigate(world):
     ctx = _FakeCtx(ai=_FakeAI(dets=[_det()]))
     _run(ctx, world, RawStep(primitive="find_object", object="cola", raw="find the cola"))
     assert ctx.gotos == []
+
+
+# --- find_object scene-memory fallback (option A) ---------------------------
+
+class _RecallGraphs:
+    """Fake walkie_graphs: query_text returns one node at a fixed centroid."""
+
+    def __init__(self, centroid=(3.0, 4.0, 0.5)):
+        self._c = centroid
+        self.queries: list[str] = []
+
+    def query_text(self, query, k=1):
+        self.queries.append(query)
+        return [type("N", (), {"centroid": self._c})()]
+
+
+class _ArriveThenSeeImage:
+    """Detect returns nothing until approach_point flips state['arrived'] True —
+    i.e. the object is only visible once the robot has driven to the recalled spot."""
+
+    def __init__(self, state, name="cola"):
+        self.state, self.name = state, name
+
+    def detect(self, img, *, prompts=None, return_mask=False):
+        return [_det(name=self.name)] if self.state["arrived"] else []
+
+    def estimate_poses(self, img):
+        return []
+
+    def caption(self, img, *, prompt=None):
+        return ""
+
+
+def test_find_object_no_location_recalls_from_scene_memory(world, monkeypatch):
+    """No location named -> ask the scene graph where the cola is, drive there
+    (approach_point), and confirm with a live detect. Position comes from memory."""
+    monkeypatch.setenv("GPSR_FIND_USE_MEMORY", "1")
+    state = {"arrived": False}
+    approached: list[tuple[float, float]] = []
+    monkeypatch.setattr(skills, "approach_point",
+                        lambda ctx, x, y, **kw: (approached.append((x, y)), state.__setitem__("arrived", True), True)[-1])
+    graphs = _RecallGraphs((3.0, 4.0, 0.5))
+    ctx = _FakeCtx(ai=type("AI", (), {"image": _ArriveThenSeeImage(state)})())
+    ctx.data["brain"] = type("B", (), {"graphs": graphs})()
+    _, status = _run(ctx, world, RawStep(primitive="find_object", object="cola", raw="find the cola"))
+    assert status is CmdStatus.DONE
+    assert graphs.queries == ["cola"]        # consulted the scene memory
+    assert approached == [(3.0, 4.0)]        # drove to the recalled position
+    assert any("found the cola" in s for s in ctx.saids)
+
+
+def test_find_object_at_named_place_does_not_touch_memory(world, monkeypatch):
+    """Command names a place and the object is there -> the scene graph is never
+    queried (the operator's location wins — option A)."""
+    monkeypatch.setenv("GPSR_FIND_USE_MEMORY", "1")
+    graphs = _RecallGraphs()
+    ctx = _FakeCtx(ai=_FakeAI(dets=[_det(name="cola")]))
+    ctx.data["brain"] = type("B", (), {"graphs": graphs})()
+    _, status = _run(ctx, world, RawStep(
+        primitive="find_object", object="cola", room="living_room",
+        raw="find the cola in the living room"))
+    assert status is CmdStatus.DONE
+    assert graphs.queries == []              # memory NOT consulted
+    assert ctx.gotos == [(3.0, 4.0, 1.5)]    # only the living_room drive
+    assert any("found the cola" in s for s in ctx.saids)
+
+
+def test_find_object_falls_back_to_memory_when_named_place_empty(world, monkeypatch):
+    """Named place comes up empty -> recall from the scene graph and confirm."""
+    monkeypatch.setenv("GPSR_FIND_USE_MEMORY", "1")
+    state = {"arrived": False}
+    approached: list[tuple[float, float]] = []
+    monkeypatch.setattr(skills, "approach_point",
+                        lambda ctx, x, y, **kw: (approached.append((x, y)), state.__setitem__("arrived", True), True)[-1])
+    graphs = _RecallGraphs((7.0, 1.0, 0.3))
+    ctx = _FakeCtx(ai=type("AI", (), {"image": _ArriveThenSeeImage(state)})())
+    ctx.data["brain"] = type("B", (), {"graphs": graphs})()
+    _, status = _run(ctx, world, RawStep(
+        primitive="find_object", object="cola", room="living_room",
+        raw="find the cola in the living room"))
+    assert status is CmdStatus.DONE
+    assert ctx.gotos[0] == (3.0, 4.0, 1.5)   # first drove to the named place
+    assert graphs.queries == ["cola"]        # then recalled from memory
+    assert approached == [(7.0, 1.0)]        # and approached the recalled spot
+    assert any("found the cola" in s for s in ctx.saids)
 
 
 def test_distinct_places_are_not_deduped(world):

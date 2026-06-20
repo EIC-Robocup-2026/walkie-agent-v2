@@ -19,6 +19,15 @@ GPSR_INTERLEAVE = "0"
 # 1 = run the walkie_graphs perception loop in the background during the task so
 # "find/bring object" commands can use long-term spatial memory.
 GPSR_START_PERCEPTION = "1"
+# find_object scene-memory fallback (skills.py). 1 = when the command names no
+# location, or the named place comes up empty, recall where the object was last
+# seen from the walkie_graphs CLIP scene graph, drive there, and confirm with a
+# live detection. Object positions come from the scene graph, not world.toml
+# (which holds only fixed places); objects move/vary, so a static lookup can't
+# find them. Needs GPSR_START_PERCEPTION=1 to have anything stored.
+GPSR_FIND_USE_MEMORY = "1"
+# How far (m) to stop short of a recalled object position when approaching it.
+GPSR_FIND_APPROACH_M = "0.8"
 # 1 = speak the parsed plan for each command before executing — this is what
 # scores "demonstrate a plan has been generated" (3×100). Leave on.
 GPSR_SPEAK_PLAN = "1"
