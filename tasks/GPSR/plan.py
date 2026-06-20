@@ -148,6 +148,14 @@ def _bare(name: str | None) -> str:
     return (name or "").replace("_", " ")
 
 
+def _obj(name: str | None) -> str:
+    """Object reference for speech, falling back to a generic noun (not the bare
+    pronoun "it") for superlative/placement-scoped queries that name no concrete
+    item — "find the object" reads better than "find it" when the item is
+    discovered at the placement."""
+    return _the(name) if name else "the object"
+
+
 def _person_phrase(descriptor: str | None, kind: str | None) -> str:
     """Spoken reference to a person from a grounded descriptor + its kind.
 
@@ -213,21 +221,21 @@ def _step_phrase(step: PlanStep) -> str:
         return f"go to {_the(a.get('target'))}"
     if p is Primitive.FIND_OBJECT:
         where = a.get("location") or a.get("room")
-        return f"find {_the(a.get('object'))}" + (f" at {_the(where)}" if where else "")
+        return f"find {_obj(a.get('object'))}" + (f" at {_the(where)}" if where else "")
     if p is Primitive.FIND_PERSON:
         who = _person_phrase(a.get("descriptor"), a.get("kind"))
         room = a.get("room")
         return f"find {who}" + (f" in {_the(room)}" if room else "")
     if p is Primitive.PICK:
         where = a.get("location")
-        return f"pick up {_the(a.get('object'))}" + (f" from {_the(where)}" if where else "")
+        return f"pick up {_obj(a.get('object'))}" + (f" from {_the(where)}" if where else "")
     if p is Primitive.PLACE:
-        return f"place {_the(a.get('object'))} on {_the(a.get('location'))}"
+        return f"place {_obj(a.get('object'))} on {_the(a.get('location'))}"
     if p is Primitive.DELIVER:
         recipient = a.get("recipient")
         if recipient in (None, "me", "you"):
-            return f"bring {_the(a.get('object'))} to you"
-        return f"deliver {_the(a.get('object'))} to {_person_phrase(recipient, a.get('kind'))}"
+            return f"bring {_obj(a.get('object'))} to you"
+        return f"deliver {_obj(a.get('object'))} to {_person_phrase(recipient, a.get('kind'))}"
     if p is Primitive.FOLLOW:
         who = _person_phrase(a.get("descriptor"), a.get("kind"))
         to = a.get("to")
@@ -246,7 +254,7 @@ def _step_phrase(step: PlanStep) -> str:
         return f"find out the person's {_bare(a.get('which')) or 'details'}"
     if p is Primitive.GET_OBJECT_PROPERTY:
         obj = a.get("object")
-        return f"check the {_bare(a.get('which')) or 'property'} of {_the(obj)}"
+        return f"check the {_bare(a.get('which')) or 'property'} of {_obj(obj)}"
     if p is Primitive.SAY:
         return f"say {_bare(a.get('info')) or 'the information'}"
     if p is Primitive.GREET:
@@ -268,6 +276,9 @@ def render_plan_speech(plan: Plan, *, preamble: str = "Here is my plan.") -> str
     phrases = [_step_phrase(s) for s in plan.steps]
     if len(phrases) == 1:
         body = f"I will {phrases[0]}."
+    elif len(phrases) == 2:
+        # Two clauses don't warrant the "first … and finally …" framing.
+        body = f"I will {phrases[0]}, and then {phrases[1]}."
     else:
         seq = []
         for i, ph in enumerate(phrases):

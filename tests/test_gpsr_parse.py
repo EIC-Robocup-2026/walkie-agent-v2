@@ -231,5 +231,32 @@ def test_render_single_step():
     assert speech == "Here is my plan. I will go to the bedroom."
 
 
+def test_render_two_step_uses_and_then_not_finally():
+    # Two clauses read better as "I will X, and then Y." than the "first … and
+    # finally …" framing, which is reserved for three or more steps.
+    raw = RawPlan(steps=[
+        RawStep(primitive="navigate", room="the kitchen", raw="go to the kitchen"),
+        RawStep(primitive="greet", person="Charlie", descriptor_kind="name", room="the kitchen", raw="say hi to charlie"),
+    ])
+    speech = render_plan_speech(ground_plan(raw, load_world()))
+    assert speech == "Here is my plan. I will go to the kitchen, and then greet Charlie in the kitchen."
+    assert "finally" not in speech and "First" not in speech
+
+
+def test_render_superlative_object_says_the_object_not_it():
+    # A placement-scoped query names no concrete item; the spoken plan should say
+    # "the object", never the bare pronoun ("find it" / "size of it").
+    raw = RawPlan(steps=[
+        RawStep(primitive="navigate", location="the desk", raw="go to the desk"),
+        RawStep(primitive="find_object", object="object", location="the desk", raw="find the biggest object"),
+        RawStep(primitive="get_object_property", object="object", which="size", raw="the biggest one"),
+        RawStep(primitive="say", info="the biggest object on the desk", raw="tell me"),
+    ])
+    speech = render_plan_speech(ground_plan(raw, load_world()))
+    assert "find the object at the desk" in speech
+    assert "size of the object" in speech
+    assert "find it" not in speech and "of it" not in speech
+
+
 def test_render_empty_plan_apologizes():
     assert "could not" in render_plan_speech(Plan(steps=[])).lower()
