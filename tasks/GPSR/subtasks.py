@@ -66,11 +66,17 @@ class Command:
 
 
 class GoToInstructionPoint(SubTask):
-    """Navigate to the instruction point when the arena door opens."""
+    """Enter the arena (asking for the door if needed) and drive to the
+    instruction point."""
 
     critical = True
 
     def run(self, ctx: TaskContext) -> StepResult:
+        # The arena door may be closed — ask a human to open it before driving in.
+        # Reusable across challenges: tasks.skills.request_open_door.
+        if os.getenv("GPSR_REQUEST_DOOR", "0").lower() in ("1", "true", "yes"):
+            from tasks.skills import request_open_door
+            request_open_door(ctx)
         x, y, h = _pose("GPSR_INSTRUCTION_POINT_POSE")
         return StepResult.DONE if ctx.goto(x, y, h) else StepResult.RETRY
 

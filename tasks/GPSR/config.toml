@@ -6,6 +6,11 @@
 [gpsr]
 # Map-frame waypoint "x,y,heading_rad" announced ~2h before the test.
 GPSR_INSTRUCTION_POINT_POSE = "0.0,0.0,0.0"
+# 1 = on entry, ask a human to open the arena door and wait for it before driving
+# to the instruction point (the robot starts outside a possibly-closed door). Uses
+# the shared tasks.skills.request_open_door. Default OFF so dev/practice runs with
+# no door don't block; turn on for the real run.
+GPSR_REQUEST_DOOR = "0"
 # Maximum commands taken in one go (the rulebook issues three).
 GPSR_MAX_COMMANDS = "3"
 # How the operator issues commands: "consecutive" (all at once, enables the
