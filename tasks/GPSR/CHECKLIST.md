@@ -94,6 +94,9 @@ or real poses** · `[ ]` stub / Tier-2 fallback / not implemented.
 
 ## How to run / verify
 
+> On-robot validation (arena survey → nav-class → follow/guide → interleave →
+> clock budget): [`docs/GPSR_ONROBOT_RUNBOOK.md`](../../docs/GPSR_ONROBOT_RUNBOOK.md).
+
 ```bash
 # Pure offline tests (no robot, no server):
 uv run pytest tests/ -k "gpsr and not coverage"
