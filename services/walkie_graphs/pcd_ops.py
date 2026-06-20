@@ -22,8 +22,8 @@ import os
 
 import numpy as np
 
-from .dbscan import _open3d
-from .geometry import voxel_downsample as _voxel_downsample_np
+from interfaces.perception.dbscan import _open3d
+from interfaces.perception.geometry import voxel_downsample as _voxel_downsample_np
 
 # Resolved device per requested mode ("auto"/"cpu"/"cuda" -> "cpu"/"cuda").
 # Keyed by the env value so tests that flip WALKIE_GRAPHS_O3D_DEVICE re-resolve.

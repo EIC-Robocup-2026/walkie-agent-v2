@@ -112,11 +112,15 @@ class RerunViz:
             color = _class_color(n.class_name)
             pts = memory.load_pcd(n.id)
             if len(pts):
-                rr.log(f"world/objects/{n.id}/points", rr.Points3D(pts, colors=[color]))
+                # n.id can contain spaces (it carries the class name); build the
+                # entity path via new_entity_path so each part is escaped properly
+                # — a raw f-string leaves unescaped whitespace and Rerun warns.
+                rr.log(rr.new_entity_path(["world", "objects", n.id, "points"]),
+                       rr.Points3D(pts, colors=[color]))
             if self._show_boxes:
                 half = [e / 2.0 for e in n.extent]
                 rr.log(
-                    f"world/objects/{n.id}/box",
+                    rr.new_entity_path(["world", "objects", n.id, "box"]),
                     rr.Boxes3D(centers=[list(n.centroid)], half_sizes=[half],
                                labels=[n.class_name] if self._show_labels else None,
                                colors=[color]),
@@ -125,7 +129,7 @@ class RerunViz:
                 # Boxes hidden but labels wanted: anchor the class name to the
                 # object's centroid as a standalone marker (tiny point + label).
                 rr.log(
-                    f"world/objects/{n.id}/label",
+                    rr.new_entity_path(["world", "objects", n.id, "label"]),
                     rr.Points3D([list(n.centroid)], radii=[0.01],
                                 labels=[n.class_name], colors=[color]),
                 )
@@ -170,7 +174,7 @@ class RerunViz:
     def _log_camera(self, cam_pose) -> None:
         """Mark the camera's 3D world position + viewing direction.
 
-        ``cam_pose`` is a :class:`~walkie_graphs.geometry.CameraPose`: ``t`` is the
+        ``cam_pose`` is a :class:`~interfaces.perception.geometry.CameraPose`: ``t`` is the
         optical center in world coords and ``R`` maps the optical frame into the world,
         where the camera looks along the optical +z axis, so ``R @ [0,0,1]`` is the
         world-frame look direction.

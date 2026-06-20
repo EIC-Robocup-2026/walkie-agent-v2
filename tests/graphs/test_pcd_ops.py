@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from services.walkie_graphs import pcd_ops
-from services.walkie_graphs.geometry import voxel_downsample as voxel_np
+from interfaces.perception.geometry import voxel_downsample as voxel_np
 
 try:
     import open3d as _o3d
@@ -41,7 +41,7 @@ def test_resolve_device_cpu_override(monkeypatch):
 
 
 def test_resolve_device_without_open3d_is_cpu(monkeypatch):
-    import services.walkie_graphs.dbscan as dbscan_mod
+    import interfaces.perception.dbscan as dbscan_mod
 
     monkeypatch.setattr(dbscan_mod, "_O3D", False)
     monkeypatch.setenv("WALKIE_GRAPHS_O3D_DEVICE", "auto")
@@ -84,7 +84,7 @@ def test_icp_disabled_or_degenerate_is_identity():
 
 
 def test_icp_identity_without_open3d(monkeypatch):
-    import services.walkie_graphs.dbscan as dbscan_mod
+    import interfaces.perception.dbscan as dbscan_mod
 
     monkeypatch.setattr(dbscan_mod, "_O3D", False)
     target = _corner_cloud()

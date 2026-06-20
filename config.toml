@@ -71,6 +71,19 @@ WALKIE_SUMMARIZE_KEEP_MSGS = "12"
 # 1 = pause after each movement / arm action (debugging).
 PAUSE_AFTER_WALK = "0"
 
+[camera]
+# Tilt-servo backlash correction (interfaces/devices/camera.py::camera_pose).
+# The head's tilt servo has mechanical play, so the optical frame the TF tree
+# reports is rotated slightly from where the camera actually points. These euler
+# offsets (radians, in the camera OPTICAL frame) are composed into the camera
+# pose as R @ R_offset right before every 3D lift, so they fix deprojected world
+# points in both the walkie_graphs loop and the HRI/skills snapshot paths.
+# Y is the tilt (up/down) axis on this mount — start there. Calibrate on the real
+# robot: point at a known target, nudge until the lifted point lands on it.
+WALKIE_CAMERA_TILT_OFFSET_X_RAD = "0.0"
+WALKIE_CAMERA_TILT_OFFSET_Y_RAD = "0.0"
+WALKIE_CAMERA_TILT_OFFSET_Z_RAD = "0.0"
+
 [manipulation]
 # Robot-wide grasp/arm knobs shared by every manipulation task (Pick and Place,
 # Restaurant, ...). Read by tasks/manipulation.py. The grasp PLANNER is a stub

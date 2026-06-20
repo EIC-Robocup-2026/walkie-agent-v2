@@ -50,6 +50,11 @@ class _StubMemory:
 def svc():
     s = WalkieGraphsService(walkieAI=None, walkie=None, memory=_StubMemory(), verbose=False)
     s.viz = None
+    # Cadence tests assert exact synchronous call counts against the stub memory, so
+    # run heavy maintenance inline (the async worker would race the assertions). The
+    # inline path runs the SAME due-list selector, just calling synchronously — async
+    # dispatch/de-collision get their own dedicated tests below.
+    s._async_maintenance = False
     return s
 
 
@@ -228,7 +233,7 @@ def test_flag_for_refine_called_on_rejected_registration(monkeypatch):
 
     img = SimpleNamespace(size=(40, 40), crop=lambda box: SimpleNamespace(size=(20, 20)))
     depth = _np.ones((40, 40), dtype=_np.float32)
-    from services.walkie_graphs.geometry import CameraPose, Intrinsics
+    from interfaces.perception.geometry import CameraPose, Intrinsics
 
     cam = CameraPose(R=_np.eye(3), t=_np.zeros(3))
     intr = Intrinsics(fx=50.0, fy=50.0, cx=20.0, cy=20.0, width=40, height=40)
@@ -252,7 +257,7 @@ def _carve_frame_and_capture(accepted=True, correction=None):
 
     import numpy as _np
 
-    from services.walkie_graphs.geometry import CameraPose, Intrinsics
+    from interfaces.perception.geometry import CameraPose, Intrinsics
 
     cam = CameraPose(R=_np.eye(3), t=_np.zeros(3))
     frame = SimpleNamespace(
@@ -311,6 +316,36 @@ def test_carve_skipped_without_geometry(svc):
     for _ in range(25):
         svc._maybe_tick(True, touched=[])
     assert svc.memory.calls.count("carve") == 0
+
+
+# ---------------------------------------------------------------------------
+# De-collision + async maintenance dispatch
+# ---------------------------------------------------------------------------
+def test_heavy_ops_decollide_carve_priority(svc):
+    """Coprime carve/refine periods collide on tick 13 (13%5==3 and 13%7==6); the
+    selector runs AT MOST ONE heavy op per tick, carve first (it needs the frustum)."""
+    svc.carve_every_n = 5  # carve due at ticks 8, 13, 18, 23
+    svc.refine_every_n = 7  # refine due at ticks 13, 20
+    svc.capture_icp_max_corr_m = 0.0  # registration off → pose trusted, carve allowed
+    frame, capture = _carve_frame_and_capture(accepted=True)
+    for _ in range(25):
+        svc._maybe_tick(True, touched=[], frame=frame, capture=capture)
+    # Carve fires on all four of its ticks (priority 0).
+    assert svc.memory.calls.count("carve") == 4
+    # Refine is due at 13 and 20, but loses the tick-13 collision to carve → fires once.
+    assert svc.memory.calls.count("refine_nodes") == 1
+
+
+def test_async_maintenance_dispatches_to_worker_and_drains(svc):
+    """With async on, a due heavy op runs on the worker (not inline); the executor
+    shutdown in stop_and_join drains it so the side effect lands."""
+    svc._async_maintenance = True
+    svc.refine_every_n = 7  # refine due at tick 13 (offset 6)
+    for _ in range(13):
+        svc._maybe_tick(True, touched=[])
+    # Submitted to the worker; drain it (stop_and_join calls executor.shutdown(wait=True)).
+    svc.stop_and_join(timeout=0)
+    assert svc.memory.calls.count("refine_nodes") == 1
 
 
 # ---------------------------------------------------------------------------

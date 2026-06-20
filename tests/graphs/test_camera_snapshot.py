@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from interfaces.devices.camera import CameraSnapshot
-from services.walkie_graphs.geometry import CameraPose, Intrinsics
+from interfaces.perception.geometry import CameraPose, Intrinsics
 
 
 def _intr(width=640, height=480, fx=500.0, fy=500.0, cx=320.0, cy=240.0):

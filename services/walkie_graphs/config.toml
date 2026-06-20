@@ -15,6 +15,12 @@
 # existing memory).
 WALKIE_GRAPHS_ENABLED = "1"
 WALKIE_GRAPHS_PERF="0"
+# Per-detection ingest diagnostics. 1 = each tick logs the raw detector output
+# (class=confidence for every detection) plus, for every INTERESTED class, the exact
+# gate that dropped it (no mask / size / 0 lifted points / confidence / min_points) or
+# that it was kept. Use to debug "class X never becomes a node" (e.g. a spoon on a
+# table); leave 0 in normal operation.
+WALKIE_GRAPHS_DEBUG_INGEST = "0"
 # The perception loop's tick cadence (seconds): detect → ingest → write perception.json,
 # once per interval. This is the active cadence in production.
 WALKIE_GRAPHS_INTERVAL_SEC = "2.0"
@@ -24,7 +30,7 @@ WALKIE_GRAPHS_INTERVAL_SEC = "2.0"
 # may contain spaces (split on commas). Grouped here by category for readability.
 
 
-WALKIE_GRAPHS_INTERESTED_CLASSES = "sofa,door,chair,armchair,table,stool,shirt,sponge,bowl,cup,fork,knife,plate,spoon,coffee creamer,coke,ice tea,milk,orange juice,red bull,water bottle,bread,cornflakes,instant noodles,potato,tomato soup,apple,avocado,lemon,orange,chips,cookies,gum,mixed nuts,pringles,hand cream,soap,toothpaste,dish rack,shelf,monitor,bed,pillow"
+WALKIE_GRAPHS_INTERESTED_CLASSES = "sofa,door,chair,armchair,table,stool,shirt,sponge,bowl,cup,fork,knife,plate,spoon,coke,ice tea,milk,orange juice,red bull,water bottle,bread,cornflakes,instant noodles,potato,tomato soup,apple,avocado,lemon,orange,chips,cookies,gum,mixed nuts,pringles,hand cream,soap,toothpaste,dish rack,shelf,monitor,bed,pillow"
 
 
 # Classes to always drop before lift/embed/store — moving objects (people) can't be
@@ -118,7 +124,7 @@ WALKIE_GRAPHS_SEGMENTS_PER_NODE = "12"
 # union before inverting (mask rims are exactly where depth is least reliable, and a
 # person's mask tends to underestimate their silhouette), and the save cadence (ticks).
 WALKIE_GRAPHS_BG_VOXEL_M = "0.05"
-WALKIE_GRAPHS_BG_MAX_POINTS = "300000"
+WALKIE_GRAPHS_BG_MAX_POINTS = "600000"
 WALKIE_GRAPHS_BG_MASK_DILATE_PX = "4"
 WALKIE_GRAPHS_BG_SAVE_EVERY_N = "7"
 
@@ -149,9 +155,16 @@ WALKIE_GRAPHS_DEDUP_VISUAL_K = "0"
 # MIN_POINTS gates graph entry only (the live snapshot still gets a centroid below it):
 # keep it low or small/thin/flat objects (a fork) never enter the catalogue.
 # REQUIRE_CONFIRMATION + MIN_OBS_CONFIRM backstop the false-positive risk of a low value.
-WALKIE_GRAPHS_VOXEL_M = "0.02"
-WALKIE_GRAPHS_MAX_POINTS_PER_OBJ = "15000"
-WALKIE_GRAPHS_MIN_POINTS = "15"
+WALKIE_GRAPHS_VOXEL_M = "0.01"
+WALKIE_GRAPHS_MAX_POINTS_PER_OBJ = "25000"
+WALKIE_GRAPHS_MIN_POINTS = "0"
+# Far-depth cutoff (m): drop lifted points beyond this range. ZED stereo depth error
+# grows ~quadratically with distance, so far pixels are the noisiest and smear most —
+# capping them is the single biggest per-point noise reduction. 0 = unbounded (no cap).
+# MAX_DEPTH_M gates object segments; BG_MAX_DEPTH_M gates the classless background cloud
+# (blank inherits MAX_DEPTH_M). Also bounds the carve frustum (CARVE_MAX_Z_M inherits it).
+WALKIE_GRAPHS_MAX_DEPTH_M = "4.0"
+WALKIE_GRAPHS_BG_MAX_DEPTH_M = "4.0"
 # Minimum detector confidence to accept a detection. Dropped early (before
 # lift/embed/caption), alongside the class scope and MIN_POINTS checks. 0.0 = keep all.
 WALKIE_GRAPHS_CONFIDENCE_THRESHOLD = "0.3"
@@ -173,6 +186,17 @@ WALKIE_GRAPHS_NN_VOXEL_M = "0.025"
 # score clears this STRICTER gate (needs ~full overlap AND agreeing CLIP — with
 # weights 1/1, 1.5 means nn_ratio + phi_sem >= 1.5). 0 = same-class only.
 WALKIE_GRAPHS_CROSS_CLASS_SIM_THRESHOLD = "1.5"
+# Cross-class CONTAINMENT guard. The score above uses a one-directional overlap
+# (detection→node) that SATURATES for a small object resting on a big surface: a
+# spoon lying flat on a table has ~all its points within NN_VOXEL_M of the tabletop,
+# so it clears the cross-class gate and gets absorbed into the table node — no spoon
+# node is ever created (flat cutlery/items-on-shelf vanish; tall objects survive
+# because most of their points sit above the surface band). This requires a
+# cross-class merge to also be MUTUAL: the reverse overlap (node→detection, fraction
+# of the node's cloud near the detection) must clear this. A true same-object pair
+# the detector mislabels ("cup"↔"mug") overlaps mutually (~1.0); pure containment is
+# ~0. 0 = guard off (legacy). 0.3 keeps label-flip merges while blocking absorption.
+WALKIE_GRAPHS_CROSS_CLASS_MIN_MUTUAL_OVERLAP = "0.3"
 # Depth "flying pixel" cleanup — the points that smear off an object's silhouette into
 # a shadow because a boundary depth pixel mixes the object with the background behind it.
 # Removed at the source (before back-projection), where the discontinuity is visible:
@@ -215,7 +239,7 @@ WALKIE_GRAPHS_DBSCAN_MIN_POINTS = "10"
 # of the frame (walls/floor/background), and masks smaller than this many pixels.
 # 1.0 / 0 disable each. 0.9 keeps real objects while dropping whole-frame misfires.
 WALKIE_GRAPHS_MAX_BBOX_AREA_RATIO = "0.9"
-WALKIE_GRAPHS_MIN_MASK_AREA_PX = "64"
+WALKIE_GRAPHS_MIN_MASK_AREA_PX = "16"
 # Subtract a contained detection's mask from its container's before deprojection
 # (CG mask_subtract_contained): keeps the mug's pixels out of the table's cloud and
 # crop, so containers don't absorb the objects resting on/in them. 1 = on.
@@ -228,6 +252,13 @@ WALKIE_GRAPHS_CROP_MARGIN_PX = "20"
 [graphs.maintenance]
 # Periodic ConceptGraphs post-processing, each on its own cadence (in ingest ticks,
 # staggered so no two collide). 0 disables a pass.
+# Heavy maintenance (refine/carve/denoise/merge/evict) runs on a single background
+# worker so a multi-second pass never stalls the next frame capture. At most ONE
+# heavy pass runs per tick (carve has priority — it needs the current frustum — then
+# refine, then denoise/merge/evict, all of which roll over losslessly); a cadence
+# that fires while the worker is busy is skipped and re-fires next cadence. Set to 0
+# to run inline on the ingest thread (the pre-worker behavior; used by tests).
+WALKIE_GRAPHS_ASYNC_MAINTENANCE = "1"
 # denoise_nodes: clean nodes whose cloud changed, in two cluster-preserving stages —
 #   (1) statistical outlier removal (same SOR_K / SOR_STD_RATIO knobs as the per-frame
 #       pass above): erases the fuzzy halo that ACCUMULATES across sightings (each
@@ -279,6 +310,12 @@ WALKIE_GRAPHS_REFINE_CORR_M = "0.08"
 WALKIE_GRAPHS_REFINE_MIN_FITNESS = "0.6"
 WALKIE_GRAPHS_REFINE_MAX_TRANS_M = "0.12"
 WALKIE_GRAPHS_REFINE_MAX_ROT_DEG = "5"
+# ICP backend for the refine pass specifically (independent of the global O3D_DEVICE
+# used by capture registration). At refine's subsampled cloud sizes (≤5000 pts) the
+# legacy CPU solver is ~2x faster than the CUDA tensor path because host↔GPU transfer
+# outweighs the compute gain (measured 87 ms CPU vs 161 ms CUDA, RTX 3080 Ti). Default
+# "cpu"; set blank to follow WALKIE_GRAPHS_O3D_DEVICE, or "cuda" to force the GPU.
+WALKIE_GRAPHS_REFINE_O3D_DEVICE = "cpu"
 # Node precision (CG obj_min_detections): an object must be seen MIN_OBS_CONFIRM times
 # before it counts. With REQUIRE_CONFIRMATION=1, provisional (under-seen) nodes are
 # HIDDEN from queries/description (non-destructive — a re-sighting promotes them; the

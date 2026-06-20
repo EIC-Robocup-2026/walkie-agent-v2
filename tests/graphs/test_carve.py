@@ -10,7 +10,7 @@ from services.walkie_graphs.carve import (
     free_space_mask,
     frustum_aabb,
 )
-from services.walkie_graphs.geometry import CameraPose, Intrinsics
+from interfaces.perception.geometry import CameraPose, Intrinsics
 from services.walkie_graphs.memory import GraphMemory
 from tests.graphs.conftest import put_object, unit
 

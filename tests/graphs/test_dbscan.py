@@ -9,8 +9,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import services.walkie_graphs.dbscan as dbscan_mod
-from services.walkie_graphs.dbscan import (
+import interfaces.perception.dbscan as dbscan_mod
+from interfaces.perception.dbscan import (
     dbscan_labels,
     dbscan_largest_cluster,
     dbscan_remove_noise,

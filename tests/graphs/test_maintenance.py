@@ -67,8 +67,57 @@ def test_merge_cross_class_requires_embeddings(mem):
     assert mem.count() == 2
 
 
+def _put_spoon_on_table(mem):
+    """A big flat table node + a small spoon node resting on it (cross-class containment).
+
+    Every spoon point sits within nn_voxel of the tabletop, so the spoon→table overlap
+    saturates (~1.0); the reverse table→spoon overlap is ~0 (the spoon covers a tiny
+    patch). Same embedding so the CLIP gate is not what separates them.
+    """
+    mem.cross_class_sim_threshold = 1.5
+    gx, gy = np.meshgrid(np.linspace(0.5, 1.5, 51), np.linspace(-0.5, 0.5, 51))
+    table_pts = np.column_stack(
+        [gx.ravel(), gy.ravel(), np.full(gx.size, 0.50)]
+    ).astype(np.float32)
+    rng = np.random.default_rng(7)
+    spoon_pts = rng.normal((1.0, 0.0, 0.505), (0.03, 0.01, 0.002), size=(40, 3)).astype(np.float32)
+    put_object(mem, "table", "table", table_pts, emb=unit(1, 0, 0), n_obs=12)
+    put_object(mem, "spoon", "spoon", spoon_pts, emb=unit(1, 0, 0), n_obs=2)
+
+
+def test_merge_cross_class_absorbs_object_on_surface_without_guard(mem):
+    # Documents the bug the guard fixes: with the guard off (constructor default 0), the
+    # symmetric max() overlap saturates for a spoon on a table, so the cleanup pass
+    # absorbs the spoon into the higher-n_obs table node.
+    _put_spoon_on_table(mem)
+    mem.cross_class_min_mutual_overlap = 0.0
+    assert mem.merge_overlapping_nodes() == 1
+    assert mem.count() == 1
+
+
+def test_merge_cross_class_guard_keeps_object_on_surface_separate(mem):
+    # The fix: requiring MUTUAL overlap for cross-class merges blocks the absorption — the
+    # reverse overlap (table->spoon) is ~0, so the spoon survives the cleanup pass.
+    _put_spoon_on_table(mem)
+    mem.cross_class_min_mutual_overlap = 0.3
+    assert mem.merge_overlapping_nodes() == 0
+    assert mem.count() == 2
+    assert {n.class_name for n in mem.all_objects()} == {"table", "spoon"}
+
+
+def test_merge_cross_class_label_flip_still_merges_with_guard_on(mem):
+    # The guard must not block a genuine same-object/different-label merge: coincident
+    # clouds overlap MUTUALLY (~1.0 both directions), so cup<->mug still fuses at 0.3.
+    mem.cross_class_sim_threshold = 1.5
+    mem.cross_class_min_mutual_overlap = 0.3
+    put_object(mem, "a", "cup", make_cloud((0, 0, 0), seed=1), emb=unit(1, 0, 0), n_obs=3)
+    put_object(mem, "b", "mug", make_cloud((0, 0, 0), seed=2), emb=unit(1, 0, 0), n_obs=1)
+    assert mem.merge_overlapping_nodes() == 1
+    assert mem.count() == 1
+
+
 def _o3d_available() -> bool:
-    from services.walkie_graphs.dbscan import _open3d
+    from interfaces.perception.dbscan import _open3d
 
     return bool(_open3d())
 

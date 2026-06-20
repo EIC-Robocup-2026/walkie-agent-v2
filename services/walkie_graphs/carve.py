@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .geometry import CameraPose, Intrinsics
+from interfaces.perception.geometry import CameraPose, Intrinsics
 
 
 def corrected_pose(cam: CameraPose, correction: np.ndarray | None) -> CameraPose:
