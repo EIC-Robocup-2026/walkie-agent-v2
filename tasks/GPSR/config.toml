@@ -78,6 +78,14 @@ GPSR_PERSON_SCAN_SETTLE_SEC = "0.7"
 # person is double-counted across stops.
 GPSR_COUNT_SCAN_STEPS = "6"
 GPSR_COUNT_DEDUP_M = "0.4"
+# Minimum detector confidence for an object detection to count (tasks/GPSR/skills.py
+# _detect, applied to find_object / count-objects / get_object_property). Open-vocab
+# detectors emit low-confidence boxes even for an absent class; with no floor those
+# inflate the object count (len(dets)) and let find_object claim a false "found".
+# 0 = keep every detection (behaviour-preserving default). Tune UP on the robot
+# (e.g. 0.3) once the real detector's score distribution is known — too high drops
+# true objects (count too low / false "not found"), too low keeps the noise.
+GPSR_DETECT_CONF_MIN = "0"
 # follow/guide tracking (tasks/GPSR/tracking.py): how close (m) the robot must get
 # to a "follow me to X" destination before the ArrivalStopper ends the follow, and
 # how often (s) it polls the robot pose.

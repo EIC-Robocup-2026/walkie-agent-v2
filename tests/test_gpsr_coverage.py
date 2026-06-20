@@ -62,7 +62,13 @@ def _build_model():
 
 
 def test_parser_coverage():
-    world = load_world()
+    # Full CompetitionTemplate vocabulary: the corpus references the whole arena
+    # (kitchen, cabinet, desk, sofa…), most of which is present=false in the
+    # practice world.toml. Coverage measures parser/grounding quality over the
+    # grammar, not which places are physically surveyed — so load the full vocab
+    # (else every present=false noun reads as an ungrounded "miss"). Mirrors the
+    # test_gpsr_parse fixture; the present-flag drop is tested separately there.
+    world = load_world(include_absent=True)
     model = _build_model()
     corpus = _load_corpus()
     assert corpus, "empty corpus"

@@ -135,14 +135,20 @@ class WorldModel:
         return None
 
     def category(self, text: str | None) -> str | None:
-        """Ground a category reference, tolerating singular/plural ("drink")."""
+        """Ground a category reference, tolerating singular/plural.
+
+        Handles irregular plurals via the shared de-pluralizer: "drink"->drinks,
+        "dish"->dishes (es), "cleaning supply"->cleaning_supplies (ies). The
+        generator emits the singular category form ("the heaviest dish", "a
+        cleaning supply"), so missing these would forfeit object-category commands.
+        """
         if not text:
             return None
         key = _strip_article(_norm(text))
         if key in self.categories:
             return key
         for cat in self.categories:
-            if key == cat or key + "s" == cat or key == cat.rstrip("s"):
+            if key == cat or key in _singulars(cat):
                 return cat
         return None
 
@@ -199,12 +205,21 @@ def _pose_of(raw: dict) -> Pose:
     return (float(p[0]), float(p[1]), float(p[2]))
 
 
-def load_world(path: str | os.PathLike | None = None) -> WorldModel:
+def load_world(
+    path: str | os.PathLike | None = None, *, include_absent: bool = False
+) -> WorldModel:
     """Load the world model from a TOML file.
 
     Resolution order: explicit *path* arg, else $GPSR_WORLD_FILE, else the
     sibling `world.toml`. Raises FileNotFoundError if none exists (a missing
     arena is a setup error worth failing loudly on, unlike runtime perception).
+
+    ``include_absent=True`` loads every room/location regardless of its
+    ``present`` flag — the *full* CompetitionTemplate vocabulary. The default
+    (False) drops ``present = false`` entries, which is what the robot wants (it
+    must not navigate to an un-surveyed practice-arena place). The full vocabulary
+    is for offline parser-coverage measurement against the whole grammar, where
+    `present` is irrelevant — see tasks/GPSR/tools/gen_corpus.py.
     """
     if path is None:
         path = os.getenv("GPSR_WORLD_FILE") or Path(__file__).with_name("world.toml")
@@ -215,7 +230,7 @@ def load_world(path: str | os.PathLike | None = None) -> WorldModel:
     wm = WorldModel()
 
     for name, raw in (data.get("rooms") or {}).items():
-        if not raw.get("present", True):
+        if not include_absent and not raw.get("present", True):
             continue  # in the template but ABSENT from this arena — drop it entirely
         canonical = _norm(name)
         wm.rooms[canonical] = Room(name=canonical, pose=_pose_of(raw))
@@ -223,7 +238,7 @@ def load_world(path: str | os.PathLike | None = None) -> WorldModel:
             wm._room_alias[k] = canonical
 
     for name, raw in (data.get("locations") or {}).items():
-        if not raw.get("present", True):
+        if not include_absent and not raw.get("present", True):
             continue  # absent from this arena — drop so nothing grounds/navigates to it
         room = _norm(raw["room"]) if raw.get("room") else None
         if room is not None and room not in wm.rooms:

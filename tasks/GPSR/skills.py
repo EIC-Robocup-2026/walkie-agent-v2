@@ -52,12 +52,40 @@ from .world import WorldModel
 
 # --- low-level helpers ------------------------------------------------------
 
+def _conf_floor() -> float:
+    """Minimum detector confidence for an object detection to count (0 = keep all).
+
+    Open-vocab detectors emit low-confidence boxes even for an absent class; with
+    no floor those inflate ``count`` (which is ``len(dets)``) and let
+    ``find_object`` call a spurious box a "found" object. The floor drops them.
+    Default 0 reproduces the pre-gate behaviour exactly — the useful value is a
+    robot-tuning question (try ~0.3 once the real detector's score distribution is
+    known), so it ships off by default and is set per-arena like the other knobs.
+    """
+    try:
+        return float(os.getenv("GPSR_DETECT_CONF_MIN", "0") or 0)
+    except ValueError:
+        return 0.0
+
+
+def _above_floor(dets, floor: float):
+    """Keep only detections at/above the confidence floor (missing conf -> 0).
+
+    Pure (no robot/LLM) so it is unit-tested directly. ``floor <= 0`` is a no-op
+    short-circuit that returns every detection — the default, behaviour-preserving
+    path."""
+    if floor <= 0:
+        return list(dets)
+    return [d for d in dets if (getattr(d, "confidence", None) or 0.0) >= floor]
+
+
 def _detect(ctx: TaskContext, img, classes: list[str], *, return_mask: bool = False):
     try:
-        return ctx.walkieAI.image.detect(img, prompts=classes, return_mask=return_mask)
+        dets = ctx.walkieAI.image.detect(img, prompts=classes, return_mask=return_mask)
     except Exception as exc:
         print(f"[gpsr.skill] object detection failed ({exc})")
         return []
+    return _above_floor(dets, _conf_floor())
 
 
 def _people(ctx: TaskContext, img):
@@ -366,9 +394,9 @@ def _find_person_match(ctx: TaskContext, step: PlanStep):
 
 
 def find_person(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
-    room = step.args.get("room")
-    if room:
-        go_to_named(ctx, room, world, state)
+    where = step.args.get("location") or step.args.get("room")  # room or a beacon
+    if where:
+        go_to_named(ctx, where, world, state)
     snap, bbox = _find_person_match(ctx, step)
     if snap is None:
         return False  # no camera frame -> let Tier-2 try
@@ -476,9 +504,9 @@ def say(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> boo
 
 
 def greet(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
-    room = step.args.get("room")
-    if room:
-        go_to_named(ctx, room, world, state)
+    where = step.args.get("location") or step.args.get("room")  # room or a beacon
+    if where:
+        go_to_named(ctx, where, world, state)
     snap, bbox = _find_person_match(ctx, step)
     if snap is not None and bbox is not None:
         xy = lift_bbox_world_xy(ctx, snap, bbox)

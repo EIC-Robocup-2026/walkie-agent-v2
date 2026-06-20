@@ -203,7 +203,9 @@ def step_location(step: PlanStep) -> str | None:
         return a.get("target")
     if p is Primitive.FIND_OBJECT:
         return a.get("location") or a.get("room")
-    if p in (Primitive.FIND_PERSON, Primitive.GREET, Primitive.DELIVER):
+    if p in (Primitive.FIND_PERSON, Primitive.GREET):
+        return a.get("location") or a.get("room")  # a room or a beacon (meetPrsAtBeac)
+    if p is Primitive.DELIVER:
         return a.get("room")
     if p is Primitive.COUNT:
         return a.get("location") or a.get("room")
@@ -226,8 +228,8 @@ def _step_phrase(step: PlanStep) -> str:
         return f"find {_obj(a.get('object'))}" + (f" at {_the(where)}" if where else "")
     if p is Primitive.FIND_PERSON:
         who = _person_phrase(a.get("descriptor"), a.get("kind"))
-        room = a.get("room")
-        return f"find {who}" + (f" in {_the(room)}" if room else "")
+        where = a.get("location") or a.get("room")
+        return f"find {who}" + (f" in {_the(where)}" if where else "")
     if p is Primitive.PICK:
         where = a.get("location")
         return f"pick up {_obj(a.get('object'))}" + (f" from {_the(where)}" if where else "")
@@ -261,8 +263,8 @@ def _step_phrase(step: PlanStep) -> str:
         return f"say {_bare(a.get('info')) or 'the information'}"
     if p is Primitive.GREET:
         who = _person_phrase(a.get("descriptor"), a.get("kind"))
-        room = a.get("room")
-        return f"greet {who}" + (f" in {_the(room)}" if room else "")
+        where = a.get("location") or a.get("room")
+        return f"greet {who}" + (f" in {_the(where)}" if where else "")
     return step.raw or p.value
 
 
