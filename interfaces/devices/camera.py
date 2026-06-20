@@ -411,6 +411,7 @@ class CameraSnapshot:
         self,
         mask: np.ndarray,
         *,
+        frame: str = "map",
         voxel: float | None = None,
         max_points: int | None = None,
         erode_px: int | None = None,
@@ -419,21 +420,38 @@ class CameraSnapshot:
         sor_std_ratio: float | None = None,
         use_edge_filter: bool = True,
     ) -> np.ndarray:
-        """Lift a pixel mask to an ``(N, 3)`` map-frame cloud — the walkie_graphs way.
+        """Lift a pixel mask to an ``(N, 3)`` cloud — the walkie_graphs way.
 
         Runs :func:`deproject_mask` against the *snapshot's* depth/pose/intrinsics
         with the same flying-pixel cleanup the scene graph uses. ``None`` params
         default from the corresponding ``WALKIE_GRAPHS_*`` env vars. Returns an
         empty ``(0, 3)`` array when the snapshot has no geometry.
+
+        ``frame`` selects the output frame:
+
+        - ``"map"`` (default) — points in the map/world frame (``P = P_opt @ R.T + t``),
+          what the scene graph stores.
+        - ``"optical"`` — points in the camera **optical** frame (X-right, Y-down,
+          Z-forward), lifted with an identity pose. This is what GraspNet expects;
+          map them back with ``p_map = self.cam.R @ p_opt + self.cam.t``. The cleanup
+          (voxel/SOR/edge filter) is rigid-invariant, so the cloud is identical to the
+          map-frame one up to that transform.
         """
         if not self.has_geometry:
             return np.zeros((0, 3), dtype=np.float32)
+
+        if frame == "map":
+            pose = self.cam
+        elif frame == "optical":
+            pose = CameraPose(R=np.eye(3, dtype=float), t=np.zeros(3, dtype=float))
+        else:
+            raise ValueError(f"frame must be 'map' or 'optical', got {frame!r}")
 
         return deproject_mask(
             mask,
             self.depth,
             self.intr,
-            self.cam,
+            pose,
             voxel=voxel if voxel is not None else _envf("WALKIE_GRAPHS_VOXEL_M", "0.02"),
             max_points=max_points
             if max_points is not None

@@ -3,6 +3,7 @@
 from __future__ import annotations
 import os
 
+from .grasp import GraspClient
 from .image import ImageClient
 from .stt import STTClient
 from .tts import TTSClient
@@ -57,3 +58,4 @@ class WalkieAIClient:
         self.stt = STTClient(base_url=base_url, timeout=timeout)
         self.tts = TTSClient(base_url=base_url, timeout=timeout)
         self.image = ImageClient(base_url=base_url, timeout=timeout)
+        self.grasp = GraspClient(base_url=base_url, timeout=timeout)
