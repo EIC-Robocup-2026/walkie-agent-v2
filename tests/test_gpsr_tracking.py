@@ -7,11 +7,15 @@ asserts on its `.triggered` Event (no sleep-timing assertions).
 
 from __future__ import annotations
 
+import math
+
 from tasks.GPSR.tracking import (
     ArrivalStopper,
     arrived,
     companion_present,
+    heading_between,
     robot_xy,
+    segment_route,
     within,
 )
 
@@ -57,6 +61,31 @@ def test_robot_xy_and_arrived():
     assert robot_xy(ctx) == (3.0, 4.0)
     assert arrived(ctx, (3.5, 4.0), 1.0)
     assert not arrived(ctx, (10.0, 10.0), 1.0)
+
+
+def test_heading_between_is_directional_and_reversible():
+    assert heading_between((0.0, 0.0), (1.0, 0.0)) == 0.0               # +x -> 0
+    assert math.isclose(heading_between((0.0, 0.0), (0.0, 1.0)), math.pi / 2)  # +y -> 90deg
+    # the look-back heading is the reverse of the travel heading (180deg apart).
+    fwd = heading_between((0.0, 0.0), (3.0, 4.0))
+    back = heading_between((3.0, 4.0), (0.0, 0.0))
+    assert math.isclose(abs(fwd - back), math.pi)
+
+
+def test_segment_route_splits_long_legs_capped_at_max_step():
+    pts = segment_route((0.0, 0.0), (10.0, 0.0), 3.0)
+    assert pts[-1] == (10.0, 0.0)          # ends exactly at the destination
+    assert len(pts) == 4                   # ceil(10/3) = 4 hops
+    prev = (0.0, 0.0)
+    for p in pts:                          # no hop longer than max_step
+        assert math.hypot(p[0] - prev[0], p[1] - prev[1]) <= 3.0 + 1e-9
+        prev = p
+
+
+def test_segment_route_short_or_degenerate_is_single_hop():
+    assert segment_route((0.0, 0.0), (1.0, 0.0), 3.0) == [(1.0, 0.0)]   # short leg
+    assert segment_route((5.0, 5.0), (5.0, 5.0), 3.0) == [(5.0, 5.0)]   # zero-length
+    assert segment_route((0.0, 0.0), (10.0, 0.0), 0.0) == [(10.0, 0.0)]  # max_step guard
 
 
 def test_companion_present():

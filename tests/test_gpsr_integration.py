@@ -140,19 +140,28 @@ class _FakeBrain:
 class _FakeCtx:
     """Mock TaskContext recording the robot's outward actions."""
 
-    def __init__(self, *, ai=None, model=None, snap=True, goto_ok=True, ask_reply=""):
+    def __init__(self, *, ai=None, model=None, snap=True, goto_ok=True, ask_reply="", pose=(0.0, 0.0)):
         self.walkieAI = ai or _FakeAI()
         self.model = model or _FakeModel()
         self._snap = _FakeSnap() if snap else None
         self._goto_ok = goto_ok
         self._ask_reply = ask_reply
+        self._pose = pose
         self.gotos: list[tuple[float, float, float]] = []
+        self.rotations: list[float] = []
         self.saids: list[str] = []
         self.asked: list[str] = []
 
     def goto(self, x, y, h):
         self.gotos.append((x, y, h))
         return self._goto_ok
+
+    def current_pose(self):
+        return {"x": self._pose[0], "y": self._pose[1], "heading": 0.0}
+
+    def rotate_to(self, heading_rad):
+        self.rotations.append(heading_rad)
+        return True
 
     def snapshot(self):
         return self._snap
@@ -378,6 +387,41 @@ def test_guide_leads_person_from_start_to_destination(world, _patch_geometry):
     assert _patch_geometry == [(9.0, 9.0)]                  # faced the person
     assert any("hello charlie" in s.lower() for s in ctx.saids)
     assert any("guide you to kitchen" in s.lower() for s in ctx.saids)
+    assert any("arrived at kitchen" in s.lower() for s in ctx.saids)
+
+
+def test_guide_reacquire_leads_in_segments_and_looks_back(world, _patch_geometry, monkeypatch):
+    """With GPSR_GUIDE_REACQUIRE on, guide drives to `to` in capped hops and turns
+    back between them (look-back). A visible follower → no waiting; final hop lands
+    on the destination pose."""
+    monkeypatch.setenv("GPSR_GUIDE_REACQUIRE", "1")
+    monkeypatch.setenv("GPSR_GUIDE_SEGMENT_M", "1.0")
+    # start at the origin; kitchen is (1,2) → dist 2.24 → ceil(2.24/1)=3 hops.
+    ctx = _FakeCtx(ai=_FakeAI(people=[_plain_person((100, 100, 40, 120))]), pose=(0.0, 0.0))
+    _, status = _run(ctx, world, RawStep(
+        primitive="guide", person="Charlie", descriptor_kind="name",
+        to_location="kitchen", raw="guide Charlie to the kitchen"))
+    assert status is CmdStatus.DONE
+    assert len(ctx.gotos) == 3                       # segmented, not one blocking drive
+    assert ctx.gotos[-1] == (1.0, 2.0, 0.0)          # final hop = kitchen surveyed pose
+    assert len(ctx.rotations) == 2                   # looked back after each non-final hop
+    assert any("arrived at kitchen" in s.lower() for s in ctx.saids)
+
+
+def test_guide_reacquire_leads_on_best_effort_when_follower_lost(world, _patch_geometry, monkeypatch):
+    """Follower never re-appears at a look-back → prompt + wait (bounded), then lead
+    on. Must still reach the destination (DONE), never hang."""
+    monkeypatch.setenv("GPSR_GUIDE_REACQUIRE", "1")
+    monkeypatch.setenv("GPSR_GUIDE_SEGMENT_M", "1.0")
+    monkeypatch.setenv("GPSR_GUIDE_MAX_MISSES", "2")
+    monkeypatch.setattr(skills.time, "sleep", lambda *_: None)  # don't actually wait
+    ctx = _FakeCtx(ai=_FakeAI(people=[]), pose=(0.0, 0.0))      # nobody ever visible
+    _, status = _run(ctx, world, RawStep(
+        primitive="guide", person="Charlie", descriptor_kind="name",
+        to_location="kitchen", raw="guide Charlie to the kitchen"))
+    assert status is CmdStatus.DONE
+    assert ctx.gotos[-1] == (1.0, 2.0, 0.0)          # reached the destination anyway
+    assert any("keep up" in s.lower() for s in ctx.saids)  # asked the follower to catch up
     assert any("arrived at kitchen" in s.lower() for s in ctx.saids)
 
 

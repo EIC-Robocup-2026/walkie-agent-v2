@@ -29,6 +29,36 @@ def within(a: Point, b: Point, radius: float) -> bool:
     return math.hypot(a[0] - b[0], a[1] - b[1]) <= radius
 
 
+def heading_between(src: Point, dst: Point) -> float:
+    """Heading (rad, map frame) pointing from *src* toward *dst*. Pure.
+
+    Used by ``guide``'s segmented lead: the travel heading for a hop is
+    ``heading_between(here, next)``; the *look-back* heading (to face the trailing
+    follower) is the reverse, ``heading_between(here, came_from)``.
+    """
+    return math.atan2(dst[1] - src[1], dst[0] - src[0])
+
+
+def segment_route(start: Point, end: Point, max_step: float) -> list[Point]:
+    """Split the straight line *start*→*end* into evenly-spaced waypoints no
+    farther apart than *max_step* metres, returning the ordered intermediate
+    points and ending exactly at *end*. Pure.
+
+    This is what lets ``guide`` lead in hops (pausing to look back between them)
+    instead of one blocking drive. A short leg (≤ ``max_step``) or a non-positive
+    ``max_step`` yields ``[end]`` — a single hop, i.e. the legacy behaviour.
+    """
+    dist = math.hypot(end[0] - start[0], end[1] - start[1])
+    if max_step <= 0 or dist <= max_step:
+        return [end]
+    n = math.ceil(dist / max_step)
+    return [
+        (start[0] + (end[0] - start[0]) * i / n,
+         start[1] + (end[1] - start[1]) * i / n)
+        for i in range(1, n + 1)
+    ]
+
+
 def robot_xy(ctx: TaskContext) -> Point:
     """The robot's current map-frame (x, y). Zeros if odometry has no fix."""
     p = ctx.current_pose()

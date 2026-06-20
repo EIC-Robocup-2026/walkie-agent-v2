@@ -43,6 +43,19 @@ GPSR_ENABLE_MANIPULATION = "0"
 # how often (s) it polls the robot pose.
 GPSR_ARRIVAL_RADIUS_M = "1.0"
 GPSR_ARRIVAL_POLL_SEC = "0.5"
+# guide mid-route re-acquire (tasks/GPSR/skills.py): when leading a person to a
+# destination the robot leads with its back to them, so it can't see if they kept
+# up. With this on, guide drives in segments and turns back between hops to
+# re-acquire a trailing follower. Default OFF — the turn-arounds + waits cost the
+# 7-minute clock and the loop is unvalidated on-robot; enable after a bench test.
+GPSR_GUIDE_REACQUIRE = "0"
+# Max metres per lead segment before pausing to look back (smaller = checks the
+# follower more often, but slower).
+GPSR_GUIDE_SEGMENT_M = "2.0"
+# When the follower isn't seen after a look-back: how many times to prompt + wait
+# before leading on best-effort, and how long (s) to wait each attempt.
+GPSR_GUIDE_MAX_MISSES = "3"
+GPSR_GUIDE_REACQUIRE_WAIT_SEC = "2.0"
 # Minimum parser coverage the Phase-0 gate (tests/test_gpsr_coverage.py) requires.
 GPSR_COVERAGE_MIN = "0.85"
 # Identity facts the 'say/tell' skill grounds answers with (the day/time are read

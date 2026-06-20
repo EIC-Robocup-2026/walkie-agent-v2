@@ -31,9 +31,12 @@ or real poses** · `[ ]` stub / Tier-2 fallback / not implemented.
   - [~] `get_person_info` — pose/gesture keypoints, clothing caption, name-by-ask.
   - [~] `get_object_property` — world-model category, else caption/measure.
   - [~] `guide` — lead a person to a destination (drive to `from` → confirm/face
-        the person → lead to `to` → announce arrival). Confirming the person arrived
-        needs **mid-route re-acquire** (the robot leads with its back to them, so a
-        forward arrival frame can't see a trailing follower) — still open; needs robot.
+        the person → lead to `to` → announce arrival). **Mid-route re-acquire** is
+        now implemented (`GPSR_GUIDE_REACQUIRE`, default OFF): leads in capped hops
+        (`tracking.segment_route`) and turns back between them to re-acquire a
+        trailing follower (`tracking.companion_present`), prompting + waiting then
+        leading on best-effort. Pure bits offline-tested; the turn/camera/wait loop
+        needs on-robot validation before the flag is flipped on.
   - [ ] `pick` / `place` / `deliver` — **gated off** (`GPSR_ENABLE_MANIPULATION=0`)
         until the arm is calibrated; promote Restaurant's grasp (`tasks/manipulation.py`).
         Falls through to Tier-2.
@@ -66,8 +69,9 @@ or real poses** · `[ ]` stub / Tier-2 fallback / not implemented.
       lift / navigation / people), per the skills-refactor policy — not via
       `tasks.HRI.skills`.
 - [x] Shared follow/guide tracking (`tracking.py`): `ArrivalStopper` (follow ends on
-      arrival — wired) + `companion_present` (building block for guide's mid-route
-      re-acquire — not yet wired). Pure bits offline-tested; poll thread is robot-side.
+      arrival — wired), `companion_present` + `segment_route`/`heading_between` (now
+      wired into guide's mid-route re-acquire, gated by `GPSR_GUIDE_REACQUIRE`). Pure
+      bits offline-tested; poll/turn/wait loops are robot-side.
 - [x] Interleave scheduler (`schedule.py`) + per-command-isolated interleaved executor.
 - [x] Pose-survey tool (`tools/teach_poses.py`): drive-and-capture poses into
       `world.toml`; the in-place TOML writer is pure + offline-tested.
@@ -75,9 +79,10 @@ or real poses** · `[ ]` stub / Tier-2 fallback / not implemented.
 
 ## TODO (next, roughly in priority)
 
-- [ ] **`guide` mid-route re-acquire** — pause/re-acquire if the guided person falls
-      behind *during* the lead (needs interruptible/segmented nav; today it confirms
-      only at arrival via `companion_present`).
+- [~] **`guide` mid-route re-acquire** — *implemented* (segmented lead + look-back,
+      `GPSR_GUIDE_REACQUIRE`, default OFF); pure bits offline-tested. **On-robot:**
+      validate the turn-back/companion-check loop and tune `GPSR_GUIDE_SEGMENT_M` vs.
+      the 7-minute clock before flipping the flag on.
 - [ ] **Survey the real arena poses** (announced ~2 h before the test) — drive the
       robot to each place and capture with `python -m tasks.GPSR.tools.teach_poses`
       (writes `world.toml` in place, preserving fields), then paste the printed

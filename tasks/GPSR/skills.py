@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from datetime import datetime
 
 from langchain.messages import HumanMessage
@@ -43,7 +44,7 @@ from tasks.skills import (
 
 from . import gestures
 from .plan import PlanStep, _person_phrase
-from .tracking import ArrivalStopper
+from .tracking import ArrivalStopper, companion_present, heading_between, segment_route
 from .world import WorldModel
 
 
@@ -399,15 +400,76 @@ def follow(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> 
     return True
 
 
+def _check_follower(ctx: TaskContext, came_from) -> None:
+    """Mid-lead: turn back toward ``came_from`` and (bounded) wait for the guided
+    person to re-appear in the forward frame. Best-effort — after the retries we
+    lead on regardless, since arriving with a chance they catch up beats aborting
+    (which also scores nothing). Robot-side (turn + camera + sleep)."""
+    here = ctx.current_pose()
+    ctx.rotate_to(heading_between((here["x"], here["y"]), came_from))
+    if companion_present(ctx):
+        return
+    misses = int(os.getenv("GPSR_GUIDE_MAX_MISSES", "3"))
+    wait_s = float(os.getenv("GPSR_GUIDE_REACQUIRE_WAIT_SEC", "2.0"))
+    for _ in range(max(0, misses)):
+        ctx.say("Please keep up with me; I will wait for you.")
+        time.sleep(wait_s)
+        if companion_present(ctx):
+            ctx.say("Thank you. Let us continue.")
+            return
+    print("[gpsr.skill] guide: follower not re-acquired; leading on best-effort")
+
+
+def _lead_with_reacquire(ctx: TaskContext, dest_pose) -> bool:
+    """Lead to ``dest_pose`` in segments, looking back between hops to keep the
+    trailing follower along (the guide mid-route re-acquire). Each hop drives
+    facing the direction of travel; at the destination it faces the surveyed
+    heading. Robot-side. Returns False if any hop's nav fails."""
+    here = ctx.current_pose()
+    prev = (here["x"], here["y"])
+    end = (dest_pose[0], dest_pose[1])
+    final_heading = dest_pose[2] if len(dest_pose) > 2 else 0.0
+    seg_m = float(os.getenv("GPSR_GUIDE_SEGMENT_M", "2.0"))
+    waypoints = segment_route(prev, end, seg_m)
+    for i, wp in enumerate(waypoints):
+        last = i == len(waypoints) - 1
+        heading = final_heading if last else heading_between(prev, wp)
+        if not ctx.goto(wp[0], wp[1], heading):
+            return False
+        if not last:
+            _check_follower(ctx, prev)
+        prev = wp
+    return True
+
+
+def _lead_to(ctx: TaskContext, to_name, world: WorldModel, state: dict) -> bool:
+    """Drive to ``to_name`` while leading a follower. With GPSR_GUIDE_REACQUIRE on,
+    lead in segments with mid-route look-back; otherwise one blocking drive
+    (``go_to_named``, the legacy behaviour). Honours the per-command nav dedup."""
+    if os.getenv("GPSR_GUIDE_REACQUIRE", "0") != "1":
+        return go_to_named(ctx, to_name, world, state)
+    if state is not None and state.get("at") == to_name:
+        return True  # already here this command — nothing to lead
+    pose = world.location_pose(to_name)
+    if pose is None:
+        print(f"[gpsr.skill] no pose for {to_name!r}")
+        return False
+    ok = _lead_with_reacquire(ctx, pose)
+    if ok and state is not None:
+        state["at"] = to_name
+    return ok
+
+
 def guide(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
     """Guide (lead) a person to a destination — nav + best-effort person confirm.
 
     Optionally goes to ``from`` first (where the person is), confirms/faces them,
-    then leads to ``to`` and announces arrival. We lead with our back to the person,
-    so confirming they arrived with us needs **mid-route re-acquire** (looking back
-    at the trailing follower), the open follow-back TODO — a forward-facing arrival
-    frame can't see them. Returns False (→ Tier-2) only when the destination is
-    missing or unreachable — matching `navigate`.
+    then leads to ``to`` and announces arrival. We lead with our back to the
+    person, so a forward-facing arrival frame can't confirm they kept up — with
+    GPSR_GUIDE_REACQUIRE on, `_lead_to` instead leads in segments and looks back
+    between hops to re-acquire a trailing follower (`_check_follower`). Returns
+    False (→ Tier-2) only when the destination is missing or unreachable —
+    matching `navigate`.
     """
     to = step.args.get("to")
     frm = step.args.get("from")
@@ -425,13 +487,9 @@ def guide(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> b
     dest = (to or "").replace("_", " ")
     addr = f"Hello {descriptor}, " if kind == "name" and descriptor else ""
     ctx.say(f"{addr}please follow me, and I will guide you to {dest}.")
-    if not to or not go_to_named(ctx, to, world, state):
+    if not to or not _lead_to(ctx, to, world, state):
         ctx.say("I am sorry, I could not find the way there.")
         return False
-    # We led with our back to the person (they trail behind), so the forward camera
-    # frame here CANNOT confirm they arrived — checking it would false-negative on a
-    # compliant follower. Confirming the companion needs looking back / mid-route
-    # re-acquire (tracking.companion_present; the open follow-back TODO). Announce.
     ctx.say(f"We have arrived at {dest}.")
     return True
 
