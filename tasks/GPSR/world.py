@@ -215,16 +215,23 @@ def load_world(path: str | os.PathLike | None = None) -> WorldModel:
     wm = WorldModel()
 
     for name, raw in (data.get("rooms") or {}).items():
+        if not raw.get("present", True):
+            continue  # in the template but ABSENT from this arena — drop it entirely
         canonical = _norm(name)
         wm.rooms[canonical] = Room(name=canonical, pose=_pose_of(raw))
         for k in _alias_keys(canonical, raw.get("aliases")):
             wm._room_alias[k] = canonical
 
     for name, raw in (data.get("locations") or {}).items():
+        if not raw.get("present", True):
+            continue  # absent from this arena — drop so nothing grounds/navigates to it
+        room = _norm(raw["room"]) if raw.get("room") else None
+        if room is not None and room not in wm.rooms:
+            continue  # its room was dropped (present=false / unlisted) — cascade-drop it too
         canonical = _norm(name)
         wm.locations[canonical] = Location(
             name=canonical,
-            room=_norm(raw["room"]) if raw.get("room") else None,
+            room=room,
             placement=bool(raw.get("placement", False)),
             category=_norm(raw["category"]) if raw.get("category") else None,
             pose=_pose_of(raw),

@@ -8,6 +8,8 @@ parser (utterance -> RawPlan) is exercised separately by the coverage harness
 
 from __future__ import annotations
 
+import textwrap
+
 import pytest
 
 from tasks.GPSR.parse import ground_plan, ground_step
@@ -41,6 +43,30 @@ def test_world_loads_vocabulary(world):
 ])
 def test_location_grounding(world, text, expected):
     assert world.location(text) == expected
+
+
+def test_present_false_place_is_dropped(tmp_path):
+    # A room/location marked `present = false` is in the template but absent from
+    # THIS arena — load_world drops it, so it never grounds (-> Tier-2) and nav
+    # never drives to its [0,0,0].
+    p = tmp_path / "world.toml"
+    p.write_text(textwrap.dedent("""
+        [rooms]
+        kitchen = { pose = [1.0, 2.0, 0.0] }
+        garage  = { pose = [0.0, 0.0, 0.0], present = false }
+
+        [locations]
+        kitchen_table = { room = "kitchen", pose = [1.5, 2.5, 0.0] }
+        workbench     = { room = "garage", pose = [0.0, 0.0, 0.0] }
+    """))
+    w = load_world(p)
+    assert "kitchen" in w.rooms and "garage" not in w.rooms
+    assert w.room("garage") is None              # absent -> ungrounded -> Tier-2
+    # workbench wasn't marked, but its room is gone -> cascade-dropped (no orphan
+    # pointing at a [0,0,0] the robot would drive to).
+    assert "kitchen_table" in w.locations and "workbench" not in w.locations
+    assert w.location("workbench") is None
+    assert "garage" not in w.vocab_prompt().lower()  # the LLM won't even see it
 
 
 def test_room_alias_and_article(world):

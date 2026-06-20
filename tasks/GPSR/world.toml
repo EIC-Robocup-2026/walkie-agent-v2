@@ -11,6 +11,11 @@
 # parser grounds against, the *poses* are what navigation drives to (Phase 1).
 #
 # pose = [x, y, heading_rad] in the map frame. [0,0,0] = "not yet surveyed".
+#
+# present = false  → this room/location is in the template but NOT in the arena
+# you're running (e.g. a smaller practice room). load_world drops it entirely, so
+# the parser won't ground to it and navigation never drives to its [0,0,0]; a
+# command that references it falls to the Tier-2 agent instead. Default: present.
 
 # Person names the operator may reference (meet / greet / guide / deliver-to).
 # MUST stay above the first [table] header — a bare key after a table header
