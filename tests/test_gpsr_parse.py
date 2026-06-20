@@ -130,6 +130,18 @@ def test_object_property_which_validation():
     assert ("which", "flavour") in bad.unresolved
 
 
+@pytest.mark.parametrize("phrase", [
+    "object", "the biggest object", "heaviest item", "the largest one", "something",
+])
+def test_qualified_generic_object_is_placement_scoped(world, phrase):
+    # The head noun ("object"/"item"/"one") marks a placement-scoped query even
+    # behind a superlative qualifier — grounds to None WITHOUT a gap, so the
+    # question form ("what's the biggest object on the desk") still completes.
+    step = _step("get_object_property", object=phrase, which="size")
+    assert step.grounded, step.unresolved
+    assert "object" not in step.args  # generic dropped, not grounded to a vocab item
+
+
 def test_superlative_query_object_grounds_as_placement_scoped():
     # "tell me the biggest object on the desk" — object is a query placeholder,
     # not a vocab item; it must NOT count as an ungrounded gap.

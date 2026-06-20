@@ -55,3 +55,27 @@ synonym: grab the soda from the cabinet
 synonym: go to the lounge and find someone waving
 synonym: get the apple off the desk and put it on the couch
 synonym: how many sodas are in the fridge
+
+# -- LLM-rephrased / conversational / simplified variants. The rulebook rephrases
+#    each command up to 3x, getting SIMPLER each pass, so the parser must not
+#    over-fit canonical generator phrasing: polite wrappers ("could you"), verb
+#    spread (head/make your way; grab/pick up; set/put), question forms
+#    ("what's the…", "how many…"), and terser/elliptical shapes. Every noun still
+#    grounds against world.toml, so a correct parse stays a complete Plan. --
+navigate: head over to the bathroom
+navigate: could you make your way to the office
+findObjInRoom: look for the milk in the kitchen
+findPrsInRoom: look for someone sitting in the bedroom
+bringMeObjFromPlcmt: i'd like you to bring me a cola from the cabinet
+countObjOnPlcmt: please count how many apples are on the desk
+countObjOnPlcmt: how many cups are on the kitchen table
+countPrsInRoom: how many people are waving in the living room
+greetNameInRm: go say hi to Robin in the kitchen
+placeObjOnPlcmt: set the cola down on the kitchen table
+deliverObjToMe: hand me the cola
+takeObjFromPlcmt: could you pick up the apple from the desk
+tellPrsInfoInLoc: what is the name of the person at the bed
+tellObjPropOnPlcmt: what's the biggest object on the desk
+guideNameToRoom: take Charlie to the bedroom
+followPrs: follow the person who is standing
+deliverObjToPrsInRoom: bring the milk to the standing person in the living room

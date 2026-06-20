@@ -39,10 +39,19 @@ _GENERIC_OBJECTS = {"object", "item", "thing", "one", "something", "anything", "
 
 
 def _is_generic_object(text: str | None) -> bool:
+    """True for a non-specific object reference ("the biggest object", "something").
+
+    Tests the **head noun** (last word) so a leading superlative/qualifier
+    ("biggest object", "heaviest item") doesn't hide the generic noun — the LLM
+    emits the bare "object" for some phrasings and "biggest object" for question
+    forms ("what's the biggest object on the desk").
+    """
     if not text:
         return False
-    key = re.sub(r"[^a-z]", "", text.lower()).rstrip("s")
-    return key in {g.rstrip("s") for g in _GENERIC_OBJECTS}
+    words = re.findall(r"[a-z]+", text.lower())
+    if not words:
+        return False
+    return words[-1].rstrip("s") in {g.rstrip("s") for g in _GENERIC_OBJECTS}
 
 
 def _ground(unresolved: list[tuple[str, str]], field: str, text: str | None, resolver) -> str | None:
