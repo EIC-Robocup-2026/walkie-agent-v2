@@ -163,6 +163,8 @@ def _person_phrase(descriptor: str | None, kind: str | None) -> str:
     person in a red shirt". The plan stores the descriptor under args
     'descriptor' (find_person/follow/guide/greet) or 'recipient' (deliver).
     """
+    if kind == "operator":
+        return "you"  # "follow me" / "guide me to X" -> spoken as "you"
     desc = _bare(descriptor)
     if not desc:
         return "the person"

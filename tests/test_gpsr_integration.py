@@ -571,7 +571,9 @@ def test_gated_manipulation_falls_through_to_tier2(world):
     brain = _FakeBrain()
     _, status = _run(ctx, world, RawStep(primitive="pick", object="cola", raw="pick up the cola"), brain=brain, manip=False)
     assert ctx.gotos == []  # no Tier-1 skill ran
-    assert brain.clauses == ["pick up the cola"]
+    # The clause is wrapped with the autonomous-operation directive (no operator to
+    # answer questions) and ends with the raw command.
+    assert len(brain.clauses) == 1 and brain.clauses[0].endswith("pick up the cola")
     assert status is CmdStatus.DONE  # Tier-2 reported handled
 
 
@@ -596,7 +598,7 @@ def test_tier2_invalidates_the_nav_cache(world):
         RawStep(primitive="navigate", room="kitchen", raw="go back to the kitchen"),
         brain=brain, manip=False,
     )
-    assert brain.clauses == ["pick up the cola"]
+    assert len(brain.clauses) == 1 and brain.clauses[0].endswith("pick up the cola")
     assert ctx.gotos == [(1.0, 2.0, 0.0), (1.0, 2.0, 0.0)]  # drove to kitchen twice
 
 

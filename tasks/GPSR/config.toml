@@ -5,7 +5,7 @@
 
 [gpsr]
 # Map-frame waypoint "x,y,heading_rad" announced ~2h before the test.
-GPSR_INSTRUCTION_POINT_POSE = "0.0,0.0,0.0"
+GPSR_INSTRUCTION_POINT_POSE = "2.606,0.321,-0.0844"
 # 1 = on entry, ask a human to open the arena door and wait for it before driving
 # to the instruction point (the robot starts outside a possibly-closed door). Uses
 # the shared tasks.skills.request_open_door. Default OFF so dev/practice runs with
@@ -52,6 +52,32 @@ GPSR_WORLD_FILE = "tasks/GPSR/world.toml"
 # Manipulation is gated until the arm is calibrated (mirrors
 # RESTAURANT_ARM_CALIBRATED). Phase 1 is navigation-class; Phase 2 flips this on.
 GPSR_ENABLE_MANIPULATION = "0"
+# For each run the people in the scene is different
+GPSR_PEOPLE_RESET = "1"
+# find_person scan (tasks/GPSR/skills.py): when the forward view at the arrival
+# heading shows nobody matching, the robot rotates in place through a full turn,
+# re-detecting at each stop. This many stops over 360 deg (6 -> 60 deg each);
+# higher = more thorough but slower. 0 disables the scan (honest negative from the
+# single forward frame, the pre-scan behavior).
+GPSR_PERSON_SCAN_STEPS = "6"
+# Seconds to wait after each scan rotation before grabbing the frame to detect. The
+# base sways briefly after the (blocking) rotation stops and the camera pipeline
+# lags, so detecting too soon gets a motion-blurred/stale frame and misses the
+# person. Raise if people are still missed mid-scan; lower to scan faster. 0 = no
+# wait (detect immediately on stop).
+GPSR_PERSON_SCAN_SETTLE_SEC = "0.7"
+# count-people scan (tasks/GPSR/skills.py::_count_people_scanning): counting people
+# in a room also rotates a full turn (people scatter), counting UNIQUE bodies.
+# Stops over 360 deg (defaults to GPSR_PERSON_SCAN_STEPS when unset); reuses
+# GPSR_PERSON_SCAN_SETTLE_SEC for the post-rotation settle. DEDUP_M is the radius
+# (m) under which two lifted person positions count as the same body. It must sit
+# BELOW the separation between two real people (two adults sitting side by side are
+# ~0.5 m apart) but ABOVE the cross-frame lift jitter of one person seen in
+# overlapping frames (~0.2 m) — 0.4 m is the default sweet spot. Lower it (toward
+# 0.3) if people sitting close are merged into one; raise it (toward 0.5) if one
+# person is double-counted across stops.
+GPSR_COUNT_SCAN_STEPS = "6"
+GPSR_COUNT_DEDUP_M = "0.4"
 # follow/guide tracking (tasks/GPSR/tracking.py): how close (m) the robot must get
 # to a "follow me to X" destination before the ArrivalStopper ends the follow, and
 # how often (s) it polls the robot pose.

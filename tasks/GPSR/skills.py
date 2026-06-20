@@ -26,6 +26,7 @@ gestures.py / plan.py.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import time
@@ -243,6 +244,22 @@ def _pick_index(reply: str | None, n: int) -> int | None:
     return i if 0 <= i < n else None
 
 
+_GENERIC_PERSON_WORDS = {
+    "person", "people", "someone", "somebody", "anyone", "anybody",
+    "human", "guy", "man", "woman", "girl", "boy", "individual", "",
+}
+
+
+def _is_generic_person(descriptor: str) -> bool:
+    """True when the descriptor is a bare person-noun, not a distinguishing
+    attribute. ``find a person`` parses to a *clothing* descriptor of "a person";
+    that word names nobody's attire, so the attire LLM rejects every candidate and
+    a present person reads as "not found". Detect it so we fall back to the nearest
+    person instead. Strips a leading article (a/an/the)."""
+    d = re.sub(r"^(a|an|the)\s+", "", (descriptor or "").strip().lower())
+    return d in _GENERIC_PERSON_WORDS
+
+
 def _match_attire(ctx: TaskContext, snap, people, descriptor: str):
     """Pick the person whose clothing best matches a free-text descriptor.
 
@@ -269,8 +286,8 @@ def _match_attire(ctx: TaskContext, snap, people, descriptor: str):
     return people[idx] if idx is not None else None
 
 
-def _find_person_match(ctx: TaskContext, step: PlanStep):
-    """Return (snap, person_bbox_xyxy) for the descriptor, or (snap, None).
+def _detect_person_in_view(ctx: TaskContext, step: PlanStep):
+    """One snapshot at the CURRENT heading: detect + match per descriptor kind.
 
     Matching is per descriptor *kind* (parse._ground_person):
       gesture/pose -> COCO-keypoint heuristics (gestures.py);
@@ -279,7 +296,8 @@ def _find_person_match(ctx: TaskContext, step: PlanStep):
                       verified; fall back to the nearest person (best effort) and
                       let the caller address them by name;
       (none given) -> the nearest person.
-    snap is None only on a camera failure; bbox is None when nobody matches.
+    snap is None only on a camera failure; bbox is None when nobody in this view
+    matches.
     """
     snap = ctx.snapshot()
     if snap is None:
@@ -291,17 +309,60 @@ def _find_person_match(ctx: TaskContext, step: PlanStep):
     descriptor = step.args.get("descriptor")
 
     if kind in ("gesture", "pose") and descriptor:
+        for i, p in enumerate(people):
+            conf = [k.name for k in p.keypoints if k.confidence >= gestures._conf()]
+            print(f"[gpsr.skill] person {i}: gestures={sorted(gestures.classify_gestures(p))} "
+                  f"want={descriptor!r} match={gestures.matches_gesture(p, descriptor)} conf_kps={conf}")
         people = [p for p in people if gestures.matches_gesture(p, descriptor)]
         if not people:
-            return snap, None  # nobody is doing that gesture/pose
+            return snap, None  # nobody in this view is doing that gesture/pose
 
-    elif kind == "clothing" and descriptor:
+    elif kind == "clothing" and descriptor and not _is_generic_person(descriptor):
         match = _match_attire(ctx, snap, people, descriptor)
         return snap, (cxcywh_to_xyxy(match.bbox) if match is not None else None)
 
-    # name / no descriptor / gesture-matched: nearest person (largest = closest).
+    # generic ("a person") / name / no descriptor / gesture-matched: nearest person.
     target = max(people, key=lambda p: p.bbox[2] * p.bbox[3])
     return snap, cxcywh_to_xyxy(target.bbox)
+
+
+def _find_person_match(ctx: TaskContext, step: PlanStep):
+    """Find a person matching the descriptor, scanning the room if the forward
+    view is empty. Returns (snap, person_bbox_xyxy) or (snap, None)/(None, None).
+
+    The arrival heading rarely points the camera straight at the person, so a
+    single forward frame misses anyone off to the side or behind. When the forward
+    view comes up empty we rotate in place through a full turn
+    (``GPSR_PERSON_SCAN_STEPS`` stops, default 6 -> 60 deg each), re-detecting at
+    each stop and stopping early on the first match. People are static for ``find``
+    (unlike ``follow``'s moving target), so an in-place spin covers the room; we
+    end back near the arrival heading when nobody is found.
+    """
+    snap, bbox = _detect_person_in_view(ctx, step)
+    if snap is None or bbox is not None:
+        return snap, bbox
+
+    steps = int(os.getenv("GPSR_PERSON_SCAN_STEPS", "6"))
+    if steps <= 0:
+        return snap, None  # scanning disabled -> honest negative from the forward view
+    # rotate_to blocks until the base reaches the heading, but the base still sways
+    # for a moment and the camera pipeline lags, so an immediate frame is motion-
+    # blurred (or stale from mid-rotation) and the pose detector misses. Let it
+    # settle before grabbing the frame.
+    settle = float(os.getenv("GPSR_PERSON_SCAN_SETTLE_SEC", "0.7"))
+    base = ctx.current_pose()["heading"]
+    ctx.say("I do not see anyone here yet; let me look around.")
+    for i in range(1, steps + 1):
+        target = base + 2 * math.pi * i / steps
+        ctx.rotate_to(math.atan2(math.sin(target), math.cos(target)))  # normalize to [-pi, pi]
+        if settle > 0:
+            time.sleep(settle)
+        snap_i, bbox_i = _detect_person_in_view(ctx, step)
+        if snap_i is not None:
+            snap = snap_i
+        if bbox_i is not None:
+            return snap, bbox_i
+    return snap, None
 
 
 def find_person(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
@@ -323,22 +384,69 @@ def find_person(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict
     return True
 
 
+def _count_people_scanning(ctx: TaskContext, step: PlanStep) -> int | None:
+    """Rotate in place through a full turn, detecting people at each stop and
+    counting UNIQUE bodies. People are spread around a room, so a single forward
+    frame at the arrival heading misses everyone off to the side — we scan like
+    `_find_person_match` does. Adjacent frames overlap (the camera FOV is wider
+    than the per-stop rotation), so a naive sum double-counts; we dedup by each
+    person's lifted world (x, y) within `GPSR_COUNT_DEDUP_M`. Honours the gesture
+    filter for "how many sitting/waving people". Returns the count, or None on a
+    total camera failure (no frame at any stop) so the caller can fall to Tier-2.
+    """
+    gesture = step.args.get("descriptor") if step.args.get("kind") in ("gesture", "pose") else None
+    steps = max(1, int(os.getenv("GPSR_COUNT_SCAN_STEPS", os.getenv("GPSR_PERSON_SCAN_STEPS", "6"))))
+    settle = float(os.getenv("GPSR_PERSON_SCAN_SETTLE_SEC", "0.7"))
+    dedup_m = float(os.getenv("GPSR_COUNT_DEDUP_M", "0.4"))
+    base = ctx.current_pose()["heading"]
+    seen: list[tuple[float, float]] = []
+    unlocated = 0  # matched people we couldn't lift to a world point -> can't dedup
+    got_frame = False
+    for i in range(steps):
+        if i > 0:  # i == 0 is the arrival heading; no need to rotate first
+            target = base + 2 * math.pi * i / steps
+            ctx.rotate_to(math.atan2(math.sin(target), math.cos(target)))  # normalize to [-pi, pi]
+            if settle > 0:
+                time.sleep(settle)
+        snap = ctx.snapshot()
+        if snap is None:
+            continue
+        got_frame = True
+        people = _people(ctx, snap.img)
+        if gesture:
+            people = [p for p in people if gestures.matches_gesture(p, gesture)]
+        for p in people:
+            xy = lift_bbox_world_xy(ctx, snap, cxcywh_to_xyxy(p.bbox))
+            if xy is None:
+                unlocated += 1
+                continue
+            if not any(math.dist(xy, s) < dedup_m for s in seen):
+                seen.append(xy)
+    ctx.rotate_to(math.atan2(math.sin(base), math.cos(base)))  # restore arrival heading
+    if not got_frame:
+        return None
+    return len(seen) + unlocated
+
+
 def count(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
     where = step.args.get("location") or step.args.get("room")
     if where:
         go_to_named(ctx, where, world, state)
+    if step.args.get("what") == "persons":
+        # People scatter around a room -> scan the full turn and count unique bodies.
+        total = _count_people_scanning(ctx, step)
+        if total is None:
+            return False  # no camera frame at any stop -> Tier-2
+        descriptor = step.args.get("descriptor")
+        if step.args.get("kind") in ("gesture", "pose") and descriptor:
+            ctx.say(f"I count {total} {descriptor.replace('_', ' ')} people.")
+        else:
+            ctx.say(f"I count {total} people.")
+        return True
+    # Objects sit on a single placement we're already facing -> one forward frame.
     snap = ctx.snapshot()
     if snap is None:
         return False
-    if step.args.get("what") == "persons":
-        people = _people(ctx, snap.img)
-        descriptor = step.args.get("descriptor")
-        if step.args.get("kind") in ("gesture", "pose") and descriptor:
-            people = [p for p in people if gestures.matches_gesture(p, descriptor)]
-            ctx.say(f"I count {len(people)} {descriptor.replace('_', ' ')} people.")
-        else:
-            ctx.say(f"I count {len(people)} people.")
-        return True
     classes = _object_classes(step.args.get("object"), step.args.get("category"), world) or ["object"]
     dets = _detect(ctx, snap.img, classes)
     noun = (step.args.get("object") or step.args.get("category") or "objects").replace("_", " ")

@@ -49,13 +49,28 @@ def _torso_h(person: PersonPose) -> float | None:
     return None
 
 
+def _scale(person: PersonPose) -> float | None:
+    """A scale reference for margins: torso height if both a shoulder and hip are
+    visible, else the shoulder width. A waving person is often framed upper-body
+    only (hips out of frame / low confidence), so torso is unavailable — but the
+    shoulders are, and shoulder width tracks body scale just as well. None only
+    when neither is measurable."""
+    torso = _torso_h(person)
+    if torso:
+        return torso
+    ls, rs = _kp(person, "left_shoulder"), _kp(person, "right_shoulder")
+    if ls and rs:
+        return abs(rs.x - ls.x) or 1.0
+    return None
+
+
 def _arm_raised(person: PersonPose, side: str) -> bool:
     """The side's wrist is clearly above (smaller y than) its shoulder."""
     wrist, shoulder = _kp(person, f"{side}_wrist"), _kp(person, f"{side}_shoulder")
-    torso = _torso_h(person)
-    if not (wrist and shoulder and torso):
+    scale = _scale(person)
+    if not (wrist and shoulder and scale):
         return False
-    margin = float(os.getenv("GPSR_ARM_RAISE_MARGIN", "0.15")) * torso
+    margin = float(os.getenv("GPSR_ARM_RAISE_MARGIN", "0.15")) * scale
     return wrist.y < shoulder.y - margin
 
 

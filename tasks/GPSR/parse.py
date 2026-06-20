@@ -37,6 +37,24 @@ _PERSON_INFO = {"name", "pose", "gesture", "clothing"}
 # ground to None *without* a gap, so a placement-scoped query still completes.
 _GENERIC_OBJECTS = {"object", "item", "thing", "one", "something", "anything", "stuff"}
 
+# Person nouns the LLM sometimes drops into `object` instead of `person` — most
+# often on "count the people in X", where there is no gesture/name to trigger the
+# person field. We detect them so the count grounds as persons (the pose detector),
+# not as an object the detector can't resolve (which would forfeit the command).
+_PERSON_NOUNS = {
+    "person", "people", "persons", "someone", "somebody", "anyone", "anybody",
+    "human", "humans", "guest", "guests", "man", "men", "woman", "women",
+    "boy", "boys", "girl", "girls", "child", "children", "everyone", "everybody",
+}
+
+
+def _is_person_noun(text: str | None) -> bool:
+    """True when the head noun names a person generically ("people", "guests")."""
+    if not text:
+        return False
+    words = re.findall(r"[a-z]+", text.lower())
+    return bool(words) and words[-1] in _PERSON_NOUNS
+
 
 def _is_generic_object(text: str | None) -> bool:
     """True for a non-specific object reference ("the biggest object", "something").
@@ -78,17 +96,27 @@ def _ground_target(unresolved, raw: RawStep, world: WorldModel) -> str | None:
     return val
 
 
+# The operator refers to themselves in a person slot ("follow me", "guide me to
+# the exit"). It names no enrolled person, so don't try to ground it against the
+# names list (that records a spurious gap and breaks the spoken plan — "follow me");
+# it grounds to the operator, whom follow/guide track as the nearest person anyway.
+_OPERATOR_REFS = {"me", "myself", "i", "operator", "you", "yourself"}
+
+
 def _ground_person(unresolved, raw: RawStep, world: WorldModel) -> dict:
     """Ground a person reference. Returns args fragment {descriptor, kind}.
 
     name -> must match the names list; gesture/pose -> must match the gesture
     set; clothing (or an unclassified free description) is open-vocab and always
-    grounds. An unknown name/gesture is recorded unresolved.
+    grounds. The operator self-reference ("me") grounds to kind "operator". An
+    unknown name/gesture is recorded unresolved.
     """
     text = raw.person
     kind = raw.descriptor_kind
     if not text:
         return {}
+    if text.strip().lower() in _OPERATOR_REFS:
+        return {"descriptor": "you", "kind": "operator"}
     if kind == "name":
         canon = _ground(unresolved, "person", text, world.name)
         return {"descriptor": canon or text, "kind": "name"}
@@ -192,7 +220,7 @@ def ground_step(raw: RawStep, world: WorldModel) -> PlanStep:
             args["to"] = to
 
     elif primitive is Primitive.COUNT:
-        if raw.person or raw.descriptor_kind:  # counting people
+        if raw.person or raw.descriptor_kind or _is_person_noun(raw.object):  # counting people
             args["what"] = "persons"
             args.update(_ground_person(unresolved, raw, world))
             args["room"] = room()

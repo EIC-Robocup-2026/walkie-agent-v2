@@ -24,6 +24,21 @@ from .skills import SKILLS
 from .world import WorldModel
 
 
+# Prepended to every Tier-2 clause. The Walkie agent's general prompt lets it ask
+# the operator for help / to choose between candidates — correct for interactive
+# use, but wrong in GPSR: the command is executed autonomously, nobody answers, and
+# the executor does not wait for a reply (it marks the step done and moves on, so a
+# question silently does nothing). Force it to commit to one choice and act.
+_TIER2_DIRECTIVE = (
+    "You are carrying out a single RoboCup GPSR command autonomously. There is NO "
+    "operator available to answer follow-up questions and you will not receive any "
+    "reply, so never ask the user to choose or to clarify. If several candidates "
+    "match, silently pick the single most likely one (most recently / most "
+    "confidently seen) and act on it. Complete the command end to end, then report "
+    "the outcome with `speak` in one short sentence.\n\nCommand: "
+)
+
+
 def _tier2(ctx: TaskContext, brain, clause: str) -> bool:
     """Delegate one clause to the Walkie agent stack (the long-tail fallback)."""
     if brain is None or not clause:
@@ -31,7 +46,7 @@ def _tier2(ctx: TaskContext, brain, clause: str) -> bool:
     print(f"[gpsr.dispatch] Tier-2 fallback: {clause!r}")
     try:
         brain.walkie_agent.invoke(
-            {"messages": [HumanMessage(content=clause)]},
+            {"messages": [HumanMessage(content=_TIER2_DIRECTIVE + clause)]},
             config={"configurable": {"thread_id": f"gpsr-{uuid.uuid4()}"}},
         )
         return True
