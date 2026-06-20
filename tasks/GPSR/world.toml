@@ -23,38 +23,38 @@
 names = ["Adel", "Angel", "Axel", "Charlie", "Jane", "Jules", "Morgan", "Paris", "Robin", "Simone"]
 
 [rooms]
-kitchen     = { pose = [0.0, 0.0, 0.0] }
-bedroom     = { pose = [0.0, 0.0, 0.0] }
-living_room = { pose = [0.0, 0.0, 0.0], aliases = ["living room", "lounge"] }
-office      = { pose = [0.0, 0.0, 0.0], aliases = ["study"] }
-bathroom    = { pose = [0.0, 0.0, 0.0] }
+kitchen     = { pose = [0.0, 0.0, 0.0], present = false }
+bedroom     = { pose = [5.526, 2.248, -0.0903] }
+living_room = { pose = [5.378, -1.617, -0.0806], aliases = ["living room", "lounge"] }
+office      = { pose = [0.0, 0.0, 0.0], aliases = ["study"], present = false }
+bathroom    = { pose = [0.0, 0.0, 0.0], present = false }
 
 # Locations / placements / beacons. `room` ties each to a room; `placement=true`
 # means objects can be put there (the "(p)" flag in the template); `category` is
 # the object category that lives there by default (lets "the drinks" resolve to
 # the cabinet). `aliases` cover phrasings the parser/STT may produce.
 [locations]
-bed           = { room = "bedroom",     placement = true,  pose = [0,0,0] }
-bedside_table = { room = "bedroom",     placement = true,  pose = [0,0,0], aliases = ["bedside table", "nightstand"] }
-shelf         = { room = "bathroom",    placement = true,  category = "cleaning_supplies", pose = [0,0,0] }
-dishwasher    = { room = "kitchen",     placement = true,  pose = [0,0,0] }
-kitchen_table = { room = "kitchen",     placement = true,  category = "dishes", pose = [0,0,0], aliases = ["kitchen table"] }
-pantry        = { room = "kitchen",     placement = true,  category = "food", pose = [0,0,0] }
-refrigerator  = { room = "kitchen",     placement = true,  pose = [0,0,0], aliases = ["fridge"] }
-sink          = { room = "kitchen",     placement = true,  pose = [0,0,0] }
-cabinet       = { room = "kitchen",     placement = true,  category = "drinks", pose = [0,0,0] }
-desk          = { room = "office",      placement = true,  category = "fruits", pose = [0,0,0] }
-tv_stand      = { room = "living_room", placement = true,  pose = [0,0,0], aliases = ["tv stand", "television stand"] }
-storage_rack  = { room = "office",      placement = true,  pose = [0,0,0], aliases = ["storage rack"] }
-side_tables   = { room = "living_room", placement = true,  category = "snacks", pose = [0,0,0], aliases = ["side tables", "side table"] }
-sofa          = { room = "living_room", placement = true,  pose = [0,0,0], aliases = ["couch"] }
-bookshelf     = { room = "living_room", placement = true,  category = "toys", pose = [0,0,0] }
-trashbin      = { room = "kitchen",     placement = false, pose = [0,0,0], aliases = ["trash bin", "trash can", "bin"] }
-potted_plant  = { room = "living_room", placement = false, pose = [0,0,0], aliases = ["potted plant", "plant"] }
-armchair      = { room = "living_room", placement = false, pose = [0,0,0] }
-coatrack      = { room = "living_room", placement = false, pose = [0,0,0], aliases = ["coat rack"] }
-entrance      = { room = "living_room", placement = false, pose = [0,0,0] }
-exit          = { room = "living_room", placement = false, pose = [0,0,0] }
+bed           = { room = "bedroom",     placement = true,  pose = [0,0,0], present = false }
+bedside_table = { room = "bedroom",     placement = true,  pose = [0,0,0], aliases = ["bedside table", "nightstand"], present = false }
+shelf         = { room = "bathroom",    placement = true,  category = "cleaning_supplies", pose = [0,0,0], present = false }
+dishwasher    = { room = "kitchen",     placement = true,  pose = [0,0,0], present = false }
+kitchen_table = { room = "kitchen",     placement = true,  category = "dishes", pose = [0,0,0], aliases = ["kitchen table"], present = false }
+pantry        = { room = "kitchen",     placement = true,  category = "food", pose = [0,0,0], present = false }
+refrigerator  = { room = "kitchen",     placement = true,  pose = [0,0,0], aliases = ["fridge"], present = false }
+sink          = { room = "kitchen",     placement = true,  pose = [0,0,0], present = false }
+cabinet       = { room = "kitchen",     placement = true,  category = "drinks", pose = [0,0,0], present = false }
+desk          = { room = "office",      placement = true,  category = "fruits", pose = [0,0,0], present = false }
+tv_stand      = { room = "living_room", placement = true,  pose = [0,0,0], aliases = ["tv stand", "television stand"], present = false }
+storage_rack  = { room = "office",      placement = true,  pose = [0,0,0], aliases = ["storage rack"], present = false }
+side_tables   = { room = "living_room", placement = true,  category = "snacks", pose = [0,0,0], aliases = ["side tables", "side table"], present = false }
+sofa          = { room = "living_room", placement = true,  pose = [0,0,0], aliases = ["couch"], present = false }
+bookshelf     = { room = "living_room", placement = true,  category = "toys", pose = [0,0,0], present = false }
+trashbin      = { room = "kitchen",     placement = false, pose = [0,0,0], aliases = ["trash bin", "trash can", "bin"], present = false }
+potted_plant  = { room = "living_room", placement = false, pose = [0,0,0], aliases = ["potted plant", "plant"], present = false }
+armchair      = { room = "living_room", placement = false, pose = [0,0,0], present = false }
+coatrack      = { room = "living_room", placement = false, pose = [0,0,0], aliases = ["coat rack"], present = false }
+entrance      = { room = "living_room", placement = false, pose = [0,0,0], present = false }
+exit          = { room = "living_room", placement = false, pose = [0,0,0], present = false }
 
 # Objects grouped by category (both directions are built in code, so "bring me a
 # drink" can pick the category and "bring me the cola" the item). Names match the
