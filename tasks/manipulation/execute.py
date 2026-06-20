@@ -12,12 +12,13 @@ logs, never raises) so a partial failure scores partially instead of aborting.
 
 from __future__ import annotations
 
+import math
 import os
 
 from tasks.base import TaskContext
 
 from . import db, scene
-from .approach import aim_camera_at_object, drive_to_object, refine_approach
+from .approach import aim_camera_at_object, drive_to_object, refine_approach, viz_nav_target
 from .grasp import plan_grasp
 from .types import (
     DetectedObject,
@@ -44,6 +45,15 @@ def _envf(name: str, default: str) -> float:
 def _rich() -> bool:
     """True when the full collision-aware sequence should run (GraspNet planner)."""
     return os.getenv("WALKIE_GRASP_PLANNER", "graspnet").strip().lower() != "stub"
+
+
+def _nav_label(verb: str, xy: tuple[float, float], standoff: float) -> str:
+    """Confirm-gate label naming the map-frame ``go_to`` target + standoff.
+
+    So a tester gating the drive sees where the base is being sent even without
+    RViz open (it pairs with :func:`viz_nav_target`'s marker).
+    """
+    return f"{verb} @ map({xy[0]:.2f},{xy[1]:.2f}) standoff={standoff:.2f}m"
 
 
 # --- tester confirmation gate -----------------------------------------------
@@ -153,7 +163,17 @@ def _carry_arm(ctx: TaskContext, group) -> None:
 
 # --- collision-scene staging (rich path only) -------------------------------
 def _stage_table(ctx: TaskContext, obj: DetectedObject) -> None:
-    """Add the surface collision box from a DB surface node, when one is resolvable."""
+    """Add the surface collision box from a DB surface node, when one is resolvable.
+
+    Gated by ``WALKIE_STAGE_TABLE`` (default off): the table box frequently
+    swallows the grasp pose, so MoveIt rejects it as in-collision and can't plan.
+    With it off the arm plans against the octomap alone. Re-enable
+    (``WALKIE_STAGE_TABLE=1``) once the box is calibrated to sit below the grasp.
+    """
+    if os.getenv("WALKIE_STAGE_TABLE", "0").strip().lower() not in ("1", "true", "yes"):
+        print("[manipulation] table staging disabled (WALKIE_STAGE_TABLE=0); "
+              "planning against octomap only")
+        return
     graphs = getattr(ctx, "graphs", None)
     node = None
     surface_query = os.getenv("WALKIE_SURFACE_CLASS", "table").strip()
@@ -222,8 +242,13 @@ def pick_object(ctx: TaskContext, obj: DetectedObject) -> bool:
     group = _arm_group(ctx)
     try:
         if rich and obj.world_xy is not None:
-            _gated("drive to far standoff", drive_to_object,
-                   ctx, obj.world_xy, _envf("WALKIE_PICK_STANDOFF_FAR_M", "0.35"))
+            far = _envf("WALKIE_PICK_STANDOFF_FAR_M", "0.35")
+            # Show the go_to target in RViz BEFORE the confirm gate, so the tester
+            # sees where the base is headed and can accept/skip/abort it.
+            viz_nav_target(ctx, obj.world_xy, far, label="far standoff",
+                           ns="pick/far_standoff", marker_id=400)
+            _gated(_nav_label("drive to far standoff", obj.world_xy, far),
+                   drive_to_object, ctx, obj.world_xy, far)
             _gated("aim camera (lift + head tilt)", aim_camera_at_object, ctx, obj.world_xyz)
         plan = plan_grasp(ctx, obj)
         if plan is None:
@@ -239,8 +264,11 @@ def pick_object(ctx: TaskContext, obj: DetectedObject) -> bool:
                 _carry_arm(ctx, group)  # arm to standby before staging the scene
             _stage_table(ctx, obj)
             if obj.world_xy is not None:
-                _gated("refine approach to near standoff", refine_approach,
-                       ctx, obj.world_xy, _envf("WALKIE_PICK_STANDOFF_NEAR_M", "0.10"))
+                near = _envf("WALKIE_PICK_STANDOFF_NEAR_M", "0.10")
+                viz_nav_target(ctx, obj.world_xy, near, label="near standoff",
+                               ns="pick/near_standoff", marker_id=402)
+                _gated(_nav_label("refine approach to near standoff", obj.world_xy, near),
+                       refine_approach, ctx, obj.world_xy, near)
         return _execute_grasp(ctx, group, plan, rich=rich)
     except _AbortManipulation as ab:
         print(f"[manipulation] pick_object({obj.class_name}) aborted by tester at: {ab}")

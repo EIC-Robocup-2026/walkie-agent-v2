@@ -24,7 +24,7 @@ WALKIE_GRAPHS_INTERVAL_SEC = "2.0"
 # may contain spaces (split on commas). Grouped here by category for readability.
 
 
-WALKIE_GRAPHS_INTERESTED_CLASSES = "sofa,door,chair,armchair,table,stool,shirt,sponge,bowl,cup,fork,knife,plate,spoon,coffee creamer,coke,ice tea,milk,orange juice,red bull,water bottle,bread,cornflakes,instant noodles,potato,tomato soup,apple,avocado,lemon,orange,chips,cookies,gum,mixed nuts,pringles,hand cream,soap,toothpaste,dish rack,shelf,monitor,bed,pillow"
+WALKIE_GRAPHS_INTERESTED_CLASSES = "sofa,door,chair,armchair,table,stool,shirt,sponge,bowl,cup,fork,knife,plate,spoon,coke,milk,orange juice,red bull,water bottle,bread,cornflakes,instant noodles,potato,tomato soup,apple,avocado,lemon,orange,chips,cookies,gum,mixed nuts,pringles,hand cream,soap,toothpaste,dish rack,shelf,monitor,bed,pillow"
 
 
 # Classes to always drop before lift/embed/store — moving objects (people) can't be
@@ -84,6 +84,20 @@ WALKIE_GRAPHS_TF_TIMEOUT_SEC = "1.0"
 # still frame is one tick away. 0 disables either bound.
 WALKIE_GRAPHS_MOTION_MAX_TRANS_M = "0"
 WALKIE_GRAPHS_MOTION_MAX_ROT_DEG = "0"
+# Trusted depth range (metres): drop lifted pixels whose depth exceeds this at the
+# source (geometry.deproject_mask). Stereo depth error grows ~quadratically with
+# range, so far pixels carry both noise and wide silhouette bleed — capping is
+# cheaper and cleaner than filtering the artifacts downstream (the edge/SOR/DBSCAN
+# passes only attenuate that fuzz, they don't bound range). This gates camera-frame
+# depth z — distance straight in FRONT of the camera, not Euclidean distance from
+# the base — which is the axis the stereo error actually scales with. 0 = unbounded.
+#   MAX_DEPTH_M    — caps the per-object segment lift.
+#   BG_MAX_DEPTH_M — caps the classless background remainder lift; blank inherits
+#                    MAX_DEPTH_M. Kept looser so distant walls/floor still anchor the
+#                    capture-ICP solve ([graphs.capture]) even when nearer objects are
+#                    trimmed (matches the carve far range, CARVE_MAX_Z_M = 4.0).
+WALKIE_GRAPHS_MAX_DEPTH_M = "3.0"
+WALKIE_GRAPHS_BG_MAX_DEPTH_M = "6.0"
 
 [graphs.capture]
 # Capture-level registration: ONE rigid ICP correction per frame, solved against the
@@ -275,7 +289,7 @@ WALKIE_GRAPHS_MERGE_RESCUE_MAX_ROT_DEG = "10"
 # via env. REFINE_EVERY_N = 0 (code default) keeps the cadence off for tests.
 WALKIE_GRAPHS_REFINE_EVERY_N = "7"
 WALKIE_GRAPHS_REFINE_LIMIT = "3"
-WALKIE_GRAPHS_REFINE_CORR_M = "0.08"
+WALKIE_GRAPHS_REFINE_CORR_M = "0.15"
 WALKIE_GRAPHS_REFINE_MIN_FITNESS = "0.6"
 WALKIE_GRAPHS_REFINE_MAX_TRANS_M = "0.12"
 WALKIE_GRAPHS_REFINE_MAX_ROT_DEG = "5"

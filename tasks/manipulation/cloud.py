@@ -5,10 +5,15 @@ The SDK ships :func:`walkie_sdk.utils.converters.parse_point_cloud_xyz`
 inverse: the object's stored world cloud (``GraphMemory.load_pcd``) is a numpy
 ``(N, 3)`` array and ``walkie.robot.grasp.from_cloud`` wants a PointCloud2 dict.
 
-The wire encoding of the ``data`` field differs by transport — zenoh wants raw
-bytes, rosbridge wants a base64 string (or a uint8 list). Default to ``bytes``;
-override with ``WALKIE_PC2_DATA_ENCODING`` (bytes|base64|list) if the grasp
-server can't parse what we send (see the calibration note in the design).
+The wire encoding of the ``data`` field (a ROS ``uint8[]``) differs by transport.
+The Zenoh transport coerces every message field with ``np.asarray(value, uint8)``
+before CDR-serializing, so it wants a numpy ``uint8`` array — handing it raw
+``bytes`` makes numpy read the whole blob as a scalar and raise ``invalid literal
+for int()`` (the failure that sank the cloud/pos paths). A pure rosbridge
+transport JSON-encodes instead, and JSON handles neither numpy arrays nor
+``bytes`` — it needs a base64 string or a uint8 list. Default to ``ndarray``
+(zenoh, i.e. the hybrid transport's primary leg); override with
+``WALKIE_PC2_DATA_ENCODING`` (ndarray|base64|list|bytes) for a rosbridge-only setup.
 """
 
 from __future__ import annotations
@@ -32,12 +37,16 @@ def _xyz_fields() -> list[dict]:
 
 
 def _encode(raw: bytes) -> object:
-    enc = os.getenv("WALKIE_PC2_DATA_ENCODING", "bytes").strip().lower()
+    enc = os.getenv("WALKIE_PC2_DATA_ENCODING", "ndarray").strip().lower()
     if enc == "base64":
-        return base64.b64encode(raw).decode("ascii")
+        return base64.b64encode(raw).decode("ascii")  # rosbridge (JSON)
     if enc == "list":
-        return list(raw)
-    return raw  # "bytes" (default) — zenoh transport
+        return list(raw)  # rosbridge (JSON), bulky but explicit
+    if enc == "bytes":
+        return raw  # raw blob — for callers that serialize it themselves
+    # "ndarray" (default) — zenoh: a uint8 array passes np.asarray() coercion as
+    # a no-op, where raw bytes would raise "invalid literal for int()".
+    return np.frombuffer(raw, dtype=np.uint8)
 
 
 def numpy_to_pointcloud2(points_xyz: np.ndarray, frame_id: str = "map") -> dict:

@@ -46,6 +46,18 @@ def _open3d():
         try:
             import open3d  # noqa: PLC0415 — deliberate lazy import (slow)
 
+            # Mute Open3D's C++ logger (writes straight to stderr, bypassing
+            # Python logging). Its Warning level is pure noise for our loop —
+            # chiefly ICP's "0 correspondence present between the pointclouds",
+            # which just means fitness=0; every caller already gates on fitness
+            # and falls back to "no correction", so the message is informational.
+            try:
+                open3d.utility.set_verbosity_level(
+                    open3d.utility.VerbosityLevel.Error
+                )
+            except Exception:  # noqa: BLE001 — verbosity API is best-effort
+                pass
+
             _O3D = open3d
         except Exception:  # pragma: no cover — wheel missing on this platform
             _O3D = False

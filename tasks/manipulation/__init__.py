@@ -18,7 +18,7 @@ callers that want finer control.
 from __future__ import annotations
 
 from . import approach, cloud, db, scene
-from .approach import aim_camera_at_object, drive_to_object, refine_approach
+from .approach import aim_camera_at_object, drive_to_object, refine_approach, viz_nav_target
 from .execute import (
     PICK_NO_PLAN,
     PICKING,
@@ -59,6 +59,7 @@ __all__ = [
     "drive_to_object",
     "aim_camera_at_object",
     "refine_approach",
+    "viz_nav_target",
     # submodules
     "db",
     "scene",

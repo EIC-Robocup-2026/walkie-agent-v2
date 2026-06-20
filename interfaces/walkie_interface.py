@@ -1,4 +1,5 @@
 import logging
+import os
 
 from .devices.speaker import Speaker
 from .devices.microphone import Microphone
@@ -10,7 +11,7 @@ _log = logging.getLogger(__name__)
 class WalkieInterface:
     def __init__(self, robot: WalkieRobot, microphone_device: int | str | None = None):
         self._robot = robot
-        self._microphone = Microphone(device=microphone_device)
+        self._microphone = Microphone(device=microphone_device, debug_save_dir=os.environ.get("WALKIE_MIC_DEBUG_DIR", None))
         # Give the speaker the mic so it can pause it while playing — otherwise the
         # robot transcribes its own TTS (a problem for any background listener).
         self._speaker = Speaker(mic=self._microphone)
