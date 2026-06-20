@@ -114,7 +114,7 @@ HRI_FOLLOW_DISTANCE_M = "1.2"
 HRI_FOLLOW_LISTEN_TIMEOUT_SEC = "5"
 # Background CommandListener: max length (s) of one record cycle. Also bounds
 # how long stop() waits for the recorder to wind down, so keep it modest.
-HRI_FOLLOW_RECORD_TIMEOUT_SEC = "5"
+HRI_FOLLOW_RECORD_TIMEOUT_SEC = "30"
 # Optional extra delay (s) between nav commands. The follow loop is synchronous —
 # the per-tick snapshot + lift already pace it at the detector rate — so 0 means
 # flat out (re-command every tick). Raise only if re-issuing go_to that fast
@@ -140,7 +140,7 @@ HRI_FOLLOW_LEAD_GAIN = "0.9"
 # box(es) near the last tracked host position each tick, so the cap only bites on
 # the rare re-acquire ticks that scan the full frame; raise toward 0 (= all) if a
 # host who has walked off is being dropped on those ticks.
-HRI_FOLLOW_APPEARANCE_MAX_CANDIDATES = "2"
+HRI_FOLLOW_APPEARANCE_MAX_CANDIDATES = "3"
 # The follow selector tracks the host's last box and, on a steady-state tick,
 # only embeds the candidate(s) whose center lies within this multiple of the last
 # box's width — usually just the host, cutting the per-tick OSNet embeds from N
@@ -155,7 +155,7 @@ HRI_FOLLOW_GATE_RADIUS_SCALE = "2"
 # throttling it removes that cost from most ticks while keeping a periodic
 # re-acquisition check for when the host turns around. 1 = face every tick (the
 # old behaviour).
-HRI_FOLLOW_FACE_EVERY_N = "2"
+HRI_FOLLOW_FACE_EVERY_N = "1"
 # A box is only followed when the host's attire score beats the best GUEST's by
 # at least this margin — not just edges it out. People dress alike at a party,
 # so a bare top-1 host match flips onto a guest on embedding noise; the margin
@@ -215,16 +215,16 @@ HRI_FOLLOW_LOST_GRACE_SEC = "1.5"
 # When the host is lost past the grace AND there is no usable motion prediction,
 # turn this many degrees toward the side they were last seen on, each lost
 # frame, until they reappear (non-blocking — never stalls the loop).
-HRI_FOLLOW_SEARCH_STEP_DEG = "20"
+HRI_FOLLOW_SEARCH_STEP_DEG = "10"
 # Overall time budget (s) for the follow loop before placing the bag anyway.
 HRI_FOLLOW_TIMEOUT_SEC = "450"
 # Consecutive lost frames (each predicting or turning to look for the host)
 # before giving up the search and placing the bag here.
-HRI_FOLLOW_MAX_LOST = "8"
+HRI_FOLLOW_MAX_LOST = "35"
 # --- Predictive re-acquisition (MotionPredictor) -----------------------------
 # 1 = when the host leaves the frame, extrapolate their recent map-frame
 # trajectory and drive to the predicted spot before falling back to rotating.
-HRI_FOLLOW_PREDICT = "1"
+HRI_FOLLOW_PREDICT = "0.7"
 # Sliding window (s) of recent sightings used to fit the host's velocity, and
 # the minimum number of sightings in it before a velocity is trusted.
 HRI_FOLLOW_PREDICT_WINDOW_SEC = "4.0"

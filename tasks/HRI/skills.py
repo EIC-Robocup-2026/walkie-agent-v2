@@ -94,7 +94,7 @@ def host_command_listener(ctx: TaskContext) -> CommandListener:
     return CommandListener(
         ctx,
         on_transcript=lambda text: classify_host_command(ctx, text) == "place",
-        record_timeout=float(os.getenv("HRI_FOLLOW_RECORD_TIMEOUT_SEC", "5")),
+        record_timeout=float(os.getenv("HRI_FOLLOW_RECORD_TIMEOUT_SEC", "30.0")),
     )
 
 

@@ -22,7 +22,7 @@
 [llm]
 # 1 = use a local OpenAI-compatible LLM (LOCAL_BASE_URL/LOCAL_MODEL) instead of
 # OpenRouter. The OpenRouter API key + base URL are the only things left in .env.
-LLM_USE_LOCAL = "0"
+LLM_USE_LOCAL = "1"
 WALKIE_MODEL = "anthropic/claude-sonnet-4.5"
 WALKIE_TEMPERATURE = "0.5"
 # Local LLM endpoint (OpenAI-compatible), used when LLM_USE_LOCAL=1.
@@ -44,7 +44,7 @@ WALKIE_ROS_PORT = "9090"
 # 127.0.0.1 when running on the robot itself; set to walkie's own LAN IP (e.g.
 # 10.0.0.201) when running from a developer PC. Note: walkie is NOT the same
 # machine as the AI server at WALKIE_AI_BASE_URL — they're separate boxes.
-WALKIE_ROBOT_IP = "127.0.0.1"
+WALKIE_ROBOT_IP = "10.0.0.201"
 
 [runtime]
 # 1 = type instructions at a TTY instead of speaking (no mic).
@@ -85,6 +85,10 @@ WALKIE_GRASP_PLANNER = "graspnet"    # "graspnet" | "stub"
 WALKIE_ARM = "left"                  # which arm group: "left" or "right"
 WALKIE_ARM_FRAME = "base_footprint"  # arm planning frame: "base_footprint" or "map"
 WALKIE_SURFACE_CLASS = "table"       # walkie_graphs class to resolve for the table box
+# Add the table/shelf collision box to the MoveIt scene before the grasp. Off by
+# default: an uncalibrated box swallows the grasp pose so MoveIt can't plan; with
+# it off the arm plans against the octomap alone. Turn on once the box is dialed in.
+WALKIE_STAGE_TABLE = "0"             # "1" to stage the surface collision box
 
 # GraspNet INPUT source (graspnet planner only): "cloud" feeds the object's stored
 # walkie_graphs point cloud to grasp.from_cloud; "pos" feeds that cloud to
@@ -111,8 +115,12 @@ WALKIE_GRASP_FROM_POS_ANTIPODAL_W = "0.0"    # antipodal-quality re-rank weight
 WALKIE_GRASP_MASK_NUM_FRAMES = "0"        # frames to accumulate (0 = adaptive 1->3->5)
 
 # --- approach + camera framing (GraspNet path) ---
+# The standoffs drive via the SDK NavigateToObject (nav.go_to heading=None): the
+# value is the distance from the edge nav_commander fits to the object/surface, not
+# a line-of-sight pullback from the centroid.
 WALKIE_PICK_STANDOFF_FAR_M = "0.35"  # initial approach standoff (spec 0.40–0.30)
 WALKIE_PICK_STANDOFF_NEAR_M = "0.10" # refined grasp standoff (spec 0.15–0.05)
+WALKIE_PICK_ALIGN_METHOD = "nearest_edge"  # NavigateToObject alignment: "nearest_edge" (default) or "face_target"
 WALKIE_PICK_HEAD_TILT_RAD = "0.5"    # +ve = camera DOWN to see the surface
 WALKIE_PICK_LIFT_NORM = "0.5"        # lift height (normalized 0–1) to reach the table
 WALKIE_PICK_CAMERA_SETTLE_SEC = "1.0" # wait after lift/tilt before capture
@@ -121,6 +129,9 @@ WALKIE_PICK_CAMERA_SETTLE_SEC = "1.0" # wait after lift/tilt before capture
 # Step-through gate: when "1", every arm/base motion waits for the tester to press
 # Enter (s=skip that action, q=abort the sequence). Off for normal/autonomous runs.
 WALKIE_MANIP_CONFIRM = "0"
+# Publish an RViz marker (on walkie/viz_markers) at each nav.go_to target BEFORE
+# its confirm gate, so a tester can see where the base will drive. "0" disables.
+WALKIE_MANIP_VIZ = "1"
 
 # --- common motion ---
 WALKIE_PREGRASP_OFFSET_M = "0.10"    # heuristic pre-grasp standoff (stub path only)
@@ -129,8 +140,10 @@ WALKIE_PLACE_Z_CLEARANCE_M = "0.10"  # hover above the surface before releasing
 WALKIE_CARRY_POSE = "standby"        # go_to_home preset to tuck the arm for nav
 WALKIE_TABLE_FALLBACK_SIZE = "0.8,1.2"  # depth_x,width_y table box when no DB node
 
-# Wire encoding of the GraspNet cloud's data field — CALIBRATE per transport:
-# "bytes" (zenoh, default), "base64" or "list" (rosbridge). The grasp server must
-# be able to parse what we send.
-WALKIE_PC2_DATA_ENCODING = "bytes"
+# Wire encoding of the GraspNet cloud's data (uint8[]) field — per transport:
+# "ndarray" (zenoh/hybrid, default), "base64" or "list" (rosbridge-only JSON).
+# zenoh coerces fields with np.asarray(), which rejects raw bytes; rosbridge JSON
+# rejects both numpy arrays and bytes — so each transport needs its own form.
+WALKIE_PC2_DATA_ENCODING = "ndarray"
 
+WALKIE_MIC_DEBUG_DIR = "mic_recording"

@@ -32,7 +32,7 @@ def load_task_config(task_dir: str | os.PathLike) -> None:
     load_config()
 
 
-def initialize_robot() -> WalkieRobot:
+def initialize_robot() -> WalkieInterface:
     ros_protocol = os.getenv("WALKIE_ROS_PROTOCOL", "rosbridge")
     ros_port = int(os.getenv("WALKIE_ROS_PORT", str(ZENOH_PORT if ros_protocol == "zenoh" else 9090)))
     # 127.0.0.1 is correct when running on the robot itself (SSH'd in); set

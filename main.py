@@ -40,7 +40,7 @@ def get_robot() -> WalkieRobot:
     ros_port = int(os.getenv("WALKIE_ROS_PORT", str(ZENOH_PORT if ros_protocol == "zenoh" else 9090)))
     # 127.0.0.1 is correct when running on the robot itself (SSH'd in); set
     # WALKIE_ROBOT_IP to walkie's LAN address when running from a developer PC.
-    robot_ip = os.getenv("WALKIE_ROBOT_IP", "127.0.0.1")
+    robot_ip = os.getenv("WALKIE_ROBOT_IP", "10.0.0.201")
     return WalkieRobot(
         ip=robot_ip,
         ros_protocol=ros_protocol,
@@ -118,10 +118,10 @@ def run_ready_stage(walkieAI: WalkieAIClient, walkie: WalkieInterface, model: Ch
                 if not text:
                     continue
                 print(f"[user] {text}")
-                walkie_agent.invoke(
-                    {"messages": [HumanMessage(content=text)]},
-                    config={"configurable": {"thread_id": "main"}},
-                )
+                # walkie_agent.invoke(
+                #     {"messages": [HumanMessage(content=text)]},
+                #     config={"configurable": {"thread_id": "main"}},
+                # )
             except EOFError:
                 # Ctrl+D at the typed-input prompt — treat as a clean exit.
                 print("\n[main] EOF — shutting down.")

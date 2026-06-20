@@ -51,7 +51,7 @@ class CommandListener:
         ctx: TaskContext,
         on_transcript: Callable[[str], bool | None],
         *,
-        record_timeout: float = 5.0,
+        record_timeout: float = 30.0,
     ) -> None:
         self.ctx = ctx
         self.on_transcript = on_transcript
@@ -106,6 +106,7 @@ class CommandListener:
                 audio = self.ctx.walkie.microphone.record_until_silence(
                     timeout=self.record_timeout
                 )
+                
             except Exception as exc:
                 print(f"[skills] CommandListener record failed ({exc})")
                 self._stop.wait(0.2)
