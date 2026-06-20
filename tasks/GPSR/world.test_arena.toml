@@ -1,0 +1,84 @@
+# GPSR world model — the arena nouns (rooms, locations, objects, names, gestures).
+#
+# This is the per-competition CompetitionTemplate data, NOT tuning knobs, so it
+# lives in its own file loaded directly by world.py (tomllib) rather than going
+# through config.toml's env-var flattening. Point GPSR_WORLD_FILE at a different
+# file to swap arenas.
+#
+# Defaults below are the official RoboCupAtHome CompetitionTemplate example arena
+# (https://github.com/RoboCupAtHome/CompetitionTemplate). REPLACE the poses with
+# the real announced ones (~2h before the test); the *vocabulary* is what the
+# parser grounds against, the *poses* are what navigation drives to (Phase 1).
+#
+# pose = [x, y, heading_rad] in the map frame. [0,0,0] = "not yet surveyed".
+#
+# present = false  → this room/location is in the template but NOT in the arena
+# you're running (e.g. a smaller practice room). load_world drops it entirely, so
+# the parser won't ground to it and navigation never drives to its [0,0,0]; a
+# command that references it falls to the Tier-2 agent instead. Default: present.
+
+# Person names the operator may reference (meet / greet / guide / deliver-to).
+# MUST stay above the first [table] header — a bare key after a table header
+# would be parsed as a member of that table, not a top-level key.
+names = ["Adel", "Angel", "Axel", "Charlie", "Jane", "Jules", "Morgan", "Paris", "Robin", "Simone"]
+
+[rooms]
+# Test arena has only living_room + bedroom — the rest are present=false so the
+# parser/teach_poses/nav skip them (their locations cascade-drop automatically).
+kitchen     = { pose = [0.0, 0.0, 0.0], present = false }
+bedroom     = { pose = [0.0, 0.0, 0.0] }
+living_room = { pose = [0.0, 0.0, 0.0], aliases = ["living room", "lounge"] }
+office      = { pose = [0.0, 0.0, 0.0], aliases = ["study"], present = false }
+bathroom    = { pose = [0.0, 0.0, 0.0], present = false }
+
+# Locations / placements / beacons. `room` ties each to a room; `placement=true`
+# means objects can be put there (the "(p)" flag in the template); `category` is
+# the object category that lives there by default (lets "the drinks" resolve to
+# the cabinet). `aliases` cover phrasings the parser/STT may produce.
+[locations]
+bed           = { room = "bedroom",     placement = true,  pose = [0,0,0] }
+bedside_table = { room = "bedroom",     placement = true,  pose = [0,0,0], aliases = ["bedside table", "nightstand"] }
+shelf         = { room = "bathroom",    placement = true,  category = "cleaning_supplies", pose = [0,0,0] }
+dishwasher    = { room = "kitchen",     placement = true,  pose = [0,0,0] }
+kitchen_table = { room = "kitchen",     placement = true,  category = "dishes", pose = [0,0,0], aliases = ["kitchen table"] }
+pantry        = { room = "kitchen",     placement = true,  category = "food", pose = [0,0,0] }
+refrigerator  = { room = "kitchen",     placement = true,  pose = [0,0,0], aliases = ["fridge"] }
+sink          = { room = "kitchen",     placement = true,  pose = [0,0,0] }
+cabinet       = { room = "kitchen",     placement = true,  category = "drinks", pose = [0,0,0] }
+desk          = { room = "office",      placement = true,  category = "fruits", pose = [0,0,0] }
+tv_stand      = { room = "living_room", placement = true,  pose = [0,0,0], aliases = ["tv stand", "television stand"] }
+storage_rack  = { room = "office",      placement = true,  pose = [0,0,0], aliases = ["storage rack"] }
+side_tables   = { room = "living_room", placement = true,  category = "snacks", pose = [0,0,0], aliases = ["side tables", "side table"] }
+sofa          = { room = "living_room", placement = true,  pose = [0,0,0], aliases = ["couch"] }
+bookshelf     = { room = "living_room", placement = true,  category = "toys", pose = [0,0,0] }
+trashbin      = { room = "kitchen",     placement = false, pose = [0,0,0], aliases = ["trash bin", "trash can", "bin"] }
+potted_plant  = { room = "living_room", placement = false, pose = [0,0,0], aliases = ["potted plant", "plant"] }
+armchair      = { room = "living_room", placement = false, pose = [0,0,0] }
+coatrack      = { room = "living_room", placement = false, pose = [0,0,0], aliases = ["coat rack"] }
+entrance      = { room = "living_room", placement = false, pose = [0,0,0] }
+exit          = { room = "living_room", placement = false, pose = [0,0,0] }
+
+# Objects grouped by category (both directions are built in code, so "bring me a
+# drink" can pick the category and "bring me the cola" the item). Names match the
+# detector's open-vocab classes after underscores→spaces.
+[object_categories]
+drinks            = ["juice_pack", "cola", "milk", "orange_juice", "tropical_juice", "red_wine", "iced_tea"]
+toys              = ["tennis_ball", "rubiks_cube", "baseball", "soccer_ball", "dice"]
+fruits            = ["orange", "pear", "peach", "strawberry", "apple", "lemon", "banana", "plum"]
+snacks            = ["cornflakes", "pringles", "cheezit"]
+dishes            = ["cup", "bowl", "fork", "plate", "knife", "spoon"]
+food              = ["chocolate_jello", "coffee_grounds", "mustard", "tomato_soup", "tuna", "strawberry_jello", "spam", "sugar"]
+cleaning_supplies = ["cleanser", "sponge"]
+
+# Recognizable gestures/poses → the keypoint-rule id the perception side uses
+# (Phase 1 wires these to is_calling-style heuristics). The keys are the canonical
+# descriptors the parser emits; aliases cover the generator's phrasings.
+[gestures]
+waving             = { aliases = ["waving person", "person waving"] }
+raising_left_arm   = { aliases = ["raising their left arm", "person raising their left arm", "left arm raised"] }
+raising_right_arm  = { aliases = ["raising their right arm", "person raising their right arm", "right arm raised"] }
+pointing_left      = { aliases = ["pointing to the left", "person pointing to the left"] }
+pointing_right     = { aliases = ["pointing to the right", "person pointing to the right"] }
+sitting            = { aliases = ["sitting person", "seated person", "person sitting"] }
+standing           = { aliases = ["standing person", "person standing"] }
+lying_down         = { aliases = ["lying person", "person lying down", "lying down"] }
