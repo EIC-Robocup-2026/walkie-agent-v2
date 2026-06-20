@@ -5,13 +5,101 @@
 
 [gpsr]
 # Map-frame waypoint "x,y,heading_rad" announced ~2h before the test.
-GPSR_INSTRUCTION_POINT_POSE = "0.0,0.0,0.0"
+GPSR_INSTRUCTION_POINT_POSE = "2.606,0.321,-0.0844"
+# 1 = on entry, ask a human to open the arena door and wait for it before driving
+# to the instruction point (the robot starts outside a possibly-closed door). Uses
+# the shared tasks.skills.request_open_door. Default OFF so dev/practice runs with
+# no door don't block; turn on for the real run.
+GPSR_REQUEST_DOOR = "0"
 # Maximum commands taken in one go (the rulebook issues three).
 GPSR_MAX_COMMANDS = "3"
 # How the operator issues commands: "consecutive" (all at once, enables the
 # interleaved-task bonus) or "one_by_one" (return to the instruction point
 # between each).
 GPSR_ISSUE_MODE = "consecutive"
+# 1 = interleave all commands into one room-batched order to reduce movement (the
+# Interleaved Task Bonus, +200). 0 = strictly serial MVP (default — the bonus path
+# is riskier and falls back to serial on any scheduling error).
+GPSR_INTERLEAVE = "0"
 # 1 = run the walkie_graphs perception loop in the background during the task so
 # "find/bring object" commands can use long-term spatial memory.
 GPSR_START_PERCEPTION = "1"
+# find_object scene-memory fallback (skills.py). 1 = when the command names no
+# location, or the named place comes up empty, recall where the object was last
+# seen from the walkie_graphs CLIP scene graph, drive there, and confirm with a
+# live detection. Object positions come from the scene graph, not world.toml
+# (which holds only fixed places); objects move/vary, so a static lookup can't
+# find them. Needs GPSR_START_PERCEPTION=1 to have anything stored.
+GPSR_FIND_USE_MEMORY = "1"
+# How far (m) to stop short of a recalled object position when approaching it.
+GPSR_FIND_APPROACH_M = "0.8"
+# 1 = speak the parsed plan for each command before executing — this is what
+# scores "demonstrate a plan has been generated" (3×100). Leave on.
+GPSR_SPEAK_PLAN = "1"
+# Recovery when a command can't be parsed (rulebook 5.3). Re-ask only on an empty
+# parse and keep it small — each rephrasing request costs −30 (§5.2).
+GPSR_MAX_REPHRASINGS = "2"
+# 1 = after rephrasings are exhausted, request a custom operator (a clearer human
+# speaker; −20/command but recovers the command) rather than giving up.
+GPSR_USE_CUSTOM_OPERATOR = "1"
+# Listening attempts with the custom operator before giving up (the rulebook gives
+# the custom operator three attempts).
+GPSR_CUSTOM_OPERATOR_ATTEMPTS = "3"
+# Path to the world-model file (arena nouns the parser grounds against). The rich
+# data lives in its own TOML loaded directly (NOT flattened to env vars); only
+# the path is a knob. Relative to the repo root. Override to swap arenas.
+GPSR_WORLD_FILE = "tasks/GPSR/world.toml"
+# Manipulation is gated until the arm is calibrated (mirrors
+# RESTAURANT_ARM_CALIBRATED). Phase 1 is navigation-class; Phase 2 flips this on.
+GPSR_ENABLE_MANIPULATION = "0"
+# For each run the people in the scene is different
+GPSR_PEOPLE_RESET = "1"
+# find_person scan (tasks/GPSR/skills.py): when the forward view at the arrival
+# heading shows nobody matching, the robot rotates in place through a full turn,
+# re-detecting at each stop. This many stops over 360 deg (6 -> 60 deg each);
+# higher = more thorough but slower. 0 disables the scan (honest negative from the
+# single forward frame, the pre-scan behavior).
+GPSR_PERSON_SCAN_STEPS = "6"
+# Seconds to wait after each scan rotation before grabbing the frame to detect. The
+# base sways briefly after the (blocking) rotation stops and the camera pipeline
+# lags, so detecting too soon gets a motion-blurred/stale frame and misses the
+# person. Raise if people are still missed mid-scan; lower to scan faster. 0 = no
+# wait (detect immediately on stop).
+GPSR_PERSON_SCAN_SETTLE_SEC = "0.7"
+# count-people scan (tasks/GPSR/skills.py::_count_people_scanning): counting people
+# in a room also rotates a full turn (people scatter), counting UNIQUE bodies.
+# Stops over 360 deg (defaults to GPSR_PERSON_SCAN_STEPS when unset); reuses
+# GPSR_PERSON_SCAN_SETTLE_SEC for the post-rotation settle. DEDUP_M is the radius
+# (m) under which two lifted person positions count as the same body. It must sit
+# BELOW the separation between two real people (two adults sitting side by side are
+# ~0.5 m apart) but ABOVE the cross-frame lift jitter of one person seen in
+# overlapping frames (~0.2 m) — 0.4 m is the default sweet spot. Lower it (toward
+# 0.3) if people sitting close are merged into one; raise it (toward 0.5) if one
+# person is double-counted across stops.
+GPSR_COUNT_SCAN_STEPS = "6"
+GPSR_COUNT_DEDUP_M = "0.4"
+# follow/guide tracking (tasks/GPSR/tracking.py): how close (m) the robot must get
+# to a "follow me to X" destination before the ArrivalStopper ends the follow, and
+# how often (s) it polls the robot pose.
+GPSR_ARRIVAL_RADIUS_M = "1.0"
+GPSR_ARRIVAL_POLL_SEC = "0.5"
+# guide mid-route re-acquire (tasks/GPSR/skills.py): when leading a person to a
+# destination the robot leads with its back to them, so it can't see if they kept
+# up. With this on, guide drives in segments and turns back between hops to
+# re-acquire a trailing follower. Default OFF — the turn-arounds + waits cost the
+# 7-minute clock and the loop is unvalidated on-robot; enable after a bench test.
+GPSR_GUIDE_REACQUIRE = "0"
+# Max metres per lead segment before pausing to look back (smaller = checks the
+# follower more often, but slower).
+GPSR_GUIDE_SEGMENT_M = "2.0"
+# When the follower isn't seen after a look-back: how many times to prompt + wait
+# before leading on best-effort, and how long (s) to wait each attempt.
+GPSR_GUIDE_MAX_MISSES = "3"
+GPSR_GUIDE_REACQUIRE_WAIT_SEC = "2.0"
+# Minimum parser coverage the Phase-0 gate (tests/test_gpsr_coverage.py) requires.
+GPSR_COVERAGE_MIN = "0.85"
+# Identity facts the 'say/tell' skill grounds answers with (the day/time are read
+# live from the clock). Set the real team identity ~2h before the test.
+GPSR_ROBOT_NAME = "Walkie"
+GPSR_TEAM_NAME = "EIC"
+GPSR_TEAM_AFFILIATION = "Chulalongkorn University"

@@ -34,7 +34,7 @@ except Exception:  # pragma: no cover
     cv2 = None
 
 from . import pcd_ops
-from .geometry import deproject_mask
+from interfaces.perception.geometry import deproject_mask
 
 
 @dataclass(frozen=True)

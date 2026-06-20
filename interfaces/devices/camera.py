@@ -17,10 +17,15 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from interfaces.perception.geometry import (
+    CameraPose,
+    Intrinsics,
+    deproject_mask,
+    depth_discontinuity_mask,
+)
+
 if TYPE_CHECKING:
     from walkie_sdk.robot import WalkieRobot
-
-    from services.walkie_graphs.geometry import CameraPose, Intrinsics
 
 
 class Camera:
@@ -169,12 +174,12 @@ class Camera:
 # snapshot pins lift pose, intrinsics, and robot heading to the moment the frame
 # was actually taken.
 #
-# Lifting reuses the exact ``services.walkie_graphs.geometry.deproject_mask``
+# Lifting reuses the exact ``interfaces.perception.geometry.deproject_mask``
 # pipeline the scene graph runs (depth-edge filter, mask erode, SOR, voxel),
 # parameterized by the same ``WALKIE_GRAPHS_*`` env vars by default. Those
-# geometry helpers are imported lazily inside the methods that use them so that
-# importing this device module never pulls in the ``walkie_graphs`` package
-# (which imports back into here — a cycle if done at module top level).
+# geometry helpers live in ``interfaces.perception`` (a pure-leaf package, not the
+# ``walkie_graphs`` service), so they're imported at module top level — there is no
+# cycle to dodge: walkie_graphs imports this module, never the other way around.
 
 
 def _noop(_msg: str) -> None:
@@ -187,6 +192,40 @@ def _envf(name: str, default: str) -> float:
 
 def _envi(name: str, default: str) -> int:
     return int(os.getenv(name, default))
+
+
+def _euler_xyz_to_matrix(rx: float, ry: float, rz: float) -> np.ndarray:
+    """Rotation matrix for intrinsic X→Y→Z euler angles (radians): ``Rx @ Ry @ Rz``."""
+    cx, sx = np.cos(rx), np.sin(rx)
+    cy, sy = np.cos(ry), np.sin(ry)
+    cz, sz = np.cos(rz), np.sin(rz)
+    Rx = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]])
+    Ry = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]])
+    Rz = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]])
+    return Rx @ Ry @ Rz
+
+
+def tilt_offset_matrix(
+    *,
+    rx: float | None = None,
+    ry: float | None = None,
+    rz: float | None = None,
+) -> np.ndarray | None:
+    """Camera-local rotation correction for the tilt servo's backlash, or ``None``.
+
+    The head's tilt servo has mechanical backlash, so the optical frame the TF tree
+    reports is rotated slightly from where the camera actually points. These three
+    euler offsets (radians, in the camera *optical* frame) are baked into the camera
+    pose right before lifting so the correction applies to every deprojection path.
+    ``None`` args default from ``WALKIE_CAMERA_TILT_OFFSET_{X,Y,Z}_RAD``. Returns
+    ``None`` when all three are zero (so callers can skip the matmul entirely).
+    """
+    rx = rx if rx is not None else _envf("WALKIE_CAMERA_TILT_OFFSET_X_RAD", "0.0")
+    ry = ry if ry is not None else _envf("WALKIE_CAMERA_TILT_OFFSET_Y_RAD", "0.0")
+    rz = rz if rz is not None else _envf("WALKIE_CAMERA_TILT_OFFSET_Z_RAD", "0.0")
+    if rx == 0.0 and ry == 0.0 and rz == 0.0:
+        return None
+    return _euler_xyz_to_matrix(rx, ry, rz)
 
 
 # Intrinsics are static per camera, so cache the scaled result per resolution.
@@ -203,6 +242,8 @@ def camera_pose(
     map_frame: str | None = None,
     cam_frame: str | None = None,
     timeout: float | None = None,
+    tilt_offset: np.ndarray | None = None,
+    apply_tilt_offset: bool = True,
     log=_noop,
 ) -> CameraPose | None:
     """Camera optical-frame pose in the map frame, from the SDK transform tree.
@@ -211,6 +252,12 @@ def camera_pose(
     returns a pose whose rotation maps camera-optical points straight into the map
     (lift, head tilt, and mount offsets already baked in), so deprojection needs no
     further composition. Returns ``None`` when the lookup fails.
+
+    The tilt servo has backlash, so the reported optical frame is rotated slightly
+    from where the camera really points. When *apply_tilt_offset* is true the
+    camera-local correction from :func:`tilt_offset_matrix` (or an explicit
+    *tilt_offset* matrix) is composed in as ``R @ R_offset`` — rotating points in
+    the optical frame before the TF rotation maps them to the map.
     """
     map_frame = map_frame or os.getenv("WALKIE_GRAPHS_TF_MAP_FRAME", "map")
     cam_frame = cam_frame or os.getenv(
@@ -228,11 +275,13 @@ def camera_pose(
 
     from walkie_sdk.utils.converters import quaternion_to_matrix
 
-    from services.walkie_graphs.geometry import CameraPose
-
     q, p = tf["quaternion"], tf["position"]
     R = quaternion_to_matrix(float(q["x"]), float(q["y"]), float(q["z"]), float(q["w"]))
     t = np.array([float(p["x"]), float(p["y"]), float(p["z"])])
+    if apply_tilt_offset:
+        R_off = tilt_offset if tilt_offset is not None else tilt_offset_matrix()
+        if R_off is not None:
+            R = R @ R_off
     return CameraPose(R=R, t=t)
 
 
@@ -258,8 +307,6 @@ def intrinsics_for(walkie, width: int, height: int, *, log=_noop) -> Intrinsics 
     if not raw:
         log("intrinsics unavailable (camera_info not published yet)")
         return None
-
-    from services.walkie_graphs.geometry import Intrinsics
 
     intr = Intrinsics(
         fx=float(raw["fx"]),
@@ -352,8 +399,6 @@ class CameraSnapshot:
     def _edges(self) -> np.ndarray | None:
         """Depth-discontinuity map for this frame, computed once and cached."""
         if not self._edge_mask_done:
-            from services.walkie_graphs.geometry import depth_discontinuity_mask
-
             self._edge_mask = depth_discontinuity_mask(
                 self.depth,
                 _envf("WALKIE_GRAPHS_DEPTH_EDGE_THRESH_M", "0.05"),
@@ -383,8 +428,6 @@ class CameraSnapshot:
         """
         if not self.has_geometry:
             return np.zeros((0, 3), dtype=np.float32)
-
-        from services.walkie_graphs.geometry import deproject_mask
 
         return deproject_mask(
             mask,

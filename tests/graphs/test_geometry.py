@@ -1,11 +1,11 @@
-"""Unit tests for services.walkie_graphs.geometry — optical-frame deprojection, no robot."""
+"""Unit tests for interfaces.perception.geometry — optical-frame deprojection, no robot."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from services.walkie_graphs.geometry import (
+from interfaces.perception.geometry import (
     CameraPose,
     Intrinsics,
     depth_discontinuity_mask,

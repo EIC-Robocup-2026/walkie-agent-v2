@@ -48,7 +48,7 @@ except Exception:  # pragma: no cover
 
 from perception.vector_db import get_collection, make_client
 
-from .dbscan import (
+from interfaces.perception.dbscan import (
     dbscan_largest_cluster,
     dbscan_remove_noise,
     statistical_outlier_removal,
@@ -57,10 +57,9 @@ from .fusion import (
     aabb_overlap,
     additive_similarity,
     nn_ratio,
-    nn_ratio_symmetric,
     pairs_within,
 )
-from .geometry import voxel_downsample
+from interfaces.perception.geometry import voxel_downsample
 from .pcd_ops import apply_transform, icp, rotation_angle_deg, subsample
 
 DEFAULT_EMB_DIM = 512  # CLIP ViT-B/16
@@ -211,6 +210,7 @@ class GraphMemory:
         visual_merge_max_dist_m: float = 0.0,
         sim_threshold: float = 1.1,
         cross_class_sim_threshold: float = 0.0,
+        cross_class_min_mutual_overlap: float = 0.0,
         w_geo: float = 1.0,
         w_sem: float = 1.0,
         nn_voxel_m: float = 0.025,
@@ -236,6 +236,7 @@ class GraphMemory:
         refine_min_fitness: float = 0.6,
         refine_max_trans_m: float = 0.12,
         refine_max_rot_deg: float = 5.0,
+        refine_icp_device: Optional[str] = None,
         min_obs_confirm: int = 1,
         require_confirmation: bool = False,
         ghost_grace_sec: float = 0.0,
@@ -267,6 +268,7 @@ class GraphMemory:
         self.visual_merge_max_dist_m = visual_merge_max_dist_m
         self.sim_threshold = sim_threshold
         self.cross_class_sim_threshold = cross_class_sim_threshold
+        self.cross_class_min_mutual_overlap = cross_class_min_mutual_overlap
         self.w_geo = w_geo
         self.w_sem = w_sem
         self.nn_voxel_m = nn_voxel_m
@@ -290,6 +292,11 @@ class GraphMemory:
         self.merge_rescue_max_rot_deg = merge_rescue_max_rot_deg
         self.refine_corr_m = refine_corr_m
         self.refine_min_fitness = refine_min_fitness
+        # ICP backend for the per-object refine pass. At refine's subsampled sizes
+        # (≤5000 pts) the legacy CPU solver beats the CUDA tensor path — host↔GPU
+        # transfer outweighs the compute gain (measured ~87 ms CPU vs ~161 ms CUDA on
+        # an RTX 3080 Ti). "cpu" forces legacy; None follows the global O3D device.
+        self.refine_icp_device = refine_icp_device
         self.refine_max_trans_m = refine_max_trans_m
         self.refine_max_rot_deg = refine_max_rot_deg
         self.min_obs_confirm = min_obs_confirm
@@ -309,6 +316,10 @@ class GraphMemory:
         self.emb_dim = emb_dim
 
         self._lock = threading.RLock()
+        # Serializes Chroma collection writes independently of self._lock so the
+        # async maintenance worker's _write_node/_delete can't race the ingest
+        # thread's _flush_chroma (which upserts outside self._lock).
+        self._chroma_lock = threading.Lock()
         self._client = make_client(chroma_dir or None)
         # EphemeralClient shares one in-memory DB process-wide, so each
         # in-memory store gets a unique collection to stay isolated (tests).
@@ -389,6 +400,7 @@ class GraphMemory:
             visual_merge_max_dist_m=_f("WALKIE_GRAPHS_VISUAL_MERGE_MAX_DIST_M", "0.4"),
             sim_threshold=_f("WALKIE_GRAPHS_SIM_THRESHOLD", "1.1"),
             cross_class_sim_threshold=_f("WALKIE_GRAPHS_CROSS_CLASS_SIM_THRESHOLD", "1.5"),
+            cross_class_min_mutual_overlap=_f("WALKIE_GRAPHS_CROSS_CLASS_MIN_MUTUAL_OVERLAP", "0"),
             w_geo=_f("WALKIE_GRAPHS_W_GEO", "1.0"),
             w_sem=_f("WALKIE_GRAPHS_W_SEM", "1.0"),
             nn_voxel_m=_f("WALKIE_GRAPHS_NN_VOXEL_M", "0.025"),
@@ -414,6 +426,7 @@ class GraphMemory:
             refine_min_fitness=_f("WALKIE_GRAPHS_REFINE_MIN_FITNESS", "0.6"),
             refine_max_trans_m=_f("WALKIE_GRAPHS_REFINE_MAX_TRANS_M", "0.12"),
             refine_max_rot_deg=_f("WALKIE_GRAPHS_REFINE_MAX_ROT_DEG", "5"),
+            refine_icp_device=(os.getenv("WALKIE_GRAPHS_REFINE_O3D_DEVICE", "cpu") or None),
             min_obs_confirm=_i("WALKIE_GRAPHS_MIN_OBS_CONFIRM", "3"),
             require_confirmation=_b("WALKIE_GRAPHS_REQUIRE_CONFIRMATION", "1"),
             ghost_grace_sec=_f("WALKIE_GRAPHS_GHOST_GRACE_SEC", "0"),
@@ -505,12 +518,15 @@ class GraphMemory:
         """Upsert a batch of nodes' embeddings + metadata into Chroma in one call."""
         if not nodes:
             return
-        self._col.upsert(
-            ids=[n.id for n in nodes],
-            embeddings=[list(n.clip_emb if n.clip_emb else [0.0] * self.emb_dim) for n in nodes],
-            metadatas=[self._metadata(n) for n in nodes],
-            documents=[n.best_caption or n.class_name for n in nodes],
-        )
+        with self._chroma_lock:
+            self._col.upsert(
+                ids=[n.id for n in nodes],
+                embeddings=[
+                    list(n.clip_emb if n.clip_emb else [0.0] * self.emb_dim) for n in nodes
+                ],
+                metadatas=[self._metadata(n) for n in nodes],
+                documents=[n.best_caption or n.class_name for n in nodes],
+            )
 
     def _flush_chroma(self) -> None:
         with self._lock:
@@ -596,43 +612,55 @@ class GraphMemory:
         return len(pending)
 
     def load_base(self, node_id: str) -> np.ndarray:
-        """The node's baked base cloud (history older than its live segments)."""
-        cached = self._base_cache.get(node_id)
-        if cached is not None:
-            return cached
-        base = np.zeros((0, 3), dtype=np.float32)
-        path = self._pcd_path(node_id)
-        if path.exists():
-            try:
-                with np.load(path) as data:
-                    if "base" in data.files:
-                        base = np.asarray(data["base"], dtype=np.float32)
-            except Exception:  # noqa: BLE001 — a corrupt sidecar reads as no base
-                pass
-        self._base_cache[node_id] = base
-        return base
+        """The node's baked base cloud (history older than its live segments).
+
+        Locked around the cache populate so the async maintenance worker and the
+        ingest thread can't race the ``_base_cache`` write (RLock is reentrant, so
+        callers already holding ``self._lock`` are unaffected).
+        """
+        with self._lock:
+            cached = self._base_cache.get(node_id)
+            if cached is not None:
+                return cached
+            base = np.zeros((0, 3), dtype=np.float32)
+            path = self._pcd_path(node_id)
+            if path.exists():
+                try:
+                    with np.load(path) as data:
+                        if "base" in data.files:
+                            base = np.asarray(data["base"], dtype=np.float32)
+                except Exception:  # noqa: BLE001 — a corrupt sidecar reads as no base
+                    pass
+            self._base_cache[node_id] = base
+            return base
 
     def _stored_tree(self, node_id: str):
         """Cached ``cKDTree`` over the node's stored cloud (None when scipy/cloud absent)."""
-        tree = self._tree_cache.get(node_id)
-        if tree is None and _cKDTree is not None:
-            pts = self.load_pcd(node_id)
-            if len(pts):
-                tree = _cKDTree(pts.astype(np.float64))
-                self._tree_cache[node_id] = tree
-        return tree
+        with self._lock:
+            tree = self._tree_cache.get(node_id)
+            if tree is None and _cKDTree is not None:
+                pts = self.load_pcd(node_id)
+                if len(pts):
+                    tree = _cKDTree(pts.astype(np.float64))
+                    self._tree_cache[node_id] = tree
+            return tree
 
     def load_pcd(self, node_id: str) -> np.ndarray:
-        """The node's world cloud — from the write-through cache, disk on a cold start."""
-        cached = self._pcd_cache.get(node_id)
-        if cached is not None:
-            return cached
-        path = self._pcd_path(node_id)
-        if not path.exists():
-            return np.zeros((0, 3), dtype=np.float32)
-        pts = np.load(path)["points"]
-        self._pcd_cache[node_id] = pts
-        return pts
+        """The node's world cloud — from the write-through cache, disk on a cold start.
+
+        Locked around the cache populate (see :meth:`load_base`) so a worker-thread
+        read can't race the ingest thread's ``_pcd_cache`` write.
+        """
+        with self._lock:
+            cached = self._pcd_cache.get(node_id)
+            if cached is not None:
+                return cached
+            path = self._pcd_path(node_id)
+            if not path.exists():
+                return np.zeros((0, 3), dtype=np.float32)
+            pts = np.load(path)["points"]
+            self._pcd_cache[node_id] = pts
+            return pts
 
     def _save_thumb(self, node_id: str, crop) -> Optional[str]:
         if crop is None or not self.thumbnails:
@@ -761,8 +789,9 @@ class GraphMemory:
                 or (same_class and l2(det_c, n.centroid) <= self.dedup_radius_m)
             ):
                 continue
+            obj_cloud = self.load_pcd(n.id)
             ratio = nn_ratio(
-                self.load_pcd(n.id),
+                obj_cloud,
                 det.points_world,
                 self.nn_voxel_m,
                 obj_tree=self._stored_tree(n.id),  # cached per cloud version
@@ -771,8 +800,25 @@ class GraphMemory:
             cos = cosine(det.clip_emb, n.clip_emb)
             sim = additive_similarity(ratio, cos, w_geo=self.w_geo, w_sem=self.w_sem)
             gate = self.sim_threshold if same_class else self.cross_class_sim_threshold
-            if sim >= gate and sim > best_sim:
-                best, best_sim = n, sim
+            if sim < gate or sim <= best_sim:
+                continue
+            # Cross-class containment guard. ``ratio`` above is one-directional
+            # (det→node) and SATURATES for a small object resting on a big surface — a
+            # spoon lying on a table has ~all its points within nn_voxel of the
+            # tabletop, so ratio≈1 and the cross-class gate is cleared even though the
+            # spoon is not the table. Without this it merges into the table node and no
+            # spoon node is ever created. A genuine same-object/different-label pair
+            # (the detector flip-flopping "cup"↔"mug") overlaps MUTUALLY, so the reverse
+            # ratio (node→det, fraction of the node's cloud near the detection) is also
+            # high; pure containment drives it to ~0. Require the reverse to clear
+            # ``cross_class_min_mutual_overlap`` (0 = guard off → legacy behaviour).
+            if not same_class and self.cross_class_min_mutual_overlap > 0:
+                rev = nn_ratio(
+                    det.points_world, obj_cloud, self.nn_voxel_m, max_query=1024
+                )
+                if rev < self.cross_class_min_mutual_overlap:
+                    continue
+            best, best_sim = n, sim
         return best
 
     def _candidates(self, det: Detection3D) -> list[ObjectNode]:
@@ -1073,7 +1119,10 @@ class GraphMemory:
                     continue
                 pts = segs[ref]
                 T, fitness = icp(
-                    subsample(pts, 5000), subsample(consensus, 5000), self.refine_corr_m
+                    subsample(pts, 5000),
+                    subsample(consensus, 5000),
+                    self.refine_corr_m,
+                    device=self.refine_icp_device,
                 )
                 if fitness < self.refine_min_fitness:
                     continue
@@ -1589,6 +1638,14 @@ class GraphMemory:
         sides as two nodes, later seen to physically coincide. The expensive overlap math
         runs on a cloud snapshot taken outside the short mutation critical section.
 
+        Cross-class pairs (the detector flip-flopping one object's label) are allowed when
+        ``cross_class_sim_threshold > 0``, but the symmetric ``max`` overlap above would
+        also fire for a small object sitting on a big surface (a spoon's points are all
+        within ``nn_voxel_m`` of the tabletop → ratio ≈ 1 one way, ≈ 0 the other). So a
+        cross-class merge additionally requires the **mutual** overlap (the smaller of the
+        two directions) to clear ``cross_class_min_mutual_overlap`` — the same guard the
+        live ``_associate`` path uses; same-class partial views keep the lenient ``max``.
+
         **ICP rescue** (``merge_rescue_corr_m > 0``): when the identity gate passes but
         overlap is insufficient (stacked ghost duplicates from captures whose registration
         was rejected), point-to-plane ICP aligns the candidate pair outside the lock.
@@ -1626,7 +1683,7 @@ class GraphMemory:
         # pairs: (overlap, aid, bid, T_or_None) — T maps bid cloud → aid cloud frame.
         # sort key is p[0] because T is an ndarray and tuple compare would crash.
         pairs: list[tuple[float, str, str, object]] = []
-        rescue_cands: list[tuple[str, str, np.ndarray, np.ndarray]] = []
+        rescue_cands: list[tuple[str, str, np.ndarray, np.ndarray, bool]] = []
         for a, b in cand:
             # Identity guard FIRST (cheap, and it decides whether the ICP rescue below
             # is even allowed): same-class pairs may merge on geometry alone, but any
@@ -1639,14 +1696,29 @@ class GraphMemory:
             elif a[1] != b[1]:
                 continue
             ca, cb = clouds[a[0]], clouds[b[0]]
-            overlap = nn_ratio_symmetric(ca, cb, self.nn_voxel_m)
+            fwd = nn_ratio(ca, cb, self.nn_voxel_m)
+            rev = nn_ratio(cb, ca, self.nn_voxel_m)
+            # Cross-class containment guard (mirrors _associate): a small object resting
+            # on a big surface saturates ONE direction, so the symmetric max(...) ≈ 1 and
+            # the spoon would be absorbed into the table. A genuine same-object /
+            # different-label pair (cup↔mug) overlaps MUTUALLY. Require the smaller
+            # direction to clear the guard for cross-class pairs; same-class partial views
+            # (a bed mapped from two ends) keep the lenient symmetric max. The `continue`
+            # also keeps a blocked pair out of the ICP-rescue branch below.
+            if (
+                a[1] != b[1]
+                and self.cross_class_min_mutual_overlap > 0
+                and min(fwd, rev) < self.cross_class_min_mutual_overlap
+            ):
+                continue
+            overlap = max(fwd, rev)
             if overlap > self.merge_overlap_thresh:
                 pairs.append((overlap, a[0], b[0], None))
             elif self.merge_rescue_corr_m > 0 and len(ca) >= 3 and len(cb) >= 3:
-                rescue_cands.append((a[0], b[0], ca, cb))
+                rescue_cands.append((a[0], b[0], ca, cb, a[1] != b[1]))
         # ICP rescue: run outside the lock (expensive but no shared-state mutation).
         # Source = cb (bid's cloud), target = ca (aid's cloud) → T maps bid → aid.
-        for aid, bid, ca, cb in rescue_cands:
+        for aid, bid, ca, cb, cross_class in rescue_cands:
             T, fitness = icp(subsample(cb, 5000), subsample(ca, 5000), self.merge_rescue_corr_m)
             if fitness < self.merge_rescue_min_fitness:
                 continue
@@ -1656,7 +1728,17 @@ class GraphMemory:
             )
             if shift > self.merge_rescue_max_trans_m or rotation_angle_deg(T) > self.merge_rescue_max_rot_deg:
                 continue
-            rescued_overlap = nn_ratio_symmetric(ca, apply_transform(cb, T), self.nn_voxel_m)
+            cbT = apply_transform(cb, T)
+            fwd = nn_ratio(ca, cbT, self.nn_voxel_m)
+            rev = nn_ratio(cbT, ca, self.nn_voxel_m)
+            # Same cross-class containment guard as the primary test, on the aligned cloud.
+            if (
+                cross_class
+                and self.cross_class_min_mutual_overlap > 0
+                and min(fwd, rev) < self.cross_class_min_mutual_overlap
+            ):
+                continue
+            rescued_overlap = max(fwd, rev)
             if rescued_overlap > self.merge_overlap_thresh:
                 pairs.append((rescued_overlap, aid, bid, T))
         pairs.sort(key=lambda p: p[0], reverse=True)  # strongest overlap first
@@ -1946,7 +2028,8 @@ class GraphMemory:
     def _delete(self, node_id: str) -> None:
         node = self._nodes.pop(node_id, None)
         try:
-            self._col.delete(ids=[node_id])
+            with self._chroma_lock:
+                self._col.delete(ids=[node_id])
         except Exception:
             pass
         self._pcd_path(node_id).unlink(missing_ok=True)

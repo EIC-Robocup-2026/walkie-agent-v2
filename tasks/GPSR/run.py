@@ -3,10 +3,14 @@
     uv run python -m tasks.GPSR.run
     DISABLE_LISTENING=1 uv run python -m tasks.GPSR.run   # type instead of speak
 
-PLACEHOLDER: builds the full Walkie agent stack (WalkieBrain) and hands it to the
-task on ctx.data["brain"]; ExecuteCommands delegates each operator command to it.
-The walkie_graphs perception loop is started in the background (GPSR_START_PERCEPTION)
-so "find/bring object" commands can use long-term spatial memory.
+Builds the world model (arena nouns) + the Walkie agent stack (WalkieBrain, the
+Tier-2 execution fallback) and runs the four-step GPSR envelope (subtasks.py):
+go to the instruction point → receive + plan + speak each command → execute →
+return. The walkie_graphs perception loop runs in the background
+(GPSR_START_PERCEPTION) so find/bring commands can use long-term spatial memory.
+
+A no-robot dry run of just the parser + spoken plan is available offline via
+`python -m tasks.GPSR.parse` (needs OPENROUTER_API_KEY, no robot).
 """
 
 import os
@@ -17,7 +21,9 @@ from dotenv import load_dotenv
 from ..base import TaskContext
 from ..common import WalkieBrain, initialize_llm_model, initialize_robot, load_task_config
 from .subtasks import build_gpsr_task
+from .world import load_world
 from client import WalkieAIClient
+from perception import PeopleStore
 
 
 def main() -> None:
@@ -29,7 +35,7 @@ def main() -> None:
     walkie_ai = WalkieAIClient()
     disable_listening = os.getenv("DISABLE_LISTENING", "0").lower() in ("1", "true", "yes")
 
-    # The agent stack IS the GPSR planner/executor (see subtasks.ExecuteCommands).
+    # The agent stack is the Tier-2 execution fallback (see subtasks.ExecuteCommands).
     brain = WalkieBrain(walkie_ai, walkie_interface, model, disable_listening=disable_listening)
     if os.getenv("GPSR_START_PERCEPTION", "1").lower() in ("1", "true", "yes"):
         try:
@@ -42,8 +48,12 @@ def main() -> None:
         walkieAI=walkie_ai,
         model=model,
         disable_listening=disable_listening,
+        # GPSR is thick with person commands (meet/greet/guide/follow) — reuse
+        # HRI's face+attire re-ID people store (§5.4), unlike Restaurant.
+        people=PeopleStore.from_env(),
     )
     ctx.data["brain"] = brain
+    ctx.data["world"] = load_world()  # arena nouns the parser grounds against
 
     try:
         build_gpsr_task(ctx).run()

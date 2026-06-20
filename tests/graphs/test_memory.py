@@ -218,6 +218,59 @@ def test_cross_class_assoc_respects_strict_threshold(mem):
     assert mem.count() == 2
 
 
+def test_cross_class_guard_blocks_object_absorbed_by_surface(mem):
+    # A spoon lying flat on a table: every spoon point sits within nn_voxel of the
+    # tabletop, so the one-directional det->table overlap SATURATES and (matching
+    # embeddings) clears the cross-class gate — without the guard the spoon is absorbed
+    # into the table node and never appears. The mutual-overlap guard rejects it: the
+    # reverse overlap (table->spoon) is ~0 because the spoon covers a tiny patch.
+    mem.cross_class_sim_threshold = 1.5
+
+    gx, gy = np.meshgrid(np.linspace(0.5, 1.5, 51), np.linspace(-0.5, 0.5, 51))
+    table_pts = np.column_stack(
+        [gx.ravel(), gy.ravel(), np.full(gx.size, 0.50)]
+    ).astype(np.float32)
+    mem.upsert(
+        replace(
+            make_det(class_name="table", center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0)),
+            points_world=table_pts,
+        )
+    )
+
+    rng = np.random.default_rng(0)
+    spoon_pts = rng.normal((1.0, 0.0, 0.505), (0.03, 0.01, 0.002), size=(40, 3)).astype(np.float32)
+    spoon = replace(
+        make_det(class_name="spoon", center=(1.0, 0.0, 0.505), emb=unit(1, 0, 0)),
+        points_world=spoon_pts,
+    )
+    probe = replace(spoon, points_world=mem._denoise(spoon_pts))
+
+    # Guard off (legacy): the saturated one-directional overlap WOULD absorb it.
+    mem.cross_class_min_mutual_overlap = 0.0
+    assert mem._associate(probe) is not None
+    # Guard on: the reverse overlap (~0) blocks the cross-class match.
+    mem.cross_class_min_mutual_overlap = 0.3
+    assert mem._associate(probe) is None
+
+    mem.upsert(spoon)
+    assert mem.count() == 2
+    assert {n.class_name for n in mem.all_objects()} == {"table", "spoon"}
+
+
+def test_cross_class_guard_keeps_label_flipflop_merge(mem):
+    # The guard must not break the case cross-class exists for: the detector mislabels
+    # ONE object ("cup" then "mug"); the coincident clouds overlap MUTUALLY, so the
+    # reverse ratio is ~1.0 and the merge still fires.
+    mem.cross_class_sim_threshold = 1.5
+    mem.cross_class_min_mutual_overlap = 0.3
+    mem.upsert(make_det(class_name="cup", center=(1.0, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01))
+    node = mem.upsert(
+        make_det(class_name="mug", center=(1.005, 0.0, 0.5), emb=unit(1, 0, 0), spread=0.01, ts=2.0)
+    )
+    assert mem.count() == 1
+    assert node.class_name == "cup"
+
+
 # ---------------------------------------------------------------------------
 # Queries
 # ---------------------------------------------------------------------------

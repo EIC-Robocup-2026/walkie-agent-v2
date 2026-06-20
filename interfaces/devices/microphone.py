@@ -111,7 +111,14 @@ class Microphone:
             dev_info = sd.query_devices(device)
             self.device_sample_rate = int(dev_info["default_samplerate"])
         else:
-            self.device_sample_rate = int(sd.query_devices(sd.default.device[0])["default_samplerate"])
+            dev_info = sd.query_devices(sd.default.device[0])
+            self.device_sample_rate = int(dev_info["default_samplerate"])
+        # Log which input the mic actually opened — the #1 cause of "STT hears
+        # nothing" is capturing from the wrong/empty default device. Set
+        # WALKIE_MIC_DEVICE (index or name substring) to pin the real mic.
+        print(f"[microphone] using input device {device if device is not None else 'default'}"
+              f" -> '{dev_info['name']}' @ {self.device_sample_rate} Hz"
+              f" (in_channels={dev_info['max_input_channels']})")
         
         # Calculate chunk size at device rate that corresponds to 512 samples at 16kHz
         # We use a slightly larger chunk to ensure we always have enough after resampling
@@ -333,6 +340,46 @@ class Microphone:
         """
         if audio_chunk.dtype != np.float32:
             audio_chunk = audio_chunk.astype(np.float32) / 32768.0
-        
+
         result = self.vad_iterator(audio_chunk)
         return result is not None and "start" in result
+
+
+def _diagnostic() -> None:
+    """Quick mic check: list devices, then record a few seconds from the chosen
+    one and report the audio level — a near-zero level means the device captures
+    nothing (the usual "STT hears nothing" cause).
+
+        python -m interfaces.devices.microphone            # default device
+        WALKIE_MIC_DEVICE=fifine python -m interfaces.devices.microphone
+        python -m interfaces.devices.microphone 4          # device index 4
+    """
+    import os
+    import sys
+
+    print_audio_devices(input_only=True)
+    arg = sys.argv[1] if len(sys.argv) > 1 else (os.getenv("WALKIE_MIC_DEVICE") or "").strip()
+    device: int | str | None = None
+    if arg:
+        device = int(arg) if arg.lstrip("-").isdigit() else arg
+    secs = 4.0
+    mic = Microphone(device=device)
+    print(f"\nRecording {secs:.0f}s — say something now...")
+    raw = mic.record_seconds(secs)
+    audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    if not len(audio):
+        print("  !! captured 0 samples — device opened but returned nothing")
+        return
+    rms = float(np.sqrt(np.mean(audio ** 2)))
+    peak = float(np.max(np.abs(audio)))
+    print(f"  samples={len(audio)} rms={rms:.4f} peak={peak:.4f}")
+    if rms < 1e-3:
+        print("  !! essentially silent — wrong device, muted, or unplugged. "
+              "Try another WALKIE_MIC_DEVICE (index or name above).")
+    else:
+        print("  OK — audio captured. If STT still fails, the issue is downstream "
+              "(VAD threshold / walkie-ai-server STT).")
+
+
+if __name__ == "__main__":
+    _diagnostic()

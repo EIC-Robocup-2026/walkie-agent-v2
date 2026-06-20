@@ -25,7 +25,8 @@ interface — the same trio the agents take)::
     print(graphs.to_text_description())
     graphs.stop()
 
-The heavy lifting lives in :mod:`walkie_graphs.geometry` (camera math),
+The heavy lifting lives in :mod:`interfaces.perception.geometry` (camera math,
+re-exported here as ``walkie_graphs.geometry`` for back-compat),
 :mod:`walkie_graphs.memory` (the node/edge store), :mod:`walkie_graphs.service`
 (the background thread), and :mod:`walkie_graphs.viz` (optional Rerun).
 """
@@ -36,8 +37,8 @@ import os
 from typing import Optional
 
 from interfaces.devices.camera import CameraSnapshot
+from interfaces.perception import geometry  # back-compat: ``walkie_graphs.geometry``
 
-from . import geometry
 from .capture import Capture, CaptureStore, Segment
 from .memory import Detection3D, GraphMemory, ObjectNode, Relation
 from .service import WalkieGraphsService

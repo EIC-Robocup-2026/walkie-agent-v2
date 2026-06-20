@@ -16,7 +16,7 @@ from services.walkie_graphs.capture import (
     parse_ref,
     register_capture,
 )
-from services.walkie_graphs.geometry import CameraPose, Intrinsics
+from interfaces.perception.geometry import CameraPose, Intrinsics
 
 
 def _snap(depth, *, cam=True):

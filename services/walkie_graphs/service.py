@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -38,7 +39,7 @@ from interfaces.devices.camera import CameraSnapshot, camera_pose
 
 from .capture import lift_capture, register_capture
 from .fusion import subtract_contained_masks
-from .geometry import depth_discontinuity_mask, deproject_mask
+from interfaces.perception.geometry import depth_discontinuity_mask, deproject_mask
 from .memory import Detection3D, GraphMemory
 from .snapshot import build_object_records, write_atomic
 
@@ -111,6 +112,16 @@ class WalkieGraphsService(threading.Thread):
 
         self.min_confidence = float(os.getenv("WALKIE_GRAPHS_CONFIDENCE_THRESHOLD", "0.0"))
         self.min_points = int(os.getenv("WALKIE_GRAPHS_MIN_POINTS", "30"))
+        # Per-detection drop diagnostics. When on, each tick logs the raw detector
+        # output and, for every INTERESTED-class detection, the exact gate that
+        # dropped it (no mask / size / 0 lifted points / confidence / min_points) or
+        # that it was kept. The loop is otherwise silent about WHY a class like
+        # "spoon" never becomes a node — detection-miss vs zero-depth-points vs
+        # confidence vs provisional-hidden are indistinguishable without this. Off by
+        # default; flip on for a debugging session (env or config.toml).
+        self.debug_ingest = os.getenv("WALKIE_GRAPHS_DEBUG_INGEST", "0").strip().lower() in (
+            "1", "true", "yes",
+        )
         self.voxel_m = float(os.getenv("WALKIE_GRAPHS_VOXEL_M", "0.02"))
         self.max_points = int(os.getenv("WALKIE_GRAPHS_MAX_POINTS_PER_OBJ", "2000"))
         self.relation_every_n = int(os.getenv("WALKIE_GRAPHS_RELATION_EVERY_N", "5"))
@@ -216,6 +227,19 @@ class WalkieGraphsService(threading.Thread):
         self._tick = 0  # ingest_frame call counter, drives the relation/prune/viz cadence
         self._last_touched: list = []  # nodes upserted by the last ingest_frame (for observe())
 
+        # Heavy maintenance (refine/carve/denoise/merge/evict) runs on a single
+        # background worker so a 6 s refine pass never stalls the next frame
+        # capture. Single-flight: at most one job in flight; a cadence that fires
+        # while the worker is busy is skipped (it re-fires next cadence). Set
+        # WALKIE_GRAPHS_ASYNC_MAINTENANCE=0 to run inline (today's behavior).
+        self._async_maintenance = os.getenv(
+            "WALKIE_GRAPHS_ASYNC_MAINTENANCE", "1"
+        ).strip().lower() not in ("0", "false", "no", "")
+        self._maint_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="walkie-graphs-maint"
+        )
+        self._maint_future = None  # the in-flight maintenance Future, or None
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -223,6 +247,11 @@ class WalkieGraphsService(threading.Thread):
         self._stop_event.set()
         if self.is_alive():
             self.join(timeout)
+        # Drain the maintenance worker before the final flush so its last
+        # write-backs (carved/refined clouds) land on disk. cancel_futures drops
+        # anything still queued (none under single-flight); wait lets a running
+        # pass finish cleanly — each node write is atomic under the lock.
+        self._maint_executor.shutdown(wait=True, cancel_futures=True)
         try:  # persist any deferred clouds/captures/background before the process exits
             self.memory.flush_pcds()
             if getattr(self.memory, "capture_store", None) is not None:
@@ -495,16 +524,34 @@ class WalkieGraphsService(threading.Thread):
         d_edge = time.perf_counter() - t
 
         t = time.perf_counter()
+        if self.debug_ingest:
+            summary = ", ".join(
+                f"{(d.class_name or '?')}={float(d.confidence or 0):.2f}" for d in detections
+            )
+            self._log(f"raw detections [{len(detections)}]: {summary or '(none)'}")
+
+        def _drop_dbg(d, reason: str) -> None:
+            # Narrate only interested classes (the ones we WANT as nodes), so the log
+            # pinpoints why e.g. a spoon never lands instead of spamming background.
+            if self.debug_ingest and self._keep(d.class_name or ""):
+                px = int(d.mask.sum()) if d.mask is not None else 0
+                self._log(
+                    f"drop[{d.class_name}] conf={float(d.confidence or 0):.2f} "
+                    f"mask_px={px}: {reason}"
+                )
+
         pending = []  # (orig_index, detected, points, crop)
         for i, d in enumerate(detections):
             mask = masks[i]
             if mask is None or not mask.any():
+                _drop_dbg(d, "empty / no mask")
                 continue
             if (d.class_name or "").lower() in self.exclude:
                 # Masking-only detection: its mask carves the background union below,
                 # but it gets no centroid (not shown in the live view) and no segment.
                 continue
             if not self._passes_size_filters(d, img_area):
+                _drop_dbg(d, f"size filter (min_mask_area_px={self.min_mask_area_px})")
                 continue
             pts = deproject_mask(
                 mask,
@@ -520,14 +567,26 @@ class WalkieGraphsService(threading.Thread):
                 sor_std_ratio=self.sor_std_ratio,
             )
             if len(pts) == 0:
+                _drop_dbg(d, "0 valid-depth points after lift (erode/edge/SOR/depth)")
                 continue
             c = pts.mean(axis=0)
             result[i]["centroid"] = (float(c[0]), float(c[1]), float(c[2]))
-            if (
+            kept = (
                 self._keep(d.class_name or "")
                 and float(d.confidence or 0.0) >= self.min_confidence
                 and len(pts) >= self.min_points
-            ):
+            )
+            if self.debug_ingest and self._keep(d.class_name or ""):
+                if kept:
+                    self._log(
+                        f"keep[{d.class_name}] conf={float(d.confidence or 0):.2f} "
+                        f"pts={len(pts)} -> upsert"
+                    )
+                elif float(d.confidence or 0.0) < self.min_confidence:
+                    _drop_dbg(d, f"below CONFIDENCE_THRESHOLD={self.min_confidence} (pts={len(pts)})")
+                else:
+                    _drop_dbg(d, f"below MIN_POINTS={self.min_points} (pts={len(pts)})")
+            if kept:
                 pending.append((i, d, pts, _crop_pil(img, d.bbox, self.crop_margin_px)))
         d_deproject = time.perf_counter() - t
 
@@ -707,17 +766,17 @@ class WalkieGraphsService(threading.Thread):
         if self.relation_every_n > 0 and t % self.relation_every_n == 0:
             _timed("relations", self.memory.derive_relations)
             _timed("prune", self.memory.prune)
-        # Staggered ConceptGraphs post-processing — offsets 0/1/2 so no two collide,
-        # and only after a full interval has elapsed (no churn on a near-empty graph).
-        if self.denoise_every_n > 0 and t >= self.denoise_every_n and t % self.denoise_every_n == 0:
-            _timed("denoise", self.memory.denoise_nodes)
-        if self.merge_every_n > 0 and t >= self.merge_every_n and t % self.merge_every_n == 1:
-            _timed("merge", self.memory.merge_overlapping_nodes)
-        if self.ghost_every_n > 0 and t >= self.ghost_every_n and t % self.ghost_every_n == 2:
-            _timed("evict", lambda: self.memory.evict_stale_provisional(time.time()))
-        # Free-space carving (offset 3). Gated on a TRUSTED pose: registration off
-        # (correction is identity) or an accepted solve — never a rejected/cold one.
-        if (
+        # Heavy ConceptGraphs post-processing (denoise/merge/evict/carve/refine).
+        # Each is individually expensive — refine and carve reach seconds. Their
+        # cadences have coprime periods, so independent gates can fire several in
+        # one tick (e.g. carve t%5==3 AND refine t%7==6 on tick 13) and stack into
+        # a multi-second stall. Collect the due ones and run AT MOST ONE per tick,
+        # by priority: carve first because it alone needs THIS tick's frustum
+        # (frame/capture) and can't be deferred — the rest roll over losslessly
+        # (refine via _refine_pending; denoise/merge/evict re-fire next cadence).
+        # The chosen op runs on the maintenance worker (off the ingest critical
+        # path) unless async is disabled.
+        carve_ready = (
             self.carve_every_n > 0
             and t >= self.carve_every_n
             and t % self.carve_every_n == 3
@@ -728,29 +787,34 @@ class WalkieGraphsService(threading.Thread):
             and getattr(frame, "cam", None) is not None
             and hasattr(self.memory, "carve_free_space")
             and (self.capture_icp_max_corr_m <= 0 or capture.icp_accepted)
-        ):
-            from .carve import corrected_pose
-
-            pose = corrected_pose(capture.cam, capture.correction)
-            _timed(
-                "carve",
-                lambda: self.memory.carve_free_space(
-                    frame.depth, frame.intr, pose,
-                    margin_base=self.carve_margin_base,
-                    margin_rel=self.carve_margin_rel,
-                    z_min=self.carve_z_min,
-                    max_z=self.carve_max_z,
-                    evict_min_points=self.carve_evict_min_points,
-                    refine_frac=self.carve_refine_frac,
-                ),
-            )
+        )
+        due: list[str] = []
+        if carve_ready:
+            due.append("carve")
         if (
             self.refine_every_n > 0
             and t >= self.refine_every_n
             and t % self.refine_every_n == 6
             and hasattr(self.memory, "refine_nodes")
         ):
-            _timed("refine_nodes", lambda: self.memory.refine_nodes(self.refine_limit))
+            due.append("refine")
+        if self.denoise_every_n > 0 and t >= self.denoise_every_n and t % self.denoise_every_n == 0:
+            due.append("denoise")
+        if self.merge_every_n > 0 and t >= self.merge_every_n and t % self.merge_every_n == 1:
+            due.append("merge")
+        if self.ghost_every_n > 0 and t >= self.ghost_every_n and t % self.ghost_every_n == 2:
+            due.append("evict")
+        heavy = due[:1]  # de-collision guarantee: ≤1 heavy op per tick
+        if heavy:
+            if not self._async_maintenance:
+                # Inline: fold timings into this tick's "maintenance: …" line (today's behavior).
+                self._run_maintenance(heavy, frame, capture, ran=ran)
+            elif self._maint_future is not None and not self._maint_future.done():
+                self._perf_log(f"  maint-skip: {heavy[0]} (worker busy)")
+            else:
+                self._maint_future = self._maint_executor.submit(
+                    self._run_maintenance, heavy, frame, capture
+                )
         if self.pcd_flush_every_n > 0 and t % self.pcd_flush_every_n == 0:
             _timed("pcd_flush", self.memory.flush_pcds)
             if getattr(self.memory, "capture_store", None) is not None:
@@ -796,6 +860,60 @@ class WalkieGraphsService(threading.Thread):
             ran.append(f"viz={(time.perf_counter() - t0) * 1000:.0f}ms")
         if ran:
             self._perf_log(f"  maintenance: {' '.join(ran)}")
+
+    def _run_maintenance(self, jobs, frame, capture, ran=None) -> None:
+        """Run the chosen heavy maintenance pass(es) — refine/carve/denoise/merge/evict.
+
+        On the maintenance worker thread when async (``ran`` is None → builds its own
+        list and emits a device-tagged ``maintenance[async] (cuda|cpu): …`` line);
+        inline with the caller's ``ran`` list otherwise, so the timings fold into the
+        tick's ``maintenance: …`` line exactly as before the worker existed.
+
+        ``frame``/``capture`` are the immutable per-tick snapshots (only carve reads
+        them, for the depth frustum). Runs under a blanket except so a maintenance
+        error never poisons the worker (a Future's exception is otherwise silent) or
+        the ingest tick.
+        """
+        inline = ran is not None
+        local: list[str] = ran if inline else []
+
+        def _timed(name, fn):
+            t0 = time.perf_counter()
+            fn()
+            local.append(f"{name}={(time.perf_counter() - t0) * 1000:.0f}ms")
+
+        try:
+            for job in jobs:
+                if job == "carve":
+                    from .carve import corrected_pose
+
+                    pose = corrected_pose(capture.cam, capture.correction)
+                    _timed(
+                        "carve",
+                        lambda: self.memory.carve_free_space(
+                            frame.depth, frame.intr, pose,
+                            margin_base=self.carve_margin_base,
+                            margin_rel=self.carve_margin_rel,
+                            z_min=self.carve_z_min,
+                            max_z=self.carve_max_z,
+                            evict_min_points=self.carve_evict_min_points,
+                            refine_frac=self.carve_refine_frac,
+                        ),
+                    )
+                elif job == "refine":
+                    _timed("refine_nodes", lambda: self.memory.refine_nodes(self.refine_limit))
+                elif job == "denoise":
+                    _timed("denoise", self.memory.denoise_nodes)
+                elif job == "merge":
+                    _timed("merge", self.memory.merge_overlapping_nodes)
+                elif job == "evict":
+                    _timed("evict", lambda: self.memory.evict_stale_provisional(time.time()))
+        except Exception as e:  # noqa: BLE001 — never let maintenance kill the worker/tick
+            self._log(f"maintenance error: {e}")
+        if not inline and local:
+            from . import pcd_ops
+
+            self._perf_log(f"  maintenance[async] ({pcd_ops.resolve_device()}): {' '.join(local)}")
 
     # ------------------------------------------------------------------
     # Per-class scoping

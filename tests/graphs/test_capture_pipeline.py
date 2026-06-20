@@ -18,7 +18,7 @@ from interfaces.devices.camera import CameraSnapshot
 
 from services.walkie_graphs.background import BackgroundStore
 from services.walkie_graphs.capture import CaptureStore
-from services.walkie_graphs.geometry import CameraPose, Intrinsics
+from interfaces.perception.geometry import CameraPose, Intrinsics
 from services.walkie_graphs.memory import GraphMemory
 from services.walkie_graphs.service import WalkieGraphsService
 
