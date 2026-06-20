@@ -92,7 +92,7 @@ def main() -> None:
     from dotenv import load_dotenv
 
     load_dotenv()
-    from ..common import initialize_robot, load_task_config  # type: ignore  # heavy: torch
+    from ...common import initialize_robot, load_task_config  # type: ignore  # heavy: torch
     from ..world import load_world
 
     load_task_config(Path(__file__).resolve().parents[1])

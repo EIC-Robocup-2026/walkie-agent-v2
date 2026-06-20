@@ -77,6 +77,7 @@ class TaskContext:
             except EOFError:
                 return ""
         try:
+            print(f"[listen] Listening... (timeout {timeout:.0f}s)")
             audio = self.walkie.microphone.record_until_silence(timeout=timeout)
             text = self.walkieAI.stt.transcribe(audio)
         except Exception as exc:

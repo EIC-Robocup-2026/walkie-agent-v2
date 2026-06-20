@@ -251,6 +251,13 @@ class ReturnToInstructionPoint(SubTask):
 
 def build_gpsr_task(ctx: TaskContext) -> Task:
     """Construct the GPSR task. Pure: the agent stack + world are read from ctx.data."""
+    # Guests differ every run — stale identities must never match today's.
+    if ctx.people is not None and os.getenv("GPSR_PEOPLE_RESET", "1").lower() in ("1", "true", "yes"):
+        try:
+            ctx.people.clear()
+            print("[GPSR] people memory cleared for a fresh run")
+        except Exception as exc:
+            print(f"[GPSR] people memory reset failed ({exc})")
     return Task(
         "GPSR",
         [

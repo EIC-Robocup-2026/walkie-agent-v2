@@ -80,7 +80,7 @@ point in the room. The result is a little **3D point cloud** shaped like the obj
 <details>
 <summary>Details — depth back-projection &amp; camera pose</summary>
 
-The camera math lives in [services/walkie_graphs/geometry.py](services/walkie_graphs/geometry.py) (pure numpy); the
+The camera math lives in [interfaces/perception/geometry.py](interfaces/perception/geometry.py) (pure numpy); the
 service feeds it real calibration and pose straight from the **walkie-sdk**.
 
 - **Intrinsics** (`_intrinsics` in service.py): `bot.camera.get_intrinsics()` returns the ZED's true
@@ -123,7 +123,7 @@ size and position stay accurate.
 <details>
 <summary>Details — flying-pixel edge cleanup</summary>
 
-These run during back-projection ([services/walkie_graphs/geometry.py](services/walkie_graphs/geometry.py)), where the
+These run during back-projection ([interfaces/perception/geometry.py](interfaces/perception/geometry.py)), where the
 depth discontinuity is still visible in 2D — much more reliable than trying to spot the smear in the
 finished 3D cloud:
 
@@ -138,7 +138,7 @@ finished 3D cloud:
 <details>
 <summary>Details — 3D denoising (SOR + DBSCAN, the backstops)</summary>
 
-Two complementary 3D filters live in [services/walkie_graphs/dbscan.py](services/walkie_graphs/dbscan.py),
+Two complementary 3D filters live in [interfaces/perception/dbscan.py](interfaces/perception/dbscan.py),
 each with a library fast path and a pure scipy fallback:
 
 - **Statistical outlier removal** (`statistical_outlier_removal`, Open3D's C++
@@ -436,9 +436,9 @@ background-box rejection, DBSCAN on). See the comments in `config.toml` for each
 | [services/walkie_graphs/__init__.py](services/walkie_graphs/__init__.py) | `WalkieGraphs` facade — ties store + observer + visualizer together; what the rest of the app uses |
 | [services/walkie_graphs/service.py](services/walkie_graphs/service.py) | `WalkieGraphsService` — the per-frame ingestion pipeline + maintenance scheduling |
 | [services/walkie_graphs/memory.py](services/walkie_graphs/memory.py) | `GraphMemory` — the store: association, merging, relations, queries, maintenance, persistence |
-| [services/walkie_graphs/geometry.py](services/walkie_graphs/geometry.py) | camera math — intrinsics, pose, depth→world deprojection |
+| [interfaces/perception/geometry.py](interfaces/perception/geometry.py) | camera math — intrinsics, pose, depth→world deprojection |
 | [services/walkie_graphs/fusion.py](services/walkie_graphs/fusion.py) | association math — `nn_ratio` overlap, AABB prefilter, additive score |
-| [services/walkie_graphs/dbscan.py](services/walkie_graphs/dbscan.py) | point-cloud denoising (Open3D statistical outlier removal + DBSCAN clustering, with scipy fallbacks) |
+| [interfaces/perception/dbscan.py](interfaces/perception/dbscan.py) | point-cloud denoising (Open3D statistical outlier removal + DBSCAN clustering, with scipy fallbacks) |
 | [services/walkie_graphs/viz.py](services/walkie_graphs/viz.py) | optional real-time 3D visualization via Rerun |
 | [services/walkie_graphs/tools/reset.py](services/walkie_graphs/tools/reset.py) | CLI to wipe the store |
 
