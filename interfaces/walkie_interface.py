@@ -1,4 +1,5 @@
 import logging
+import os
 
 from .devices.speaker import Speaker
 from .devices.microphone import Microphone
@@ -7,10 +8,39 @@ from walkie_sdk.robot import WalkieRobot
 
 _log = logging.getLogger(__name__)
 
+
+def _resolve_mic_device(explicit: int | str | None) -> int | str | None:
+    """Pick the input device: explicit arg wins, else $WALKIE_MIC_DEVICE, else the
+    system default (None). The env value may be an index ("4") or a name substring
+    ("fifine") — a name is more robust than an index, which can shuffle when USB
+    devices are re-enumerated across reboots.
+
+    A name is resolved to the index of an INPUT-capable device whose name contains
+    it: the same USB mic often also exposes a playback/monitor entry with zero input
+    channels, and a bare name hands sounddevice that one (so capture stays silent).
+    Returns the matched index, or the raw value as a last resort."""
+    if explicit is not None:
+        return explicit
+    val = (os.getenv("WALKIE_MIC_DEVICE") or "").strip()
+    if not val:
+        return None
+    if val.lstrip("-").isdigit():
+        return int(val)
+    try:
+        import sounddevice as sd
+        needle = val.lower()
+        for i, dev in enumerate(sd.query_devices()):
+            if dev["max_input_channels"] > 0 and needle in dev["name"].lower():
+                return i
+    except Exception as exc:  # noqa: BLE001 — fall back to the raw name
+        _log.warning("mic device name lookup failed (%s); using %r as-is", exc, val)
+    return val
+
+
 class WalkieInterface:
     def __init__(self, robot: WalkieRobot, microphone_device: int | str | None = None):
         self._robot = robot
-        self._microphone = Microphone(device=microphone_device)
+        self._microphone = Microphone(device=_resolve_mic_device(microphone_device))
         # Give the speaker the mic so it can pause it while playing — otherwise the
         # robot transcribes its own TTS (a problem for any background listener).
         self._speaker = Speaker(mic=self._microphone)
