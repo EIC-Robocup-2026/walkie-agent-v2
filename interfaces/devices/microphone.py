@@ -1,7 +1,9 @@
 """Microphone input with Voice Activity Detection using Silero VAD."""
 
+import os
 import threading
 import time
+import wave
 from contextlib import contextmanager
 from typing import Iterator
 
@@ -92,19 +94,26 @@ class Microphone:
         threshold: float = 0.5,
         min_silence_duration_ms: int = 1000,
         speech_pad_ms: int = 1000,
+        debug_save_dir: str | None = None,
     ) -> None:
         """Initialize microphone with VAD.
-        
+
         Args:
             device: Audio device ID or name. Use list_audio_devices() to see options.
             threshold: VAD sensitivity (0.0-1.0). Higher = less sensitive.
             min_silence_duration_ms: Silence duration to end speech segment.
             speech_pad_ms: Padding around detected speech.
+            debug_save_dir: When set (or the WALKIE_MIC_DEBUG_DIR env var is set),
+                every record_until_silence result is written to a timestamped WAV
+                here and its duration/peak amplitude printed — so you can tell a
+                silent capture (mic/pause bug) from a healthy one (STT bug).
         """
         self.device = device
         self.threshold = threshold
         self.min_silence_duration_ms = min_silence_duration_ms
         self.speech_pad_ms = speech_pad_ms
+        self.debug_save_dir = debug_save_dir or os.getenv("WALKIE_MIC_DEBUG_DIR")
+        self._debug_counter = 0
         
         # Get device sample rate
         if device is not None:
@@ -145,12 +154,14 @@ class Microphone:
         matching number of resume() calls arrive. Cheap and safe to call when no
         recording is running — it just sets a flag.
         """
+        print("============== Microphone paused ==============")
         with self._pause_lock:
             self._pause_depth += 1
             self._paused.set()
 
     def resume(self) -> None:
         """Undo one pause(); the mic resumes once every pause() has been matched."""
+        print("============== Microphone resumed ==============")
         with self._pause_lock:
             if self._pause_depth > 0:
                 self._pause_depth -= 1
@@ -178,6 +189,34 @@ class Microphone:
             min_silence_duration_ms=self.min_silence_duration_ms,
             speech_pad_ms=self.speech_pad_ms,
         )
+
+    def _save_debug_wav(self, data: bytes, label: str = "rec") -> None:
+        """Write 16kHz/16-bit mono `data` to the debug dir and print its stats.
+
+        Best-effort: a save failure is logged, never raised. The printed peak
+        amplitude (0–32767) is the quick tell — near-zero means the capture
+        itself was silent (a mic/pause problem), a healthy peak points at STT.
+        """
+        if not self.debug_save_dir:
+            return
+        try:
+            os.makedirs(self.debug_save_dir, exist_ok=True)
+            self._debug_counter += 1
+            path = os.path.join(self.debug_save_dir, f"{label}_{self._debug_counter:04d}.wav")
+            arr = np.frombuffer(data, dtype=np.int16)
+            peak = int(np.abs(arr).max()) if arr.size else 0
+            duration = arr.size / self.VAD_SAMPLE_RATE
+            with wave.open(path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)  # int16
+                wf.setframerate(self.VAD_SAMPLE_RATE)
+                wf.writeframes(data)
+            print(
+                f"[mic] debug saved {duration:.2f}s, {arr.size} samples, "
+                f"peak {peak}/32767 -> {path}"
+            )
+        except Exception as exc:
+            print(f"[mic] debug save failed ({exc})")
 
     def _resample_to_vad_chunk(self, audio: np.ndarray) -> np.ndarray:
         """Resample audio to exactly 512 samples at 16kHz for VAD.
@@ -228,6 +267,7 @@ class Microphone:
         Returns:
             Audio data as bytes (16-bit PCM, 16kHz mono).
         """
+        print("============== Microphone recording started ==============")
         self._reset_vad()
         audio_chunks: list[np.ndarray] = []
         speech_started = False
@@ -303,8 +343,11 @@ class Microphone:
         if audio_chunks:
             audio = np.concatenate(audio_chunks)
             audio_16k = _resample(audio, self.device_sample_rate, self.VAD_SAMPLE_RATE)
-            return audio_16k.tobytes()
-        return b""
+            data = audio_16k.tobytes()
+        else:
+            data = b""
+        self._save_debug_wav(data)
+        return data
 
     def record_seconds(self, duration: float) -> bytes:
         """Record audio for a fixed duration.
@@ -315,6 +358,7 @@ class Microphone:
         Returns:
             Audio data as bytes (16-bit PCM, 16kHz mono).
         """
+        print(f"============== Microphone recording for {duration:.2f} seconds ==============")
         samples = int(self.device_sample_rate * duration)
         audio = sd.rec(
             samples,
@@ -327,7 +371,9 @@ class Microphone:
         
         # Resample to 16kHz for output
         audio_16k = _resample(audio[:, 0], self.device_sample_rate, self.VAD_SAMPLE_RATE)
-        return audio_16k.tobytes()
+        data = audio_16k.tobytes()
+        self._save_debug_wav(data, label="fixed")
+        return data
 
     def is_speech(self, audio_chunk: np.ndarray) -> bool:
         """Check if audio chunk contains speech.

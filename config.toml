@@ -107,3 +107,4 @@ WALKIE_PREGRASP_OFFSET_M = "0.10"    # pre-grasp standoff (above for top-down, b
 WALKIE_LIFT_HEIGHT_M = "0.15"        # how far to lift after grasping
 WALKIE_CARRY_POSE = "standby"        # go_to_home preset to tuck the arm for nav
 
+WALKIE_MIC_DEBUG_DIR = "mic_recording"

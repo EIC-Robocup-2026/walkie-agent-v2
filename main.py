@@ -118,10 +118,10 @@ def run_ready_stage(walkieAI: WalkieAIClient, walkie: WalkieInterface, model: Ch
                 if not text:
                     continue
                 print(f"[user] {text}")
-                walkie_agent.invoke(
-                    {"messages": [HumanMessage(content=text)]},
-                    config={"configurable": {"thread_id": "main"}},
-                )
+                # walkie_agent.invoke(
+                #     {"messages": [HumanMessage(content=text)]},
+                #     config={"configurable": {"thread_id": "main"}},
+                # )
             except EOFError:
                 # Ctrl+D at the typed-input prompt — treat as a clean exit.
                 print("\n[main] EOF — shutting down.")

@@ -528,12 +528,18 @@ class FollowHostAndDropBag(SubTask):
     def _place_bag(self, ctx: TaskContext) -> StepResult:
         """Lower the left arm, open the gripper to release the bag, reset."""
         try:
-            ctx.walkie.robot.arm.right.go_to_home(pose_name="standby", blocking=False)  # get the arm out of the way for better nav while following
-            ctx.walkie.robot.arm.go_to_pose(0.45, 0.16, 1.15, -0.8, 0, -1.57, group_name="left_arm", blocking=True)
-            ctx.walkie.robot.arm.left.go_to_pose([0.38, 0.16, 0.5299], [-2.6230, -0.0326, -1.4681], blocking=True)
-            ctx.walkie.robot.arm.left.gripper(1.0)  # open: release the bag
-            ctx.walkie.robot.arm.go_to_home(group_name="both_arms_lift", blocking=True)  # reset the arm for better nav after releasing the bag
-            ctx.walkie.robot.arm.left.gripper(0, blocking=False)  # close the gripper after releasing the bag, so it's not just hanging open while following
+            result = ctx.walkie.robot.arm.right.go_to_home(pose_name="standby", blocking=False)  # get the arm out of the way for better nav while following
+            print(result)
+            result = ctx.walkie.robot.arm.go_to_pose(0.45, 0.16, 1.15, -0.8, 0, -1.57, group_name="left_arm", blocking=True)
+            print(result)
+            result = ctx.walkie.robot.arm.left.go_to_pose([0.38, 0.16, 0.5299], [-2.6230, -0.0326, -1.4681], blocking=True)
+            print(result)
+            result = ctx.walkie.robot.arm.left.gripper(1.0)  # open: release the bag
+            print(result)
+            result = ctx.walkie.robot.arm.go_to_home(group_name="both_arms_lift", blocking=True)  # reset the arm for better nav after releasing the bag
+            print(result)
+            result = ctx.walkie.robot.arm.left.gripper(0, blocking=False)  # close the gripper after releasing the bag, so it's not just hanging open while following
+            print(result)
         except Exception as exc:
             print(f"[HRI] bag release failed ({exc})")
         ctx.data["has_bag"] = False
@@ -842,6 +848,23 @@ class TestMoveBase(SubTask):
         time.sleep(1)
         move_base_relative(ctx, -0.5)
         return StepResult.DONE
+
+
+
+class TestPlaceBag(SubTask):
+    def run(self, ctx: TaskContext) -> StepResult:
+        result = ctx.walkie.robot.arm.right.go_to_home(pose_name="standby", blocking=False)  # get the arm out of the way for better nav while following
+        print(result)
+        result = ctx.walkie.robot.arm.go_to_pose(0.45, 0.16, 1.15, -0.8, 0, -1.57, group_name="left_arm", blocking=True)
+        print(result)
+        result = ctx.walkie.robot.arm.left.go_to_pose([0.38, 0.16, 0.5299], [-2.6230, -0.0326, -1.4681], blocking=True)
+        print(result)
+        result = ctx.walkie.robot.arm.left.gripper(1.0)  # open: release the bag
+        print(result)
+        result = ctx.walkie.robot.arm.go_to_home(group_name="both_arms_lift", blocking=True)  # reset the arm for better nav after releasing the bag
+        print(result)
+        result = ctx.walkie.robot.arm.left.gripper(0, blocking=False)  # close the gripper after releasing the bag, so it's not just hanging open while following
+        print(result)
 
 
 def build_hri_task(ctx: TaskContext) -> Task:
