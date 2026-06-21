@@ -11,6 +11,12 @@ GPSR_INSTRUCTION_POINT_POSE = "2.606,0.321,-0.0844"
 # the shared tasks.skills.request_open_door. Default OFF so dev/practice runs with
 # no door don't block; turn on for the real run.
 GPSR_REQUEST_DOOR = "0"
+# 1 = when a named navigation can't reach its goal, check whether a closed door is
+# blocking the way (depth) and, if so, ask a human to open it and retry
+# (tasks.skills.go_to_through_door). Only asks on a nav FAILURE and not when the
+# path is seen clear, so normal driving is unaffected. Turn OFF (0) if it
+# false-asks at a wall/furniture where nav stalls for non-door reasons.
+GPSR_NAV_DOOR_RETRY = "1"
 # Maximum commands taken in one go (the rulebook issues three).
 GPSR_MAX_COMMANDS = "3"
 # How the operator issues commands: "consecutive" (all at once, enables the
