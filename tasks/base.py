@@ -27,10 +27,13 @@ from langchain_openai import ChatOpenAI
 from PIL import Image
 from pydantic import BaseModel
 
-from client import WalkieAIClient
-from interfaces.walkie_interface import WalkieInterface
-
-if TYPE_CHECKING:  # import-time decoupling: tasks without people memory don't pay for it
+if TYPE_CHECKING:  # import-time decoupling — these are type-only (annotations are
+    # lazy strings under `from __future__ import annotations`), so importing them
+    # at runtime would needlessly pull the hardware stack (interfaces ->
+    # silero_vad -> torch -> CUDA). Keeping them out lets the pure task logic
+    # (parse/ground/dispatch policy, mock-ctx dry runs) import on a GPU-less box.
+    from client import WalkieAIClient
+    from interfaces.walkie_interface import WalkieInterface
     from perception import PeopleStore
 
 

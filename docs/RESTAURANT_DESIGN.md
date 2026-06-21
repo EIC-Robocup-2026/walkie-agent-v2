@@ -339,6 +339,18 @@ RESTAURANT_GAZE_TRACK         # 0 = re-center between utterances, 1 = background
   calibration); background gaze-tracking thread is still future (the MVP re-centers
   between utterances instead).
 
+### Offline test coverage (`tests/test_restaurant_skills.py`)
+
+The pure logic carrying the no-arm tier (~960 pts) now has an in-suite regression
+test (was zero — the `manual_tests/` dry-runs are deliberately uncollected):
+`is_calling` (caller detection, 160), `_dedup_callers` / `exclude_handled` (the
+distinct-customer accounting behind the ">= 2 customers" gate), `_said_no` (order
+confirmation, 320), `_scan_offsets`, `_cxcywh_to_xyxy`, and the manipulation
+geometry `_map_to_base` / `_in_reach`. Enabler: `tasks/base.py` now imports
+`WalkieInterface` / `WalkieAIClient` under `TYPE_CHECKING` (annotations are lazy
+strings), so the pure task logic imports on a GPU-less dev box without pulling
+`silero_vad` → `torch` → CUDA (same decoupling already on `feat/GPSR`).
+
 ### Phase 2 calibration checklist (one ordered on-robot pass)
 Do these with the robot stationary and a clear bench before setting
 `RESTAURANT_ARM_CALIBRATED=1`. Each is a config knob — no code change.
