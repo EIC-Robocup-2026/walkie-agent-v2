@@ -87,6 +87,11 @@ or real poses** · `[ ]` stub / Tier-2 fallback / not implemented.
 - [x] Interleave scheduler (`schedule.py`) + per-command-isolated interleaved executor.
 - [x] Pose-survey tool (`tools/teach_poses.py`): drive-and-capture poses into
       `world.toml`; the in-place TOML writer is pure + offline-tested.
+- [x] Closed-door handling (shared `tasks.skills` door feature): arena entry's
+      `request_open_door` auto-detects open/closed via depth; named navigation
+      (`go_to_named`) routes through `go_to_through_door` so a closed door blocking a
+      goal triggers an ask + retry (gated `GPSR_NAV_DOOR_RETRY`, default ON; depth
+      thresholds + the false-ask risk are on-robot tuning).
 - [x] Offline test suite: 144 GPSR tests (`tests/test_gpsr_*`) + coverage/generator
       LLM gates (the gates also assert render quality now).
 

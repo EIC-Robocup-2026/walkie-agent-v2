@@ -40,6 +40,7 @@ from tasks.skills import (
     cxcywh_to_xyxy,
     face_point,
     follow_person,
+    go_to_through_door,
     lift_bbox_world_xy,
     select_largest_person,
 )
@@ -153,7 +154,13 @@ def go_to_named(
     if pose is None:
         print(f"[gpsr.skill] no pose for {name!r}")
         return False
-    ok = ctx.goto(*pose)
+    # If a closed door blocks the route, ask a human to open it and retry
+    # (go_to_through_door only asks when the way is actually blocked + not seen
+    # open; gate OFF with GPSR_NAV_DOOR_RETRY=0 if it false-asks on the robot).
+    if os.getenv("GPSR_NAV_DOOR_RETRY", "1").lower() in ("1", "true", "yes"):
+        ok = go_to_through_door(ctx, *pose)
+    else:
+        ok = ctx.goto(*pose)
     if ok and state is not None:
         state["at"] = name  # remember so the next step doesn't re-navigate
     return ok

@@ -107,4 +107,12 @@ WALKIE_PREGRASP_OFFSET_M = "0.10"    # pre-grasp standoff (above for top-down, b
 WALKIE_LIFT_HEIGHT_M = "0.15"        # how far to lift after grasping
 WALKIE_CARRY_POSE = "standby"        # go_to_home preset to tuck the arm for nav
 
+[skills]
+# Arena-entry door detection (tasks/skills/door.py is_door_open / door_open_from_depth),
+# the built-in is_open sensor for request_open_door. Reads the depth camera: the door
+# is CLOSED when a near surface fills the central doorway region. CALIBRATE on-robot.
+WALKIE_DOOR_CLEAR_M = "1.2"           # median depth (m) below this in the centre = closed
+WALKIE_DOOR_CENTER_FRAC = "0.4"      # central fraction of the frame to inspect (the doorway)
+WALKIE_DOOR_MIN_VALID_FRAC = "0.5"   # min fraction of valid depth pixels to trust a "closed"
+
 WALKIE_MIC_DEBUG_DIR = "mic_recording"
