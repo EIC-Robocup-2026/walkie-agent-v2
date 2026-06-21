@@ -8,30 +8,90 @@
 # relative start reference, not an absolute map waypoint. Mapping in advance is a
 # disqualification (rulebook 5.5).
 
-# Robot-wide grasp/arm knobs (WALKIE_ARM, WALKIE_GRASP_*, WALKIE_CARRY_POSE, ...)
-# used by collect/serve live in the ROOT config.toml [manipulation] block.
-
 [restaurant]
-# Relative start reference "x,y,heading_rad" (robot starts next to the kitchen-bar
-# facing the dining area). Not an arena waypoint — online nav must take over.
+# Kitchen-bar start pose "x,y,heading_rad". Captured as the bar anchor at GoToStart;
+# later phases re-acquire the bar/barman visually on return (design doc §5.1).
 RESTAURANT_KITCHEN_BAR_POSE = "0.0,0.0,0.0"
-# Horizontal FOV (deg) for the pixel->heading fallback when the depth lift fails.
+# Horizontal FOV (deg) of the camera (pixel<->bearing conversions).
 RESTAURANT_CAMERA_HFOV_DEG = "110"
 # How many customers to serve (rulebook scores up to two; tables >= 5 exist).
 RESTAURANT_TARGET_CUSTOMERS = "2"
 # Extra detect attempts beyond the target before giving up (no caller in view).
 RESTAURANT_EXTRA_ATTEMPTS = "3"
+# 1 = run only the Phase 0 slice (GoToStart -> scan -> approach) for on-robot bring-up.
+RESTAURANT_PHASE0 = "0"
 
-# Min keypoint confidence for the raised-wrist wave gesture.
-RESTAURANT_WAVE_CONF = "0.3"
-# How far (m) short of the customer to stop when approaching their table.
-RESTAURANT_APPROACH_DISTANCE_M = "0.8"
-# Open-vocab detector prompts for the items on the kitchen-bar (the ordered item
-# name is prepended automatically). Edible/drinkable standard objects.
-RESTAURANT_BAR_CLASSES = "can,bottle,cup,snack,fruit,box,bag"
-# Arm-frame place pose "x,y,z,roll,pitch,yaw" to set an item on the customer's
-# table. Empty -> open the gripper to drop in front. CALIBRATE on the robot.
-RESTAURANT_SERVE_POSE = ""
-# 1 = use an unattached tray to transport orders (optional goal). Not implemented
-# yet — when set, the robot logs a note and serves items individually instead.
+# --- Phase 0: caller detection + approach -----------------------------------
+# Base-rotation sweep that searches the dining area for a waving customer
+# (the head only tilts, so looking around is an in-place base rotation).
+RESTAURANT_SCAN_ARC_DEG = "120"      # total arc swept, centered on entry heading
+RESTAURANT_SCAN_STEP_DEG = "30"      # rotation between snapshots within the arc
+RESTAURANT_SCAN_SETTLE_SEC = "0.8"   # settle time after each rotation before capture
+# is_calling: a wrist must sit above its shoulder by this fraction of the person's
+# bbox height (rejects an arm resting near shoulder level); keypoint conf floor.
+RESTAURANT_CALL_WRIST_MARGIN = "0.05"
+RESTAURANT_KP_CONF = "0.3"
+# Merge callers whose lifted map points are within this distance (same person).
+RESTAURANT_CALLER_DEDUP_M = "0.6"
+# Stop this far in front of the customer/table (conversational + public-space safe).
+RESTAURANT_STANDOFF_M = "0.8"
+# Conservative approach speed for the public venue — a Nav2/robot-side param;
+# recorded here for that tuning (go_to does not cap velocity itself).
+RESTAURANT_APPROACH_SPEED = "0.3"
+
+# --- Phase 1: re-acquire on return (anti-drift, design §5.1) -----------------
+# When returning to a customer, accept a re-detected person within this distance
+# of the stored point as "the same customer" (else keep the stored point).
+RESTAURANT_REACQUIRE_RADIUS_M = "1.5"
+# When back at the bar, treat a person within this distance of the anchor as the barman.
+RESTAURANT_BARMAN_RADIUS_M = "2.5"
+# Treat a fresh caller within this distance of a customer we already took an order
+# from as the SAME person, and skip them — so a still-waving customer isn't served
+# twice (the loop needs >= 2 DISTINCT customers, rulebook 5.5). Set between the
+# caller-dedup radius (0.6) and the typical table spacing so two real customers at
+# separate tables stay distinct.
+RESTAURANT_HANDLED_RADIUS_M = "1.0"
+# Give up on a spot after this many failed attempts (approach refused, or order
+# never parsed in venue noise) so one uncooperative caller can't monopolize every
+# attempt while a second waving customer is never reached. < this = transient retry.
+RESTAURANT_MAX_FAILS_PER_SPOT = "2"
+
+# --- Phase 2: manipulation (CALIBRATION-READY, NOT VALIDATED) ----------------
+# MASTER SAFETY GATE. 0 = pick/serve compute + log the target pose but DO NOT move
+# the arm (fail-safe). Set to 1 only AFTER the on-robot calibration pass below —
+# untested arm motion in a public venue is dangerous (contact = e-stop).
+RESTAURANT_ARM_CALIBRATED = "0"
+# MoveIt groups (confirm names on the robot).
+RESTAURANT_ARM_GROUP = "right_arm"
+RESTAURANT_GRIPPER_GROUP = "right_gripper"
+# Gripper opening in meters (0.0 closed .. 0.04 open) — calibrate to the objects.
+RESTAURANT_GRIPPER_OPEN_M = "0.04"
+RESTAURANT_GRIPPER_CLOSED_M = "0.0"
+# Grasp orientation roll,pitch,yaw (rad). Default = top-down (pitch 90deg). CALIBRATE.
+RESTAURANT_GRASP_RPY = "0,1.5708,0"
+# Pre-grasp clearance above the object (m), before descending to grasp.
+RESTAURANT_PREGRASP_DZ = "0.10"
+# map->base z offset (m): map z-origin vs. floor. ON-ROBOT VERIFY #1. CALIBRATE.
+RESTAURANT_Z_OFFSET = "0.0"
+# Torso lift (normalized 0..1) while picking from the bar / carrying. CALIBRATE.
+RESTAURANT_LIFT_PICK = "0.5"
+RESTAURANT_LIFT_CARRY = "0.5"
+# Where to place a served item, in the base frame "x_fwd,y_left,z_up" (m). CALIBRATE.
+RESTAURANT_PLACE_OFFSET = "0.55,0.0,0.80"
+# Arm reach envelope in the base frame (m) — a target outside this is rejected
+# ("needs base reposition") instead of commanded. CALIBRATE to the real arm.
+RESTAURANT_REACH_X_MIN = "0.20"
+RESTAURANT_REACH_X_MAX = "0.85"
+RESTAURANT_REACH_Y_MIN = "-0.55"
+RESTAURANT_REACH_Y_MAX = "0.55"
+RESTAURANT_REACH_Z_MIN = "0.0"
+RESTAURANT_REACH_Z_MAX = "1.30"
+
+# --- Phase 3: scheduling + bonus --------------------------------------------
+# 1 = batched order-taking: take several nearby orders in one sweep before
+# delivering (rulebook allows it; trims walking within the 15-min limit).
+RESTAURANT_BATCH = "0"
+RESTAURANT_BATCH_SIZE = "2"
+# 1 = use an unattached tray to transport orders (optional bonus, 2x200 pts).
+# Bimanual + uncalibrated -> currently a logged no-move stub (transport_with_tray).
 RESTAURANT_USE_TRAY = "0"
