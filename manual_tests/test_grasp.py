@@ -23,6 +23,8 @@ from dotenv import load_dotenv
 
 from client import WalkieAIClient
 
+from walkie_config import load_config
+
 ZENOH_PORT = 7447
 ROBOT_IP = "127.0.0.1"
 
@@ -36,12 +38,13 @@ def _print_grasps(grasps) -> None:
         return
     print(f"{len(grasps)} grasp(s) (best first):")
     for i, g in enumerate(grasps[:10]):
-        anti = "" if g.antipodal_score is None else f" antipodal={g.antipodal_score:.2f}"
-        tx, ty, tz = g.translation
-        print(
-            f"  [{i}] pos=({tx:+.3f}, {ty:+.3f}, {tz:+.3f}) "
-            f"score={g.score:.3f} width={g.width * 100:.1f}cm{anti}"
-        )
+        print(g)
+        # anti = "" if g.antipodal_score is None else f" antipodal={g.antipodal_score:.2f}"
+        # tx, ty, tz = g.translation
+        # print(
+        #     f"  [{i}] pos=({tx:+.3f}, {ty:+.3f}, {tz:+.3f}) "
+        #     f"score={g.score:.3f} width={g.width * 100:.1f}cm{anti}"
+        # )
 
 
 def _synthetic_box_cloud() -> np.ndarray:
@@ -75,38 +78,41 @@ def run_robot(walkieAI: WalkieAIClient) -> None:
     walkie = WalkieInterface(robot)
     print("Robot + AI client initialized")
 
-    snap = CameraSnapshot.capture(walkie, log=print)
-    if snap is None or not snap.has_geometry:
-        print("No snapshot geometry (depth/pose/intrinsics) — is the ZED running?")
-        return
+    for _ in range(100):
 
-    detections = walkieAI.image.detect(snap.img, prompts=PROMPTS, return_mask=True)
-    detections = [d for d in detections if d.mask is not None]
-    if not detections:
-        print("No masked detections in view.")
-        return
-    det = detections[0]
-    print(f"Grasping '{det.class_name}' (conf={det.confidence}) bbox={tuple(det.bbox)}")
+        snap = CameraSnapshot.capture(walkie, log=print)
+        if snap is None or not snap.has_geometry:
+            print("No snapshot geometry (depth/pose/intrinsics) — is the ZED running?")
+            continue
 
-    # Lift the mask to a camera-optical cloud (what GraspNet expects).
-    cloud = snap.mask_to_points(det.mask, frame="optical")
-    print(f"Lifted {cloud.shape[0]} optical-frame points")
-    if cloud.shape[0] < 50:
-        print("Too few points lifted — object too far / occluded?")
-        return
+        detections = walkieAI.image.detect(snap.img, prompts=["red can"], return_mask=True)
+        detections = [d for d in detections if d.mask is not None]
+        if not detections:
+            print("No masked detections in view.")
+            continue
+        det = detections[0]
+        print(f"Grasping '{det.class_name}' (conf={det.confidence}) bbox={tuple(det.bbox)}")
 
-    grasps = walkieAI.grasp.infer(cloud, antipodal=True, max_grasps=10)
-    _print_grasps(grasps)
+        # Lift the mask to a camera-optical cloud (what GraspNet expects).
+        cloud = snap.mask_to_points(det.mask, voxel= 0.005, frame="optical", erode_px=5)
+        print(f"Lifted {cloud.shape[0]} optical-frame points")
+        if cloud.shape[0] < 50:
+            print("Too few points lifted — object too far / occluded?")
+            continue
 
-    if grasps:
-        # Sanity check: map the top grasp's centre back to the map frame.
-        p_opt = np.asarray(grasps[0].translation, dtype=float)
-        p_map = snap.cam.R @ p_opt + snap.cam.t
-        print(f"Top grasp in map frame: ({p_map[0]:+.3f}, {p_map[1]:+.3f}, {p_map[2]:+.3f})")
+        grasps = walkieAI.grasp.infer(cloud, antipodal=True, max_grasps=1)
+        _print_grasps(grasps)
+
+        if grasps:
+            # Sanity check: map the top grasp's centre back to the map frame.
+            p_opt = np.asarray(grasps[0].translation, dtype=float)
+            p_map = snap.cam.R @ p_opt + snap.cam.t
+            print(f"Top grasp in map frame: ({p_map[0]:+.3f}, {p_map[1]:+.3f}, {p_map[2]:+.3f})")
 
 
 def main() -> None:
     load_dotenv()
+    load_config()
     mode = os.getenv("WALKIE_GRASP_TEST_MODE", "offline").strip().lower()
     walkieAI = WalkieAIClient(
         base_url=os.getenv("WALKIE_AI_BASE_URL", "http://localhost:5000"),

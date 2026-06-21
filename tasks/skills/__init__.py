@@ -38,6 +38,7 @@ from .seating import (
     split_seat_regions,
 )
 from .door import request_open_door
+from .grasp import GraspCandidate, grasp_object
 from .navigation import (
     MotionPredictor,
     approach_point,
@@ -63,6 +64,8 @@ from .people import (
 __all__ = [
     "CommandListener",
     "request_open_door",
+    "GraspCandidate",
+    "grasp_object",
     "BBox",
     "cxcywh_to_xyxy",
     "overlap_fraction",
