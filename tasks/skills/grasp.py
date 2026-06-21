@@ -68,6 +68,7 @@ def grasp_object(
     min_points: int = 50,
     antipodal: bool = True,
     approach_preference: str = "none",
+    approach_weight: float | None = None,
 ) -> GraspCandidate | None:
     """Best-of-N grasp for the first object matching *prompts*, in the map frame.
 
@@ -93,6 +94,9 @@ def grasp_object(
             GraspNet's ranking untouched. The "up" reference is derived
             automatically from each snapshot's pose (the map frame's +Z gravity axis,
             expressed in the cloud's optical frame), so the caller need not supply it.
+        approach_weight: How strongly the preference outranks GraspNet's own score
+            (server default ~1.0; higher favours the preferred approach harder). Only
+            used when ``approach_preference`` is set; ``None`` keeps the server default.
 
     Returns:
         The winning :class:`GraspCandidate` (with ``grasp_xyz`` and
@@ -127,6 +131,8 @@ def grasp_object(
             # side/top approaches against gravity.
             infer_kwargs["approach_preference"] = approach_preference
             infer_kwargs["up"] = snap.cam.R.T @ np.array([0.0, 0.0, 1.0])
+            if approach_weight is not None:
+                infer_kwargs["approach_weight"] = approach_weight
         grasps = ctx.walkieAI.grasp.infer(cloud, **infer_kwargs)
         if not grasps:
             print(f"[grasp] {tag}: GraspNet returned nothing")
