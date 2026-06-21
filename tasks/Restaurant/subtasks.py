@@ -29,7 +29,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from tasks.base import StepResult, SubTask, Task, TaskContext
-from tasks.skills import grasp_object
+from tasks.skills import get_object_grasp_pos
 
 from . import prompts
 from .skills import (
@@ -310,7 +310,7 @@ class TestTask(SubTask):
         if ee:  # also show the arm's actual current EE pose, to eyeball the gap to target
             R_ee = Rotation.from_quat([ee["qx"], ee["qy"], ee["qz"], ee["qw"]]).as_matrix()
             ctx.viz.axes("grasp/ee_actual", (ee["x"], ee["y"], ee["z"]), rotation=R_ee, length=0.08)
-        grasp_pos = grasp_object(ctx, prompts=["red can"], standoff_m=0.2, approach_preference="side")
+        grasp_pos = get_object_grasp_pos(ctx, prompts=["bottle"], standoff_m=0.2, approach_preference="side", approach_weight=2.0)
         if grasp_pos is None:
             print("[test] no grasp found")
             return StepResult.RETRY
@@ -332,11 +332,21 @@ class TestTask(SubTask):
         # RPY euler radians, so convert. frame_id="map" because the pose is map-frame.
         roll, pitch, yaw = Rotation.from_matrix(grasp_pos.rotation).as_euler("xyz")
         print(f"[test] grasp RPY (rad): {roll:.2f}, {pitch:.2f}, {yaw:.2f}")
+        # Disable collision for gripper
+        ctx.walkie.arm.toggle_gripper_collision("left_gripper", False)
+        result = ctx.walkie.arm.go_to_pose(
+            *grasp_pos.pregrasp_xyz, roll, pitch, yaw,
+            group_name="left_arm", frame_id="map", blocking=True,
+        )
+        print(result)
         result = ctx.walkie.arm.go_to_pose(
             *grasp_pos.grasp_xyz, roll, pitch, yaw,
             group_name="left_arm", frame_id="map", blocking=True,
         )
         print(result)
+        ctx.walkie.arm.left.gripper(0.0)  # close
+        ctx.walkie.arm.go_to_home(group_name="left_arm", pose_name="hands_up")
+        ctx.walkie.arm.toggle_gripper_collision("left_gripper", True)
         while True:
             pass
         return StepResult.DONE

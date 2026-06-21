@@ -25,7 +25,7 @@ from scipy.spatial.transform import Rotation
 from client import WalkieAIClient
 from tasks.base import StepResult, SubTask, TaskContext
 from tasks.common import initialize_robot, load_task_config
-from tasks.skills import grasp_object
+from tasks.skills import get_object_grasp_pos
 
 
 class TestTask(SubTask):
@@ -41,7 +41,7 @@ class TestTask(SubTask):
         # print("[test] running test subtask")
         ctx.walkie.arm.left.gripper(1.0, blocking=True)  # open
         ctx.walkie.arm.left.go_to_home(pose_name="standby", blocking=False)
-        grasp_pos = grasp_object(ctx, prompts=[self.target], standoff_m=0.2)
+        grasp_pos = get_object_grasp_pos(ctx, prompts=[self.target], standoff_m=0.2)
         if grasp_pos is None:
             print("[test] no grasp found")
             return StepResult.RETRY

@@ -57,7 +57,7 @@ def _to_map_frame(snap, g, standoff_m: float) -> GraspCandidate:
     )
 
 
-def grasp_object(
+def get_object_grasp_pos(
     ctx: TaskContext,
     prompts: list[str],
     *,
@@ -66,15 +66,17 @@ def grasp_object(
     voxel: float = 0.005,
     erode_px: int = 5,
     min_points: int = 50,
+    min_confidence: float = 0.3,
     antipodal: bool = True,
     approach_preference: str = "none",
     approach_weight: float | None = None,
 ) -> GraspCandidate | None:
-    """Best-of-N grasp for the first object matching *prompts*, in the map frame.
+    """Best-of-N grasp for the nearest object matching *prompts*, in the map frame.
 
     Captures up to *attempts* snapshots; on each it runs masked open-vocab
-    detection for *prompts*, lifts the top detection's mask to a camera-optical
-    cloud, and asks GraspNet for the single best grasp. The highest-scoring grasp
+    detection for *prompts*, drops detections below *min_confidence*, lifts the
+    **nearest** surviving detection's mask to a camera-optical cloud, and asks
+    GraspNet for the single best grasp. The highest-scoring grasp
     across all attempts wins, mapped to the map frame against the geometry of the
     very snapshot it came from (accurate even after detection/GraspNet latency).
 
@@ -85,7 +87,10 @@ def grasp_object(
         standoff_m: Pre-grasp back-off distance along the approach axis (metres).
         voxel: Voxel-downsample size for the lifted object cloud (metres).
         erode_px: Mask erosion before lifting, to shed rim/background pixels.
-        min_points: Skip an attempt whose lifted cloud is smaller than this.
+        min_points: Skip a detection whose lifted cloud is smaller than this.
+        min_confidence: Drop detections whose detector confidence is below this
+            (detections with no confidence reported are kept). Among the survivors,
+            the one closest to the camera is grasped.
         antipodal: Run GraspNet's antipodal surface-normal validation.
         approach_preference: Bias grasp selection by approach direction relative to
             gravity: ``"side"`` favours horizontal approaches (e.g. grabbing a can
@@ -113,15 +118,31 @@ def grasp_object(
             continue
 
         detections = ctx.walkieAI.image.detect(snap.img, prompts=prompts, return_mask=True)
-        detections = [d for d in detections if d.mask is not None]
+        detections = [
+            d for d in detections
+            if d.mask is not None
+            and (d.confidence is None or d.confidence >= min_confidence)
+        ]
         if not detections:
-            print(f"[grasp] {tag}: no masked detections for {prompts}")
+            print(f"[grasp] {tag}: no masked detections for {prompts} "
+                  f"(confidence >= {min_confidence})")
             continue
-        det = detections[0]
 
-        cloud = snap.mask_to_points(det.mask, voxel=voxel, frame="optical", erode_px=erode_px)
-        if cloud.shape[0] < min_points:
-            print(f"[grasp] {tag}: only {cloud.shape[0]} pts lifted — too far/occluded?")
+        # Lift every surviving detection and keep the one closest to the camera.
+        # The cloud is in the optical frame (camera at the origin, looking down
+        # +Z), so the median point range is the object's distance; the nearest is
+        # easiest to reach and least likely to be a far-away false positive.
+        cloud: np.ndarray | None = None
+        nearest_range = float("inf")
+        for det in detections:
+            pts = snap.mask_to_points(det.mask, voxel=voxel, frame="optical", erode_px=erode_px)
+            if pts.shape[0] < min_points:
+                continue
+            rng = float(np.median(np.linalg.norm(pts, axis=1)))
+            if rng < nearest_range:
+                nearest_range, cloud = rng, pts
+        if cloud is None:
+            print(f"[grasp] {tag}: no detection lifted >= {min_points} pts — too far/occluded?")
             continue
 
         infer_kwargs: dict = {"antipodal": antipodal, "max_grasps": 1}
