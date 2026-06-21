@@ -310,7 +310,7 @@ class TestTask(SubTask):
         if ee:  # also show the arm's actual current EE pose, to eyeball the gap to target
             R_ee = Rotation.from_quat([ee["qx"], ee["qy"], ee["qz"], ee["qw"]]).as_matrix()
             ctx.viz.axes("grasp/ee_actual", (ee["x"], ee["y"], ee["z"]), rotation=R_ee, length=0.08)
-        grasp_pos = grasp_object(ctx, prompts=["red can"], standoff_m=0.2)
+        grasp_pos = grasp_object(ctx, prompts=["red can"], standoff_m=0.2, approach_preference="side")
         if grasp_pos is None:
             print("[test] no grasp found")
             return StepResult.RETRY

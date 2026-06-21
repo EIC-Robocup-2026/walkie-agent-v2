@@ -5,7 +5,7 @@ which is what keeps it in-distribution. This skill maps the winning grasp back t
 the **map frame** using the snapshot's frozen capture-time pose, so callers get a
 map-frame grasp point (and a backed-off pre-grasp point) ready to hand to the arm.
 
-    cand = grasp_object(ctx, ["red can"], attempts=5)
+    cand = grasp_object(ctx, ["red can"], attempts=5, approach_preference="side")
     if cand:
         ctx.goto_pregrasp(cand.pregrasp_xyz)   # caller's arm/nav logic
         ...
@@ -67,6 +67,7 @@ def grasp_object(
     erode_px: int = 5,
     min_points: int = 50,
     antipodal: bool = True,
+    approach_preference: str = "none",
 ) -> GraspCandidate | None:
     """Best-of-N grasp for the first object matching *prompts*, in the map frame.
 
@@ -85,6 +86,13 @@ def grasp_object(
         erode_px: Mask erosion before lifting, to shed rim/background pixels.
         min_points: Skip an attempt whose lifted cloud is smaller than this.
         antipodal: Run GraspNet's antipodal surface-normal validation.
+        approach_preference: Bias grasp selection by approach direction relative to
+            gravity: ``"side"`` favours horizontal approaches (e.g. grabbing a can
+            around its side under a high fixed camera), ``"top"`` favours approaches
+            pointing straight down (e.g. a spoon lying flat), ``"none"`` leaves
+            GraspNet's ranking untouched. The "up" reference is derived
+            automatically from each snapshot's pose (the map frame's +Z gravity axis,
+            expressed in the cloud's optical frame), so the caller need not supply it.
 
     Returns:
         The winning :class:`GraspCandidate` (with ``grasp_xyz`` and
@@ -112,7 +120,14 @@ def grasp_object(
             print(f"[grasp] {tag}: only {cloud.shape[0]} pts lifted — too far/occluded?")
             continue
 
-        grasps = ctx.walkieAI.grasp.infer(cloud, antipodal=antipodal, max_grasps=1)
+        infer_kwargs: dict = {"antipodal": antipodal, "max_grasps": 1}
+        if approach_preference != "none":
+            # World-up = the map frame's +Z (gravity) axis, expressed in the
+            # camera-optical frame the cloud lives in, so the server can bias
+            # side/top approaches against gravity.
+            infer_kwargs["approach_preference"] = approach_preference
+            infer_kwargs["up"] = snap.cam.R.T @ np.array([0.0, 0.0, 1.0])
+        grasps = ctx.walkieAI.grasp.infer(cloud, **infer_kwargs)
         if not grasps:
             print(f"[grasp] {tag}: GraspNet returned nothing")
             continue
