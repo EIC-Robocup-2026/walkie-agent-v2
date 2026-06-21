@@ -78,6 +78,29 @@ GPSR_PERSON_SCAN_SETTLE_SEC = "0.7"
 # person is double-counted across stops.
 GPSR_COUNT_SCAN_STEPS = "6"
 GPSR_COUNT_DEDUP_M = "0.4"
+# Minimum detector confidence for an object detection to count (tasks/GPSR/skills.py
+# _detect, applied to find_object / count-objects / get_object_property). Open-vocab
+# detectors emit low-confidence boxes even for an absent class; with no floor those
+# inflate the object count (len(dets)) and let find_object claim a false "found".
+# 0 = keep every detection (behaviour-preserving default). Tune UP on the robot
+# (e.g. 0.3) once the real detector's score distribution is known — too high drops
+# true objects (count too low / false "not found"), too low keeps the noise.
+GPSR_DETECT_CONF_MIN = "0"
+# Object counting (count-objects, tasks/GPSR/skills.py _count_objects_stable):
+# objects on a placement are static, so instead of one forward frame the robot
+# re-shoots the same view FRAMES times and reports the per-frame MEDIAN detection
+# count — robust to the open-vocab detector flickering a spurious/dropped box on
+# any single frame. SETTLE_SEC is the pause between re-shoots. FRAMES=1 reproduces
+# the old single-shot behaviour; 3 is a cheap, robust default.
+GPSR_COUNT_OBJ_FRAMES = "3"
+GPSR_COUNT_OBJ_SETTLE_SEC = "0.2"
+# Grounding fuzzy fallback (tasks/GPSR/world.py _lookup): when an exact alias
+# lookup misses, accept the closest vocab entry whose difflib ratio clears this
+# cutoff — recovers an STT/LLM near-miss ("kitchen tabel" -> kitchen_table) that
+# would otherwise be an ungrounded gap (lost plan + command). Only consulted on a
+# miss, so it never overrides a correct exact match. 0 disables (exact-only).
+# Raise toward 0.9 if it mis-corrects a genuinely-absent noun to a similar one.
+GPSR_GROUNDING_FUZZY_CUTOFF = "0.8"
 # follow/guide tracking (tasks/GPSR/tracking.py): how close (m) the robot must get
 # to a "follow me to X" destination before the ArrivalStopper ends the follow, and
 # how often (s) it polls the robot pose.

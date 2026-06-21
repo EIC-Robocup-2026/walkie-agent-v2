@@ -52,12 +52,40 @@ from .world import WorldModel
 
 # --- low-level helpers ------------------------------------------------------
 
+def _conf_floor() -> float:
+    """Minimum detector confidence for an object detection to count (0 = keep all).
+
+    Open-vocab detectors emit low-confidence boxes even for an absent class; with
+    no floor those inflate ``count`` (which is ``len(dets)``) and let
+    ``find_object`` call a spurious box a "found" object. The floor drops them.
+    Default 0 reproduces the pre-gate behaviour exactly — the useful value is a
+    robot-tuning question (try ~0.3 once the real detector's score distribution is
+    known), so it ships off by default and is set per-arena like the other knobs.
+    """
+    try:
+        return float(os.getenv("GPSR_DETECT_CONF_MIN", "0") or 0)
+    except ValueError:
+        return 0.0
+
+
+def _above_floor(dets, floor: float):
+    """Keep only detections at/above the confidence floor (missing conf -> 0).
+
+    Pure (no robot/LLM) so it is unit-tested directly. ``floor <= 0`` is a no-op
+    short-circuit that returns every detection — the default, behaviour-preserving
+    path."""
+    if floor <= 0:
+        return list(dets)
+    return [d for d in dets if (getattr(d, "confidence", None) or 0.0) >= floor]
+
+
 def _detect(ctx: TaskContext, img, classes: list[str], *, return_mask: bool = False):
     try:
-        return ctx.walkieAI.image.detect(img, prompts=classes, return_mask=return_mask)
+        dets = ctx.walkieAI.image.detect(img, prompts=classes, return_mask=return_mask)
     except Exception as exc:
         print(f"[gpsr.skill] object detection failed ({exc})")
         return []
+    return _above_floor(dets, _conf_floor())
 
 
 def _people(ctx: TaskContext, img):
@@ -143,6 +171,70 @@ def _object_classes(obj: str | None, category: str | None, world: WorldModel) ->
 def _crop(img, bbox_xyxy):
     x1, y1, x2, y2 = (int(v) for v in bbox_xyxy)
     return img.crop((max(0, x1), max(0, y1), min(img.width, x2), min(img.height, y2)))
+
+
+# --- counting / measurement helpers (pure -> unit-tested) -------------------
+
+def _median_count(counts: list[int]) -> int:
+    """Median of per-frame detection counts, rounded to int. The open-vocab
+    detector flickers a spurious/dropped box frame to frame, so a single-shot
+    ``len(dets)`` over- or under-counts; the median across a few frames is robust
+    to one bad frame. Empty -> 0."""
+    if not counts:
+        return 0
+    s = sorted(counts)
+    mid = len(s) // 2
+    if len(s) % 2:
+        return s[mid]
+    return round((s[mid - 1] + s[mid]) / 2)
+
+
+def _count_objects_stable(ctx: TaskContext, classes: list[str]) -> int | None:
+    """Count detections of *classes* in the current view, stabilized over a few
+    frames at the same heading (objects on a placement are static, so we re-shoot
+    rather than scan). Returns the per-frame median count, or None if not one
+    frame was captured (caller -> Tier-2)."""
+    frames = max(1, int(os.getenv("GPSR_COUNT_OBJ_FRAMES", "3")))
+    settle = float(os.getenv("GPSR_COUNT_OBJ_SETTLE_SEC", "0.2"))
+    counts: list[int] = []
+    for i in range(frames):
+        if i > 0 and settle > 0:
+            time.sleep(settle)
+        snap = ctx.snapshot()
+        if snap is None:
+            continue
+        counts.append(len(_detect(ctx, snap.img, classes)))
+    if not counts:
+        return None
+    return _median_count(counts)
+
+
+_SUPERLATIVE_LARGE = ("biggest", "largest", "heaviest", "thickest", "tallest", "longest")
+_SUPERLATIVE_SMALL = ("smallest", "thinnest", "lightest", "tiniest", "shortest")
+
+
+def _superlative_dir(text: str | None) -> str | None:
+    """'large' for a biggest/largest/... query, 'small' for smallest/thinnest/...,
+    else None. The parser carries the superlative DIRECTION only in the raw clause
+    (the object grounds to a generic placeholder), so the skill reads it from there
+    to pick the right object by image-size."""
+    t = (text or "").lower()
+    if any(w in t for w in _SUPERLATIVE_SMALL):
+        return "small"
+    if any(w in t for w in _SUPERLATIVE_LARGE):
+        return "large"
+    return None
+
+
+def _bbox_area(bbox) -> float:
+    x1, y1, x2, y2 = bbox
+    return max(0.0, x2 - x1) * max(0.0, y2 - y1)
+
+
+def _pick_by_size(dets, direction: str):
+    """The largest ('large') or smallest ('small') detection by image-bbox area —
+    a proxy for physical size when the world has no measurements. Pure -> tested."""
+    return (max if direction == "large" else min)(dets, key=lambda d: _bbox_area(d.bbox))
 
 
 # --- primitives -------------------------------------------------------------
@@ -366,9 +458,9 @@ def _find_person_match(ctx: TaskContext, step: PlanStep):
 
 
 def find_person(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
-    room = step.args.get("room")
-    if room:
-        go_to_named(ctx, room, world, state)
+    where = step.args.get("location") or step.args.get("room")  # room or a beacon
+    if where:
+        go_to_named(ctx, where, world, state)
     snap, bbox = _find_person_match(ctx, step)
     if snap is None:
         return False  # no camera frame -> let Tier-2 try
@@ -443,14 +535,14 @@ def count(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> b
         else:
             ctx.say(f"I count {total} people.")
         return True
-    # Objects sit on a single placement we're already facing -> one forward frame.
-    snap = ctx.snapshot()
-    if snap is None:
-        return False
+    # Objects sit on a single placement we're already facing -> re-shoot the same
+    # view a few times and take the median count (kills detector flicker).
     classes = _object_classes(step.args.get("object"), step.args.get("category"), world) or ["object"]
-    dets = _detect(ctx, snap.img, classes)
+    total = _count_objects_stable(ctx, classes)
+    if total is None:
+        return False  # no camera frame -> Tier-2
     noun = (step.args.get("object") or step.args.get("category") or "objects").replace("_", " ")
-    ctx.say(f"I count {len(dets)} {noun}.")
+    ctx.say(f"I count {total} {noun}.")
     return True
 
 
@@ -476,9 +568,9 @@ def say(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> boo
 
 
 def greet(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
-    room = step.args.get("room")
-    if room:
-        go_to_named(ctx, room, world, state)
+    where = step.args.get("location") or step.args.get("room")  # room or a beacon
+    if where:
+        go_to_named(ctx, where, world, state)
     snap, bbox = _find_person_match(ctx, step)
     if snap is not None and bbox is not None:
         xy = lift_bbox_world_xy(ctx, snap, bbox)
@@ -524,6 +616,25 @@ def get_object_property(ctx: TaskContext, step: PlanStep, world: WorldModel, sta
     snap = ctx.snapshot()
     if snap is None:
         return False
+    # A "biggest/smallest … object on the placement" query: the parser leaves the
+    # object generic (obj is None) and carries the direction in the raw clause.
+    # Detect over all candidate objects, pick by image-size, and NAME the winner
+    # (not a property of an arbitrary box). A concrete named object (obj set) or a
+    # non-size property falls through to the plain describe path.
+    direction = _superlative_dir(step.raw) if which == "size" and not obj else None
+    if direction:
+        classes = [o.replace("_", " ") for o in world.objects] or ["object"]
+        dets = _detect(ctx, snap.img, classes)
+        if not dets:
+            ctx.say("I could not find any objects there.")
+            return True
+        winner = _pick_by_size(dets, direction)
+        word = "largest" if direction == "large" else "smallest"
+        name = _caption(ctx, _crop(snap.img, winner.bbox),
+                        "In two or three words, name the object in this image.")
+        ctx.say(f"The {word} object I see is {name}." if name
+                else f"I see the {word} object but cannot identify it.")
+        return True
     classes = _object_classes(obj, None, world) or ["object"]
     dets = _detect(ctx, snap.img, classes)
     if not dets:
