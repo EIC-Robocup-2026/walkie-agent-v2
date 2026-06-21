@@ -2,14 +2,14 @@
 
 Run on the robot (or a dev PC with WALKIE_ROBOT_IP set) with walkie-ai-server up::
 
-    WALKIE_GRAPHS_VIZ=rerun uv run python -m manual_tests.test_graphs_live
+    WALKIE_VIZ=rerun uv run python -m manual_tests.test_graphs_live
 
 A Rerun viewer shows the accumulating point clouds, per-object boxes, and relation
 edges; the console prints the text description each tick. Set
 WALKIE_GRAPHS_INTERESTED_CLASSES (e.g. "bottle,cup,chair") to scope what's mapped.
 Ctrl+C to stop. This is a manual test (no robot in CI) — guarded by __main__.
 
-To watch from ANOTHER computer on the LAN, add WALKIE_GRAPHS_RERUN_SERVE=1 (the
+To watch from ANOTHER computer on the LAN, add WALKIE_VIZ_SERVE=1 (the
 startup log prints the URL). The servers bind 0.0.0.0, so if a remote machine can't
 connect it's the robot's host firewall — open BOTH ports on the robot, e.g.
 ``sudo ufw allow 9090/tcp && sudo ufw allow 9876/tcp``.
@@ -32,7 +32,7 @@ ZENOH_PORT = 7447
 def test_graphs_live() -> None:
     load_dotenv()
     load_config()
-    os.environ.setdefault("WALKIE_GRAPHS_VIZ", "rerun")
+    os.environ.setdefault("WALKIE_VIZ", "rerun")
 
     robot = WalkieRobot(
         ip=os.getenv("WALKIE_ROBOT_IP", "127.0.0.1"),

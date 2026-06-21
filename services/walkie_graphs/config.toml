@@ -41,35 +41,16 @@ WALKIE_GRAPHS_INTERESTED_CLASSES = "sofa,door,chair,armchair,table,stool,shirt,s
 WALKIE_GRAPHS_EXCLUDE_CLASSES = "person"
 # Classes to caption (server image-caption). Empty = same as interested classes.
 WALKIE_GRAPHS_CAPTION_CLASSES = "shirt"
-# Live 3D visualization backend: none | rerun.
-WALKIE_GRAPHS_VIZ = "rerun"
-# What to draw in the Rerun viewer. Point clouds are always shown.
+# 3D visualization is the shared services/viz session — enable it with WALKIE_VIZ=rerun;
+# the session/serve/reachability knobs (WALKIE_VIZ_SERVE, _WEB_PORT, _HOST, ...) and the
+# robot/camera markers (WALKIE_VIZ_ROBOT/_CAMERA) live in services/viz/config.toml. The
+# old WALKIE_GRAPHS_VIZ / WALKIE_GRAPHS_RERUN_* names are still honored as fallbacks.
+# The keys below only control WHAT the scene-graph layer draws. Point clouds always show.
 WALKIE_GRAPHS_VIZ_BOXES = "0"   # 0 = hide per-object bounding boxes
 # Per-object class-name labels, independent of boxes. With boxes ON the label
 # rides on the box; with boxes OFF the label is anchored to the object centroid.
 WALKIE_GRAPHS_VIZ_LABELS = "1"  # 0 = hide per-object class-name labels
-WALKIE_GRAPHS_VIZ_ROBOT = "1"   # 0 = hide the robot position + heading marker
-WALKIE_GRAPHS_VIZ_CAMERA = "1"  # 0 = hide the camera position + look-direction marker
 WALKIE_GRAPHS_VIZ_BACKGROUND = "1"  # 0 = hide the grey classless background cloud
-# Rerun viewer reachability. 0 = spawn a native window ON THE ROBOT (needs a
-# display, local only). 1 = serve a browser viewer + gRPC data stream bound to
-# 0.0.0.0 so any computer on the LAN can watch (prints the URL on startup).
-#
-# IMPORTANT: serving binds 0.0.0.0, but the robot's HOST FIREWALL (ufw/iptables,
-# usually default-deny incoming — which is why only SSH gets through) will silently
-# DROP these ports, so a remote machine sees a connection *timeout*. Open BOTH ports
-# on the robot (the browser loads the page on WEB_PORT and streams data on
-# GRPC_PORT — both are required):
-#     sudo ufw allow 9090/tcp && sudo ufw allow 9876/tcp
-# (use the actual WEB_PORT/GRPC_PORT below if you change them).
-WALKIE_GRAPHS_RERUN_SERVE = "1"
-WALKIE_GRAPHS_RERUN_WEB_PORT = "8008"
-WALKIE_GRAPHS_RERUN_GRPC_PORT = "9876"
-# Host/IP that REMOTE browsers use to reach the robot (blank = auto-detect LAN IP).
-WALKIE_GRAPHS_RERUN_HOST = ""
-# CORS origins allowed to reach the gRPC data server (the browser page is served on
-# a different port). "*" = allow any — fine on a trusted LAN.
-WALKIE_GRAPHS_RERUN_CORS = "*"
 
 [graphs.camera]
 # Camera calibration + pose come straight from the walkie-sdk — no manual tuning.

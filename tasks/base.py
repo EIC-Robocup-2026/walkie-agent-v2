@@ -35,6 +35,7 @@ if TYPE_CHECKING:  # import-time decoupling — these are type-only (annotations
     from client import WalkieAIClient
     from interfaces.walkie_interface import WalkieInterface
     from perception import PeopleStore
+    from services.viz import VizSession
 
 
 class StepResult(Enum):
@@ -57,6 +58,17 @@ class TaskContext:
     data: dict[str, Any] = field(default_factory=dict)  # cross-step blackboard
     disable_listening: bool = False  # DISABLE_LISTENING: type at a TTY instead of mic
     people: "PeopleStore | None" = None  # face/appearance person memory (optional)
+    viz: "VizSession | None" = None  # shared 3D viz session; auto-filled below
+
+    def __post_init__(self) -> None:
+        # Wire the shared viz session so every subtask can draw via ctx.viz (e.g.
+        # ctx.viz.axes(...) for a grasp triad). Lazy import keeps tasks/base.py
+        # importable on a GPU-less box: get_viz() returns a no-op stub unless
+        # WALKIE_VIZ is enabled, and services.viz imports rerun only when it is.
+        if self.viz is None:
+            from services.viz import get_viz
+
+            self.viz = get_viz()
 
     # --- conversation ---------------------------------------------------
 

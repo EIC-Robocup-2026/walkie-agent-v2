@@ -1,0 +1,39 @@
+# viz module config — loaded by walkie_config.load_config() alongside the root
+# config.toml (same setdefault walk), so precedence is:
+#   shell env > .env > root config.toml > THIS FILE > code default.
+# The keys ARE the exact env-var names; the [viz] table is just grouping.
+
+[viz]
+# Shared 3D visualization service (Rerun). Used by the walkie_graphs perception loop
+# AND by competition tasks (ctx.viz) — one process-global session, drawn into under
+# separate entity paths. Optional: everything runs fine with it disabled.
+
+# Master switch: none | rerun. Disabled by default — set "rerun" to watch the scene
+# graph and/or a task's geometry (e.g. the grasp end-effector triad). Replaces the
+# old WALKIE_GRAPHS_VIZ, which is still honored as a fallback if this is unset.
+WALKIE_VIZ = "none"
+# Recording name shown in the Rerun viewer.
+WALKIE_VIZ_RECORDING = "walkie"
+
+# Viewer reachability. 0 = spawn a native window ON THE ROBOT (needs a display, local
+# only). 1 = serve a browser viewer + gRPC data stream bound to 0.0.0.0 so any computer
+# on the LAN can watch (prints the URL on startup).
+#
+# IMPORTANT: serving binds 0.0.0.0, but the robot's HOST FIREWALL (ufw/iptables, usually
+# default-deny incoming — which is why only SSH gets through) will silently DROP these
+# ports, so a remote machine sees a connection *timeout*. Open BOTH ports on the robot
+# (the browser loads the page on WEB_PORT and streams data on GRPC_PORT — both required):
+#     sudo ufw allow 8008/tcp && sudo ufw allow 9876/tcp
+# (use the actual WEB_PORT/GRPC_PORT below if you change them).
+WALKIE_VIZ_SERVE = "1"
+WALKIE_VIZ_WEB_PORT = "8008"
+WALKIE_VIZ_GRPC_PORT = "9876"
+# Host/IP that REMOTE browsers use to reach the robot (blank = auto-detect LAN IP).
+WALKIE_VIZ_HOST = ""
+# CORS origins allowed to reach the gRPC data server (the browser page is served on a
+# different port). "*" = allow any — fine on a trusted LAN.
+WALKIE_VIZ_CORS = "*"
+
+# Reusable map markers (drawn by any consumer that calls viz.robot()/viz.camera()).
+WALKIE_VIZ_ROBOT = "1"   # 0 = hide the robot position + heading marker
+WALKIE_VIZ_CAMERA = "1"  # 0 = hide the camera position + look-direction marker

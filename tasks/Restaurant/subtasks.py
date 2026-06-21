@@ -25,7 +25,11 @@ import os
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
+import numpy as np
+from scipy.spatial.transform import Rotation
+
 from tasks.base import StepResult, SubTask, Task, TaskContext
+from tasks.skills import grasp_object
 
 from . import prompts
 from .skills import (
@@ -289,6 +293,49 @@ class ServeCustomersBatched(SubTask):
         ctx.say(prompts.ALL_DONE)
         print("[restaurant] batched orders: " + ", ".join(
             f"#{o.id}={o.status.name}({o.items})" for o in orders.values()))
+        return StepResult.DONE
+
+
+class TestTask(SubTask):
+    """A simple test subtask, for quick manual testing of the infrastructure."""
+
+    critical = True
+
+    def run(self, ctx: TaskContext) -> StepResult:
+        # print("[test] running test subtask")
+        ctx.walkie.arm.left.gripper(1.0, blocking=True)  # open
+        ctx.walkie.arm.left.go_to_home(pose_name="standby", blocking=False)
+        grasp_pos = grasp_object(ctx, prompts=["red can"], standoff_m=0.2)
+        if grasp_pos is None:
+            print("[test] no grasp found")
+            return StepResult.RETRY
+        print(f"[test] grasp: {grasp_pos.grasp_xyz} score={grasp_pos.score:.3f}")
+
+        # Visualize the planned grasp in the shared viewer (no-op unless WALKIE_VIZ is
+        # on). Everything is map-frame, so it drops straight into the world: an XYZ
+        # triad at the grasp pose, the backed-off pre-grasp point, and the approach
+        # arrow (pre-grasp -> grasp).
+        ctx.viz.clear("grasp", recursive=True)  # drop the previous attempt's markers
+        ctx.viz.axes("grasp/ee", grasp_pos.grasp_xyz, rotation=grasp_pos.rotation,
+                     length=0.10, labels=True)
+        ctx.viz.points("grasp/pregrasp", [list(grasp_pos.pregrasp_xyz)], radii=[0.02],
+                       colors=[(255, 180, 0)], labels=["pregrasp"])
+        approach = (np.asarray(grasp_pos.grasp_xyz) - np.asarray(grasp_pos.pregrasp_xyz)).tolist()
+        ctx.viz.arrow("grasp/approach", grasp_pos.pregrasp_xyz, approach, color=(255, 180, 0))
+
+        # grasp_pos is in the map frame (positions + 3x3 rotation); the arm wants
+        # RPY euler radians, so convert. frame_id="map" because the pose is map-frame.
+        roll, pitch, yaw = Rotation.from_matrix(grasp_pos.rotation).as_euler("xyz")
+        print(f"[test] grasp RPY (rad): {roll:.2f}, {pitch:.2f}, {yaw:.2f}")
+        ee = ctx.walkie.arm.get_ee_pose("left_arm", frame_id="map")  # warm up the transform cache
+        if ee:  # also show the arm's actual current EE pose, to eyeball the gap to target
+            R_ee = Rotation.from_quat([ee["qx"], ee["qy"], ee["qz"], ee["qw"]]).as_matrix()
+            ctx.viz.axes("grasp/ee_actual", (ee["x"], ee["y"], ee["z"]), rotation=R_ee, length=0.08)
+        result = ctx.walkie.arm.go_to_pose(
+            ee["x"], ee["y"], ee["z"], roll, pitch, yaw,
+            group_name="left_arm", frame_id="map", blocking=True,
+        )
+        print(result)
         return StepResult.DONE
 
 

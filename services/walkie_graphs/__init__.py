@@ -33,7 +33,6 @@ re-exported here as ``walkie_graphs.geometry`` for back-compat),
 
 from __future__ import annotations
 
-import os
 from typing import Optional
 
 from interfaces.devices.camera import CameraSnapshot
@@ -59,16 +58,23 @@ __all__ = [
 
 
 def _build_viz():
-    """Construct the configured visualizer, or None (lazy: rerun is optional)."""
-    backend = os.getenv("WALKIE_GRAPHS_VIZ", "none").lower()
-    if backend in ("", "none"):
-        return None
-    try:
-        from .viz import build_viz
+    """Build the scene-graph renderer over the shared viz session, or None if disabled.
 
-        return build_viz(backend)
+    Returns ``None`` when viz is off so the service skips all viz work (preserving the
+    ``self.viz is None`` fast path); otherwise wraps the process-wide
+    :mod:`services.viz` session in a :class:`~services.walkie_graphs.viz.SceneGraphViz`.
+    """
+    try:
+        from services.viz import NoOpViz, get_viz
+
+        viz = get_viz()
+        if isinstance(viz, NoOpViz):
+            return None
+        from .viz import SceneGraphViz
+
+        return SceneGraphViz(viz)
     except Exception as e:  # noqa: BLE001 — viz is best-effort
-        print(f"[graphs] visualizer '{backend}' unavailable: {e}")
+        print(f"[graphs] visualizer unavailable: {e}")
         return None
 
 
@@ -82,7 +88,9 @@ class WalkieGraphs:
         walkie: :class:`interfaces.walkie_interface.WalkieInterface` for the camera,
             pose, lift, and head tilt.
         memory: Override the store (mainly for tests); built from env otherwise.
-        viz: Override the visualizer; built from ``WALKIE_GRAPHS_VIZ`` otherwise.
+        viz: Override the scene-graph renderer; otherwise a
+            :class:`~services.walkie_graphs.viz.SceneGraphViz` over the shared
+            :mod:`services.viz` session (``None`` when ``WALKIE_VIZ`` is disabled).
         snapshot_path: Where the observer loop writes the live ``perception.json`` snapshot
             the agents read each turn. ``None`` (default) writes no snapshot.
     """
