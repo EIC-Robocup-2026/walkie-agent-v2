@@ -27,9 +27,23 @@ import pytest
 from dotenv import load_dotenv
 
 from tasks.GPSR.parse import parse_command
+from tasks.GPSR.plan import render_plan_speech
 from tasks.GPSR.world import load_world
 
 load_dotenv()
+
+
+def _render_defect(cmd: str, plan) -> str | None:
+    """A COMPLETE plan must also render a clean spoken plan (the scored 300). A
+    degenerate render (empty, the can't-understand fallback, or a leaked raw
+    primitive token — which still carries an underscore where healthy phrases space
+    names) loses it silently even on a good parse. Returns a defect, or None."""
+    speech = render_plan_speech(plan)
+    if not speech or "could not work out a plan" in speech:
+        return f"  ✗ {cmd!r} -> empty/degenerate render: {speech!r}"
+    if "_" in speech:
+        return f"  ✗ {cmd!r} -> render leaks a raw token: {speech!r}"
+    return None
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("OPENROUTER_API_KEY"),
@@ -72,10 +86,13 @@ def test_generator_parser_coverage():
 
     complete = 0
     failures: list[str] = []
+    render_defects: list[str] = []
     for cmd in corpus:
         plan = parse_command(model, cmd, world)
         if plan.is_complete:
             complete += 1
+            if defect := _render_defect(cmd, plan):
+                render_defects.append(defect)
         else:
             gaps = [u for s in plan.steps for u in s.unresolved] or ["no steps"]
             failures.append(
@@ -87,4 +104,7 @@ def test_generator_parser_coverage():
           f"(N={CORPUS_N}, floor {COVERAGE_MIN:.0%})")
     if failures:
         print("Incomplete (Tier-2 tail or real gaps):\n" + "\n".join(failures))
+    # A complete parse that renders a broken plan loses the 300 silently — gate it
+    # independently of the coverage floor.
+    assert not render_defects, "spoken-plan render defects:\n" + "\n".join(render_defects)
     assert coverage >= COVERAGE_MIN, f"coverage {coverage:.0%} below floor {COVERAGE_MIN:.0%}"

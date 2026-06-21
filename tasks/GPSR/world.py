@@ -14,6 +14,7 @@ core of Phase 0.
 
 from __future__ import annotations
 
+import difflib
 import os
 import re
 import tomllib
@@ -21,6 +22,30 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 Pose = tuple[float, float, float]
+
+
+def _fuzzy_cutoff() -> float:
+    """difflib ratio an STT/LLM near-miss must clear to be accepted as a match
+    (GPSR_GROUNDING_FUZZY_CUTOFF, default 0.8). 0 / unparsable disables fuzzy
+    grounding entirely (exact-alias behaviour only)."""
+    try:
+        return float(os.getenv("GPSR_GROUNDING_FUZZY_CUTOFF", "0.8") or 0)
+    except ValueError:
+        return 0.0
+
+
+def _fuzzy_match(key: str, candidates, cutoff: float) -> str | None:
+    """Closest candidate to *key* at/above *cutoff* (difflib ratio), or None.
+
+    Belt-and-suspenders for STT/LLM near-misses ("kitchen tabel" -> kitchen_table,
+    "couch" -> couches) that survive the parser's vocab-grounded extraction and so
+    would otherwise be an ungrounded gap. Only consulted on an exact-lookup miss,
+    so it can never override a correct exact match. ``cutoff <= 0`` disables it.
+    Pure (no robot/LLM/network) -> unit-tested directly."""
+    if not key or cutoff <= 0:
+        return None
+    hits = difflib.get_close_matches(key, list(candidates), n=1, cutoff=cutoff)
+    return hits[0] if hits else None
 
 
 def _norm(s: str) -> str:
@@ -105,7 +130,13 @@ class WorldModel:
         if not text:
             return None
         key = _norm(text)
-        return table.get(key) or table.get(_strip_article(key))
+        hit = table.get(key) or table.get(_strip_article(key))
+        if hit is not None:
+            return hit
+        # Exact-alias miss: fall back to a conservative fuzzy match so a mis-heard
+        # noun ("kitchen tabel") still grounds instead of forfeiting the command.
+        cand = _fuzzy_match(_strip_article(key), table.keys(), _fuzzy_cutoff())
+        return table.get(cand) if cand else None
 
     def room(self, text: str | None) -> str | None:
         return self._lookup(self._room_alias, text)

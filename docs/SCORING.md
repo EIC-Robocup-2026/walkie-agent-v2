@@ -87,7 +87,10 @@ often ~1 manipulation + ~2 non-manipulation.
    that is currently gated; single largest upside.
 2. **Always take all 3 at once** → secures the +200 interleave (validated).
 3. **Tune count dedup** (`GPSR_COUNT_DEDUP_M`) + object-count path → lifts the
-   count/tell categories from 🟡 toward ✅.
+   count/tell categories from 🟡 toward ✅. The object-count path is now
+   median-stabilized over `GPSR_COUNT_OBJ_FRAMES` frames and superlative
+   ("biggest object") queries pick by image-size — both offline-hardened; the
+   remaining lift is on-robot tuning (`GPSR_DETECT_CONF_MIN`, the frame count).
 
 ---
 
