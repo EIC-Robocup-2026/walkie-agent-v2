@@ -72,13 +72,20 @@ class GoToInstructionPoint(SubTask):
     critical = True
 
     def run(self, ctx: TaskContext) -> StepResult:
-        # The arena door may be closed — ask a human to open it before driving in.
-        # Reusable across challenges: tasks.skills.request_open_door.
-        if os.getenv("GPSR_REQUEST_DOOR", "0").lower() in ("1", "true", "yes"):
-            from tasks.skills import request_open_door
-            request_open_door(ctx)
         x, y, h = _pose("GPSR_INSTRUCTION_POINT_POSE")
-        return StepResult.DONE if ctx.goto(x, y, h) else StepResult.RETRY
+        # The arena door may be closed — ask a human to open it before driving in.
+        # Reusable across challenges: tasks.skills.{request_open_door,go_to_through_door}.
+        if os.getenv("GPSR_REQUEST_DOOR", "0").lower() in ("1", "true", "yes"):
+            from tasks.skills import go_to_through_door, request_open_door
+            # Fully-closed door: ask once, then self-watch the depth and walk in the
+            # moment it reads open (no spoken confirmation needed).
+            request_open_door(ctx)
+            # Then drive — and if a *partly*-open door blocks nav (the doorway reads
+            # open but the gap is too narrow), ask for it to be opened wider and retry.
+            reached = go_to_through_door(ctx, x, y, h, ask_even_if_open=True, door_attempts=3)
+        else:
+            reached = ctx.goto(x, y, h)
+        return StepResult.DONE if reached else StepResult.RETRY
 
 
 class ReceiveAndPlanCommands(SubTask):

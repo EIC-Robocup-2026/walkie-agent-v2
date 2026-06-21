@@ -157,8 +157,11 @@ def go_to_named(
     # If a closed door blocks the route, ask a human to open it and retry
     # (go_to_through_door only asks when the way is actually blocked + not seen
     # open; gate OFF with GPSR_NAV_DOOR_RETRY=0 if it false-asks on the robot).
+    # For a place flagged `barrier = true` in world.toml (a door/partition that the
+    # depth check reads as "open" because it can't see a too-narrow gap), ask on the
+    # block even when depth says open — nav success is the real signal.
     if os.getenv("GPSR_NAV_DOOR_RETRY", "1").lower() in ("1", "true", "yes"):
-        ok = go_to_through_door(ctx, *pose)
+        ok = go_to_through_door(ctx, *pose, ask_even_if_open=world.is_barrier(name))
     else:
         ok = ctx.goto(*pose)
     if ok and state is not None:

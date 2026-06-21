@@ -48,6 +48,24 @@ class _CamCtx(_Ctx):
         return type("_S", (), {"depth": _depth(self._depth_value)})()
 
 
+class _SeqCamCtx(_Ctx):
+    """_Ctx whose snapshot() walks a list of depth values (last value repeats).
+
+    A scalar is treated as a one-element list (a fixed depth). Lets a test simulate
+    a door that reads closed for a few polls and then opens.
+    """
+
+    def __init__(self, depth_values, **kw):
+        super().__init__(**kw)
+        self._depths = list(depth_values) if isinstance(depth_values, (list, tuple)) else [depth_values]
+
+    def snapshot(self):
+        value = self._depths.pop(0) if len(self._depths) > 1 else self._depths[0]
+        if value is None:
+            return None
+        return type("_S", (), {"depth": _depth(value)})()
+
+
 def test_confirms_on_spoken_reply():
     ctx = _Ctx(replies=["the door is open now"])
     assert request_open_door(ctx, attempts=3) is True
@@ -137,16 +155,27 @@ def test_request_open_door_detects_open_without_asking():
     assert ctx.listens == 0 and ctx.said == []     # never had to ask
 
 
-def test_request_open_door_asks_when_camera_sees_closed():
-    ctx = _CamCtx(0.6, replies=["it's open now"])  # camera says closed -> ask + confirm
-    assert request_open_door(ctx, attempts=2) is True
-    assert ctx.listens == 1
+def test_request_open_door_polls_until_the_camera_sees_open():
+    # Camera says closed, then opens a few frames later -> walk in, no mic needed.
+    ctx = _SeqCamCtx([0.6, 0.6, 0.6, 2.5])
+    assert request_open_door(ctx, poll_interval=0.0, confirm_reads=1) is True
+    assert ctx.listens == 0                                       # depth-driven, never asked the mic
+    assert any("door appears to be closed" in s.lower() for s in ctx.said)  # asked once
+    assert any("coming in" in s.lower() for s in ctx.said)                  # thanked + proceeding
+
+
+def test_request_open_door_proceeds_after_timeout_if_never_opens():
+    # Door never reads open -> proceed anyway after the wait budget (never stuck).
+    ctx = _CamCtx(0.6)
+    assert request_open_door(ctx, poll_interval=0.0, max_wait=0.02) is False
+    assert ctx.listens == 0
+    assert any("assume the door is open" in s.lower() for s in ctx.said)
 
 
 # --- go_to_through_door: the actual purpose (can't reach -> ask for the door) -
 
-class _NavCtx(_CamCtx):
-    """_CamCtx plus a goto() that returns a canned sequence of results."""
+class _NavCtx(_SeqCamCtx):
+    """_SeqCamCtx plus a goto() that returns a canned sequence of results."""
 
     def __init__(self, depth_value, goto_results, **kw):
         super().__init__(depth_value, **kw)
@@ -158,6 +187,21 @@ class _NavCtx(_CamCtx):
         return self._goto.pop(0) if self._goto else False
 
 
+class _PoseNavCtx(_NavCtx):
+    """_NavCtx plus current_pose() walking a list of (x, y) (last value repeats).
+
+    Lets a test model the robot advancing toward the goal between nav retries.
+    """
+
+    def __init__(self, depth_value, goto_results, poses, **kw):
+        super().__init__(depth_value, goto_results, **kw)
+        self._poses = list(poses)
+
+    def current_pose(self):
+        x, y = self._poses.pop(0) if len(self._poses) > 1 else self._poses[0]
+        return {"x": x, "y": y, "heading": 0.0}
+
+
 def test_reaches_goal_directly_without_touching_the_door():
     ctx = _NavCtx(2.5, goto_results=[True])
     assert go_to_through_door(ctx, 1.0, 2.0, 0.0) is True
@@ -165,10 +209,10 @@ def test_reaches_goal_directly_without_touching_the_door():
 
 
 def test_closed_door_asks_then_retries_and_reaches():
-    # nav fails, depth says closed -> ask a human, then nav succeeds
-    ctx = _NavCtx(0.6, goto_results=[False, True], replies=["it's open now"])
-    assert go_to_through_door(ctx, 1.0, 2.0, 0.0) is True
-    assert ctx.gotos == 2 and ctx.listens == 1
+    # nav fails, depth says closed -> ask a human, watch the door open, then nav succeeds
+    ctx = _NavCtx([0.6, 0.6, 0.6, 2.5], goto_results=[False, True])
+    assert go_to_through_door(ctx, 1.0, 2.0, 0.0, poll_interval=0.0, confirm_reads=1) is True
+    assert ctx.gotos == 2 and ctx.listens == 0          # depth-driven entry, no mic
     assert any("coming in" in s.lower() for s in ctx.said)
 
 
@@ -177,6 +221,39 @@ def test_nav_fails_but_door_is_open_does_not_ask():
     ctx = _NavCtx(2.5, goto_results=[False])
     assert go_to_through_door(ctx, 1.0, 2.0, 0.0) is False
     assert ctx.gotos == 1 and ctx.said == [] and ctx.listens == 0
+
+
+def test_partly_open_door_asks_to_widen_then_reaches():
+    # Doorway READS open (centre clear) but the robot can't fit through the narrow gap
+    # -> with ask_even_if_open (the entry setting) ask for it wider, retry, succeed.
+    ctx = _NavCtx(2.5, goto_results=[False, True])
+    assert go_to_through_door(ctx, 1.0, 2.0, 0.0, ask_even_if_open=True, retry_pause=0.0) is True
+    assert ctx.gotos == 2 and ctx.listens == 0                       # nav success is the signal
+    assert any("all the way" in s.lower() for s in ctx.said)         # asked to open it wider
+
+
+def test_partly_open_door_gives_up_after_attempts():
+    # Gap never widens / nav never fits -> ask a bounded number of times, then fail.
+    ctx = _NavCtx(2.5, goto_results=[False, False, False])
+    assert go_to_through_door(ctx, 1.0, 2.0, 0.0,
+                              ask_even_if_open=True, retry_pause=0.0, door_attempts=2) is False
+    assert ctx.gotos == 3                                            # initial + 2 retries
+    assert sum("all the way" in s.lower() for s in ctx.said) == 2    # one ask per retry round
+
+
+def test_partly_open_door_stops_asking_once_driving_through():
+    # Person opens the door; the robot starts driving through. The transit goto still
+    # FAILs once (costmap clearing), but the robot has clearly advanced toward the goal
+    # -> it must NOT pester the operator again, just retry quietly.
+    ctx = _PoseNavCtx(
+        2.5,                                           # depth reads open the whole time
+        goto_results=[False, False, True],             # stuck, transit-fail, then arrive
+        poses=[(1.0, 0.5), (1.0, 0.5), (1.0, 1.9)],    # far, far (stuck), near (through)
+    )
+    assert go_to_through_door(ctx, 1.0, 2.0, 0.0,
+                              ask_even_if_open=True, retry_pause=0.0, door_attempts=3) is True
+    assert ctx.gotos == 3
+    assert sum("all the way" in s.lower() for s in ctx.said) == 1    # asked ONCE, not on transit
 
 
 def test_cannot_tell_still_asks_when_blocked():

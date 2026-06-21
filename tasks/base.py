@@ -167,14 +167,25 @@ class TaskContext:
     # --- navigation -----------------------------------------------------
 
     def goto(self, x: float, y: float, heading_rad: float) -> bool:
-        """Blocking nav.go_to to a map-frame pose."""
+        """Blocking nav.go_to to a map-frame pose. True only if the goal was reached.
+
+        ``nav.go_to`` reports the outcome as a *status string* ("SUCCEEDED",
+        "CLOSE_ENOUGH", "FAILED", "CANCELED") and only raises on a transport/timeout
+        error — a planning failure ("FAILED", e.g. a closed door blocking the route)
+        comes back as a return value, not an exception. We must inspect it: returning
+        True regardless would mask every nav failure as a success (the door
+        ask-and-retry never fires, the robot "arrives" without moving).
+        """
         _log("ctx", f"goto x={x:.2f} y={y:.2f} heading={math.degrees(heading_rad):.0f}deg")
         try:
-            self.walkie.nav.go_to(x, y, heading_rad, blocking=True)
-            return True
+            status = self.walkie.nav.go_to(x, y, heading_rad, blocking=True)
         except Exception as exc:
             _log("ctx", f"goto failed ({exc})")
             return False
+        reached = str(status).upper() in ("SUCCEEDED", "CLOSE_ENOUGH")
+        if not reached:
+            _log("ctx", f"goto did not reach goal (status={status})")
+        return reached
 
     def current_pose(self) -> dict[str, float]:
         """Robot pose {"x","y","heading"} (radians); zeros if unknown."""

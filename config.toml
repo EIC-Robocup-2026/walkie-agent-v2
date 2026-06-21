@@ -110,9 +110,23 @@ WALKIE_CARRY_POSE = "standby"        # go_to_home preset to tuck the arm for nav
 [skills]
 # Arena-entry door detection (tasks/skills/door.py is_door_open / door_open_from_depth),
 # the built-in is_open sensor for request_open_door. Reads the depth camera: the door
-# is CLOSED when a near surface fills the central doorway region. CALIBRATE on-robot.
-WALKIE_DOOR_CLEAR_M = "1.2"           # median depth (m) below this in the centre = closed
+# is CLOSED when a near surface fills the central doorway region. CALIBRATE on-robot
+# with `uv run python -m manual_tests.calibrate_door`.
+# Robot stands ~0.5 m from the closed door, so the closed reading is ~0.5 m; 0.9 sits
+# above that (robust "closed") and below the clear-arena reading once it opens.
+WALKIE_DOOR_CLEAR_M = "0.9"           # median depth (m) below this in the centre = closed
 WALKIE_DOOR_CENTER_FRAC = "0.4"      # central fraction of the frame to inspect (the doorway)
 WALKIE_DOOR_MIN_VALID_FRAC = "0.5"   # min fraction of valid depth pixels to trust a "closed"
+# request_open_door self-watch: ask once, then poll depth and walk in the moment the
+# door reads clear (no spoken confirmation needed when the camera can see the doorway).
+WALKIE_DOOR_POLL_SEC = "0.5"         # seconds between depth checks while waiting
+WALKIE_DOOR_CONFIRM_READS = "2"      # consecutive open reads before going in (debounce)
+WALKIE_DOOR_REPROMPT_SEC = "15"      # re-ask "please open the door" this often while waiting
+WALKIE_DOOR_WAIT_SEC = "120"         # give up and proceed after this long; <= 0 = wait forever
+# go_to_through_door: a partly-open door reads "open" but blocks nav; ask for it wider
+# and pause this long for the human before retrying the drive (nav success = the signal).
+WALKIE_DOOR_RETRY_PAUSE_SEC = "3"    # seconds to wait after asking, before retrying nav
+WALKIE_DOOR_PROGRESS_EPS_M = "0.3"   # if the robot got >this much closer to goal between retries
+                                     # it's driving THROUGH the door -> retry quietly, don't re-ask
 
 WALKIE_MIC_DEBUG_DIR = "mic_recording"

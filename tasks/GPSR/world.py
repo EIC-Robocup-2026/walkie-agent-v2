@@ -90,6 +90,10 @@ def _singulars(key: str) -> list[str]:
 class Room:
     name: str
     pose: Pose = (0.0, 0.0, 0.0)
+    # A human-operated barrier (door/partition/screen) blocks the route here. The
+    # depth check reads it as "open" (it can't see a too-narrow gap), so navigation
+    # asks for it to be opened on a block — see WorldModel.is_barrier / go_to_named.
+    barrier: bool = False
 
 
 @dataclass(frozen=True)
@@ -99,6 +103,7 @@ class Location:
     placement: bool = False
     category: str | None = None
     pose: Pose = (0.0, 0.0, 0.0)
+    barrier: bool = False  # see Room.barrier
 
 
 @dataclass
@@ -196,6 +201,21 @@ class WorldModel:
         room = self.rooms.get(canonical)
         return room.pose if room is not None else None
 
+    def is_barrier(self, canonical: str | None) -> bool:
+        """True if a human-operated door/partition blocks the route to this place.
+
+        Set ``barrier = true`` on the room/location in world.toml. Navigation then
+        asks for it to be opened on a nav block even when the depth check reads the
+        doorway "open" (it can't see a too-narrow gap) — see go_to_named.
+        """
+        if not canonical:
+            return False
+        loc = self.locations.get(canonical)
+        if loc is not None:
+            return loc.barrier
+        room = self.rooms.get(canonical)
+        return room.barrier if room is not None else False
+
     def vocab_prompt(self) -> str:
         """Compact listing of the arena nouns for the parser's system prompt.
 
@@ -264,7 +284,9 @@ def load_world(
         if not include_absent and not raw.get("present", True):
             continue  # in the template but ABSENT from this arena — drop it entirely
         canonical = _norm(name)
-        wm.rooms[canonical] = Room(name=canonical, pose=_pose_of(raw))
+        wm.rooms[canonical] = Room(
+            name=canonical, pose=_pose_of(raw), barrier=bool(raw.get("barrier", False))
+        )
         for k in _alias_keys(canonical, raw.get("aliases")):
             wm._room_alias[k] = canonical
 
@@ -281,6 +303,7 @@ def load_world(
             placement=bool(raw.get("placement", False)),
             category=_norm(raw["category"]) if raw.get("category") else None,
             pose=_pose_of(raw),
+            barrier=bool(raw.get("barrier", False)),
         )
         for k in _alias_keys(canonical, raw.get("aliases")):
             wm._loc_alias[k] = canonical

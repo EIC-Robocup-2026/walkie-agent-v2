@@ -16,6 +16,10 @@
 # you're running (e.g. a smaller practice room). load_world drops it entirely, so
 # the parser won't ground to it and navigation never drives to its [0,0,0]; a
 # command that references it falls to the Tier-2 agent instead. Default: present.
+#
+# barrier = true  → a human-operated door/partition/screen blocks the route here.
+# Navigation (go_to_named) asks a human to open it on a nav block even when the
+# depth check reads the doorway "open" (it can't see a too-narrow gap). Default off.
 
 # Person names the operator may reference (meet / greet / guide / deliver-to).
 # MUST stay above the first [table] header — a bare key after a table header
@@ -25,7 +29,7 @@ names = ["Adel", "Angel", "Axel", "Charlie", "Jane", "Jules", "Morgan", "Paris",
 [rooms]
 kitchen     = { pose = [0.0, 0.0, 0.0], present = false }
 bedroom     = { pose = [5.526, 2.248, -0.0903] }
-living_room = { pose = [5.378, -1.617, -0.0806], aliases = ["living room", "lounge"] }
+living_room = { pose = [5.378, -1.617, -0.0806], aliases = ["living room", "lounge"], barrier = true }
 office      = { pose = [0.0, 0.0, 0.0], aliases = ["study"], present = false }
 bathroom    = { pose = [0.0, 0.0, 0.0], present = false }
 
