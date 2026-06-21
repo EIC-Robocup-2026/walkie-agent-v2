@@ -86,7 +86,7 @@ PAUSE_AFTER_WALK = "0"
 # points in both the walkie_graphs loop and the HRI/skills snapshot paths.
 # Y is the tilt (up/down) axis on this mount — start there. Calibrate on the real
 # robot: point at a known target, nudge until the lifted point lands on it.
-WALKIE_CAMERA_TILT_OFFSET_X_RAD = "-0.1"
+WALKIE_CAMERA_TILT_OFFSET_X_RAD = "0.0"
 WALKIE_CAMERA_TILT_OFFSET_Y_RAD = "0.0"
 WALKIE_CAMERA_TILT_OFFSET_Z_RAD = "0.0"
 
