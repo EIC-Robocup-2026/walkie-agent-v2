@@ -23,9 +23,24 @@ import pytest
 from dotenv import load_dotenv
 
 from tasks.GPSR.parse import parse_command
+from tasks.GPSR.plan import render_plan_speech
 from tasks.GPSR.world import load_world
 
 load_dotenv()
+
+
+def _render_defect(cmd: str, plan) -> str | None:
+    """A COMPLETE plan must also render a clean spoken plan — that render is the
+    scored 300 ("demonstrate a plan"). A degenerate render (empty, the
+    can't-understand fallback, or a leaked raw primitive token, which still carries
+    an underscore where every healthy phrase spaces names) silently forfeits it
+    even when the parse succeeded. Return a defect string, or None when sane."""
+    speech = render_plan_speech(plan)
+    if not speech or "could not work out a plan" in speech:
+        return f"  ✗ {cmd!r} -> empty/degenerate render: {speech!r}"
+    if "_" in speech:
+        return f"  ✗ {cmd!r} -> render leaks a raw token: {speech!r}"
+    return None
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("OPENROUTER_API_KEY"),
@@ -62,17 +77,26 @@ def _build_model():
 
 
 def test_parser_coverage():
-    world = load_world()
+    # Full CompetitionTemplate vocabulary: the corpus references the whole arena
+    # (kitchen, cabinet, desk, sofa…), most of which is present=false in the
+    # practice world.toml. Coverage measures parser/grounding quality over the
+    # grammar, not which places are physically surveyed — so load the full vocab
+    # (else every present=false noun reads as an ungrounded "miss"). Mirrors the
+    # test_gpsr_parse fixture; the present-flag drop is tested separately there.
+    world = load_world(include_absent=True)
     model = _build_model()
     corpus = _load_corpus()
     assert corpus, "empty corpus"
 
     complete = 0
     failures: list[str] = []
+    render_defects: list[str] = []
     for cmd in corpus:
         plan = parse_command(model, cmd, world)
         if plan.is_complete:
             complete += 1
+            if defect := _render_defect(cmd, plan):
+                render_defects.append(defect)
         else:
             gaps = [u for s in plan.steps for u in s.unresolved] or ["no steps"]
             failures.append(f"  ✗ {cmd!r}\n      steps={[s.primitive.value for s in plan.steps]} gaps={gaps}")
@@ -81,4 +105,7 @@ def test_parser_coverage():
     print(f"\nGPSR parser coverage: {complete}/{len(corpus)} = {coverage:.0%} (min {COVERAGE_MIN:.0%})")
     if failures:
         print("Incomplete:\n" + "\n".join(failures))
+    # A complete parse that renders a broken plan loses the 300 silently — gate it
+    # independently of the coverage threshold.
+    assert not render_defects, "spoken-plan render defects:\n" + "\n".join(render_defects)
     assert coverage >= COVERAGE_MIN, f"coverage {coverage:.0%} below gate {COVERAGE_MIN:.0%}"

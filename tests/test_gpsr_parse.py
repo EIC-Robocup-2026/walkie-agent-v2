@@ -20,7 +20,12 @@ from tasks.GPSR.world import load_world
 
 @pytest.fixture(scope="module")
 def world():
-    return load_world()  # the default world.toml (CompetitionTemplate arena)
+    # Full CompetitionTemplate vocabulary (include_absent=True): these tests check
+    # parser/grounding correctness over the WHOLE grammar, independent of which
+    # places are physically surveyed in the practice arena (world.toml marks the
+    # un-surveyed ones present=false). The present-flag DROP behaviour itself is
+    # covered separately by test_present_false_place_is_dropped with its own world.
+    return load_world(include_absent=True)
 
 
 # --- world model ------------------------------------------------------------
@@ -102,7 +107,7 @@ def test_vocab_prompt_lists_canonical_terms(world):
 
 def _step(primitive, **fields):
     fields.setdefault("raw", primitive)
-    return ground_step(RawStep(primitive=primitive, **fields), load_world())
+    return ground_step(RawStep(primitive=primitive, **fields), load_world(include_absent=True))
 
 
 def test_navigate_grounds_room_and_location():
@@ -136,6 +141,39 @@ def test_find_person_clothing_is_open_vocab():
     assert s.args["kind"] == "clothing"
 
 
+def test_find_person_in_room_grounds_under_room():
+    s = _step("find_person", person="Charlie", descriptor_kind="name", room="the kitchen")
+    assert s.grounded
+    assert s.args.get("room") == "kitchen" and "location" not in s.args
+
+
+def test_find_person_at_beacon_grounds_under_location():
+    # meetPrsAtBeac: "meet Charlie at the sofa" — a beacon, not a room. It must
+    # ground (under 'location'), not forfeit the command.
+    s = _step("find_person", person="Charlie", descriptor_kind="name", room="the sofa")
+    assert s.grounded, s.unresolved
+    assert s.args.get("location") == "sofa" and "room" not in s.args
+
+
+def test_greet_at_beacon_grounds_under_location():
+    s = _step("greet", person="Jane", descriptor_kind="name", room="exit")
+    assert s.grounded, s.unresolved
+    assert s.args.get("location") == "exit"
+
+
+def test_count_persons_at_beacon_grounds():
+    s = _step("count", object="people", room="the sofa")
+    assert s.grounded, s.unresolved
+    assert s.args.get("what") == "persons"
+    assert s.args.get("location") == "sofa"
+
+
+def test_person_where_unknown_place_is_unresolved():
+    s = _step("greet", person="Jane", descriptor_kind="name", room="the dungeon")
+    assert not s.grounded
+    assert ("room", "the dungeon") in s.unresolved
+
+
 def test_unknown_location_is_unresolved():
     s = _step("navigate", location="the dungeon")
     assert not s.grounded
@@ -143,7 +181,7 @@ def test_unknown_location_is_unresolved():
 
 
 def test_unknown_primitive_is_unresolved():
-    s = ground_step(RawStep(primitive="say", info="hi", raw="hi"), load_world())
+    s = ground_step(RawStep(primitive="say", info="hi", raw="hi"), load_world(include_absent=True))
     assert s.grounded  # valid say
     # Force an invalid primitive via the enum path:
     bad = PlanStep(Primitive.SAY, {}, "x", [("primitive", "teleport")])
@@ -177,7 +215,7 @@ def test_superlative_query_object_grounds_as_placement_scoped():
         RawStep(primitive="get_object_property", object="object", which="size", raw="the biggest one"),
         RawStep(primitive="say", info="the biggest object", raw="tell me"),
     ])
-    plan = ground_plan(raw, load_world())
+    plan = ground_plan(raw, load_world(include_absent=True))
     assert plan.is_complete, [u for s in plan.steps for u in s.unresolved]
 
 
@@ -190,7 +228,7 @@ def test_complete_plan_is_complete():
         RawStep(primitive="pick", object="the cola", raw="pick it up"),
         RawStep(primitive="deliver", object="the cola", recipient="me", raw="bring it to me"),
     ])
-    plan = ground_plan(raw, load_world(), source="get me a coke from the kitchen")
+    plan = ground_plan(raw, load_world(include_absent=True), source="get me a coke from the kitchen")
     assert plan.is_complete
     assert plan.grounded_fraction == 1.0
     assert plan.needs_manipulation
@@ -198,7 +236,7 @@ def test_complete_plan_is_complete():
 
 def test_incomplete_plan_flags_gap():
     raw = RawPlan(steps=[RawStep(primitive="navigate", location="the dungeon", raw="go to the dungeon")])
-    plan = ground_plan(raw, load_world())
+    plan = ground_plan(raw, load_world(include_absent=True))
     assert not plan.is_complete
     assert plan.grounded_fraction == 0.0
 
@@ -215,7 +253,7 @@ def test_render_plan_speech_orders_clauses():
         RawStep(primitive="find_object", object="the cola", raw="find the cola"),
         RawStep(primitive="deliver", object="the cola", recipient="me", raw="bring it to me"),
     ])
-    plan = ground_plan(raw, load_world())
+    plan = ground_plan(raw, load_world(include_absent=True))
     speech = render_plan_speech(plan)
     assert speech.startswith("Here is my plan.")
     assert "First I will go to the kitchen" in speech
@@ -228,27 +266,27 @@ def test_render_names_the_person():
         RawStep(primitive="find_person", person="Charlie", descriptor_kind="name", raw="find charlie"),
         RawStep(primitive="guide", person="Charlie", descriptor_kind="name", to_location="the exit", raw="guide charlie to the exit"),
     ])
-    speech = render_plan_speech(ground_plan(raw, load_world()))
+    speech = render_plan_speech(ground_plan(raw, load_world(include_absent=True)))
     assert "find Charlie" in speech
     assert "guide Charlie to the exit" in speech
 
 
 def test_render_gesture_person_as_the_x_person():
     raw = RawPlan(steps=[RawStep(primitive="find_person", person="waving person", descriptor_kind="gesture", raw="find the waver")])
-    speech = render_plan_speech(ground_plan(raw, load_world()))
+    speech = render_plan_speech(ground_plan(raw, load_world(include_absent=True)))
     assert "the waving person" in speech
 
 
 def test_render_clothing_person_as_person_in():
     raw = RawPlan(steps=[RawStep(primitive="find_person", person="red shirt", descriptor_kind="clothing", raw="find the person in a red shirt")])
-    speech = render_plan_speech(ground_plan(raw, load_world()))
+    speech = render_plan_speech(ground_plan(raw, load_world(include_absent=True)))
     assert "find the person in red shirt" in speech  # not the bare "find red shirt"
 
 
 def test_render_clothing_person_not_double_prefixed():
     # A descriptor that already names a human must not become "the person in the person in...".
     raw = RawPlan(steps=[RawStep(primitive="find_person", person="the person in the red shirt", descriptor_kind="clothing", raw="x")])
-    speech = render_plan_speech(ground_plan(raw, load_world()))
+    speech = render_plan_speech(ground_plan(raw, load_world(include_absent=True)))
     assert "the person in the red shirt" in speech
     assert "person in the person" not in speech
 
@@ -258,14 +296,14 @@ def test_render_count_people_by_gesture():
         RawStep(primitive="navigate", room="the living room", raw="go to the living room"),
         RawStep(primitive="count", person="waving person", descriptor_kind="gesture", room="the living room", raw="how many are waving"),
     ])
-    speech = render_plan_speech(ground_plan(raw, load_world()))
+    speech = render_plan_speech(ground_plan(raw, load_world(include_absent=True)))
     assert "waving people" in speech  # not the generic "persons", and keeps the gesture
     assert "persons" not in speech
 
 
 def test_render_single_step():
     raw = RawPlan(steps=[RawStep(primitive="navigate", room="the bedroom", raw="go to the bedroom")])
-    speech = render_plan_speech(ground_plan(raw, load_world()))
+    speech = render_plan_speech(ground_plan(raw, load_world(include_absent=True)))
     assert speech == "Here is my plan. I will go to the bedroom."
 
 
@@ -276,7 +314,7 @@ def test_render_two_step_uses_and_then_not_finally():
         RawStep(primitive="navigate", room="the kitchen", raw="go to the kitchen"),
         RawStep(primitive="greet", person="Charlie", descriptor_kind="name", room="the kitchen", raw="say hi to charlie"),
     ])
-    speech = render_plan_speech(ground_plan(raw, load_world()))
+    speech = render_plan_speech(ground_plan(raw, load_world(include_absent=True)))
     assert speech == "Here is my plan. I will go to the kitchen, and then greet Charlie in the kitchen."
     assert "finally" not in speech and "First" not in speech
 
@@ -290,7 +328,7 @@ def test_render_superlative_object_says_the_object_not_it():
         RawStep(primitive="get_object_property", object="object", which="size", raw="the biggest one"),
         RawStep(primitive="say", info="the biggest object on the desk", raw="tell me"),
     ])
-    speech = render_plan_speech(ground_plan(raw, load_world()))
+    speech = render_plan_speech(ground_plan(raw, load_world(include_absent=True)))
     assert "find the object at the desk" in speech
     assert "size of the object" in speech
     assert "find it" not in speech and "of it" not in speech

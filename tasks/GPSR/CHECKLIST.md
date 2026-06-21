@@ -12,9 +12,14 @@ or real poses** · `[ ]` stub / Tier-2 fallback / not implemented.
 
 - [x] **Understand the spoken command** (3×80 = 240) — LLM extract → typed plan
       (`parse.py`). Offline coverage gate `tests/test_gpsr_coverage.py` = **100%**
-      (39/39) on the real LLM.
+      (39/39) on the real LLM. Grounding has a **fuzzy fallback** (`world._lookup`,
+      `GPSR_GROUNDING_FUZZY_CUTOFF`) so a mis-heard noun ("kitchen tabel") still
+      grounds instead of forfeiting the command — consulted only on an exact miss.
 - [x] **Demonstrate a plan has been generated** (3×100 = 300) — deterministic
-      `plan.render_plan_speech`, spoken by `subtasks.ReceiveAndPlanCommands`.
+      `plan.render_plan_speech`, spoken by `subtasks.ReceiveAndPlanCommands`. Both
+      coverage gates now **also assert the render is clean** for every complete
+      parse (non-empty, no leaked raw token) so a parse-then-degenerate-render can't
+      lose the 300 silently.
 - Solve the three commands (3×250 = 750) — per primitive:
   - [x] `say` / answer — LLM grounded with config identity + live clock (`say`).
   - [x] `find_person` — match by **gesture/pose** (keypoints), **clothing**
@@ -26,10 +31,17 @@ or real poses** · `[ ]` stub / Tier-2 fallback / not implemented.
         whoever is in front; GPSR enrolls nobody). "follow me to X" now ends the
         moment the robot reaches X via a `tracking.ArrivalStopper` (returns
         'stopped'), not on `HRI_FOLLOW_TIMEOUT_SEC`. Needs perception/robot.
-  - [~] `count` — navigate + detect/pose + `len()`; needs perception/robot.
+  - [~] `count` — persons: full-turn scan + spatial dedup. Objects: now re-shoots
+        the placement `GPSR_COUNT_OBJ_FRAMES` times and reports the **per-frame
+        median** (`_count_objects_stable`) so one flickery detector frame can't
+        in/deflate the count. Pure median offline-tested; needs perception/robot.
   - [~] `greet` — `find_person` + spoken greeting; needs perception/robot.
   - [~] `get_person_info` — pose/gesture keypoints, clothing caption, name-by-ask.
-  - [~] `get_object_property` — world-model category, else caption/measure.
+  - [~] `get_object_property` — world-model category (deterministic), else caption.
+        A **superlative size** query ("the biggest/smallest object on the X") now
+        detects over the object vocabulary and picks the winner by image-bbox area
+        (`_superlative_dir`/`_pick_by_size`, direction read from the raw clause) and
+        names it, instead of describing an arbitrary box. Pure pick offline-tested.
   - [~] `guide` — lead a person to a destination (drive to `from` → confirm/face
         the person → lead to `to` → announce arrival). **Mid-route re-acquire** is
         now implemented (`GPSR_GUIDE_REACQUIRE`, default OFF): leads in capped hops
@@ -75,7 +87,8 @@ or real poses** · `[ ]` stub / Tier-2 fallback / not implemented.
 - [x] Interleave scheduler (`schedule.py`) + per-command-isolated interleaved executor.
 - [x] Pose-survey tool (`tools/teach_poses.py`): drive-and-capture poses into
       `world.toml`; the in-place TOML writer is pure + offline-tested.
-- [x] Offline test suite: 88 GPSR tests (`tests/test_gpsr_*`) + coverage/split LLM gates.
+- [x] Offline test suite: 144 GPSR tests (`tests/test_gpsr_*`) + coverage/generator
+      LLM gates (the gates also assert render quality now).
 
 ## TODO (next, roughly in priority)
 

@@ -135,6 +135,28 @@ def _ground_person(unresolved, raw: RawStep, world: WorldModel) -> dict:
     return {"descriptor": text, "kind": "clothing"}
 
 
+def _ground_person_where(unresolved, raw: RawStep, world: WorldModel) -> dict:
+    """Ground WHERE a person is, for find_person / greet / count-persons.
+
+    Accepts a room OR a beacon/location: ``meetPrsAtBeac`` ("meet Charlie at the
+    {beacon}") and the like name a placement/beacon, not a room. A room stores
+    under ``room``, a beacon under ``location`` — the skills read ``location or
+    room`` (like count/find_object), and go_to_named navigates either. A named
+    place that matches neither is a grounding gap. Empty -> {} (no place given).
+    """
+    text = raw.room
+    if not text:
+        return {}
+    r = world.room(text)
+    if r:
+        return {"room": r}
+    loc = world.location(text)
+    if loc:
+        return {"location": loc}
+    unresolved.append(("room", text))
+    return {}
+
+
 def _ground_which(unresolved, raw: RawStep, allowed: set[str]) -> str | None:
     if not raw.which:
         unresolved.append(("which", ""))
@@ -159,9 +181,6 @@ def ground_step(raw: RawStep, world: WorldModel) -> PlanStep:
     def loc(field="location"):
         return _ground(unresolved, field, getattr(raw, field, None), world.location)
 
-    def room():
-        return _ground(unresolved, "room", raw.room, world.room)
-
     def obj():
         if _is_generic_object(raw.object):
             return None  # placement-scoped query, not a concrete item — no gap
@@ -179,7 +198,7 @@ def ground_step(raw: RawStep, world: WorldModel) -> PlanStep:
 
     elif primitive is Primitive.FIND_PERSON:
         args.update(_ground_person(unresolved, raw, world))
-        args["room"] = room()
+        args.update(_ground_person_where(unresolved, raw, world))
 
     elif primitive is Primitive.PICK:
         args["object"] = obj()
@@ -223,7 +242,7 @@ def ground_step(raw: RawStep, world: WorldModel) -> PlanStep:
         if raw.person or raw.descriptor_kind or _is_person_noun(raw.object):  # counting people
             args["what"] = "persons"
             args.update(_ground_person(unresolved, raw, world))
-            args["room"] = room()
+            args.update(_ground_person_where(unresolved, raw, world))
         else:  # counting objects
             args["what"] = "objects"
             cat = world.category(raw.object) if raw.object else None
@@ -249,7 +268,7 @@ def ground_step(raw: RawStep, world: WorldModel) -> PlanStep:
 
     elif primitive is Primitive.GREET:
         args.update(_ground_person(unresolved, raw, world))
-        args["room"] = room()
+        args.update(_ground_person_where(unresolved, raw, world))
 
     # Drop None-valued args so the plan/render stay clean.
     args = {k: v for k, v in args.items() if v is not None}
