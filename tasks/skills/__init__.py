@@ -38,7 +38,16 @@ from .seating import (
     split_seat_regions,
 )
 from .door import door_open_from_depth, go_to_through_door, is_door_open, request_open_door
-from .grasp import GraspCandidate, get_object_grasp_pos
+from .grasp import (
+    GraspCandidate,
+    approach_object,
+    execute_grasp,
+    face_object_with_arm,
+    get_object_grasp_pos,
+    in_arm_deadzone,
+    look_at_object,
+    pick_object,
+)
 from .navigation import (
     MotionPredictor,
     approach_point,
@@ -69,6 +78,12 @@ __all__ = [
     "door_open_from_depth",
     "GraspCandidate",
     "get_object_grasp_pos",
+    "look_at_object",
+    "approach_object",
+    "in_arm_deadzone",
+    "face_object_with_arm",
+    "execute_grasp",
+    "pick_object",
     "BBox",
     "cxcywh_to_xyxy",
     "overlap_fraction",
