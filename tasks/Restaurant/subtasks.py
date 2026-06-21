@@ -303,8 +303,8 @@ class TestTask(SubTask):
         # grasp on the auto-selected arm (per-move result checks inside).
         ctx.walkie.arm.go_to_home(group_name="right_arm", pose_name="standby", blocking=False)
         ok = pick_object(
-            ctx, prompts=["bottle"], arm="auto",
-            pregrasp_standoff_m=0.2, approach_preference="side", approach_weight=2.0,
+            ctx, prompts=["red can"], arm="auto",
+            pregrasp_standoff_m=0.2, approach_preference="top", approach_weight=2.0,
         )
         print(f"[test] pick_object -> {ok}")
         return StepResult.DONE if ok else StepResult.RETRY

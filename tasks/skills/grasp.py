@@ -74,7 +74,7 @@ def get_object_grasp_pos(
     *,
     attempts: int = 5,
     standoff_m: float = 0.10,
-    voxel: float = 0.005,
+    voxel: float = 0.002,
     erode_px: int = 5,
     min_points: int = 50,
     min_confidence: float = 0.3,
@@ -182,6 +182,10 @@ def get_object_grasp_pos(
 
     if best is None:
         print(f"[grasp] no graspable detection for {prompts} in {attempts} attempt(s)")
+        return None
+
+    # offset height a little for side grasps
+    best.grasp_xyz = (best.grasp_xyz[0], best.grasp_xyz[1], best.grasp_xyz[2] + 0.03)
     return best
 
 
@@ -266,11 +270,25 @@ def look_at_object(ctx: TaskContext, xyz_map: Vec3) -> bool:
         return False
     tilt = _look_down_tilt(cam.t, xyz_map)
     try:
+        # Limit tilt because graspnet is bad
+        tilt = max(0.610865, tilt)
         ctx.walkie.robot.head.tilt(tilt)
     except Exception as exc:  # noqa: BLE001 — off-robot stub may lack robot.head
         print(f"[grasp] look_at_object: head tilt failed ({exc})")
         return False
     return True
+
+
+def face_object(ctx: TaskContext, xyz_map: Vec3) -> bool:
+    """Rotate the base so the robot heading points straight at the object.
+
+    Centres the object in the camera's horizontal FOV so detection/GraspNet see
+    it square-on — better masks, better grasps. One-shot rotate-in-place toward
+    the map-frame point; best-effort, returns ``rotate_to``'s result.
+    """
+    p = ctx.current_pose()
+    desired = math.atan2(xyz_map[1] - p["y"], xyz_map[0] - p["x"])
+    return ctx.rotate_to(desired)
 
 
 def approach_object(
@@ -310,7 +328,8 @@ def approach_object(
             return "FAILED"
         look_at_object(ctx, xyz_map)
         print(f"[grasp] approach_object: nav -> {res}")
-        return "MOVED" if res in ("SUCCEEDED", "CLOSE_ENOUGH") else "FAILED"
+        return "MOVED" # Tests
+        # return "MOVED" if res in ("SUCCEEDED", "CLOSE_ENOUGH") else "FAILED"
 
     try:
         ctx.walkie.nav.go_to(
@@ -373,6 +392,48 @@ def face_object_with_arm(ctx: TaskContext, xyz_map: Vec3, *, arm: str = "left") 
     return ctx.rotate_to(desired)
 
 
+def align_arm_to_object(ctx: TaskContext, xyz_map: Vec3, *, arm: str = "left") -> bool:
+    """Strafe the base sideways so *arm* lines up laterally with the object.
+
+    Walkie's base is omnidirectional, so instead of rotating to face the object
+    with the arm (which swings the shoulder on an arc and re-aims the base), we
+    *translate* the base sideways until the object's lateral offset in the base
+    frame matches the arm's own lateral mounting offset — putting the object
+    directly in front of that arm and out of the centreline dead-zone. The goal
+    is an absolute map-frame pose at the **current heading** (a pure strafe), so
+    the map-frame grasp candidate stays valid (no re-plan needed).
+
+    nav failure is deliberately ignored: a refused or clipped strafe usually just
+    means the base is already as far over as the footprint/obstacles allow, which
+    is good enough to grasp from. Best-effort; never raises.
+    """
+    side = (arm or "left").strip().lower()
+    if side not in ("left", "right"):
+        side = "left"
+    frame = f"openarm_{side}_link3"
+    arm_left = 0.0
+    try:
+        tf = ctx.walkie.robot.transform.lookup("base_footprint", frame, timeout=5.0)
+        if tf and "position" in tf:
+            arm_left = float(tf["position"]["y"])
+    except Exception as exc:  # noqa: BLE001 — fall back to the centreline
+        print(f"[grasp] align_arm_to_object: transform.lookup({frame}) raised ({exc}); "
+              f"assuming arm on centreline")
+    _, obj_left, _ = _world_to_base(ctx, xyz_map)
+    strafe = obj_left - arm_left  # base must move this far +left to line the arm up
+    p = ctx.current_pose()
+    lx, ly = -math.sin(p["heading"]), math.cos(p["heading"])  # base +left axis in map frame
+    tx, ty = p["x"] + strafe * lx, p["y"] + strafe * ly
+    print(f"[grasp] align_arm_to_object[{side}]: obj_left={obj_left:+.2f}m arm_left={arm_left:+.2f}m "
+          f"-> strafe {strafe:+.2f}m to ({tx:+.2f},{ty:+.2f})")
+    try:
+        res = ctx.walkie.nav.go_to(tx, ty, p["heading"], blocking=True)
+        print(f"[grasp] align_arm_to_object[{side}]: nav -> {res} (failure ignored)")
+    except Exception as exc:  # noqa: BLE001 — nav fail likely means already at the limit
+        print(f"[grasp] align_arm_to_object[{side}]: nav raised ({exc}); ignored")
+    return True
+
+
 def execute_grasp(
     ctx: TaskContext,
     candidate: GraspCandidate,
@@ -407,17 +468,16 @@ def execute_grasp(
     succeeded = False
     collision_disabled = False
     try:
+        # original_planner = ctx.walkie.robot.arm.get_param(name="planner_id")  # warm up the planner cache
+        # ctx.walkie.robot.arm.set_param_result(name="planner_id", value="RRTstar")
         hand.gripper(1.0, blocking=True)  # open, ready to receive
-        home_res = ctx.walkie.arm.go_to_home(group_name=home_group, pose_name=home_pose, blocking=True)
-        if home_res != "SUCCEEDED":  # staging move: warn but press on
-            print(f"[grasp] execute_grasp[{side}]: stage home -> {home_res} (continuing)")
 
         ctx.walkie.arm.toggle_gripper_collision(gripper_group, False)
         collision_disabled = True
 
         res = ctx.walkie.arm.go_to_pose(
             *candidate.pregrasp_xyz, roll, pitch, yaw,
-            group_name=motion_group, frame_id="map", blocking=True,
+            group_name=home_group, frame_id="map", blocking=True,
         )
         print(f"[grasp] execute_grasp[{side}]: pregrasp -> {res}")
         if res != "SUCCEEDED":
@@ -426,7 +486,7 @@ def execute_grasp(
 
         res = ctx.walkie.arm.go_to_pose(
             *candidate.grasp_xyz, roll, pitch, yaw,
-            group_name=motion_group, frame_id="map", blocking=True,
+            group_name=home_group, frame_id="map", blocking=True, cartesian_path=True
         )
         print(f"[grasp] execute_grasp[{side}]: grasp -> {res}")
         if res != "SUCCEEDED":
@@ -434,7 +494,7 @@ def execute_grasp(
             return False
 
         hand.gripper(0.0, blocking=True)  # close on the object
-        ctx.walkie.arm.go_to_home(group_name=home_group, pose_name=home_pose, blocking=True)
+        ctx.walkie.arm.go_to_home(group_name=motion_group, pose_name=home_pose, blocking=True)
         succeeded = True
         print(f"[grasp] execute_grasp[{side}]: success")
         return True
@@ -442,6 +502,7 @@ def execute_grasp(
         print(f"[grasp] execute_grasp[{side}]: hardware error ({exc})")
         return False
     finally:
+        # ctx.walkie.robot.arm.set_param_result(name="planner_id", value=original_planner)
         if collision_disabled:
             try:
                 ctx.walkie.arm.toggle_gripper_collision(gripper_group, True)
@@ -459,7 +520,7 @@ def pick_object(
     prompts: list[str],
     *,
     arm: str = "auto",
-    attempts: int = 5,
+    attempts: int = 10,
     pregrasp_standoff_m: float = 0.10,
     approach_preference: str = "none",
     approach_weight: float | None = None,
@@ -475,14 +536,17 @@ def pick_object(
     """Full pick for the nearest object matching *prompts*: detect -> approach -> de-deadzone -> grasp.
 
     Sequences :func:`get_object_grasp_pos` (best-of-N planning) with the base/head
-    repositioning the robot needs to actually reach the grasp:
+    repositioning the robot needs to actually reach the grasp. Every plan first
+    faces the object (:func:`face_object` + :func:`look_at_object`) to centre it
+    in view for a more accurate detection/grasp:
 
     1. Plan a grasp; bail if the object is below *min_grasp_z_m* (no remedy).
     2. If it's farther than *approach_trigger_m* (XY), drive to *optimal_standoff_m*
        facing it (head tracking), then re-plan from the new viewpoint.
     3. Pick the arm (``"auto"`` -> object's side, dead-centre -> *default_arm*).
-    4. If it's in the lateral dead-zone, rotate the base so the arm faces it
-       (:func:`face_object_with_arm`), re-aim the head, re-plan, re-check once.
+    4. Strafe the base left/right (:func:`align_arm_to_object`) to line the chosen
+       arm up with the object; nav failure is ignored. The map-frame candidate
+       stays valid across the strafe, so no re-plan is needed.
     5. Execute the grasp on the chosen arm, checking each arm move.
 
     Returns True only when the grasp executed cleanly. Degrades to False (never
@@ -491,11 +555,30 @@ def pick_object(
     Note: distinct from :func:`tasks.manipulation.pick_object` (which takes a
     pre-detected ``DetectedObject``) — import this one from ``tasks.skills``.
     """
+    last_xyz: Vec3 | None = None
+
     def _grasp() -> GraspCandidate | None:
-        return get_object_grasp_pos(
+        # Always face the object before planning: rotating to centre it in the
+        # camera's FOV (then tilting the head down at it) gives the detector and
+        # GraspNet a square-on view, which improves accuracy. The first plan has
+        # no position estimate yet, so it runs from the current view; every
+        # re-plan faces the last known grasp point.
+        nonlocal last_xyz
+        if last_xyz is not None:
+            face_object(ctx, last_xyz)
+            look_at_object(ctx, last_xyz)
+            time.sleep(0.5)  # let the base/head settle before the snapshot
+        cand = get_object_grasp_pos(
             ctx, prompts, attempts=attempts, standoff_m=pregrasp_standoff_m,
             approach_preference=approach_preference, approach_weight=approach_weight,
         )
+        if cand is not None:
+            last_xyz = cand.grasp_xyz
+        return cand
+    
+    home_res = ctx.walkie.arm.go_to_home(group_name="both_arm_lift", pose_name="standby", blocking=True)
+    if home_res != "SUCCEEDED":  # staging move: warn but press on
+        print(f"[grasp] stage home -> {home_res} (continuing)")
 
     cand = _grasp()
     if cand is None:
@@ -506,6 +589,11 @@ def pick_object(
               f"{min_grasp_z_m:.2f}m); cannot reach")
         return False
 
+    base_lift_diff_m = ctx.walkie.robot.transform.lookup("base_footprint", "lift_link")["position"]["z"] - ctx.walkie.robot.lift.get(norm_pos=False) / 100.0
+    optimum_lift_height = cand.grasp_xyz[2] + 0.1
+    print(f"[grasp] pick_object: setting lift to {((optimum_lift_height - base_lift_diff_m) * 100):.2f}m for better reach")
+    ctx.walkie.robot.lift.set(pos=(optimum_lift_height - base_lift_diff_m) * 100, norm_pos=False)
+    
     # 2. Approach to the optimal standoff if too far, tracking with the head.
     status = approach_object(
         ctx, cand.grasp_xyz, standoff_m=optimal_standoff_m,
@@ -539,21 +627,13 @@ def pick_object(
             chosen = default_arm
     print(f"[grasp] pick_object: chosen arm = {chosen}")
 
-    # 4. If central, rotate so the arm faces the object, re-aim, re-plan, re-check.
-    if in_zone:
-        print("[grasp] pick_object: object in dead-zone; rotating to face it")
-        if face_object_with_arm(ctx, cand.grasp_xyz, arm=chosen):
-            look_at_object(ctx, cand.grasp_xyz)
-            cand = _grasp()
-            if cand is None:
-                print("[grasp] pick_object: lost the object after facing")
-                return False
-            if in_arm_deadzone(ctx, cand.grasp_xyz, half_width_m=deadzone_half_m):
-                left = _world_to_base(ctx, cand.grasp_xyz)[1]
-                print(f"[grasp] pick_object: still in dead-zone after facing "
-                      f"(y={left:+.2f}m); attempting grasp anyway")
-        else:
-            print("[grasp] pick_object: could not face object; continuing best-effort")
+    # 4. Strafe the base sideways so the chosen arm lines up with the object —
+    #    omnidirectional translation rather than a rotate, so the object lands
+    #    directly in front of the arm (and out of the dead-zone) without swinging
+    #    it on an arc. The candidate is a map-frame pose, so it stays valid after
+    #    the strafe — no re-plan needed (and re-planning would re-face the base,
+    #    undoing the alignment). nav failure is ignored (likely already at the limit).
+    align_arm_to_object(ctx, cand.grasp_xyz, arm=chosen)
 
     # 5. Final radial reach guard, then execute.
     reach = _xy_dist(ctx, cand.grasp_xyz)

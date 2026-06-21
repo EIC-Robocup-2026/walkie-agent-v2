@@ -15,6 +15,8 @@ from tasks.skills.grasp import (
     _arm_sides,
     _look_down_tilt,
     _world_to_base,
+    align_arm_to_object,
+    face_object,
     face_object_with_arm,
     in_arm_deadzone,
     _HEAD_TILT_MAX,
@@ -170,3 +172,86 @@ def test_face_object_no_transform_returns_false():
     ctx = FaceCtx(link_xyz=None)
     assert face_object_with_arm(ctx, (1.0, 0.0, 0.8)) is False
     assert ctx.rotated_to is None  # never rotated when the lookup fails
+
+
+# --- face_object ------------------------------------------------------------
+def test_face_object_points_heading_at_object():
+    # Robot at origin; object at (1, 1) -> heading 45deg toward it.
+    ctx = FaceCtx(link_xyz=(0.0, 0.0, 0.9))  # link unused by face_object
+    assert face_object(ctx, (1.0, 1.0, 0.8)) is True
+    assert ctx.rotated_to == pytest.approx(math.atan2(1.0, 1.0))
+
+
+# --- align_arm_to_object ----------------------------------------------------
+class AlignNav:
+    """Records the absolute go_to target (a pure strafe keeps the heading)."""
+
+    def __init__(self):
+        self.last_goto = None
+
+    def go_to(self, x, y, heading=None, blocking=True):
+        self.last_goto = (x, y, heading)
+        return "SUCCEEDED"
+
+
+class AlignTransform:
+    """Serves base_footprint -> openarm_{side}_link3 with a fixed lateral offset."""
+
+    def __init__(self, arm_left):
+        self._arm_left = arm_left
+
+    def lookup(self, source, target, timeout=5.0):
+        return {"position": {"x": 0.1, "y": self._arm_left, "z": 0.9}}
+
+
+class AlignRobot:
+    def __init__(self, transform):
+        self.transform = transform
+
+
+class AlignWalkie:
+    def __init__(self, transform, nav):
+        self.robot = AlignRobot(transform)
+        self.nav = nav
+
+
+class AlignCtx:
+    def __init__(self, arm_left, x=0.0, y=0.0, heading=0.0):
+        self._pose = {"x": x, "y": y, "heading": heading}
+        self.nav = AlignNav()
+        self.walkie = AlignWalkie(AlignTransform(arm_left), self.nav)
+
+    def current_pose(self):
+        return self._pose
+
+
+def test_align_arm_strafes_to_put_object_in_front_of_arm():
+    # Robot facing +x; left arm mounted +0.2 m to the left. Object dead ahead
+    # (0.6, 0) -> obj_left 0, so the base must strafe -0.2 m (to the right) to
+    # line the arm up: target = origin + (-0.2) * base_left_axis(0, 1) = (0, -0.2).
+    ctx = AlignCtx(arm_left=0.2)
+    assert align_arm_to_object(ctx, (0.6, 0.0, 0.8), arm="left") is True
+    x, y, heading = ctx.nav.last_goto
+    assert (x, y) == pytest.approx((0.0, -0.2), abs=1e-9)
+    assert heading == pytest.approx(0.0)  # pure strafe: heading unchanged
+
+
+def test_align_arm_respects_heading():
+    # Robot facing +y; base +left axis is -x. Object at (0, 0.6) -> obj_left 0,
+    # arm_left 0.2 -> strafe -0.2 along (-1, 0) -> target (+0.2, 0).
+    ctx = AlignCtx(arm_left=0.2, heading=math.pi / 2)
+    align_arm_to_object(ctx, (0.0, 0.6, 0.8), arm="left")
+    x, y, heading = ctx.nav.last_goto
+    assert (x, y) == pytest.approx((0.2, 0.0), abs=1e-9)
+    assert heading == pytest.approx(math.pi / 2)
+
+
+def test_align_arm_ignores_nav_failure():
+    # A nav that raises must not propagate — the strafe is best-effort.
+    ctx = AlignCtx(arm_left=0.2)
+
+    def boom(*a, **k):
+        raise RuntimeError("nav down")
+
+    ctx.nav.go_to = boom
+    assert align_arm_to_object(ctx, (0.6, 0.0, 0.8), arm="left") is True
