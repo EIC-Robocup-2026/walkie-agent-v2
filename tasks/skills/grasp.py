@@ -45,7 +45,7 @@ def _to_map_frame(snap, g, standoff_m: float) -> GraspCandidate:
     R_cam, t_cam = snap.cam.R, snap.cam.t
     grasp = R_cam @ np.asarray(g.translation, dtype=float) + t_cam
     R_map = R_cam @ g.rotation
-    approach = R_map[:, 0]  # unit travel direction toward the object
+    approach = R_map[:, 2]  # unit travel direction toward the object
     pregrasp = grasp - approach * standoff_m
     return GraspCandidate(
         grasp_xyz=(float(grasp[0]), float(grasp[1]), float(grasp[2])),

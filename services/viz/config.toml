@@ -11,7 +11,7 @@
 # Master switch: none | rerun. Disabled by default — set "rerun" to watch the scene
 # graph and/or a task's geometry (e.g. the grasp end-effector triad). Replaces the
 # old WALKIE_GRAPHS_VIZ, which is still honored as a fallback if this is unset.
-WALKIE_VIZ = "none"
+WALKIE_VIZ = "rerun"
 # Recording name shown in the Rerun viewer.
 WALKIE_VIZ_RECORDING = "walkie"
 
