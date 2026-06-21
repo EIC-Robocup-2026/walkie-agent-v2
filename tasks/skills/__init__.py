@@ -37,7 +37,7 @@ from .seating import (
     scan_seats,
     split_seat_regions,
 )
-from .door import request_open_door
+from .door import door_open_from_depth, go_to_through_door, is_door_open, request_open_door
 from .grasp import GraspCandidate, grasp_object
 from .navigation import (
     MotionPredictor,
@@ -64,6 +64,9 @@ from .people import (
 __all__ = [
     "CommandListener",
     "request_open_door",
+    "go_to_through_door",
+    "is_door_open",
+    "door_open_from_depth",
     "GraspCandidate",
     "grasp_object",
     "BBox",
