@@ -130,3 +130,38 @@ WALKIE_DOOR_PROGRESS_EPS_M = "0.3"   # if the robot got >this much closer to goa
                                      # it's driving THROUGH the door -> retry quietly, don't re-ask
 
 WALKIE_MIC_DEBUG_DIR = "mic_recording"
+
+[placement]
+# Surface detection + object placement (tasks/skills/place.py, surface geometry in
+# interfaces/perception/surfaces.py). The map frame is gravity-aligned (+Z up), so a
+# horizontal surface is a constant-Z band — these knobs tune the height-clustering and
+# the empty-space search. CALIBRATE the reach/footprint values on the real arm.
+# Full-scene cloud lift (override the per-detection WALKIE_GRAPHS_* defaults).
+WALKIE_PLACE_SCENE_VOXEL_M = "0.015"   # voxel size for the whole-scene cloud
+WALKIE_PLACE_MAX_DEPTH_M = "3.0"       # drop points farther than this (stereo noise)
+# Horizontal-surface detection.
+WALKIE_SURFACE_Z_GAP_M = "0.04"        # split height bands at vertical gaps wider than this
+WALKIE_SURFACE_MIN_POINTS = "150"      # drop surfaces with fewer points than this
+WALKIE_SURFACE_XY_EPS_M = "0.05"       # DBSCAN eps splitting tables at the same height
+WALKIE_SURFACE_XY_MIN_POINTS = "30"    # DBSCAN min points for an XY cluster
+# Minimum usable flat area (m^2) a surface must cover to count — the true occupied
+# area, not the bounding box, so an L-shape / sparse scatter with a big box is rejected.
+# 0.05 m^2 ~= a 22x22 cm patch; raise it to ignore small clutter surfaces.
+WALKIE_SURFACE_MIN_AREA_M2 = "0.05"    # drop surfaces below this real flat area
+WALKIE_SURFACE_AREA_CELL_M = "0.05"    # grid resolution of the area estimate
+WALKIE_SURFACE_NORMAL_Z_MIN = ""       # |n_z| gate (needs Open3D); empty = skip the gate
+# Empty-space search + place geometry.
+WALKIE_PLACE_FOOTPRINT_M = "0.12"      # object footprint (square side) when not recorded at pick
+WALKIE_PLACE_CLEARANCE_M = "0.03"      # keep this clear around the placed object
+WALKIE_PLACE_CELL_M = "0.04"           # occupancy grid resolution
+WALKIE_PLACE_EDGE_MARGIN_M = "0.05"    # keep the object this far from the table edge
+WALKIE_PLACE_Z_OFFSET_M = "0.02"       # extra clearance added above the reconstructed height
+WALKIE_PLACE_FALLBACK_OFFSET_M = "0.05"  # grasp-to-surface offset to assume when none recorded
+WALKIE_PLACE_STANDOFF_M = "0.10"       # pre-place / retreat height above the hover point
+# The arm parks the object this far ABOVE the surface, then the precise torso lift
+# lowers it straight down before releasing (the arm's cartesian descent at full reach
+# is imprecise and drops the object from too high).
+WALKIE_PLACE_LOWER_M = "0.08"          # hover height above the surface; lift lowers by this
+WALKIE_PLACE_SETTLE_SEC = "0.6"        # wait after a lift move to let it settle
+WALKIE_PLACE_MIN_Z_M = "0.70"          # don't place below this height (arm can't reach)
+WALKIE_PLACE_MAX_REACH_XY_M = "0.75"   # abort if the spot is farther than this (planar)

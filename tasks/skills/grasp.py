@@ -49,6 +49,13 @@ class GraspCandidate:
     approach: np.ndarray  # (3,) unit approach direction in the map frame
     width: float
     score: float
+    # Filled in after best-of-N selection (see get_object_grasp_pos): the surface the
+    # grasped object was sitting on, and the grasp height above it — remembered so the
+    # object can be placed back at the same relative height on another surface. ``None``
+    # when no support surface was found (or detection was skipped).
+    support_surface_z: float | None = None
+    grasp_to_surface_offset: float | None = None
+    object_footprint_m: float | None = None  # map-frame XY span of the grasped cloud
 
 
 def _to_map_frame(snap, g, standoff_m: float) -> GraspCandidate:
@@ -81,6 +88,7 @@ def get_object_grasp_pos(
     antipodal: bool = True,
     approach_preference: str = "none",
     approach_weight: float | None = None,
+    compute_support: bool = True,
 ) -> GraspCandidate | None:
     """Best-of-N grasp for the nearest object matching *prompts*, in the map frame.
 
@@ -120,6 +128,8 @@ def get_object_grasp_pos(
         graspable detection.
     """
     best: GraspCandidate | None = None
+    best_snap = None  # the snapshot the winning grasp came from (for surface lookup)
+    best_cloud: np.ndarray | None = None  # the winning object cloud (optical frame)
 
     for i in range(attempts):
         tag = f"attempt {i + 1}/{attempts}"
@@ -176,6 +186,7 @@ def get_object_grasp_pos(
             continue
 
         best = _to_map_frame(snap, g, standoff_m)
+        best_snap, best_cloud = snap, cloud
         gx, gy, gz = best.grasp_xyz
         print(f"[grasp] {tag}: new best score {best.score:.3f} "
               f"grasp=({gx:+.3f},{gy:+.3f},{gz:+.3f}) width={best.width * 100:.1f}cm")
@@ -183,6 +194,40 @@ def get_object_grasp_pos(
     if best is None:
         print(f"[grasp] no graspable detection for {prompts} in {attempts} attempt(s)")
         return None
+
+    # Remember the support surface + object footprint from the winning snapshot, so the
+    # object can be placed back later (tasks.skills.place). Computed against the RAW
+    # grasp z, BEFORE the side-grasp nudge below, so the stored offset is the true
+    # grasp-to-surface height (not inflated by the nudge).
+    if compute_support and best_snap is not None:
+        try:
+            from interfaces.perception.surfaces import (
+                detect_horizontal_surfaces,
+                support_surface_for,
+            )
+            from tasks.skills.place import _full_scene_cloud, _surface_kwargs
+
+            scene = _full_scene_cloud(best_snap)
+            surfaces = detect_horizontal_surfaces(scene, **_surface_kwargs())
+            gx, gy, gz = best.grasp_xyz
+            sup = support_surface_for(surfaces, gx, gy, gz)
+            if sup is not None:
+                best.support_surface_z = sup.z
+                best.grasp_to_surface_offset = gz - sup.z
+                print(f"[grasp] support surface z={sup.z:.2f}m "
+                      f"(grasp {gz:.2f}m, offset {best.grasp_to_surface_offset:+.2f}m)")
+            else:
+                print("[grasp] no support surface found under the grasp")
+        except Exception as exc:  # noqa: BLE001 — surface lookup is best-effort
+            print(f"[grasp] support-surface lookup failed ({exc})")
+
+    if best_cloud is not None and best_snap is not None and best_snap.cam is not None:
+        try:
+            cm = best_cloud @ best_snap.cam.R.T + best_snap.cam.t
+            span = cm[:, :2].max(axis=0) - cm[:, :2].min(axis=0)
+            best.object_footprint_m = float(max(span))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[grasp] object footprint estimate failed ({exc})")
 
     # offset height a little for side grasps
     best.grasp_xyz = (best.grasp_xyz[0], best.grasp_xyz[1], best.grasp_xyz[2] + 0.03)
@@ -271,7 +316,7 @@ def look_at_object(ctx: TaskContext, xyz_map: Vec3) -> bool:
     tilt = _look_down_tilt(cam.t, xyz_map)
     try:
         # Limit tilt because graspnet is bad
-        tilt = max(0.610865, tilt)
+        tilt = max(0.436332, tilt)
         ctx.walkie.robot.head.tilt(tilt)
     except Exception as exc:  # noqa: BLE001 — off-robot stub may lack robot.head
         print(f"[grasp] look_at_object: head tilt failed ({exc})")
@@ -524,7 +569,7 @@ def pick_object(
     pregrasp_standoff_m: float = 0.10,
     approach_preference: str = "none",
     approach_weight: float | None = None,
-    optimal_standoff_m: float = 0.60,
+    optimal_standoff_m: float = 0.55,
     approach_trigger_m: float = 0.70,
     max_reach_xy_m: float = 0.75,
     min_grasp_z_m: float = 0.70,
@@ -576,7 +621,7 @@ def pick_object(
             last_xyz = cand.grasp_xyz
         return cand
     
-    home_res = ctx.walkie.arm.go_to_home(group_name="both_arm_lift", pose_name="standby", blocking=True)
+    home_res = ctx.walkie.arm.go_to_home(group_name="both_arms_lift", pose_name="standby", blocking=True)
     if home_res != "SUCCEEDED":  # staging move: warn but press on
         print(f"[grasp] stage home -> {home_res} (continuing)")
 
@@ -602,15 +647,15 @@ def pick_object(
     if status == "FAILED":
         print("[grasp] pick_object: approach failed; aborting")
         return False
-    if status == "MOVED":
-        cand = _grasp()  # the old candidate is stale once the base moved
-        if cand is None:
-            print("[grasp] pick_object: lost the object after approaching")
-            return False
-        if cand.grasp_xyz[2] < min_grasp_z_m:
-            print(f"[grasp] pick_object: object too low after approach "
-                  f"(z={cand.grasp_xyz[2]:.2f}m); cannot reach")
-            return False
+    
+    cand = _grasp()  # grasp again from the new viewpoint
+    if cand is None:
+        print("[grasp] pick_object: lost the object after approaching")
+        return False
+    if cand.grasp_xyz[2] < min_grasp_z_m:
+        print(f"[grasp] pick_object: object too low after approach "
+                f"(z={cand.grasp_xyz[2]:.2f}m); cannot reach")
+        return False
 
     # 3. Pick the arm by which side the object is on (dead-centre -> default).
     in_zone = in_arm_deadzone(ctx, cand.grasp_xyz, half_width_m=deadzone_half_m)
@@ -640,4 +685,21 @@ def pick_object(
     if reach > max_reach_xy_m:
         print(f"[grasp] pick_object: out of reach (xy={reach:.2f}m > {max_reach_xy_m:.2f}m); aborting")
         return False
-    return execute_grasp(ctx, cand, arm=chosen, viz=viz)
+    ok = execute_grasp(ctx, cand, arm=chosen, viz=viz)
+    if ok:
+        # Remember what we're holding (per arm) so tasks.skills.place can put it back
+        # down at the same height above whatever surface it's placed on.
+        from tasks.skills.held import record_held_object
+
+        record_held_object(
+            ctx,
+            label=prompts[0] if prompts else "object",
+            arm=chosen,
+            grasp_xyz=cand.grasp_xyz,
+            rotation=cand.rotation,
+            width=cand.width,
+            footprint_m=cand.object_footprint_m,
+            support_surface_z=cand.support_surface_z,
+            grasp_to_surface_offset=cand.grasp_to_surface_offset,
+        )
+    return ok

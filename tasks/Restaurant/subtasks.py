@@ -26,7 +26,13 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 
 from tasks.base import StepResult, SubTask, Task, TaskContext
-from tasks.skills import pick_object
+from tasks.skills import (
+    detect_surfaces,
+    held_arms,
+    pick_object,
+    place_object,
+    recall_held_object,
+)
 
 from . import prompts
 from .skills import (
@@ -304,9 +310,82 @@ class TestTask(SubTask):
         ctx.walkie.arm.go_to_home(group_name="right_arm", pose_name="standby", blocking=False)
         ok = pick_object(
             ctx, prompts=["red can"], arm="auto",
-            pregrasp_standoff_m=0.2, approach_preference="top", approach_weight=2.0,
+            pregrasp_standoff_m=0.2, approach_preference="side", approach_weight=2.0,
         )
         print(f"[test] pick_object -> {ok}")
+        return StepResult.DONE if ok else StepResult.RETRY
+
+
+class SurfaceScanTestTask(SubTask):
+    """Read-only demo of surface perception (tasks.skills.detect_surfaces).
+
+    Scans for horizontal surfaces (tables/shelves/floor) from one depth snapshot and
+    prints each surface's height, footprint, and the objects sitting on it — exactly
+    the structure a placement agent reads to decide *where* to put something. No arm
+    or base motion, so it's safe to run during bring-up to eyeball detection before
+    trusting the full place motion.
+    """
+
+    critical = True
+
+    def run(self, ctx: TaskContext) -> StepResult:
+        # detect_objects=True also runs open-vocab detection and prints, per surface,
+        # which of these prompts sit on it (with height + XY distance). Drop it for a
+        # faster geometry-only scan.
+        surfaces = detect_surfaces(
+            ctx,
+            detect_objects=True,
+            object_prompts=["bottle", "cup", "can", "bowl", "plate"],
+        )
+        if not surfaces:
+            print("[test] detect_surfaces -> no horizontal surfaces found")
+            return StepResult.RETRY
+        for s in surfaces:
+            print(f"[test] surface {s.id}: z={s.z:.2f}m area={s.area:.2f}m^2 "
+                  f"centroid=({s.centroid[0]:+.2f},{s.centroid[1]:+.2f}) n_points={s.n_points}")
+        return StepResult.DONE
+
+
+class PickAndPlaceTestTask(SubTask):
+    """Full pick -> place demo (grasp memory + surface placement).
+
+    Picks the target with the grasp skill — which records what it grabbed and how
+    high above its support surface it sat (``ctx.data["held_objects"]``) — then
+    places it on a clear spot of a detected surface, reconstructing that same height
+    on the new surface so it lands upright. Placement is fully automatic here (nearest
+    reachable surface + a free spot); see the commented overrides for agent-driven
+    placement once you've inspected SurfaceScanTestTask's output.
+    """
+
+    critical = True
+
+    def run(self, ctx: TaskContext) -> StepResult:
+        # ctx.walkie.arm.go_to_home(group_name="right_arm", pose_name="standby", blocking=False)
+
+        # 1. Pick — on success this records the held object (per arm) for the placer.
+        if not pick_object(
+            ctx, prompts=["water bottle"], arm="auto",
+            pregrasp_standoff_m=0.2, approach_preference="side", approach_weight=4.0,
+        ):
+            print("[test] pick_object -> False; nothing to place")
+            return StepResult.RETRY
+
+        arms = held_arms(ctx)
+        held = recall_held_object(ctx, arms[0]) if arms else None
+        if held is not None:
+            print(f"[test] holding {held.label!r} in {held.arm} arm "
+                  f"(grasp_to_surface_offset={held.grasp_to_surface_offset}, "
+                  f"footprint={held.footprint_m})")
+        
+        input("Press Enter to continue to placement...")
+
+        # 2. Place — auto-pick the nearest reachable surface and a free spot. To let an
+        # agent steer it instead, pass an explicit surface or spot, e.g.:
+        #   surfaces = detect_surfaces(ctx)
+        #   ok = place_object(ctx, surface=surfaces[0])
+        #   ok = place_object(ctx, target_xy=(1.2, 0.4))
+        ok = place_object(ctx)
+        print(f"[test] place_object -> {ok}")
         return StepResult.DONE if ok else StepResult.RETRY
 
 
@@ -318,6 +397,15 @@ def build_phase0_slice(ctx: TaskContext) -> Task:
     return Task("Restaurant-Phase0", [GoToStart(), ScanAndApproach()], ctx)
 
 
+def build_place_demo(ctx: TaskContext) -> Task:
+    """Demo of the grasp-memory + surface-placement pipeline (tasks.skills.place).
+
+    Read-only scan first so you can eyeball detected surfaces, then the full
+    pick -> place motion. For on-robot bring-up of the place skill.
+    """
+    return Task("Restaurant-PlaceDemo", [SurfaceScanTestTask(), PickAndPlaceTestTask()], ctx)
+
+
 def build_restaurant_task(ctx: TaskContext) -> Task:
     """Full task. Serial loop by default; batched order-taking when RESTAURANT_BATCH=1.
 
@@ -326,4 +414,8 @@ def build_restaurant_task(ctx: TaskContext) -> Task:
     batched = os.getenv("RESTAURANT_BATCH", "0").lower() in ("1", "true", "yes")
     serve = ServeCustomersBatched() if batched else ServeCustomers()
     # return Task("Restaurant", [GoToStart(), serve], ctx)
-    return Task("Restaurant", [TestTask()], ctx)  # temp stub for quick testing
+    # Temp stub for quick on-robot testing — swap in whichever demo you want:
+    #   [TestTask()]              — pick only (grasp skill)
+    #   [SurfaceScanTestTask()]   — read-only: list detected surfaces + what's on them
+    #   [PickAndPlaceTestTask()]  — full pick -> place (held memory + surface placement)
+    return Task("Restaurant", [PickAndPlaceTestTask()], ctx)

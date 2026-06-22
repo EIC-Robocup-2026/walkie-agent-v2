@@ -50,6 +50,23 @@ from .grasp import (
     look_at_object,
     pick_object,
 )
+from .held import (
+    HeldObject,
+    clear_held_object,
+    held_arms,
+    recall_held_object,
+    record_held_object,
+)
+from .place import (
+    detect_surfaces,
+    execute_place,
+    place_object,
+)
+from interfaces.perception.surfaces import (
+    SurfacePlane,
+    assign_objects_to_surfaces,
+    support_surface_for,
+)
 from .navigation import (
     MotionPredictor,
     approach_point,
@@ -88,6 +105,17 @@ __all__ = [
     "align_arm_to_object",
     "execute_grasp",
     "pick_object",
+    "HeldObject",
+    "record_held_object",
+    "recall_held_object",
+    "held_arms",
+    "clear_held_object",
+    "SurfacePlane",
+    "support_surface_for",
+    "assign_objects_to_surfaces",
+    "detect_surfaces",
+    "execute_place",
+    "place_object",
     "BBox",
     "cxcywh_to_xyxy",
     "overlap_fraction",
