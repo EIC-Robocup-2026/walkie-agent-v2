@@ -397,6 +397,16 @@ def build_phase0_slice(ctx: TaskContext) -> Task:
     return Task("Restaurant-Phase0", [GoToStart(), ScanAndApproach()], ctx)
 
 
+def build_surface_demo(ctx: TaskContext) -> Task:
+    """Read-only surface scan — list detected surfaces + what's on them. No motion."""
+    return Task("Restaurant-SurfaceScan", [SurfaceScanTestTask()], ctx)
+
+
+def build_pick_demo(ctx: TaskContext) -> Task:
+    """Pick-only demo (grasp skill) — detect -> approach -> grasp. No placement."""
+    return Task("Restaurant-PickDemo", [TestTask()], ctx)
+
+
 def build_place_demo(ctx: TaskContext) -> Task:
     """Demo of the grasp-memory + surface-placement pipeline (tasks.skills.place).
 
@@ -409,13 +419,9 @@ def build_place_demo(ctx: TaskContext) -> Task:
 def build_restaurant_task(ctx: TaskContext) -> Task:
     """Full task. Serial loop by default; batched order-taking when RESTAURANT_BATCH=1.
 
-    Pure: touches no hardware at build time.
+    Pure: touches no hardware at build time. Run isolated slices for step-by-step
+    on-robot bring-up via RESTAURANT_SLICE (see tasks/Restaurant/run.py).
     """
     batched = os.getenv("RESTAURANT_BATCH", "0").lower() in ("1", "true", "yes")
     serve = ServeCustomersBatched() if batched else ServeCustomers()
-    # return Task("Restaurant", [GoToStart(), serve], ctx)
-    # Temp stub for quick on-robot testing — swap in whichever demo you want:
-    #   [TestTask()]              — pick only (grasp skill)
-    #   [SurfaceScanTestTask()]   — read-only: list detected surfaces + what's on them
-    #   [PickAndPlaceTestTask()]  — full pick -> place (held memory + surface placement)
-    return Task("Restaurant", [PickAndPlaceTestTask()], ctx)
+    return Task("Restaurant", [GoToStart(), serve], ctx)

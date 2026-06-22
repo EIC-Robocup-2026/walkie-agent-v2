@@ -1,9 +1,17 @@
 """Entrypoint for the Restaurant task (rulebook 5.5).
 
-    uv run python -m tasks.Restaurant.run
+    uv run python -m tasks.Restaurant.run                       # full serve flow
     DISABLE_LISTENING=1 uv run python -m tasks.Restaurant.run   # type instead of speak
-    RESTAURANT_PHASE0=1 uv run python -m tasks.Restaurant.run   # just scan -> approach
     RESTAURANT_SKIP_PREFLIGHT=1 ...                             # bypass the pre-flight gate
+
+Step-by-step on-robot bring-up — pick an isolated slice with RESTAURANT_SLICE
+(like GPSR's runbook; validate each subtask before running the whole flow):
+
+    RESTAURANT_SLICE=surfaces ...   # read-only: list detected surfaces (no motion)
+    RESTAURANT_SLICE=pick ...       # pick only (grasp skill, no placement)
+    RESTAURANT_SLICE=place ...      # surface scan -> full pick -> place
+    RESTAURANT_SLICE=phase0 ...     # scan -> detect waving customer -> approach
+    RESTAURANT_SLICE=full ...       # whole serve loop (default; RESTAURANT_PHASE0=1 alias for phase0)
 
 Phase 0 (scan -> detect waving customer -> approach to stand-off) is implemented;
 order-taking + relay are real; pick/serve are Phase-2 stubs. Person handling is
@@ -18,12 +26,42 @@ from dotenv import load_dotenv
 
 from ..base import TaskContext
 from ..common import initialize_llm_model, initialize_robot, load_task_config
-from .subtasks import build_phase0_slice, build_restaurant_task
+from .subtasks import (
+    build_phase0_slice,
+    build_pick_demo,
+    build_place_demo,
+    build_restaurant_task,
+    build_surface_demo,
+)
 from client import WalkieAIClient
 
 
 def _truthy(name: str, default: str = "0") -> bool:
     return os.getenv(name, default).lower() in ("1", "true", "yes")
+
+
+# Isolated slices for step-by-step on-robot bring-up, selected by RESTAURANT_SLICE
+# (RESTAURANT_PHASE0=1 stays as a back-compat alias for "phase0"). Order = rough
+# bring-up order: prove perception, then pick, then place, then HRI, then the lot.
+_SLICES = {
+    "surfaces": build_surface_demo,   # read-only surface detection (no motion)
+    "pick": build_pick_demo,          # grasp skill only
+    "place": build_place_demo,        # surface scan -> pick -> place
+    "phase0": build_phase0_slice,     # scan -> detect waving customer -> approach
+    "full": build_restaurant_task,    # whole serve loop
+}
+
+
+def _select_build():
+    """Resolve RESTAURANT_SLICE (falling back to RESTAURANT_PHASE0 / full)."""
+    slice_name = os.getenv("RESTAURANT_SLICE", "").strip().lower()
+    if not slice_name:
+        slice_name = "phase0" if _truthy("RESTAURANT_PHASE0") else "full"
+    build = _SLICES.get(slice_name)
+    if build is None:
+        valid = ", ".join(_SLICES)
+        raise SystemExit(f"[restaurant] unknown RESTAURANT_SLICE={slice_name!r}; pick one of: {valid}")
+    return slice_name, build
 
 
 def preflight(walkie, walkie_ai) -> bool:
@@ -67,8 +105,9 @@ def preflight(walkie, walkie_ai) -> bool:
           "(0,0,0 = start at the SLAM origin)")
     print(f"  [i ] arm: " + ("CALIBRATED — pick/serve WILL move" if _truthy("RESTAURANT_ARM_CALIBRATED")
                              else "uncalibrated — pick/serve log only, no motion"))
-    print(f"  [i ] mode: " + ("Phase 0 (scan->approach)" if _truthy("RESTAURANT_PHASE0")
-                              else ("batched serve" if _truthy("RESTAURANT_BATCH") else "serial serve")))
+    slice_name, _ = _select_build()
+    detail = ("batched serve" if _truthy("RESTAURANT_BATCH") else "serial serve") if slice_name == "full" else slice_name
+    print(f"  [i ] slice: {slice_name} ({detail})")
     return hard_ok
 
 
@@ -93,7 +132,8 @@ def main() -> None:
         disable_listening=_truthy("DISABLE_LISTENING"),
     )
 
-    build = build_phase0_slice if _truthy("RESTAURANT_PHASE0") else build_restaurant_task
+    slice_name, build = _select_build()
+    print(f"[restaurant] running slice: {slice_name}")
 
     try:
         build(ctx).run()
