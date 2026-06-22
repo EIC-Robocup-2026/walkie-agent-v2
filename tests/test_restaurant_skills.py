@@ -10,8 +10,6 @@ regression the way tests/test_gpsr_* do for GPSR.
 
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from client import PersonPose, PoseKeypoint
@@ -19,8 +17,6 @@ from tasks.Restaurant.skills import (
     Caller,
     _cxcywh_to_xyxy,
     _dedup_callers,
-    _in_reach,
-    _map_to_base,
     _said_no,
     _scan_offsets,
     exclude_handled,
@@ -144,42 +140,3 @@ def test_said_no_detects_explicit_rejection(text):
 @pytest.mark.parametrize("text", ["", "yes that's right", "correct, thanks", "sure"])
 def test_said_no_accepts_silence_and_affirmation(text):
     assert _said_no(text) is False
-
-
-# --- map->base transform + reach envelope ----------------------------------
-
-def test_map_to_base_identity_heading():
-    pose = {"x": 0.0, "y": 0.0, "heading": 0.0}
-    bx, by, bz = _map_to_base(pose, (1.0, 0.0, 0.5))
-    assert (round(bx, 6), round(by, 6), bz) == (1.0, 0.0, 0.5)  # straight ahead
-
-
-def test_map_to_base_rotates_into_base_frame():
-    # robot at origin facing +y (heading pi/2); a map point straight along +y is
-    # directly in front -> base +x.
-    pose = {"x": 0.0, "y": 0.0, "heading": math.pi / 2}
-    bx, by, _ = _map_to_base(pose, (0.0, 1.0, 0.0))
-    assert round(bx, 6) == 1.0 and round(by, 6) == 0.0
-
-
-def test_map_to_base_applies_z_offset():
-    pose = {"x": 0.0, "y": 0.0, "heading": 0.0}
-    _, _, bz = _map_to_base(pose, (1.0, 0.0, 0.4), z_offset=0.1)
-    assert round(bz, 6) == 0.5
-
-
-def test_map_to_base_translates_before_rotating():
-    # point coincident with the robot -> origin in base frame, regardless of heading
-    pose = {"x": 2.0, "y": -1.0, "heading": 1.234}
-    bx, by, _ = _map_to_base(pose, (2.0, -1.0, 0.0))
-    assert round(bx, 6) == 0.0 and round(by, 6) == 0.0
-
-
-def test_in_reach_accepts_a_point_inside_the_default_envelope():
-    assert _in_reach((0.5, 0.0, 0.8)) is True
-
-
-def test_in_reach_rejects_out_of_envelope_points():
-    assert _in_reach((1.5, 0.0, 0.8)) is False   # x beyond max
-    assert _in_reach((0.5, 0.0, 2.0)) is False    # z too high
-    assert _in_reach((0.5, 0.9, 0.8)) is False    # y beyond left

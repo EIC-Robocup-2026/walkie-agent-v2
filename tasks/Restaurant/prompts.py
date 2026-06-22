@@ -50,6 +50,6 @@ CUSTOMER_APPEARANCE_PROMPT = (
     "hair, glasses, and any other distinctive feature."
 )
 
-# Placeholder lines for the not-yet-implemented manipulation steps.
 NO_CUSTOMER = "I do not see anyone calling right now."
-PICK_NOT_AVAILABLE = "I cannot pick up the items yet — manipulation is not implemented."
+# Spoken when the serve loop runs with the arm gated off (RESTAURANT_ARM_CALIBRATED unset).
+PICK_NOT_AVAILABLE = "I cannot bring your order just yet — my arm is not ready."

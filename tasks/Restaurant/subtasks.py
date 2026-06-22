@@ -36,16 +36,15 @@ from tasks.skills import (
 
 from . import prompts
 from .skills import (
+    _arm_calibrated,
     approach_to_standoff,
     capture_appearance,
-    collect_items,
     exclude_handled,
     nearest_caller,
     relay_to_barman,
     return_to_bar,
     return_to_customer,
     scan_for_callers,
-    serve_order,
     take_order,
 )
 
@@ -85,26 +84,59 @@ def _int(env_key: str, default: str) -> int:
 
 
 def _pick_and_serve(ctx: TaskContext, order: Order) -> None:
-    """Phase 2: pick the order, re-acquire the customer, serve what we picked.
+    """Phase 2: per-item pick at the bar -> carry to the customer -> place on their table.
 
+    One gripper carries one object, so delivery is a per-item round trip (pick ->
+    re-acquire the customer -> place -> back to the bar), NOT pick-all-then-serve.
     Per-item partial credit (pick + serve are scored per object): a failed item
-    doesn't forfeit the others, and we only ever try to serve what we actually
-    picked. All arm motion is gated off until RESTAURANT_ARM_CALIBRATED=1, so
-    uncalibrated this picks/serves nothing and leaves the order at its relay
-    status. Shared by the serial and batched loops so they can't drift apart.
+    doesn't forfeit the others. Uses the grasp/place skills (tasks.skills.pick_object
+    / place_object): pick records what it grabbed + how high it sat above its support
+    surface, place reconstructs that height on the customer's table so it lands upright.
+    Gated off until RESTAURANT_ARM_CALIBRATED=1 so nav/HRI can be rehearsed without arm
+    motion. Shared by the serial and batched loops so they can't drift apart.
     """
-    picked = collect_items(ctx, order.items)
-    if not picked:
+    if not order.items:
         return
-    order.status = OrderStatus.PICKED
-    # Re-acquire the customer visually rather than trusting the stale point (§5.1).
-    fresh = return_to_customer(ctx, order.world_xy) if order.world_xy else None
-    if fresh is None:
-        ctx.say(prompts.SERVE_NO_CUSTOMER)
+    if not _arm_calibrated():
+        print("[restaurant] pick/serve: arm UNCALIBRATED — set RESTAURANT_ARM_CALIBRATED=1 "
+              "to enable the grasp/place pipeline; skipping manipulation")
+        ctx.say(prompts.PICK_NOT_AVAILABLE)
         return
-    order.world_xy = fresh
-    if serve_order(ctx, picked):
+
+    served: list[str] = []
+    for item in order.items:
+        # 1. Pick one item — we arrive (and return between items) at the bar anchor.
+        if not pick_object(
+            ctx, prompts=[item], arm="auto",
+            pregrasp_standoff_m=0.2, approach_preference="side", approach_weight=4.0,
+        ):
+            print(f"[restaurant] could not pick {item!r}; trying the next item")
+            continue
+        order.status = OrderStatus.PICKED
+
+        # 2. Re-acquire the customer visually rather than trusting the stale point (§5.1).
+        fresh = return_to_customer(ctx, order.world_xy) if order.world_xy else None
+        if fresh is None:
+            # Still holding the item and lost the customer — give up the rest of the order.
+            ctx.say(prompts.SERVE_NO_CUSTOMER)
+            return_to_bar(ctx)
+            break
+        order.world_xy = fresh
+
+        # 3. Place it on a clear spot of the table in front of the customer. place_object
+        #    auto-picks the nearest reachable surface; pass surface=/target_xy= to steer it.
+        if place_object(ctx):
+            served.append(item)
+            ctx.say(prompts.SERVE_ANNOUNCE.format(items=item))
+        else:
+            print(f"[restaurant] reached the customer but could not place {item!r}")
+
+        # 4. Back to the bar for the next item.
+        return_to_bar(ctx)
+
+    if served:
         order.status = OrderStatus.SERVED
+    print(f"[restaurant] order #{order.id}: served {served} of {order.items}")
 
 
 # ---------------------------------------------------------------------------
