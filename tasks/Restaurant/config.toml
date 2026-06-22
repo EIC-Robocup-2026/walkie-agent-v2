@@ -9,9 +9,13 @@
 # disqualification (rulebook 5.5).
 
 [restaurant]
-# Kitchen-bar start pose "x,y,heading_rad". Captured as the bar anchor at GoToStart;
-# later phases re-acquire the bar/barman visually on return (design doc §5.1).
-RESTAURANT_KITCHEN_BAR_POSE = "0.0,0.0,0.0"
+# Kitchen-bar start pose. Default "current" = anchor wherever the robot is standing
+# now and DON'T drive (no pre-mapped arena per rulebook 5.5; the start pose is only a
+# relative reference, so just place the robot at the bar and run — no map pose to type
+# each time). Set an explicit "x,y,heading_rad" to drive to a fixed map pose instead.
+# Captured as the bar anchor at GoToStart; later phases re-acquire the bar/barman
+# visually on return (design doc §5.1).
+RESTAURANT_KITCHEN_BAR_POSE = "current"
 # Horizontal FOV (deg) of the camera (pixel<->bearing conversions).
 RESTAURANT_CAMERA_HFOV_DEG = "110"
 # How many customers to serve (rulebook scores up to two; tables >= 5 exist).
@@ -20,11 +24,12 @@ RESTAURANT_TARGET_CUSTOMERS = "2"
 RESTAURANT_EXTRA_ATTEMPTS = "3"
 # 1 = run only the Phase 0 slice (GoToStart -> scan -> approach) for on-robot bring-up.
 RESTAURANT_PHASE0 = "0"
+RESTAURANT_SLICE = "place"
 
 # --- Phase 0: caller detection + approach -----------------------------------
 # Base-rotation sweep that searches the dining area for a waving customer
 # (the head only tilts, so looking around is an in-place base rotation).
-RESTAURANT_SCAN_ARC_DEG = "120"      # total arc swept, centered on entry heading
+RESTAURANT_SCAN_ARC_DEG = "180"      # total arc swept, centered on the dining heading (±90° = full front; widen more if tables wrap to the sides)
 RESTAURANT_SCAN_STEP_DEG = "30"      # rotation between snapshots within the arc
 RESTAURANT_SCAN_SETTLE_SEC = "0.8"   # settle time after each rotation before capture
 # is_calling: a wrist must sit above its shoulder by this fraction of the person's
@@ -35,9 +40,26 @@ RESTAURANT_KP_CONF = "0.3"
 RESTAURANT_CALLER_DEDUP_M = "0.6"
 # Stop this far in front of the customer/table (conversational + public-space safe).
 RESTAURANT_STANDOFF_M = "0.8"
+# Depth camera's accurate range (m). A customer farther than this is lifted to a coarse,
+# usually-short map point, so approach_customer closes in over several steps — each step
+# stops at most this far from the (coarse) target so the customer lands inside the
+# accurate band, then re-detects to refine before stepping again. Set to the ZED's
+# trustworthy range (≈4 m here; 3.5 leaves margin).
+RESTAURANT_DEPTH_RELIABLE_M = "3.5"
 # Conservative approach speed for the public venue — a Nav2/robot-side param;
 # recorded here for that tuning (go_to does not cap velocity itself).
 RESTAURANT_APPROACH_SPEED = "0.3"
+# Generic ctx.goto knob (not RESTAURANT_*): promote a Nav2 FAILED to CLOSE_ENOUGH
+# when the robot ended within this many metres of the goal. Stops in-place
+# scan rotations logging a spurious FAILED, and — critically — stops the serve
+# loop abandoning a customer it actually reached when Nav2's goal checker didn't
+# converge to the exact pose. Only reinterprets go_to's RESULT; it does NOT loosen
+# Nav2's controller (the "won't settle / keeps creeping" is robot-side Nav2 yaml).
+# 0.4 (not 0.15): on-robot the approach stops ~0.3 m short of the 0.8 m standoff
+# (Nav2 halts at the table/customer inflation boundary), so a tighter value never
+# promotes and the approach retries forever. 0.4 still leaves the robot ~0.8–1.2 m
+# from the customer — a safe conversational distance.
+WALKIE_NAV_GOAL_TOLERANCE_M = "0.4"
 
 # --- Phase 1: re-acquire on return (anti-drift, design §5.1) -----------------
 # When returning to a customer, accept a re-detected person within this distance
@@ -45,16 +67,28 @@ RESTAURANT_APPROACH_SPEED = "0.3"
 RESTAURANT_REACQUIRE_RADIUS_M = "1.5"
 # When back at the bar, treat a person within this distance of the anchor as the barman.
 RESTAURANT_BARMAN_RADIUS_M = "2.5"
+# Rotate this many DEGREES from the bar-anchor heading (which faces the diners) to face
+# the order station / counter when relaying an order — the counter is off to the side of
+# the customer-facing start pose. 0 = straight ahead (no turn); +90 = counter on the left,
+# -90 = on the right. Flip the sign if the robot turns the wrong way.
+RESTAURANT_COUNTER_REL_DEG = "0"
 # Treat a fresh caller within this distance of a customer we already took an order
 # from as the SAME person, and skip them — so a still-waving customer isn't served
-# twice (the loop needs >= 2 DISTINCT customers, rulebook 5.5). Set between the
-# caller-dedup radius (0.6) and the typical table spacing so two real customers at
-# separate tables stay distinct.
-RESTAURANT_HANDLED_RADIUS_M = "1.0"
+# twice (the loop needs >= 2 DISTINCT customers, rulebook 5.5). MUST be < the table
+# spacing or two real customers at adjacent tables get merged and the 2nd is never
+# served: this venue's tables are ~1 m apart, so 1.0 was too large — 0.6 (= the
+# caller-dedup radius) still absorbs the ~0.3 m position jitter between sweeps.
+RESTAURANT_HANDLED_RADIUS_M = "0.6"
 # Give up on a spot after this many failed attempts (approach refused, or order
 # never parsed in venue noise) so one uncooperative caller can't monopolize every
 # attempt while a second waving customer is never reached. < this = transient retry.
 RESTAURANT_MAX_FAILS_PER_SPOT = "2"
+# Order-taking dialogue (HRI). On an empty/garbled parse, RE-ASK the SAME customer this
+# many extra times before giving up — without it one unclear reply made the serve loop
+# wander off to find a new customer. CONFIRM_RETRIES = extra re-takes on an explicit "no"
+# at the "is that right?" step (a silent/garbled reply still counts as acceptance).
+RESTAURANT_ORDER_RETRIES = "2"
+RESTAURANT_CONFIRM_RETRIES = "1"
 
 # --- Phase 2: manipulation (CALIBRATION-READY, NOT VALIDATED) ----------------
 # MASTER SAFETY GATE. 0 = pick/serve compute + log the target pose but DO NOT move

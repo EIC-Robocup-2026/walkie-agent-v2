@@ -14,8 +14,9 @@ map-frame grasp point (and a backed-off pre-grasp point) ready to hand to the ar
 from __future__ import annotations
 
 import math
+import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -309,6 +310,7 @@ def look_at_object(ctx: TaskContext, xyz_map: Vec3) -> bool:
     clamped look-down tilt, and commands the head servo. Returns False (never
     raises) when the camera pose is unavailable or the servo command fails.
     """
+    ctx.walkie.robot.head.get_angle
     cam = camera_pose(ctx.walkie)
     if cam is None:
         print("[grasp] look_at_object: no camera pose")
@@ -479,6 +481,73 @@ def align_arm_to_object(ctx: TaskContext, xyz_map: Vec3, *, arm: str = "left") -
     return True
 
 
+def creep_to_grasp_distance(
+    ctx: TaskContext, xyz_map: Vec3, *, target_m: float = 0.50, max_advance_m: float = 0.35,
+) -> bool:
+    """Drive the base straight forward (along its heading) to close on the object.
+
+    Nav's ``NavigateToObject`` standoff is unreliable on this robot — Nav2 often
+    halts at the table/inflation boundary well short of the requested standoff, so
+    the planned grasp ends up too far to reach accurately. This is a final, direct
+    creep: a pure forward translation (heading held) that brings the object within
+    *target_m* metres (planar). The base has already been faced/strafed at the
+    object, so "forward" is "toward it". Pure translation keeps the map-frame grasp
+    candidate valid (no re-plan). Capped at *max_advance_m* so a bad estimate can't
+    drive the robot into the table. Best-effort; never raises.
+    """
+    dist = _xy_dist(ctx, xyz_map)
+    if dist <= target_m:
+        return True
+    advance = min(dist - target_m, max_advance_m)
+    p = ctx.current_pose()
+    fx, fy = math.cos(p["heading"]), math.sin(p["heading"])  # base +forward in map
+    tx, ty = p["x"] + advance * fx, p["y"] + advance * fy
+    print(f"[grasp] creep_to_grasp_distance: {dist:.2f}m -> {target_m:.2f}m "
+          f"(advance {advance:+.2f}m to {tx:+.2f},{ty:+.2f})")
+    try:
+        res = ctx.walkie.nav.go_to(tx, ty, p["heading"], blocking=True)
+        print(f"[grasp] creep_to_grasp_distance: nav -> {res}")
+    except Exception as exc:  # noqa: BLE001 — creep is best-effort
+        print(f"[grasp] creep_to_grasp_distance: nav raised ({exc}); ignored")
+    return True
+
+
+def aim_forward_candidate(
+    ctx: TaskContext, candidate: GraspCandidate, *, standoff_m: float = 0.10,
+) -> GraspCandidate:
+    """Re-point a grasp's wrist straight along the robot heading (map frame).
+
+    GraspNet's returned wrist orientation is often awkward / IK-unsolvable on
+    OpenArm. Instead of "positioning the arm at the object's full grasp pose", this
+    points the gripper's approach axis (EE **+z**) along the robot's forward heading
+    — taking the arm's forward to be the robot's. ``pick_object`` has already faced
+    the object, so "forward" is "at the object". The base-frame wrist orientation is
+    read from ``WALKIE_GRASP_POINT_RPY`` (default ``"0,1.5708,0"`` -> EE +z = base
+    +x, horizontal forward) and rotated into the map frame by the current heading.
+
+    The grasp *point* is kept; only the orientation, approach axis, and pre-grasp
+    (re-backed-off *standoff_m* along the new -forward axis) change. Returns a new
+    :class:`GraspCandidate` so the same pose drives both the arm and the held-object
+    record (so the placer sets the object back down the way it was grasped).
+    """
+    raw = os.getenv("WALKIE_GRASP_POINT_RPY", "0,1.5708,0")
+    rpy_base = [float(p.strip()) for p in raw.split(",")]
+    theta = ctx.current_pose()["heading"]
+    R_base = Rotation.from_euler("xyz", rpy_base).as_matrix()
+    R_map = Rotation.from_euler("z", theta).as_matrix() @ R_base
+    approach = R_map[:, 2]  # gripper points this way (map frame)
+    grasp = np.asarray(candidate.grasp_xyz, dtype=float)
+    pregrasp = grasp - approach * standoff_m
+    print(f"[grasp] aim_forward_candidate: heading={math.degrees(theta):+.0f}deg "
+          f"approach=({approach[0]:+.2f},{approach[1]:+.2f},{approach[2]:+.2f})")
+    return replace(
+        candidate,
+        rotation=R_map,
+        approach=approach,
+        pregrasp_xyz=(float(pregrasp[0]), float(pregrasp[1]), float(pregrasp[2])),
+    )
+
+
 def execute_grasp(
     ctx: TaskContext,
     candidate: GraspCandidate,
@@ -495,6 +564,10 @@ def execute_grasp(
     move's result string** and aborting on anything but ``"SUCCEEDED"``. Always
     re-enables gripper collision; tucks the arm home on abort. Returns True only
     when both moves succeeded and the gripper closed. Never raises.
+
+    Executes whatever orientation the *candidate* carries — callers wanting a
+    forward-pointing wrist (instead of GraspNet's) re-point it first with
+    :func:`aim_forward_candidate`.
     """
     motion_group, home_group, gripper_group = _arm_sides(arm)
     side = motion_group.split("_")[0]
@@ -505,8 +578,9 @@ def execute_grasp(
     except Exception as exc:  # noqa: BLE001
         print(f"[grasp] execute_grasp[{side}]: bad rotation matrix ({exc})")
         return False
+    grasp_xyz, pregrasp_xyz = candidate.grasp_xyz, candidate.pregrasp_xyz
     print(f"[grasp] execute_grasp[{side}]: RPY=({roll:+.2f},{pitch:+.2f},{yaw:+.2f}) "
-          f"grasp={candidate.grasp_xyz} pregrasp={candidate.pregrasp_xyz}")
+          f"grasp={grasp_xyz} pregrasp={pregrasp_xyz}")
     if viz:
         _draw_grasp_viz(ctx, candidate)
 
@@ -521,7 +595,7 @@ def execute_grasp(
         collision_disabled = True
 
         res = ctx.walkie.arm.go_to_pose(
-            *candidate.pregrasp_xyz, roll, pitch, yaw,
+            *pregrasp_xyz, roll, pitch, yaw,
             group_name=home_group, frame_id="map", blocking=True,
         )
         print(f"[grasp] execute_grasp[{side}]: pregrasp -> {res}")
@@ -530,7 +604,7 @@ def execute_grasp(
             return False
 
         res = ctx.walkie.arm.go_to_pose(
-            *candidate.grasp_xyz, roll, pitch, yaw,
+            *grasp_xyz, roll, pitch, yaw,
             group_name=home_group, frame_id="map", blocking=True, cartesian_path=True
         )
         print(f"[grasp] execute_grasp[{side}]: grasp -> {res}")
@@ -547,17 +621,18 @@ def execute_grasp(
         print(f"[grasp] execute_grasp[{side}]: hardware error ({exc})")
         return False
     finally:
+        if tuck_on_abort and not succeeded:
+            try:
+                result = ctx.walkie.arm.go_to_home(group_name=home_group, pose_name=home_pose, blocking=True)
+                print(f"[grasp] execute_grasp[{side}]: tuck-on-abort home -> {result}")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[grasp] execute_grasp[{side}]: tuck-on-abort home failed ({exc})")
         # ctx.walkie.robot.arm.set_param_result(name="planner_id", value=original_planner)
         if collision_disabled:
             try:
                 ctx.walkie.arm.toggle_gripper_collision(gripper_group, True)
             except Exception as exc:  # noqa: BLE001
                 print(f"[grasp] execute_grasp[{side}]: re-enable gripper collision failed ({exc})")
-        if tuck_on_abort and not succeeded:
-            try:
-                ctx.walkie.arm.go_to_home(group_name=home_group, pose_name=home_pose, blocking=True)
-            except Exception as exc:  # noqa: BLE001
-                print(f"[grasp] execute_grasp[{side}]: tuck-on-abort home failed ({exc})")
 
 
 def pick_object(
@@ -571,10 +646,12 @@ def pick_object(
     approach_weight: float | None = None,
     optimal_standoff_m: float = 0.55,
     approach_trigger_m: float = 0.70,
+    grasp_distance_m: float = 0.50,
     max_reach_xy_m: float = 0.75,
     min_grasp_z_m: float = 0.70,
     deadzone_half_m: float = 0.20,
     default_arm: str = "left",
+    point_at_object: bool = True,
     track: bool = True,
     viz: bool = True,
 ) -> bool:
@@ -589,10 +666,20 @@ def pick_object(
     2. If it's farther than *approach_trigger_m* (XY), drive to *optimal_standoff_m*
        facing it (head tracking), then re-plan from the new viewpoint.
     3. Pick the arm (``"auto"`` -> object's side, dead-centre -> *default_arm*).
-    4. Strafe the base left/right (:func:`align_arm_to_object`) to line the chosen
-       arm up with the object; nav failure is ignored. The map-frame candidate
-       stays valid across the strafe, so no re-plan is needed.
-    5. Execute the grasp on the chosen arm, checking each arm move.
+    4. Rotate the base so the chosen arm points straight at the object
+       (:func:`face_object_with_arm`, arm-forward = robot heading), recording the
+       pre-rotate heading. This makes "forward" point at the object for the creep and
+       wrist re-aim below; the map-frame candidate stays valid across the rotation.
+    5. Creep the base straight forward (:func:`creep_to_grasp_distance`) so the
+       object ends within *grasp_distance_m* — the approach often halts short of the
+       table, leaving it too far to reach accurately. ``None`` disables the creep.
+    6. With *point_at_object* (default), re-point the gripper straight forward along
+       the robot heading (:func:`aim_forward_candidate`) instead of using GraspNet's
+       wrist orientation (often IK-unsolvable on OpenArm) — the arm's forward is
+       taken to be the robot's.
+    7. Execute the grasp on the chosen arm, checking each arm move.
+    8. Restore the pre-rotate heading (:func:`TaskContext.rotate_to`) so the base
+       ends the pick in its original orientation, whether or not the grasp succeeded.
 
     Returns True only when the grasp executed cleanly. Degrades to False (never
     raises) at any failing step.
@@ -635,7 +722,7 @@ def pick_object(
         return False
 
     base_lift_diff_m = ctx.walkie.robot.transform.lookup("base_footprint", "lift_link")["position"]["z"] - ctx.walkie.robot.lift.get(norm_pos=False) / 100.0
-    optimum_lift_height = cand.grasp_xyz[2] + 0.1
+    optimum_lift_height = cand.grasp_xyz[2] + 0.12
     print(f"[grasp] pick_object: setting lift to {((optimum_lift_height - base_lift_diff_m) * 100):.2f}m for better reach")
     ctx.walkie.robot.lift.set(pos=(optimum_lift_height - base_lift_diff_m) * 100, norm_pos=False)
     
@@ -672,34 +759,57 @@ def pick_object(
             chosen = default_arm
     print(f"[grasp] pick_object: chosen arm = {chosen}")
 
-    # 4. Strafe the base sideways so the chosen arm lines up with the object —
-    #    omnidirectional translation rather than a rotate, so the object lands
-    #    directly in front of the arm (and out of the dead-zone) without swinging
-    #    it on an arc. The candidate is a map-frame pose, so it stays valid after
-    #    the strafe — no re-plan needed (and re-planning would re-face the base,
-    #    undoing the alignment). nav failure is ignored (likely already at the limit).
-    align_arm_to_object(ctx, cand.grasp_xyz, arm=chosen)
+    # 4. Rotate the base so the chosen arm points straight at the object. The arm's
+    #    forward is taken to be the robot's heading, so this is a rotate-to-face on the
+    #    arm's shoulder (face_object_with_arm). After this the base's "forward" genuinely
+    #    points at the object, which is exactly what the creep (step 5) and the wrist
+    #    re-aim (step 6) both assume. The candidate is a map-frame pose, so it stays
+    #    valid across the rotation. We record the pre-rotate heading and restore it once
+    #    the grasp is done (success or not) so the base ends where it started.
+    original_heading = ctx.current_pose()["heading"]
+    face_object_with_arm(ctx, cand.grasp_xyz, arm=chosen)
 
-    # 5. Final radial reach guard, then execute.
-    reach = _xy_dist(ctx, cand.grasp_xyz)
-    if reach > max_reach_xy_m:
-        print(f"[grasp] pick_object: out of reach (xy={reach:.2f}m > {max_reach_xy_m:.2f}m); aborting")
-        return False
-    ok = execute_grasp(ctx, cand, arm=chosen, viz=viz)
-    if ok:
-        # Remember what we're holding (per arm) so tasks.skills.place can put it back
-        # down at the same height above whatever surface it's placed on.
-        from tasks.skills.held import record_held_object
+    try:
+        # 5. Creep the base straight forward to close the last gap — the approach often
+        #    stops short (Nav2 halts at the table/inflation boundary), leaving the object
+        #    too far to grasp accurately. A pure forward translation keeps the map-frame
+        #    candidate valid (no re-plan). Skipped when already within grasp_distance_m.
+        if grasp_distance_m is not None:
+            creep_to_grasp_distance(ctx, cand.grasp_xyz, target_m=grasp_distance_m)
 
-        record_held_object(
-            ctx,
-            label=prompts[0] if prompts else "object",
-            arm=chosen,
-            grasp_xyz=cand.grasp_xyz,
-            rotation=cand.rotation,
-            width=cand.width,
-            footprint_m=cand.object_footprint_m,
-            support_surface_z=cand.support_surface_z,
-            grasp_to_surface_offset=cand.grasp_to_surface_offset,
-        )
-    return ok
+        # 6. Re-point the wrist straight forward at the object (instead of GraspNet's
+        #    often-IK-unsolvable orientation), taking the arm's forward to be the robot's.
+        #    Done after the creep so it uses the final heading; the new candidate drives
+        #    both the arm and the held-object record (so the placer reuses the real grasp
+        #    pose). Keeps GraspNet's orientation when disabled.
+        if point_at_object:
+            cand = aim_forward_candidate(ctx, cand, standoff_m=pregrasp_standoff_m)
+
+        # 7. Final radial reach guard, then execute.
+        reach = _xy_dist(ctx, cand.grasp_xyz)
+        if reach > max_reach_xy_m:
+            print(f"[grasp] pick_object: out of reach (xy={reach:.2f}m > {max_reach_xy_m:.2f}m); aborting")
+            return False
+        ok = execute_grasp(ctx, cand, arm=chosen, viz=viz)
+        if ok:
+            # Remember what we're holding (per arm) so tasks.skills.place can put it back
+            # down at the same height above whatever surface it's placed on.
+            from tasks.skills.held import record_held_object
+
+            record_held_object(
+                ctx,
+                label=prompts[0] if prompts else "object",
+                arm=chosen,
+                grasp_xyz=cand.grasp_xyz,
+                rotation=cand.rotation,
+                width=cand.width,
+                footprint_m=cand.object_footprint_m,
+                support_surface_z=cand.support_surface_z,
+                grasp_to_surface_offset=cand.grasp_to_surface_offset,
+            )
+        return ok
+    finally:
+        # 8. Rotate back to the heading we had before facing the object (the arm is
+        #    home/tucked by now), so the base ends the pick in its original orientation.
+        print(f"[grasp] pick_object: restoring heading to {math.degrees(original_heading):+.0f}deg")
+        ctx.rotate_to(original_heading)

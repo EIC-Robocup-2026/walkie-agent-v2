@@ -102,6 +102,12 @@ WALKIE_GRASP_APPROACH = "top_down"   # "top_down" (overhead) or "front" (horizon
 # from the HRI reach/place poses on this robot — VERIFY on the arm for grasping.
 WALKIE_GRASP_RPY_TOPDOWN = "-2.623,-0.033,-1.468"
 WALKIE_GRASP_RPY_FRONT = "-0.8,0.0,-1.5708"
+# Wrist orientation (base-frame roll,pitch,yaw rad) used by the GraspNet skill's
+# point_at_object mode (tasks/skills/grasp.py::aim_forward_candidate): instead of
+# GraspNet's often-IK-unsolvable wrist, point the gripper's approach axis (EE +z)
+# straight along the robot heading. Default "0,1.5708,0" -> EE +z = base +x
+# (horizontal, dead ahead). CALIBRATE on the arm if the gripper rolls wrong.
+WALKIE_GRASP_POINT_RPY = "0,1.5708,0"
 WALKIE_GRASP_Z_OFFSET_M = "0.0"      # vertical nudge added to the object centroid
 WALKIE_PREGRASP_OFFSET_M = "0.10"    # pre-grasp standoff (above for top-down, back for front)
 WALKIE_LIFT_HEIGHT_M = "0.15"        # how far to lift after grasping

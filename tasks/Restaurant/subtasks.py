@@ -37,7 +37,7 @@ from tasks.skills import (
 from . import prompts
 from .skills import (
     _arm_calibrated,
-    approach_to_standoff,
+    approach_customer,
     capture_appearance,
     exclude_handled,
     nearest_caller,
@@ -81,6 +81,14 @@ def _pose(env_key: str, default: str = "0.0,0.0,0.0") -> tuple[float, float, flo
 
 def _int(env_key: str, default: str) -> int:
     return int(os.getenv(env_key, default))
+
+
+def _odom_fix(ctx: TaskContext) -> dict | None:
+    """A genuine odometry fix, or None on failure (never the zeros fallback)."""
+    try:
+        return ctx.walkie.status.get_position() or None
+    except Exception:
+        return None
 
 
 def _pick_and_serve(ctx: TaskContext, order: Order) -> None:
@@ -143,25 +151,41 @@ def _pick_and_serve(ctx: TaskContext, order: Order) -> None:
 # Phase 0 states
 # ---------------------------------------------------------------------------
 class GoToStart(SubTask):
-    """Go to the Kitchen-bar start pose and remember it as the bar anchor.
+    """Anchor the Kitchen-bar start pose (where relayed orders are picked).
 
-    The bar anchor is where relayed orders are placed and picked; later phases
-    re-acquire the bar/barman visually on return rather than trusting this point
-    blindly (design doc §5.1).
+    Default (``RESTAURANT_KITCHEN_BAR_POSE`` unset or ``"current"``): treat
+    wherever the robot is standing now as the bar anchor and DON'T drive. The
+    arena isn't pre-mapped (rulebook 5.5), so the start pose is only a relative
+    reference — anchoring on the current pose means the operator just places the
+    robot at the bar and runs, with no map pose to type each time. Set an explicit
+    ``"x,y,heading_rad"`` to drive to a fixed map pose instead (old behaviour).
+
+    Later phases re-acquire the bar/barman visually on return rather than trusting
+    this point blindly (design doc §5.1).
     """
 
     critical = True
 
     def run(self, ctx: TaskContext) -> StepResult:
+        raw = os.getenv("RESTAURANT_KITCHEN_BAR_POSE", "current").strip().lower()
+
+        if raw in ("", "current", "here", "now"):
+            # Start = current pose; stay put. Needs a genuine odometry fix to anchor.
+            fix = _odom_fix(ctx)
+            if not fix:
+                print("[restaurant] GoToStart: no odometry fix; cannot anchor the bar here")
+                return StepResult.RETRY
+            ctx.data["bar_anchor"] = {"x": fix["x"], "y": fix["y"], "heading": fix["heading"]}
+            print(f"[restaurant] bar anchor = current pose "
+                  f"({fix['x']:.2f}, {fix['y']:.2f}, {math.degrees(fix['heading']):.0f}deg); staying put")
+            return StepResult.DONE
+
+        # Explicit map pose: drive there, then anchor on the pose we actually reached.
         x, y, h = _pose("RESTAURANT_KITCHEN_BAR_POSE")
         ok = ctx.goto(x, y, h)
-        # Capture the real pose we ended at as the bar anchor. Key off a genuine
-        # odometry fix (None) — NOT coordinate truthiness: (0,0) is a valid pose at
-        # the SLAM origin, so `if pose.get("x")` would wrongly discard a real fix.
-        try:
-            fix = ctx.walkie.status.get_position()
-        except Exception:
-            fix = None
+        # Key off a genuine odometry fix (None) — NOT coordinate truthiness: (0,0) is a
+        # valid pose at the SLAM origin, so `if pose.get("x")` would discard a real fix.
+        fix = _odom_fix(ctx)
         ctx.data["bar_anchor"] = (
             {"x": fix["x"], "y": fix["y"], "heading": fix["heading"]}
             if fix else {"x": x, "y": y, "heading": h}
@@ -185,7 +209,7 @@ class ScanAndApproach(SubTask):
             ctx.say(prompts.NO_CUSTOMER)
             return StepResult.RETRY
         ctx.data["target"] = target
-        if approach_to_standoff(ctx, target.world_xy):
+        if approach_customer(ctx, target.world_xy):
             return StepResult.DONE
         # Reached no nav goal (no odom fix / nav refused) — re-sweep and retry.
         return StepResult.RETRY
@@ -240,7 +264,7 @@ class ServeCustomers(SubTask):
                 continue
             order = Order(id=len(orders) + 1, world_xy=caller.world_xy, bearing=caller.bearing)
             orders[order.id] = order
-            if not approach_to_standoff(ctx, caller.world_xy):
+            if not approach_customer(ctx, caller.world_xy):
                 order.status = OrderStatus.FAILED
                 note_failure(caller.world_xy)
                 continue
@@ -302,7 +326,7 @@ class ServeCustomersBatched(SubTask):
         for caller in callers[:min(batch_size, target)]:
             order = Order(id=len(orders) + 1, world_xy=caller.world_xy, bearing=caller.bearing)
             orders[order.id] = order
-            if not approach_to_standoff(ctx, caller.world_xy):
+            if not approach_customer(ctx, caller.world_xy):
                 order.status = OrderStatus.FAILED
                 continue
             order.status = OrderStatus.APPROACHED
@@ -396,7 +420,7 @@ class PickAndPlaceTestTask(SubTask):
 
         # 1. Pick — on success this records the held object (per arm) for the placer.
         if not pick_object(
-            ctx, prompts=["water bottle"], arm="auto",
+            ctx, prompts=["bottle"], arm="auto",
             pregrasp_standoff_m=0.2, approach_preference="side", approach_weight=4.0,
         ):
             print("[test] pick_object -> False; nothing to place")

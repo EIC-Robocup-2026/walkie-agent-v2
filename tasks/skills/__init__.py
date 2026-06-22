@@ -40,8 +40,10 @@ from .seating import (
 from .door import door_open_from_depth, go_to_through_door, is_door_open, request_open_door
 from .grasp import (
     GraspCandidate,
+    aim_forward_candidate,
     align_arm_to_object,
     approach_object,
+    creep_to_grasp_distance,
     execute_grasp,
     face_object,
     face_object_with_arm,
@@ -103,6 +105,8 @@ __all__ = [
     "face_object",
     "face_object_with_arm",
     "align_arm_to_object",
+    "creep_to_grasp_distance",
+    "aim_forward_candidate",
     "execute_grasp",
     "pick_object",
     "HeldObject",

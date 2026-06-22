@@ -101,8 +101,8 @@ def preflight(walkie, walkie_ai) -> bool:
     hard("robot localizing (odom/SLAM fix)", pose is not None, "bring up Nav2 / SLAM first")
 
     # --- informational (won't block) ---
-    print(f"  [i ] bar start pose = {os.getenv('RESTAURANT_KITCHEN_BAR_POSE', '0,0,0')} "
-          "(0,0,0 = start at the SLAM origin)")
+    print(f"  [i ] bar start pose = {os.getenv('RESTAURANT_KITCHEN_BAR_POSE', 'current')} "
+          "('current' = stay where the robot is; or 'x,y,heading_rad' for a fixed map pose)")
     print(f"  [i ] arm: " + ("CALIBRATED — pick/serve WILL move" if _truthy("RESTAURANT_ARM_CALIBRATED")
                              else "uncalibrated — pick/serve log only, no motion"))
     slice_name, _ = _select_build()

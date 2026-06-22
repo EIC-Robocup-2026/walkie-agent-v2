@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import sys
 import traceback
@@ -175,10 +176,24 @@ class TaskContext:
         comes back as a return value, not an exception. We must inspect it: returning
         True regardless would mask every nav failure as a success (the door
         ask-and-retry never fires, the robot "arrives" without moving).
+
+        ``WALKIE_NAV_GOAL_TOLERANCE_M`` (default 0 = off) opts into the SDK's
+        "close enough" promotion: when set, a Nav2 FAILED whose final
+        distance_remaining is within the tolerance is reported as CLOSE_ENOUGH
+        (and counts as reached). This only reinterprets the *result* — it does
+        NOT loosen Nav2's own goal checker / stop the controller creeping — so an
+        in-place rotation that ends ~0 m from the goal stops reading as FAILED,
+        and a customer the robot got close to isn't wrongly abandoned. Left off
+        by default so door-detection (which keys off a real FAILED) is unchanged
+        unless a task opts in (Restaurant sets it in its config.toml).
         """
         _log("ctx", f"goto x={x:.2f} y={y:.2f} heading={math.degrees(heading_rad):.0f}deg")
+        tol = float(os.getenv("WALKIE_NAV_GOAL_TOLERANCE_M", "0.0"))
         try:
-            status = self.walkie.nav.go_to(x, y, heading_rad, blocking=True)
+            status = self.walkie.nav.go_to(
+                x, y, heading_rad, blocking=True,
+                goal_tolerance=(tol if tol > 0 else None),
+            )
         except Exception as exc:
             _log("ctx", f"goto failed ({exc})")
             return False
