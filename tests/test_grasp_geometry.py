@@ -255,3 +255,94 @@ def test_align_arm_ignores_nav_failure():
 
     ctx.nav.go_to = boom
     assert align_arm_to_object(ctx, (0.6, 0.0, 0.8), arm="left") is True
+
+
+# --- _grasp_cloud_multi_tilt (dedup + fuse + reframe) -----------------------
+import numpy as np  # noqa: E402
+from scipy.spatial.transform import Rotation  # noqa: E402
+
+from tasks.skills import grasp as grasp_mod  # noqa: E402
+from tasks.skills.grasp import ObjectLocation, _grasp_cloud_multi_tilt  # noqa: E402
+
+
+class _Cam:
+    def __init__(self, R, t):
+        self.R = np.asarray(R, dtype=float)
+        self.t = np.asarray(t, dtype=float)
+
+
+class _Snap:
+    def __init__(self, R, t):
+        self.cam = _Cam(R, t)
+
+
+def _world_object(seed=0, center=(1.5, 2.2, 0.85)):
+    return np.random.RandomState(seed).randn(200, 3) * 0.05 + np.asarray(center)
+
+
+def _loc_for(world, R, t, conf):
+    """Build an ObjectLocation as if a camera at (R, t) saw *world*."""
+    snap = _Snap(R, t)
+    cloud_opt = (world - snap.cam.t) @ snap.cam.R  # p_opt = (p_map - t) @ R
+    xyz = tuple(np.median(world, axis=0))
+    return ObjectLocation(xyz_map=xyz, cloud_optical=cloud_opt, snap=snap,
+                          range_m=float(np.median(np.linalg.norm(cloud_opt, axis=1))),
+                          confidence=conf)
+
+
+def _patch_two_views(monkeypatch, locs):
+    """Make tilt_head a no-op and locate_object yield *locs* in order."""
+    monkeypatch.setattr(grasp_mod, "tilt_head", lambda *a, **k: None)
+    it = iter(locs)
+    monkeypatch.setattr(grasp_mod, "locate_object", lambda *a, **k: next(it, None))
+
+
+def test_multi_tilt_fuses_same_object_into_chosen_optical_frame(monkeypatch):
+    # Two cameras see the SAME world object; the fused cloud, reframed into the
+    # first view's optical frame, must reproject back to the true world points.
+    world = _world_object()
+    RA = Rotation.from_euler("xyz", [0.1, -0.2, 0.3]).as_matrix()
+    RB = Rotation.from_euler("xyz", [-0.05, 0.15, 1.2]).as_matrix()
+    a = _loc_for(world, RA, [1.0, 2.0, 0.7], conf=0.9)
+    b = _loc_for(world, RB, [1.3, 1.8, 0.72], conf=0.8)
+    _patch_two_views(monkeypatch, [a, b])
+
+    out = _grasp_cloud_multi_tilt(FakeCtx(), ["can"], merge_voxel=1e-6)
+    assert out is not None
+    cloud, snap = out
+    assert snap is a.snap  # chosen = first view
+    back = cloud @ snap.cam.R.T + snap.cam.t  # optical -> map via chosen pose
+    # Every fused point lies on the original object (within the tiny merge voxel).
+    d = np.linalg.norm(back[:, None, :] - world[None, :, :], axis=2).min(axis=1)
+    assert d.max() < 1e-3
+
+
+def test_multi_tilt_mismatch_keeps_higher_confidence_view(monkeypatch):
+    # Centroids far apart (> dedup radius) -> different objects -> don't fuse;
+    # keep the higher-confidence view's cloud/snap unchanged.
+    R = np.eye(3)
+    a = _loc_for(_world_object(seed=1, center=(1.0, 0.0, 0.85)), R, [0, 0, 0], conf=0.4)
+    b = _loc_for(_world_object(seed=2, center=(3.0, 0.0, 0.85)), R, [0, 0, 0], conf=0.95)
+    _patch_two_views(monkeypatch, [a, b])
+
+    out = _grasp_cloud_multi_tilt(FakeCtx(), ["can"], dedup_radius_m=0.10)
+    assert out is not None
+    cloud, snap = out
+    assert snap is b.snap
+    assert np.array_equal(cloud, b.cloud_optical)
+
+
+def test_multi_tilt_single_view_degrades_gracefully(monkeypatch):
+    # Only one tilt yields geometry -> return that view alone (no fuse).
+    a = _loc_for(_world_object(), np.eye(3), [0, 0, 0], conf=0.5)
+    _patch_two_views(monkeypatch, [a, None])
+
+    out = _grasp_cloud_multi_tilt(FakeCtx(), ["can"])
+    assert out is not None
+    cloud, snap = out
+    assert snap is a.snap and np.array_equal(cloud, a.cloud_optical)
+
+
+def test_multi_tilt_no_views_returns_none(monkeypatch):
+    _patch_two_views(monkeypatch, [None, None])
+    assert _grasp_cloud_multi_tilt(FakeCtx(), ["can"]) is None
