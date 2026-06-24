@@ -94,6 +94,89 @@ often ~1 manipulation + ~2 non-manipulation.
 
 ---
 
+## Pick and Place — rulebook 5.2
+
+**Total 3515** (excluding special penalties & bonuses). The scoresheet is
+overwhelmingly manipulation: ~3300 of the 3515 needs a working arm. The arm is a
+**separate skill under development**, so the PickAndPlace flow gates every
+grasp/place behind `PNP_ARM_CALIBRATED` (default 0) and earns the **non-arm
+budget** on its own — and rulebook **remark 16** lets the robot *communicate
+perception by pointing / announcing / visualizing one object at a time*, so
+recognition + placement *indication* score with **no grasp required**.
+
+### Achievable now (arm gated OFF) — the ~195 non-arm budget
+
+| Line | Pts | Capability | Low | Exp | High | Notes |
+|---|--:|---|--:|--:|--:|---|
+| Navigate to the table | 15 | ✅ nav | 0.70 | 0.90 | 1.0 | pure nav; same stack as GPSR/Restaurant |
+| Correctly recognize an object | 12×10 = 120 | 🟡 open-vocab detect + announce | 0.40 | 0.65 | 0.85 | `PerceiveDiningTable` speaks each object; cutlery / stacked / decoy objects are the risk |
+| Perceive on a shelf + indicate placement | 2×30 = 60 | 🟡 shelf perceive + indicate | 0.30 | 0.55 | 0.80 | `perceive_and_indicate_shelf` names the cabinet groups + states the match |
+| **Subtotal** | **195** | | **~77** | **~125** | **~165** | |
+
+> Indicate-only also **dodges the drop/throw penalties entirely** (nothing is
+> ever held), and asking the referee to open the dishwasher / milk is explicitly
+> **penalty-free** (remarks 7/8/15). So the non-arm floor has almost no downside.
+
+### Gated on the arm skill (`PNP_ARM_CALIBRATED=1`) — the ~3300 upside
+
+| Bucket | Pts | Cap. | Why gated |
+|---|--:|---|---|
+| Picking up an object for transport | 12×50 = 600 | ❌ gated | needs the grasp skill |
+| First Pick Bonus (one-time) | +100 | ❌ gated | first successful grasp of the run |
+| Cutlery / Plate / Dishwasher-tab / floor picks | 100 + 100 + 100 + 30 | ❌ gated | per-class pick rewards |
+| Place in designated location | 12×40 = 480 | ❌ gated | needs an object in hand |
+| Correctly in the dishwasher | 3×70 = 210 | ❌ gated | rack-correct placement |
+| Next to similar in cabinet | 2×20 = 40 | ❌ gated | grouped place (the *indication* scores now; the *place* is gated) |
+| Dishwasher-tab in slot | +160 | ❌ gated | precise place |
+| Dishwasher door/rack, milk-open, pour (extra rewards) | 200 + 400 + 400 + 400 | ❌ ask-referee / not built | "without assistance" lines need autonomy we don't have; asking is penalty-free but scores 0 |
+
+### Run scenarios
+
+| Scenario | Achievable-now | + arm budget | **Total / 3515** |
+|---|--:|--:|--:|
+| **Arm gated (today)** | ~125 (exp) | 0 | **~125** (floor ~75, ceiling ~165) |
+| **Arm lands, modest** | ~140 | ~600–900 (some picks/places + First Pick) | **~750–1050** |
+| **Arm lands, clean** | ~165 | ~1800+ (most picks/places, dishwasher) | **~2000+** |
+
+> Quote **~125 as today's planning figure** (arm gated), **~75 confident floor**.
+> The number is small only because the arm is the whole challenge — the point of
+> this pipeline is to bank that 125 risk-free *and* be the harness the arm skill
+> drops into, so the day the arm lands the 3300 unlocks with no flow rewrite.
+
+### Penalties (subtract)
+
+| Penalty | Each | Mitigation in our design |
+|---|--:|---|
+| Objects thrown / dropped while placing | −40 | indicate-only holds nothing → **not reachable while gated** |
+| Objects dropped on the floor | −40 | same — no carry, no drop |
+| Breakfast not in a typical setting | −50 | gated breakfast only *indicates* layout; no malformed place |
+| Human assistance: handover | −100 | never request a handover |
+| Human assistance: object repositioned | −30 | never ask the referee to move objects |
+| Human assistance: environment change (chairs/decor) | −40/item | nav around decor; don't ask for moves |
+| Dishwasher door/rack, milk-open assistance | −0 | explicitly penalty-free (remarks 7/8/15) |
+
+### Biggest score levers (in order)
+
+1. **Land + calibrate the arm skill** (`PNP_ARM_CALIBRATED=1`) — opens ~3300 of
+   the 3515 that is gated; everything else is a rounding error against this.
+   Within it, the **First Pick Bonus (+100)** rewards a single reliable grasp, so
+   prioritize one robust pick before breadth.
+2. **Tune open-vocab detection** (`PNP_TABLE_CLASSES`, `WALKIE_GRAPHS_DETECT_CONF_MIN`)
+   — the recognize line (120) is the largest points available *pre-arm*; lift it
+   from 🟡 toward ✅ on the real object set.
+3. **Validate the shelf-perception indication** (`perceive_and_indicate_shelf`,
+   `PNP_CABINET_CLASSES`) — the other 60 pre-arm points; needs the cabinet
+   waypoint mapped and the shelf groups read reliably.
+
+### Step-by-step bring-up (mirrors the Restaurant runner)
+
+`PNP_SLICE=nav` (waypoint tour) → `perceive` (recognize each object) → `sort`
+(recognize + indicate placement + shelf indication — the full non-arm scoring
+path) → `breakfast` → `full`. Validate each on-robot before the next; the arm
+stays gated the whole way until its skill is calibrated.
+
+---
+
 ## Other challenges
 
 _Add a section per challenge (Restaurant, HRI, Carry My Luggage, …) using the same

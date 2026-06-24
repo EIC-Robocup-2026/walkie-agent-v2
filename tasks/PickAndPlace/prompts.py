@@ -46,6 +46,19 @@ SORT_OBJECT_INSTRUCTIONS = (
 
 # --- Spoken lines (the robot must voice perception + help requests) ----------
 PERCEPTION_ANNOUNCE = "I can see {count} objects on the table. Let me sort them."
+
+# Communicating perception (rulebook 5.2 remark 16 + scoresheet recognize/indicate).
+# These score whether or not the arm later moves the object, so they always fire.
+RECOGNIZE_OBJECT = "I can see a {obj}."
+INDICATE_PLACEMENT = "The {obj} should go to the {where}."
+SHELF_PERCEIVE = "On the cabinet shelves I can see: {groups}. I will group new items with the matching shelf."
+
+# Spoken when a pick is reached with the arm gated off (PNP_ARM_CALIBRATED=0).
+PICK_GATED = "The arm is not enabled yet, so I am indicating the {obj} instead of grasping it."
+
+# Nav-tour slice (PNP_SLICE=nav) — waypoint / localization sanity check.
+NAV_TOUR_ARRIVE = "I have reached the {place}."
+NAV_TOUR_FAIL = "I could not reach the {place}."
 ASK_OPEN_DISHWASHER = (
     "I could not open the dishwasher door myself. Could you please open it for me?"
 )
