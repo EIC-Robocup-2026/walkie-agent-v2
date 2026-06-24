@@ -125,6 +125,7 @@ Interactive demos that need live hardware / the AI server live in `manual_tests/
 uv run python -m manual_tests.test_robot_object_detection   # robot camera + detection
 uv run python -m manual_tests.test_captioning               # image captioning
 uv run python -m manual_tests.test_pose_estimation          # human pose keypoints
+uv run python -m manual_tests.test_object_segmentation      # open-vocab detect + segment masks
 uv run python -m manual_tests.test_graphs_live              # live walkie_graphs ingest + Rerun viz
 ```
 

@@ -1,3 +1,9 @@
+"""Manual webcam demo: run pose estimation on the local camera and draw skeletons.
+
+Needs walkie-ai-server up at WALKIE_AI_BASE_URL and a webcam (cv2.VideoCapture(0)).
+Run: uv run python -m manual_tests.test_pose_estimation
+"""
+
 from client import WalkieAIClient
 import cv2
 import numpy as np
@@ -46,7 +52,7 @@ def draw_poses(frame, poses):
             cv2.line(frame, (int(a.x), int(a.y)), (int(b.x), int(b.y)), SKELETON_COLOR, 2)
 
 
-def test_pose_estimation():
+def main():
     walkieAI = WalkieAIClient()
     print("Walkie Client initialized")
 
@@ -77,4 +83,4 @@ def test_pose_estimation():
 
 
 if __name__ == "__main__":
-    test_pose_estimation()
+    main()

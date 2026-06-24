@@ -1,3 +1,9 @@
+"""Manual webcam demo: open-vocab detect + segment on the local camera, draw masks.
+
+Needs walkie-ai-server up at WALKIE_AI_BASE_URL and a webcam (cv2.VideoCapture(0)).
+Run: uv run python -m manual_tests.test_object_segmentation
+"""
+
 from client import WalkieAIClient
 import cv2
 import numpy as np
@@ -52,7 +58,7 @@ def draw_detections(frame, detections):
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
 
 
-def test_object_segmentation():
+def main():
     walkieAI = WalkieAIClient()
     print("Walkie Client initialized")
 
@@ -88,4 +94,4 @@ def test_object_segmentation():
 
 
 if __name__ == "__main__":
-    test_object_segmentation()
+    main()
