@@ -45,6 +45,9 @@ class FakeCtx:
     def rotate_to(self, heading):
         return True
 
+    def score(self, key, n=1):  # subtasks award against the live tally; no-op here
+        pass
+
 
 def _obj(name, conf=0.9, xy=(1.0, 0.0)):
     return DetectedObject(

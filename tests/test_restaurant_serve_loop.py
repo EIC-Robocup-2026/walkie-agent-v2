@@ -36,6 +36,9 @@ class FakeCtx:
     def current_pose(self):
         return {"x": 0.0, "y": 0.0, "heading": 0.0}
 
+    def score(self, key, n=1):  # serve loop awards against the live tally; no-op here
+        pass
+
 
 def _caller(x, y, conf=0.9):
     return Caller(world_xy=(x, y), bearing=0.0, bbox_xyxy=(0.0, 0.0, 1.0, 1.0), confidence=conf)
