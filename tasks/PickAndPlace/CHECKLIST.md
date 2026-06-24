@@ -1,27 +1,40 @@
 # Pick and Place — implementation checklist (rulebook 5.2)
 
 Status legend: `[x]` done / real · `[~]` real motion but **needs on-robot calibration**
-· `[ ]` stub / ask-referee / not implemented.
+· `[G]` **arm-gated** (built, runs only when `PNP_ARM_CALIBRATED=1`) · `[ ]` stub /
+ask-referee / not implemented.
 
-> The deliberately-stubbed boundary (agreed with the team): the **grasp planner**
-> (`skills.plan_grasp` / `plan_place`) is a heuristic that returns the hand pose from
-> the object's 3D centroid + config; the robot then **really** commands the arm and
-> gripper. Autonomous appliance manipulation and pouring stay as spoken referee
-> requests (the rulebook permits asking, with no human-assist penalty for those).
+> **Arm-excluded scope (current focus).** The arm is being brought up as a
+> *separate skill*, so PickAndPlace gates every grasp/place behind
+> **`PNP_ARM_CALIBRATED`** (default 0), mirroring Restaurant's
+> `RESTAURANT_ARM_CALIBRATED`. With the gate off the flow runs end-to-end and
+> earns its **non-arm budget**: navigate, *recognize each object*, and *indicate
+> the correct placement* to the referee (rulebook remark 16 — pointing /
+> announcing / visualizing one object at a time scores with no grasp). Flip the
+> gate to 1 once the arm skill lands and the ~3300-pt manipulation budget unlocks
+> with **no flow rewrite**. See [`docs/SCORING.md`](../../docs/SCORING.md#pick-and-place--rulebook-52).
+>
+> The deliberately-stubbed boundary inside the arm path (when gated on): the
+> **grasp planner** (`manipulation.plan_grasp`) is a heuristic that returns the
+> hand pose from the object's 3D centroid + config; the robot then really commands
+> the arm and gripper. Autonomous appliance manipulation and pouring stay as spoken
+> referee requests (the rulebook permits asking, no human-assist penalty for those).
 
 ## Main goals
 
 - [x] Navigate to the kitchen / dining table (`GoToKitchen`, `PerceiveDiningTable`).
 - [x] Perceive + recognise objects on a surface, open-vocab (`skills.perceive_surface`).
-- [x] Communicate perception to the referee (spoken announce + arm reach on every pick).
+- [x] **Recognize + announce each object** (`announce_object`) — scoresheet 12×10. *(non-arm)*
+- [x] **Indicate the correct placement per object** (`indicate_placement`) — remark 16. *(non-arm)*
+- [x] **Perceive the cabinet shelf + indicate grouping** (`perceive_and_indicate_shelf`) — 2×30. *(non-arm)*
 - [x] Sort each table object → dishwasher / trash / cabinet (LLM, `skills.sort_object`).
-- [~] Tidy the dining table — pick + place each object (`TidyDiningTable`).
-- [~] Place dirty tableware/cutlery in the dishwasher (destination poses to calibrate).
-- [~] Place designated trash in the trash bin.
-- [~] Store other objects in the cabinet, grouped by similarity (`cabinet_group` from LLM).
-- [~] Serve breakfast — fetch bowl+spoon + milk+cereal, arrange on the table
+- [G] Tidy the dining table — pick + place each object (`TidyDiningTable`, arm pass).
+- [G] Place dirty tableware/cutlery in the dishwasher (destination poses to calibrate).
+- [G] Place designated trash in the trash bin.
+- [G] Store other objects in the cabinet, grouped by similarity (`cabinet_group` from LLM).
+- [G] Serve breakfast — fetch bowl+spoon + milk+cereal, arrange on the table
       (`ServeBreakfast`; spoon next to bowl, cereal next to milk via slot poses).
-- [~] Tidy the extra surface → cabinet (`TidyExtraSurface`).
+- [G] Tidy the extra surface → cabinet (`TidyExtraSurface`).
 
 ## Optional goals
 
@@ -34,6 +47,16 @@ Status legend: `[x]` done / real · `[~]` real motion but **needs on-robot calib
 
 ## Implementation status (this repo)
 
+- [x] **Arm gate** `PNP_ARM_CALIBRATED` (default 0) — flow runs end-to-end with no
+      arm motion; pick/place self-gate in `skills.py` (`arm_enabled()`).
+- [x] **Non-arm scoring path** — `PerceiveDiningTable` announces each recognized
+      object; `TidyDiningTable` / `TidyExtraSurface` run a Pass-1 (always: sort +
+      indicate placement + shelf indication) then a Pass-2 (arm-gated pick/place).
+- [x] **Step-by-step runner** `PNP_SLICE` (`nav|perceive|sort|breakfast|full`) +
+      fail-fast `preflight()` in `run.py` (mirrors the Restaurant runner).
+- [x] **Offline flow tests** `tests/test_pickandplace_flow.py` — arm-off path
+      touches no arm yet indicates every placement; arm-on path picks/places.
+- [x] **Scoring worksheet** — PickAndPlace section in `docs/SCORING.md`.
 - [x] Task scaffold + flow ordering, dishwasher open-before / close-after (`subtasks.py`).
 - [x] Perception 3D lift — full map-frame centroid `world_xyz` (`manipulation.perceive_surface`).
 - [x] Map → base_footprint frame transform (`manipulation.world_to_base`, unit-tested).
@@ -75,12 +98,19 @@ Status legend: `[x]` done / real · `[~]` real motion but **needs on-robot calib
 ## How to run / verify
 
 ```bash
-# Pure-geometry unit tests (no robot, no server):
-uv run pytest tests/test_pickandplace_geometry.py
+# Offline tests (no robot, no server):
+uv run pytest tests/test_pickandplace_flow.py tests/test_manipulation_geometry.py
 
 # Build/import smoke test:
 uv run python -c "from tasks.PickAndPlace.subtasks import build_pick_and_place_task; print('ok')"
 
-# On the robot (after calibration; needs walkie-ai-server):
-DISABLE_LISTENING=1 uv run python -m tasks.PickAndPlace.run
+# On the robot, step-by-step bring-up (arm stays gated; needs walkie-ai-server).
+# Validate each slice before the next:
+DISABLE_LISTENING=1 PNP_SLICE=nav       uv run python -m tasks.PickAndPlace.run  # waypoint tour
+DISABLE_LISTENING=1 PNP_SLICE=perceive  uv run python -m tasks.PickAndPlace.run  # recognize each object
+DISABLE_LISTENING=1 PNP_SLICE=sort      uv run python -m tasks.PickAndPlace.run  # recognize + indicate placement
+DISABLE_LISTENING=1 PNP_SLICE=full      uv run python -m tasks.PickAndPlace.run  # whole flow
+
+# Once the arm skill lands + is calibrated, unlock manipulation:
+PNP_ARM_CALIBRATED=1 PNP_SLICE=full     uv run python -m tasks.PickAndPlace.run
 ```
