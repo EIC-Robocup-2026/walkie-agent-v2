@@ -126,3 +126,34 @@ def test_pnp_penalties_are_negative_and_excluded_from_total():
     assert all(ln.key.startswith("pen_") for ln in pens)
     # penalties must not inflate the positive total
     assert PNP_SHEET.positive_total() == 3515
+
+
+# --- every challenge sheet reconciles against its rulebook total ------------
+
+from tasks.GPSR.scoring import GPSR_SHEET                       # noqa: E402
+from tasks.HRI.scoring import HRI_SHEET                         # noqa: E402
+from tasks.Laundry.scoring import LAUNDRY_SHEET                 # noqa: E402
+from tasks.Restaurant.scoring import RESTAURANT_SHEET           # noqa: E402
+
+ALL_SHEETS = [PNP_SHEET, RESTAURANT_SHEET, HRI_SHEET, LAUNDRY_SHEET, GPSR_SHEET]
+
+
+@pytest.mark.parametrize("sheet", ALL_SHEETS, ids=lambda s: s.challenge)
+def test_sheet_positive_total_reconciles(sheet):
+    # Sum of every positive line at full units must equal the official total
+    # transcribed from the PDF — a mis-keyed points/count value trips this.
+    assert sheet.positive_total() == sheet.rulebook_total
+
+
+@pytest.mark.parametrize("sheet", ALL_SHEETS, ids=lambda s: s.challenge)
+def test_sheet_penalties_are_negative(sheet):
+    assert all(ln.points < 0 for ln in sheet.penalties())
+
+
+def test_non_arm_ceilings_match_transcription():
+    # The non-arm budget each challenge can score with the arm gated (PDF-derived).
+    assert RESTAURANT_SHEET.non_arm_ceiling() == 960   # detect+reach+order+relay+return
+    assert HRI_SHEET.non_arm_ceiling() == 950          # gaze+seat+intro+follow (door/bag are arm)
+    assert LAUNDRY_SHEET.non_arm_ceiling() == 15       # navigate only — Laundry is all-arm
+    assert GPSR_SHEET.non_arm_ceiling() == 1490        # best-case all-non-arm draw (see module docstring)
+    assert PNP_SHEET.non_arm_ceiling() == 195
