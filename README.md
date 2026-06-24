@@ -81,14 +81,14 @@ DISABLE_LISTENING=1 uv run python -m tasks.HRI.run   # type instead of speak (an
 
 A task is an ordered list of `SubTask`s over a shared `TaskContext` (`tasks/base.py`); every non-critical step **degrades rather than crashes** (partial scoring is allowed, so a failed step logs and the run moves on).
 
-**The arm is being brought up as a separate skill**, so the manipulation tasks gate every grasp/place behind an `*_ARM_CALIBRATED` flag (default off) and run + score their **non-arm budget** first — navigation, perception, and *communicating perception* to the referee (the rulebook scores recognizing an object / indicating a placement, no grasp required). Flip the flag once the arm lands and the manipulation budget unlocks with no flow rewrite. Each manipulation task also has a step-by-step `*_SLICE` runner (e.g. `PNP_SLICE=perceive`, `RESTAURANT_SLICE=phase0`) for validating one phase at a time on the robot.
+**The arm is being brought up as a separate skill**, so the manipulation tasks gate every grasp/place behind an `*_ARM_CALIBRATED` flag (default off) and run + score their **non-arm budget** first — navigation, perception, and *communicating perception* to the referee (the rulebook scores recognizing an object / indicating a placement, no grasp required). Flip the flag once the arm lands and the manipulation budget unlocks with no flow rewrite. Most tasks also expose a step-by-step `*_SLICE` runner (e.g. `PNP_SLICE=perceive`, `RESTAURANT_SLICE=phase0`, `HRI_SLICE=greet`) for validating one phase at a time on the robot — no commenting steps in and out.
 
 | Task | Status | Notes |
 |------|--------|-------|
 | **GPSR** (5.3) | mature | STT → parse → **speak a plan** → typed-plan dispatch, with an agent fallback; manipulation gated. Parser corpus-tested. |
 | **Restaurant** (5.5) | Phase-0 serve | detect a waving customer → approach → take + confirm the order → relay to the barman; pick/serve gated (`RESTAURANT_ARM_CALIBRATED`), serial + batched loops, `RESTAURANT_SLICE` runner. |
 | **Pick and Place** (5.2) | non-arm pipeline | navigate, recognize each object, indicate the correct placement (scores ~195 of 3515 with the arm gated); pick/place gated (`PNP_ARM_CALIBRATED`), `PNP_SLICE` runner. |
-| **HRI** (5.1) | reference | face/appearance re-ID, seat detection, guest introductions, follow-host — the most-built flow, brought up incrementally. |
+| **HRI** (5.1) | reference | face/appearance re-ID, seat detection, guest introductions, follow-host (the most-built flow); run via `HRI_SLICE` (`seats`/`greet`/`follow_host`/`full`, default `full`). Bag handover gated (`HRI_ENABLE_BAG`). |
 | **Laundry** (5.4) | scaffold | almost-pure manipulation: the only non-arm line on the scoresheet is navigating to the laundry area. |
 
 Each task carries a `prompts.py`, `config.toml`, and (where useful) a `skills.py`; the shared grasp/perception primitives live in `tasks/manipulation.py`. The per-challenge rulebook excerpts live in [`docs/`](docs/) — one PDF each (`docs/{HRI,PickAndPlace,GPSR,Laundry,Restaurant}.pdf`), cut from the RoboCup@Home 2026 rulebook chapter 5. Expected points per challenge are tracked in [`docs/SCORING.md`](docs/SCORING.md) — see [Scoring](#scoring).
