@@ -65,3 +65,23 @@ def test_greet_slice_targets_guest_one():
 def test_prepare_run_is_safe_without_people_store():
     # people=None -> skips clear(); reset_people_positions must still no-op cleanly.
     prepare_run(FakeCtx())  # must not raise
+
+
+def test_every_hri_score_key_exists_in_the_sheet():
+    """Every ctx.score("...") in the HRI subtasks must be a real HRI_SHEET key.
+
+    The award calls run only on the robot, so a typo'd key would otherwise only
+    surface live (where ctx.score swallows it). This grep-and-check catches it
+    offline — the runtime cost of a wrong key is a silently-missed point.
+    """
+    import pathlib
+    import re
+
+    import tasks.HRI.subtasks as subtasks_mod
+    from tasks.HRI.scoring import HRI_SHEET
+
+    src = pathlib.Path(subtasks_mod.__file__).read_text()
+    keys = set(re.findall(r'ctx\.score\(\s*"([^"]+)"', src))
+    assert keys, "expected ctx.score() award calls in the HRI subtasks"
+    sheet_keys = {ln.key for ln in HRI_SHEET.lines}
+    assert keys <= sheet_keys, f"HRI score keys not in HRI_SHEET: {sorted(keys - sheet_keys)}"
