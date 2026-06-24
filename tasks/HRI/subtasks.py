@@ -867,49 +867,66 @@ class TestPlaceBag(SubTask):
         print(result)
 
 
-def build_hri_task(ctx: TaskContext) -> Task:
-    # Guests differ every run — stale identities must never match today's.
+def prepare_run(ctx: TaskContext) -> None:
+    """Reset per-run state before building any HRI slice.
+
+    Guests differ every run, so stale face/attire identities must never match
+    today's, and map-frame person positions are run-local. Called once by the
+    runner before the chosen slice is built (keeps the builders side-effect-free
+    and testable). Gated by HRI_PEOPLE_RESET (default on).
+    """
     if ctx.people is not None and os.getenv("HRI_PEOPLE_RESET", "1").lower() in ("1", "true", "yes"):
         try:
             ctx.people.clear()
             print("[HRI] people memory cleared for a fresh run")
         except Exception as exc:
             print(f"[HRI] people memory reset failed ({exc})")
-    # Positions are map-frame and run-local; never carry them across runs.
     reset_people_positions(ctx)
-    # Standalone follow-host harness (HRI_TEST_FOLLOW_HOST=1): remember the host
-    # standing in front, then follow + drop the bag — the FollowHostAndDropBag
-    # path on its own, without walking the full 12-step receptionist flow.
-    if os.getenv("HRI_TEST_FOLLOW_HOST", "0").lower() in ("1", "true", "yes"):
-        print("[HRI] HRI_TEST_FOLLOW_HOST=1 — running the follow-host test only")
-        return Task("HRI-follow-host-test", [TestRememberAndFollowHost()], ctx)
-    # Standalone seat-scan harness (HRI_TEST_SCAN_SEATS=1): loop scan_seats and
-    # show the detected seats/occupancy/people, for tuning seat detection without
-    # walking the full receptionist flow.
-    if os.getenv("HRI_TEST_SCAN_SEATS", "0").lower() in ("1", "true", "yes"):
-        print("[HRI] HRI_TEST_SCAN_SEATS=1 — running the seat-scan test only")
-        return Task("HRI-scan-seats-test", [TestScanSeats()], ctx)
+
+
+def build_hri_task(ctx: TaskContext) -> Task:
+    """The full Receptionist flow (rulebook 5.1) — the ``full`` slice.
+
+    Two guests arrive in turn: greet + learn each (name, drink, appearance), guide
+    to the living room, offer a free seat; receive + drop the host's bag; audit the
+    two identities, introduce the guests to each other, then follow the host. Every
+    step degrades rather than crashes (partial scoring). Run :func:`prepare_run`
+    first (the runner does). Pure: constructs no hardware at build time.
+    """
     return Task(
         "HRI",
         [
-            # GoToDoor(1),
-            # GreetAndLearn(1),
-            # GuideToLivingRoom(1),
-            # OfferSeat(1),
-            # GoToDoor(2),
-            # GreetAndLearn(2),
-            # ReceiveBag(),
-            # GuideToLivingRoom(2),
-            # OfferSeat(2),
-            # AuditIdentities(),  # flag cross-guest near-duplicate face/attire, lean on face
-            # IntroduceGuests(),  # introduce the two guests to each other
-            # FollowHostAndDropBag(),
-            # Tests
-            TestRememberAndFollowHost(),  # enroll host here, then follow+drop bag (or HRI_TEST_FOLLOW_HOST=1)
-            # FollowNearestPerson(),  # follow-loop test: no identity, no bag
-            # TestScanSeats(),  # scan seats + people, draw/show detections (or HRI_TEST_SCAN_SEATS=1)
-            # TestTask(),
-            # TestMoveBase(),
+            GoToDoor(1),
+            GreetAndLearn(1),
+            GuideToLivingRoom(1),
+            OfferSeat(1),
+            GoToDoor(2),
+            GreetAndLearn(2),
+            ReceiveBag(),            # arm step — gated by HRI_ENABLE_BAG
+            GuideToLivingRoom(2),
+            OfferSeat(2),
+            AuditIdentities(),       # flag cross-guest near-duplicate face/attire, lean on face
+            IntroduceGuests(),       # introduce the two guests to each other
+            FollowHostAndDropBag(),
         ],
         ctx,
     )
+
+
+# --- Isolated slices for step-by-step on-robot bring-up (selected by HRI_SLICE).
+# Order = rough bring-up order: tune seat perception, then greet+learn one guest,
+# then the follow-host re-ID path, then the whole flow. Mirrors the Restaurant /
+# PickAndPlace runners so no step ever needs commenting out to run a sub-path.
+def build_seats_slice(ctx: TaskContext) -> Task:
+    """Loop seat + people detection and show occupancy — tune seat detection alone."""
+    return Task("HRI:seats", [TestScanSeats()], ctx)
+
+
+def build_greet_slice(ctx: TaskContext) -> Task:
+    """Greet + learn a single guest at the door (name, drink, appearance)."""
+    return Task("HRI:greet", [GreetAndLearn(1)], ctx)
+
+
+def build_follow_host_slice(ctx: TaskContext) -> Task:
+    """Remember the host standing in front, then follow + drop the bag."""
+    return Task("HRI:follow-host", [TestRememberAndFollowHost()], ctx)
