@@ -14,6 +14,13 @@ Conventions used in every challenge section:
 - Estimates assume the **practice-arena** validation status on branch `feat/GPSR`
   as of **2026-06-20** (see [`GPSR_DESIGN.md`](GPSR_DESIGN.md),
   [`GPSR_ONROBOT_RUNBOOK.md`](GPSR_ONROBOT_RUNBOOK.md)).
+- The per-line **points/counts are code-backed**: each challenge's scoresheet is
+  encoded as a `ScoreSheet` in `tasks/<Challenge>/scoring.py`, the framework is
+  [`tasks/scoring.py`](../tasks/scoring.py), and `tests/test_scoring.py` reconciles
+  every sheet's positive lines against its rulebook total + checks each non-arm
+  ceiling. The prose below (scenarios, levers) is hand-maintained; the *numbers*
+  come from the code. The same `ScoreSheet` also drives a live runtime tally
+  (`ScoreTracker`) — read it as *attempted/claimed* points, **not** referee-awarded.
 
 ---
 
@@ -94,91 +101,108 @@ often ~1 manipulation + ~2 non-manipulation.
 
 ---
 
-## Pick and Place — rulebook 5.2
+## Restaurant — rulebook 5.5
 
-**Total 3515** (excluding special penalties & bonuses). The scoresheet is
-overwhelmingly manipulation: ~3300 of the 3515 needs a working arm. The arm is a
-**separate skill under development**, so the PickAndPlace flow gates every
-grasp/place behind `PNP_ARM_CALIBRATED` (default 0) and earns the **non-arm
-budget** on its own — and rulebook **remark 16** lets the robot *communicate
-perception by pointing / announcing / visualizing one object at a time*, so
-recognition + placement *indication* score with **no grasp required**.
+**Total 2360** (code: [`tasks/Restaurant/scoring.py`](../tasks/Restaurant/scoring.py)).
+The arm is gated (`RESTAURANT_ARM_CALIBRATED`); the Phase-0 serve pipeline scores the
+**960-pt non-arm budget** without it: detect a waving customer, reach the table,
+take + confirm the order, relay it to the barman, return.
 
-### Achievable now (arm gated OFF) — the ~195 non-arm budget
+### Achievable now (arm gated) — the 960 non-arm budget
 
 | Line | Pts | Capability | Low | Exp | High | Notes |
 |---|--:|---|--:|--:|--:|---|
-| Navigate to the table | 15 | ✅ nav | 0.70 | 0.90 | 1.0 | pure nav; same stack as GPSR/Restaurant |
-| Correctly recognize an object | 12×10 = 120 | 🟡 open-vocab detect + announce | 0.40 | 0.65 | 0.85 | `PerceiveDiningTable` speaks each object; cutlery / stacked / decoy objects are the risk |
-| Perceive on a shelf + indicate placement | 2×30 = 60 | 🟡 shelf perceive + indicate | 0.30 | 0.55 | 0.80 | `perceive_and_indicate_shelf` names the cabinet groups + states the match |
-| **Subtotal** | **195** | | **~77** | **~125** | **~165** | |
+| Detect a calling/waving customer | 2×80 = 160 | 🟡 gesture scan | 0.50 | 0.75 | 0.90 | full-arc wave detection |
+| Reach a customer's table | 2×80 = 160 | ✅ nav | 0.60 | 0.85 | 0.95 | approach + stand-off |
+| Understand + confirm the order | 2×160 = 320 | 🟡 STT + parse + confirm | 0.45 | 0.70 | 0.90 | the biggest single non-arm line |
+| Communicate the order to the barman | 2×80 = 160 | ✅ speak | 0.60 | 0.85 | 0.95 | relay at the bar |
+| Return to the customer's table | 2×80 = 160 | ✅ nav | 0.60 | 0.85 | 0.95 | |
+| **Subtotal** | **960** | | **~512** | **~752** | **~888** | |
 
-> Indicate-only also **dodges the drop/throw penalties entirely** (nothing is
-> ever held), and asking the referee to open the dishwasher / milk is explicitly
-> **penalty-free** (remarks 7/8/15). So the non-arm floor has almost no downside.
+### Gated on the arm skill — the 1400 upside
+Pick the items from the bar (4×100), First Pick Bonus (+100), serve the order
+(4×100), First Place Bonus (+100), use an unattached tray (2×200).
 
-### Gated on the arm skill (`PNP_ARM_CALIBRATED=1`) — the ~3300 upside
+### Penalties (non-arm)
+Being guided to a table (2×−80), Alternative HRI (2×−80), not making eye-contact
+(2×−60), not reaching the bar (2×−60), asking directional confirmation (2×−30),
+being told where a table/bar is (2×−40). The serve loop's gaze re-facing + order
+re-ask are the mitigations.
 
-| Bucket | Pts | Cap. | Why gated |
-|---|--:|---|---|
-| Picking up an object for transport | 12×50 = 600 | ❌ gated | needs the grasp skill |
-| First Pick Bonus (one-time) | +100 | ❌ gated | first successful grasp of the run |
-| Cutlery / Plate / Dishwasher-tab / floor picks | 100 + 100 + 100 + 30 | ❌ gated | per-class pick rewards |
-| Place in designated location | 12×40 = 480 | ❌ gated | needs an object in hand |
-| Correctly in the dishwasher | 3×70 = 210 | ❌ gated | rack-correct placement |
-| Next to similar in cabinet | 2×20 = 40 | ❌ gated | grouped place (the *indication* scores now; the *place* is gated) |
-| Dishwasher-tab in slot | +160 | ❌ gated | precise place |
-| Dishwasher door/rack, milk-open, pour (extra rewards) | 200 + 400 + 400 + 400 | ❌ ask-referee / not built | "without assistance" lines need autonomy we don't have; asking is penalty-free but scores 0 |
+### Biggest levers
+1. **Land the arm skill** — opens the 1400 (pick/serve/tray).
+2. **Order-capture reliability** (the 320 line) — STT + parse + confirm is the
+   largest non-arm line; tune re-ask + confirmation.
+3. **Waving-customer detection** — gates everything downstream.
 
-### Run scenarios
+---
 
-| Scenario | Achievable-now | + arm budget | **Total / 3515** |
-|---|--:|--:|--:|
-| **Arm gated (today)** | ~125 (exp) | 0 | **~125** (floor ~75, ceiling ~165) |
-| **Arm lands, modest** | ~140 | ~600–900 (some picks/places + First Pick) | **~750–1050** |
-| **Arm lands, clean** | ~165 | ~1800+ (most picks/places, dishwasher) | **~2000+** |
+## HRI / Receptionist — rulebook 5.x
 
-> Quote **~125 as today's planning figure** (arm gated), **~75 confident floor**.
-> The number is small only because the arm is the whole challenge — the point of
-> this pipeline is to bank that 125 risk-free *and* be the harness the arm skill
-> drops into, so the day the arm lands the 3300 unlocks with no flow rewrite.
+**Total 1450** (code: [`tasks/HRI/scoring.py`](../tasks/HRI/scoring.py)). Unusually,
+HRI is **almost entirely non-arm** — the **950-pt non-arm budget** (gaze, seating,
+guest recognition + introduction, following the host) is most of the challenge; only
+the entrance door (2×200) and the bag (receive 50 + drop 50) need the arm.
 
-### Penalties (subtract)
+> ⚠️ **The 12-step flow is currently commented out** (`tasks/HRI/subtasks.py` — only a
+> follow-host test harness runs). Re-activating it is the single biggest unlock here:
+> ~950 pts of positive budget **and** the penalty guard below, almost all offline work.
 
-| Penalty | Each | Mitigation in our design |
-|---|--:|---|
-| Objects thrown / dropped while placing | −40 | indicate-only holds nothing → **not reachable while gated** |
-| Objects dropped on the floor | −40 | same — no carry, no drop |
-| Breakfast not in a typical setting | −50 | gated breakfast only *indicates* layout; no malformed place |
-| Human assistance: handover | −100 | never request a handover |
-| Human assistance: object repositioned | −30 | never ask the referee to move objects |
-| Human assistance: environment change (chairs/decor) | −40/item | nav around decor; don't ask for moves |
-| Dishwasher door/rack, milk-open assistance | −0 | explicitly penalty-free (remarks 7/8/15) |
+### Achievable now (once the flow is re-activated, arm gated) — 950 non-arm
 
-### Biggest score levers (in order)
+| Line | Pts | Capability | Low | Exp | High |
+|---|--:|---|--:|--:|--:|
+| Detect the doorbell | 2×30 = 60 | ❌ out of scope today | 0.0 | 0.0 | 0.50 |
+| Look at the person talking | 2×50 = 100 | 🟡 FaceTracker gaze | 0.50 | 0.80 | 0.95 |
+| Offer a free seat | 2×100 = 200 | 🟡 seat detection | 0.40 | 0.70 | 0.90 |
+| Look in the navigation direction | 2×15 = 30 | ✅ base heading | 0.50 | 0.80 | 0.95 |
+| Correct visual attribute to 2nd guest | 4×20 = 80 | 🟡 appearance caption | 0.30 | 0.60 | 0.85 |
+| No non-essential questions | 4×15 = 60 | ✅ prompt design | 0.50 | 0.80 | 0.95 |
+| Name + favourite drink in intro | 4×30 = 120 | 🟡 memory + speak | 0.40 | 0.70 | 0.90 |
+| Look at correct guest while introducing | 2×50 = 100 | 🟡 face re-ID | 0.40 | 0.70 | 0.90 |
+| Follow the host to the bag drop | 200 | 🟡 nav + re-ID* | 0.30 | 0.60 | 0.85 |
+| **Subtotal** | **950** | | **~347** | **~614** | **~826** |
 
-1. **Land + calibrate the arm skill** (`PNP_ARM_CALIBRATED=1`) — opens ~3300 of
-   the 3515 that is gated; everything else is a rounding error against this.
-   Within it, the **First Pick Bonus (+100)** rewards a single reliable grasp, so
-   prioritize one robust pick before breadth.
-2. **Tune open-vocab detection** (`PNP_TABLE_CLASSES`, `WALKIE_GRAPHS_DETECT_CONF_MIN`)
-   — the recognize line (120) is the largest points available *pre-arm*; lift it
-   from 🟡 toward ✅ on the real object set.
-3. **Validate the shelf-perception indication** (`perceive_and_indicate_shelf`,
-   `PNP_CABINET_CLASSES`) — the other 60 pre-arm points; needs the cabinet
-   waypoint mapped and the shelf groups read reliably.
+\* `follow_host` is a non-arm nav + re-ID skill, but earning it presumes the bag was
+received (an arm step) — a flow dependency, not an arm requirement of the follow.
 
-### Step-by-step bring-up (mirrors the Restaurant runner)
+### Non-arm penalties (the real downside — guarded by gaze + re-ID)
+**Not acknowledging people 2×−200 = −400** and **wrong guest info 4×−40 = −160**
+dwarf the positive deltas — so robust gaze-at-speaker + appearance/face re-ID guard
+~560 pts, not just earn the smaller positive lines. Plus alternative-HRI (6×−20) and
+the operator-handling penalties on the follow path.
 
-`PNP_SLICE=nav` (waypoint tour) → `perceive` (recognize each object) → `sort`
-(recognize + indicate placement + shelf indication — the full non-arm scoring
-path) → `breakfast` → `full`. Validate each on-robot before the next; the arm
-stays gated the whole way until its skill is calibrated.
+### Biggest levers
+1. **Re-activate the 12-step flow** (`tasks/HRI/subtasks.py`) + validate gaze runs
+   during *listening*, not just asking — unlocks ~950 + guards ~560 (mostly offline).
+2. **Appearance/face re-ID reliability** — lifts intro + follow lines and guards the
+   −400 acknowledge penalty (see [Chalk's eic-human pipeline]).
+3. **Doorbell detection** (60) — the one greenfield non-arm line, currently punted.
+
+---
+
+## Laundry — rulebook 5.x
+
+**Total 4415** (code: [`tasks/Laundry/scoring.py`](../tasks/Laundry/scoring.py)).
+**Laundry is an almost-pure manipulation challenge**: the only non-arm line on the
+scoresheet is *navigate to the laundry area* (**15 pts**). Unlike PickAndPlace, there
+are **no recognize / indicate-placement lines** to score via "communicate perception"
+— so an arm-gated run earns ~15 and nothing more.
+
+| Line | Pts | Capability | Exp |
+|---|--:|---|--:|
+| Navigate to the laundry area | 15 | ✅ nav | ~14 |
+| *everything else* (pick / fold / stack / washer / basket) | 4400 | ❌ arm-gated | 0 |
+
+**Lever:** the entire challenge is the folding/manipulation skill. Recommendation:
+**deprioritise for non-arm work** — gate the manipulation behind a
+`LAUNDRY_ARM_CALIBRATED` flag for parity, but there is no meaningful non-arm budget to
+develop here until the arm + folding skill exists.
 
 ---
 
 ## Other challenges
 
-_Add a section per challenge (Restaurant, HRI, Carry My Luggage, …) using the same
-table shape: fixed budget → per-category capture % → run scenarios → penalties →
-levers. Fill capability columns from each task's on-robot validation memory._
+_Same shape for any future challenge (Carry My Luggage, Stickler, …): encode the
+scoresheet in `tasks/<Challenge>/scoring.py`, add a reconciliation test, then write the
+fixed/non-arm budget → capture % → scenarios → penalties → levers prose here._
