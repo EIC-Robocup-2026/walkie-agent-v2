@@ -157,3 +157,26 @@ def test_non_arm_ceilings_match_transcription():
     assert LAUNDRY_SHEET.non_arm_ceiling() == 15       # navigate only — Laundry is all-arm
     assert GPSR_SHEET.non_arm_ceiling() == 1490        # best-case all-non-arm draw (see module docstring)
     assert PNP_SHEET.non_arm_ceiling() == 195
+
+
+# --- the TaskContext.score() hook -------------------------------------------
+
+def test_ctx_score_awards_to_attached_tracker():
+    # ctx.score() is the runtime integration point — tasks award against the
+    # sheet through it. A bad key is swallowed (logged), never raised, so the
+    # live tally can never break a run.
+    from tasks.base import TaskContext
+
+    tracker = ScoreTracker(PNP_SHEET)
+    ctx = TaskContext(walkie=None, walkieAI=None, model=None, scorer=tracker)
+    ctx.score("recognize_object", 3)
+    assert tracker.units_of("recognize_object") == 3
+    ctx.score("does_not_exist")            # bad key -> logged, must NOT raise
+    assert tracker.earned() == 30          # only the valid award counted
+
+
+def test_ctx_score_is_noop_without_a_scorer():
+    from tasks.base import TaskContext
+
+    ctx = TaskContext(walkie=None, walkieAI=None, model=None)  # scorer=None
+    ctx.score("anything")                  # must be a silent no-op, not raise

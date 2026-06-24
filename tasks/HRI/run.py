@@ -25,6 +25,8 @@ from dotenv import load_dotenv
 
 from ..base import TaskContext
 from ..common import initialize_llm_model, initialize_robot, load_task_config
+from ..scoring import ScoreTracker
+from .scoring import HRI_SHEET
 from .subtasks import (
     build_follow_host_slice,
     build_greet_slice,
@@ -124,12 +126,14 @@ def main() -> None:
         walkie_interface.close()
         return
 
+    scorecard = ScoreTracker(HRI_SHEET, path=os.getenv("HRI_SCORECARD_PATH", "hri_scorecard.json"))
     ctx = TaskContext(
         walkie=walkie_interface,
         walkieAI=walkie_ai,
         model=model,
         disable_listening=_truthy("DISABLE_LISTENING"),
         people=PeopleStore.from_env(),
+        scorer=scorecard,  # live tally of attempted/claimed points (ctx.score)
     )
 
     prepare_run(ctx)  # fresh identities + positions for this run (all slices)
@@ -139,6 +143,8 @@ def main() -> None:
     try:
         build(ctx).run()
     finally:
+        print(scorecard.summary())  # attempted/claimed points — NOT referee-awarded
+        scorecard.write()
         walkie_interface.close()
 
 
