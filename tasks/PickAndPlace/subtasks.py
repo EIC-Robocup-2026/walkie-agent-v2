@@ -89,7 +89,8 @@ class PerceiveDiningTable(SubTask):
 
     def run(self, ctx: TaskContext) -> StepResult:
         x, y, h = _pose("PNP_DINING_TABLE_POSE")
-        ctx.goto(x, y, h)
+        if ctx.goto(x, y, h):
+            ctx.score("navigate_table")  # reached the dining table (claimed)
         objects = perceive_surface(ctx)
         ctx.data["table_objects"] = objects
         ctx.say(prompts.PERCEPTION_ANNOUNCE.format(count=len(objects)))
@@ -139,8 +140,14 @@ class TidyDiningTable(SubTask):
             return StepResult.DONE
         for o, dest, group in plans:
             ctx.goto(*table)  # back to the table so the object is in reach
-            if pick_object(ctx, o) and place_object(ctx, dest, group=group):
+            if not pick_object(ctx, o):
+                continue
+            ctx.score("pick_transport")    # arm: picked an object for transport
+            ctx.score("first_pick_bonus")  # one-time (clamped to 1)
+            if place_object(ctx, dest, group=group):
+                ctx.score("place_designated")  # arm: placed at its destination
                 if dest == "dishwasher":
+                    ctx.score("place_dishwasher")
                     # Drives CloseDishwasher (closing only scores after >=1 item in).
                     ctx.data["dishwasher_items"] = ctx.data.get("dishwasher_items", 0) + 1
         return StepResult.DONE  # partial scoring: never block the rest of the task
@@ -170,9 +177,14 @@ def _fetch_and_place(
     if not pick_object(ctx, target):
         ctx.say(prompts.BREAKFAST_NOT_FOUND.format(obj=obj_name))
         return False
+    ctx.score("pick_transport")
+    ctx.score("first_pick_bonus")
     tx, ty, th = _pose("PNP_DINING_TABLE_POSE")
     ctx.goto(tx, ty, th)
-    return place_at(ctx, os.getenv(slot_env, ""))
+    if place_at(ctx, os.getenv(slot_env, "")):
+        ctx.score("place_designated")
+        return True
+    return False
 
 
 class ServeBreakfast(SubTask):
@@ -226,8 +238,12 @@ class TidyExtraSurface(SubTask):
             return StepResult.DONE
         for o, group in plans:
             ctx.goto(*surface)  # back to the surface so the object is in reach
-            if pick_object(ctx, o):
-                place_object(ctx, "cabinet", group=group)
+            if not pick_object(ctx, o):
+                continue
+            ctx.score("pick_transport")
+            ctx.score("first_pick_bonus")
+            if place_object(ctx, "cabinet", group=group):
+                ctx.score("place_designated")
         return StepResult.DONE
 
 

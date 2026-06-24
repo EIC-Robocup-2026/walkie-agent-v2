@@ -99,6 +99,7 @@ def announce_object(ctx: TaskContext, obj: DetectedObject) -> None:
     if _point_at_objects() and obj.world_xy is not None:
         _face(ctx, obj.world_xy)
     ctx.say(prompts.RECOGNIZE_OBJECT.format(obj=obj.class_name))
+    ctx.score("recognize_object")  # 'correctly recognize an object' (claimed)
 
 
 def indicate_placement(
@@ -128,6 +129,7 @@ def perceive_and_indicate_shelf(ctx: TaskContext) -> list[DetectedObject]:
     shelf = _perceive_surface(ctx, classes)
     groups = sorted({o.class_name for o in shelf})
     ctx.say(prompts.SHELF_PERCEIVE.format(groups=", ".join(groups) if groups else "an empty shelf"))
+    ctx.score("shelf_indicate")  # 'perceive on a shelf + indicate placement' (claimed)
     return shelf
 
 

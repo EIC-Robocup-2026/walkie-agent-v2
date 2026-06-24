@@ -27,6 +27,8 @@ from dotenv import load_dotenv
 
 from ..base import TaskContext
 from ..common import initialize_llm_model, initialize_robot, load_task_config
+from ..scoring import ScoreTracker
+from .scoring import PNP_SHEET
 from .subtasks import (
     build_breakfast_slice,
     build_nav_slice,
@@ -121,11 +123,13 @@ def main() -> None:
         walkie_interface.close()
         return
 
+    scorecard = ScoreTracker(PNP_SHEET, path=os.getenv("PNP_SCORECARD_PATH", "pnp_scorecard.json"))
     ctx = TaskContext(
         walkie=walkie_interface,
         walkieAI=walkie_ai,
         model=model,
         disable_listening=_truthy("DISABLE_LISTENING"),
+        scorer=scorecard,  # live tally of attempted/claimed points (ctx.score)
     )
 
     slice_name, build = _select_build()
@@ -134,6 +138,8 @@ def main() -> None:
     try:
         build(ctx).run()
     finally:
+        print(scorecard.summary())  # attempted/claimed points — NOT referee-awarded
+        scorecard.write()
         walkie_interface.close()
 
 

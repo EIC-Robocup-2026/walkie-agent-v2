@@ -180,3 +180,36 @@ def test_ctx_score_is_noop_without_a_scorer():
 
     ctx = TaskContext(walkie=None, walkieAI=None, model=None)  # scorer=None
     ctx.score("anything")                  # must be a silent no-op, not raise
+
+
+# --- award-key integrity: every ctx.score("k") in a task is a real sheet key -
+
+def _award_keys(*modules):
+    """The set of literal keys passed to ctx.score("...") across *modules*' source."""
+    import pathlib
+    import re
+
+    keys: set[str] = set()
+    for mod in modules:
+        src = pathlib.Path(mod.__file__).read_text()
+        keys |= set(re.findall(r'ctx\.score\(\s*"([^"]+)"', src))
+    return keys
+
+
+def test_pnp_award_keys_exist_in_sheet():
+    import tasks.PickAndPlace.skills as sk
+    import tasks.PickAndPlace.subtasks as st
+
+    keys = _award_keys(st, sk)
+    assert keys, "expected ctx.score() awards in the PickAndPlace task"
+    sheet_keys = {ln.key for ln in PNP_SHEET.lines}
+    assert keys <= sheet_keys, f"PnP score keys not in PNP_SHEET: {sorted(keys - sheet_keys)}"
+
+
+def test_restaurant_award_keys_exist_in_sheet():
+    import tasks.Restaurant.subtasks as st
+
+    keys = _award_keys(st)
+    assert keys, "expected ctx.score() awards in the Restaurant task"
+    sheet_keys = {ln.key for ln in RESTAURANT_SHEET.lines}
+    assert keys <= sheet_keys, f"Restaurant score keys not in RESTAURANT_SHEET: {sorted(keys - sheet_keys)}"
