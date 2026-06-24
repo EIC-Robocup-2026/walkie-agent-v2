@@ -145,7 +145,7 @@ def _person_world_xy(snap, person: PersonPose,
 
 def _scan_offsets() -> list[float]:
     """Base-rotation offsets (deg) covering the scan arc, centered on entry heading."""
-    arc = _f("RESTAURANT_SCAN_ARC_DEG", "120")
+    arc = _f("RESTAURANT_SCAN_ARC_DEG", "180")
     step = max(5.0, _f("RESTAURANT_SCAN_STEP_DEG", "30"))
     half = arc / 2.0
     offsets = []
@@ -249,7 +249,7 @@ def exclude_handled(callers: list[Caller], handled_xys: list[tuple[float, float]
     as a future disambiguator — see design §5.1.
     """
     if radius_m is None:
-        radius_m = _f("RESTAURANT_HANDLED_RADIUS_M", "1.0")
+        radius_m = _f("RESTAURANT_HANDLED_RADIUS_M", "0.6")
     if not handled_xys:
         return callers
     out: list[Caller] = []

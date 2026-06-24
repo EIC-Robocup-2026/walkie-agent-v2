@@ -147,6 +147,43 @@ def _pick_and_serve(ctx: TaskContext, order: Order) -> None:
     print(f"[restaurant] order #{order.id}: served {served} of {order.items}")
 
 
+def _take_one_order(ctx: TaskContext, caller, orders: dict[int, Order]) -> Order | None:
+    """Approach one caller, capture + confirm their order; return the Order or None.
+
+    The per-customer half of a serve cycle, shared by the serial and batched loops so
+    they can't drift apart. The Order is always recorded in *orders* (so a FAILED one is
+    still logged); returns it only on a parsed order (status ORDERED), else None with the
+    Order left FAILED. Book-keeping (handled / give-up tracking) stays in the caller —
+    only the serial loop re-scans, so only it needs give-up state.
+    """
+    order = Order(id=len(orders) + 1, world_xy=caller.world_xy, bearing=caller.bearing)
+    orders[order.id] = order
+    if not approach_customer(ctx, caller.world_xy):
+        order.status = OrderStatus.FAILED
+        return None
+    order.status = OrderStatus.APPROACHED
+    order.appearance = capture_appearance(ctx, caller.world_xy)  # for re-ID/logging
+    items = take_order(ctx, world_xy=order.world_xy)
+    if not items:
+        order.status = OrderStatus.FAILED
+        return None
+    order.items = items
+    order.status = OrderStatus.ORDERED
+    return order
+
+
+def _deliver_order(ctx: TaskContext, order: Order) -> None:
+    """The per-order delivery half of a serve cycle: relay at the bar, then pick + serve.
+
+    Returns to the bar, relays the order to the barman, then runs the (Phase-2 gated)
+    pick/serve. Shared by the serial and batched loops (see :func:`_take_one_order`).
+    """
+    return_to_bar(ctx)
+    if relay_to_barman(ctx, order.items):
+        order.status = OrderStatus.RELAYED
+    _pick_and_serve(ctx, order)
+
+
 # ---------------------------------------------------------------------------
 # Phase 0 states
 # ---------------------------------------------------------------------------
@@ -231,7 +268,7 @@ class ServeCustomers(SubTask):
         target = _int("RESTAURANT_TARGET_CUSTOMERS", "2")
         max_attempts = target + _int("RESTAURANT_EXTRA_ATTEMPTS", "3")
         max_fails = _int("RESTAURANT_MAX_FAILS_PER_SPOT", "2")
-        radius = float(os.getenv("RESTAURANT_HANDLED_RADIUS_M", "1.0"))
+        radius = float(os.getenv("RESTAURANT_HANDLED_RADIUS_M", "0.6"))
         orders: dict[int, Order] = ctx.data.setdefault("orders", {})
         # Map points of customers we've already taken an order from. We loop until
         # this many DISTINCT customers are handled — NOT a raw counter — so a
@@ -254,42 +291,24 @@ class ServeCustomers(SubTask):
         while len(handled) < target and attempts < max_attempts:
             attempts += 1
 
-            # 1. Detect + approach (Phase 0), skipping anyone already handled and any
-            # spot we've given up on (failed max_fails times).
+            # 1. Detect + approach + take the order (Phase 0), skipping anyone already
+            # handled and any spot we've given up on (failed max_fails times).
             blocked = handled + [(g[0], g[1]) for g in giveups if g[2] >= max_fails]
             callers = exclude_handled(scan_for_callers(ctx), blocked, radius)
             caller = nearest_caller(ctx, callers)
             if caller is None:
                 ctx.say(prompts.NO_CUSTOMER)
                 continue
-            order = Order(id=len(orders) + 1, world_xy=caller.world_xy, bearing=caller.bearing)
-            orders[order.id] = order
-            if not approach_customer(ctx, caller.world_xy):
-                order.status = OrderStatus.FAILED
+            order = _take_one_order(ctx, caller, orders)
+            if order is None:
                 note_failure(caller.world_xy)
                 continue
-            order.status = OrderStatus.APPROACHED
-            order.appearance = capture_appearance(ctx, caller.world_xy)  # for re-ID/logging
-
-            # 2. Take + confirm the order (real), re-facing the customer (gaze).
-            items = take_order(ctx, world_xy=order.world_xy)
-            if not items:
-                order.status = OrderStatus.FAILED
-                note_failure(caller.world_xy)
-                continue
-            order.items = items
-            order.status = OrderStatus.ORDERED
             # Mark this customer handled NOW (order secured) so the next sweep
             # won't re-select them even if they keep waving.
             handled.append(caller.world_xy)
 
-            # 3. Relay at the bar — go_to the anchor, then re-acquire the barman.
-            return_to_bar(ctx)
-            if relay_to_barman(ctx, items):
-                order.status = OrderStatus.RELAYED
-
-            # 4. Pick + serve (Phase 2 — gated off until the arm is calibrated).
-            _pick_and_serve(ctx, order)
+            # 2. Relay at the bar, then pick + serve (Phase 2 — gated until calibrated).
+            _deliver_order(ctx, order)
 
             return_to_bar(ctx)  # back to the bar for the next caller
 
@@ -312,10 +331,11 @@ class ServeCustomersBatched(SubTask):
 
     def run(self, ctx: TaskContext) -> StepResult:
         target = _int("RESTAURANT_TARGET_CUSTOMERS", "2")
-        batch_size = max(1, _int("RESTAURANT_BATCH_SIZE", "2"))
+        want = min(max(1, _int("RESTAURANT_BATCH_SIZE", "2")), target)
+        radius = float(os.getenv("RESTAURANT_HANDLED_RADIUS_M", "0.6"))
         orders: dict[int, Order] = ctx.data.setdefault("orders", {})
 
-        # Phase A — gather a batch of orders (nearest callers first).
+        # Phase A — gather up to `want` orders from ONE sweep, nearest callers first.
         callers = scan_for_callers(ctx)
         if not callers:
             ctx.say(prompts.NO_CUSTOMER)
@@ -323,19 +343,21 @@ class ServeCustomersBatched(SubTask):
         p = ctx.current_pose()
         callers.sort(key=lambda c: math.hypot(c.world_xy[0] - p["x"], c.world_xy[1] - p["y"]))
         taken: list[Order] = []
-        for caller in callers[:min(batch_size, target)]:
-            order = Order(id=len(orders) + 1, world_xy=caller.world_xy, bearing=caller.bearing)
-            orders[order.id] = order
-            if not approach_customer(ctx, caller.world_xy):
-                order.status = OrderStatus.FAILED
+        handled: list[tuple[float, float]] = []
+        # Walk the WHOLE sorted list, not just the first `want`: if a near caller fails to
+        # approach / order, fall through to the next instead of forfeiting that slot (the old
+        # `callers[:want]` slice gave up a slot whenever a leading caller failed). Skip anyone
+        # within RESTAURANT_HANDLED_RADIUS_M of one already taken this sweep (a second
+        # detection of the same person that survived the scan dedup).
+        for caller in callers:
+            if len(taken) >= want:
+                break
+            if not exclude_handled([caller], handled, radius):
+                continue  # duplicate of a customer already taken this sweep
+            order = _take_one_order(ctx, caller, orders)
+            if order is None:
                 continue
-            order.status = OrderStatus.APPROACHED
-            order.appearance = capture_appearance(ctx, caller.world_xy)
-            items = take_order(ctx, world_xy=order.world_xy)
-            if not items:
-                order.status = OrderStatus.FAILED
-                continue
-            order.items, order.status = items, OrderStatus.ORDERED
+            handled.append(caller.world_xy)
             taken.append(order)
 
         if not taken:
@@ -344,10 +366,7 @@ class ServeCustomersBatched(SubTask):
 
         # Phase B — deliver each (per-order bar trip; tray would allow one trip).
         for order in taken:
-            return_to_bar(ctx)
-            if relay_to_barman(ctx, order.items):
-                order.status = OrderStatus.RELAYED
-            _pick_and_serve(ctx, order)
+            _deliver_order(ctx, order)
 
         ctx.say(prompts.ALL_DONE)
         print("[restaurant] batched orders: " + ", ".join(
