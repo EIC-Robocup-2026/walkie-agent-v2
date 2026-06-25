@@ -259,14 +259,105 @@ def _grasp_cloud_multi_tilt(
         return chosen.cloud_optical, chosen.snap
 
 
+def _grasp_cloud_multi_snap(
+    ctx: TaskContext,
+    prompts: list[str],
+    *,
+    snaps: int | None = None,
+    settle_sec: float | None = None,
+    dedup_radius_m: float | None = None,
+    voxel: float = 0.002,
+    erode_px: int = 5,
+    min_points: int = 50,
+    min_confidence: float = 0.3,
+    merge_voxel: float | None = None,
+) -> tuple[np.ndarray, object] | None:
+    """*snaps* snapshots at the CURRENT head angle → one cleaner, deduped optical cloud.
+
+    The head holds still — unlike :func:`_grasp_cloud_multi_tilt`, which moves between
+    shots (and which ``pick_object`` no longer uses, because fusing across two head
+    tilts depends on each tilt's pose being exact and misaligns when it isn't). Here we
+    just capture the SAME view *snaps* times and fuse, so there is no cross-pose error
+    to introduce. At a fixed camera pose the per-view clouds overlap voxel-for-voxel, so
+    fusing does NOT add self-occlusion-filling density; instead ``voxel_downsample``
+    returns the *mean* point per cell, so more samples per voxel means **less depth
+    jitter**, and a voxel that dropped out (NaN) in one frame is recovered from another.
+    The result is a lower-noise, fewer-holes cloud at roughly single-shot density —
+    which keeps it in-distribution for GraspNet while giving it a steadier surface.
+
+    Locates the nearest object per frame, drops any frame whose nearest landed beyond
+    *dedup_radius_m* of the consensus (a flickering false positive elsewhere in view,
+    not the target), and fuses the survivors into the consensus view's optical frame.
+    Each survivor's cloud is lifted to MAP via its OWN capture pose before merging, so
+    the fuse stays correct even if the base/head drifted a hair between shots.
+
+    Returns ``(cloud_optical, chosen_snap)`` or ``None`` (never raises). Degrades to a
+    single view when only one snapshot yields geometry.
+    """
+    snaps = _i("WALKIE_GRASP_FUSE_SNAPS", "3") if snaps is None else snaps
+    settle_sec = _f("WALKIE_GRASP_FUSE_SETTLE_SEC", "0.15") if settle_sec is None else settle_sec
+    dedup_radius_m = (
+        _f("WALKIE_GRASP_DEDUP_RADIUS_M", "0.10") if dedup_radius_m is None else dedup_radius_m
+    )
+    merge_voxel = _f("WALKIE_GRASP_MERGE_VOXEL_M", "0.003") if merge_voxel is None else merge_voxel
+
+    locs: list[ObjectLocation] = []
+    for i in range(max(1, snaps)):
+        if i > 0 and settle_sec > 0:
+            time.sleep(settle_sec)  # let the camera serve a fresh, independent frame
+        loc = locate_object(
+            ctx, prompts, voxel=voxel, erode_px=erode_px,
+            min_points=min_points, min_confidence=min_confidence,
+        )
+        if loc is not None:
+            locs.append(loc)
+
+    if not locs:
+        print(f"[grasp] multi-snap: no object located across {snaps} snapshot(s)")
+        return None
+    if len(locs) == 1:
+        print("[grasp] multi-snap: only one snapshot yielded geometry; using it alone")
+        return locs[0].cloud_optical, locs[0].snap
+
+    # Consensus anchor = the nearest-to-camera view (least likely a far false positive,
+    # mirroring locate_object's nearest-wins rule). Keep every frame whose object
+    # centroid is within dedup_radius_m of it; drop frames that locked onto something
+    # else so we never average two different objects' clouds together.
+    chosen = min(locs, key=lambda loc: loc.range_m)
+    kept = [
+        loc for loc in locs
+        if float(np.linalg.norm(np.asarray(loc.xyz_map) - np.asarray(chosen.xyz_map)))
+        <= dedup_radius_m
+    ]
+    if len(kept) == 1:
+        print(f"[grasp] multi-snap: {len(locs)} views disagree on position "
+              f"(> {dedup_radius_m:.2f}m apart); using the nearest alone")
+        return chosen.cloud_optical, chosen.snap
+
+    # Fuse: lift each kept view's optical cloud to MAP via its OWN pose (common frame),
+    # concatenate + voxel-downsample (the mean-per-cell averages out per-voxel depth
+    # noise and fills single-frame dropouts), then re-frame back into the consensus
+    # view's optical frame so GraspNet sees one consistent cloud.
+    try:
+        clouds_map = [loc.cloud_optical @ loc.snap.cam.R.T + loc.snap.cam.t for loc in kept]
+        merged_map = voxel_downsample(np.vstack(clouds_map), merge_voxel)
+        merged_optical = (merged_map - chosen.snap.cam.t) @ chosen.snap.cam.R
+        print(f"[grasp] multi-snap: fused {len(kept)}/{len(locs)} views "
+              f"-> {merged_optical.shape[0]} pts")
+        return merged_optical, chosen.snap
+    except Exception as exc:  # noqa: BLE001 — fall back to the nearest view alone
+        print(f"[grasp] multi-snap: fuse failed ({exc}); using nearest view alone")
+        return chosen.cloud_optical, chosen.snap
+
+
 def get_object_grasp_pos(
     ctx: TaskContext,
     prompts: list[str],
     *,
     attempts: int = 5,
     standoff_m: float = 0.10,
-    voxel: float = 0.002,
-    erode_px: int = 5,
+    voxel: float = 0.001,
+    erode_px: int = 2,
     min_points: int = 50,
     min_confidence: float = 0.3,
     antipodal: bool = True,
@@ -276,6 +367,7 @@ def get_object_grasp_pos(
     prebuilt: tuple[np.ndarray, object] | None = None,
     multi_tilt: bool = False,
     tilts: tuple[float, ...] | None = None,
+    fuse_snaps: int | None = None,
 ) -> GraspCandidate | None:
     """Best-of-N grasp for the nearest object matching *prompts*, in the map frame.
 
@@ -317,6 +409,14 @@ def get_object_grasp_pos(
             it has already approached the object.
         tilts: Head-tilt angles (rad, +down) for the multi-tilt build; ``None`` uses
             the ``WALKIE_GRASP_TILT_A``/``_B`` config defaults.
+        fuse_snaps: When > 1 (and neither *prebuilt* nor *multi_tilt* is set), take this
+            many snapshots at the **current head angle**, fuse their object clouds into
+            one lower-noise / fewer-dropout cloud (:func:`_grasp_cloud_multi_snap`), and
+            run GraspNet **once** on it — instead of the best-of-N loop (which scores
+            *attempts* snapshots separately and keeps the highest). ``None`` reads
+            ``WALKIE_GRASP_FUSE_SNAPS`` (code default ``1`` = best-of-N; the repo's
+            ``config.toml`` sets ``3`` to fuse). Unlike *multi_tilt*, the head never
+            moves, so there is no cross-pose misalignment to spoil the fuse.
 
     Returns:
         The winning :class:`GraspCandidate` (with ``grasp_xyz`` and
@@ -330,7 +430,7 @@ def get_object_grasp_pos(
     def _infer_best(cloud: np.ndarray, snap) -> bool:
         """Run GraspNet once on *cloud* (optical frame) and keep the best result."""
         nonlocal best, best_snap, best_cloud
-        infer_kwargs: dict = {"antipodal": antipodal, "max_grasps": 1}
+        infer_kwargs: dict = {"antipodal": antipodal, "max_grasps": 10}
         if approach_preference != "none":
             infer_kwargs["approach_preference"] = approach_preference
             infer_kwargs["up"] = snap.cam.R.T @ np.array([0.0, 0.0, 1.0])
@@ -350,15 +450,29 @@ def get_object_grasp_pos(
               f"grasp=({gx:+.3f},{gy:+.3f},{gz:+.3f}) width={best.width * 100:.1f}cm")
         return True
 
-    # Fast path: a single GraspNet inference on a pre-built (optionally multi-tilt
-    # fused) cloud, skipping the best-of-N snapshot loop entirely.
-    if prebuilt is not None or multi_tilt:
-        built = prebuilt if prebuilt is not None else _grasp_cloud_multi_tilt(
-            ctx, prompts, tilts=tilts, voxel=voxel, erode_px=erode_px,
-            min_points=min_points, min_confidence=min_confidence,
-        )
+    fuse_snaps = _i("WALKIE_GRASP_FUSE_SNAPS", "1") if fuse_snaps is None else fuse_snaps
+
+    # Fast path: a single GraspNet inference on a cloud built up front, skipping the
+    # best-of-N snapshot loop entirely. The cloud comes from one of:
+    #   * prebuilt        — the caller already lifted it,
+    #   * multi_tilt      — fused across two head tilts (_grasp_cloud_multi_tilt),
+    #   * fuse_snaps > 1  — fused across N snapshots at the CURRENT angle, for
+    #                       noise/dropout reduction (_grasp_cloud_multi_snap).
+    if prebuilt is not None or multi_tilt or fuse_snaps > 1:
+        if prebuilt is not None:
+            built = prebuilt
+        elif multi_tilt:
+            built = _grasp_cloud_multi_tilt(
+                ctx, prompts, tilts=tilts, voxel=voxel, erode_px=erode_px,
+                min_points=min_points, min_confidence=min_confidence,
+            )
+        else:
+            built = _grasp_cloud_multi_snap(
+                ctx, prompts, snaps=fuse_snaps, voxel=voxel, erode_px=erode_px,
+                min_points=min_points, min_confidence=min_confidence,
+            )
         if built is None:
-            print(f"[grasp] no graspable detection for {prompts} (multi-tilt)")
+            print(f"[grasp] no graspable detection for {prompts} (fused build)")
             return None
         cloud, snap = built
         _infer_best(cloud, snap)
@@ -530,6 +644,7 @@ def look_at_object(ctx: TaskContext, xyz_map: Vec3) -> bool:
         # Limit tilt because graspnet is bad
         tilt = max(0.436332, tilt)
         ctx.walkie.robot.head.tilt(tilt)
+        time.sleep(1)
     except Exception as exc:  # noqa: BLE001 — off-robot stub may lack robot.head
         print(f"[grasp] look_at_object: head tilt failed ({exc})")
         return False
@@ -916,11 +1031,11 @@ def pick_object(
     pregrasp_standoff_m: float = 0.10,
     approach_preference: str = "none",
     approach_weight: float | None = None,
-    optimal_standoff_m: float = 0.85,
-    approach_trigger_m: float = 0.90,
-    grasp_distance_m: float = 0.85,
-    max_reach_xy_m: float = 0.90,
-    min_grasp_z_m: float = 0.83,
+    optimal_standoff_m: float = 0.75,
+    approach_trigger_m: float = 0.80,
+    grasp_distance_m: float = 0.70,
+    max_reach_xy_m: float = 0.80,
+    min_grasp_z_m: float = 0.80,
     deadzone_half_m: float = 0.20,
     default_arm: str = "left",
     point_at_object: bool = True,
@@ -994,7 +1109,7 @@ def pick_object(
         return False
 
     base_lift_diff_m = ctx.walkie.robot.transform.lookup("base_footprint", "lift_link")["position"]["z"] - ctx.walkie.robot.lift.get(norm_pos=False) / 100.0
-    optimum_lift_height = loc.xyz_map[2] + 0.15
+    optimum_lift_height = loc.xyz_map[2] + 0.12
     print(f"[grasp] pick_object: setting lift to {((optimum_lift_height - base_lift_diff_m) * 100):.2f}m for better reach")
     ctx.walkie.robot.lift.set(pos=(optimum_lift_height - base_lift_diff_m) * 100, norm_pos=False)
 
@@ -1050,7 +1165,7 @@ def pick_object(
         # 6. The ONE heavy grasp plan, now that we're in the final pose: 2 snapshots at
         #    the configured head tilts, deduped + fused into one dense cloud, GraspNet once.
         cand = get_object_grasp_pos(
-            ctx, prompts, multi_tilt=True, standoff_m=pregrasp_standoff_m,
+            ctx, prompts, attempts=attempts, standoff_m=pregrasp_standoff_m,
             approach_preference=approach_preference, approach_weight=approach_weight,
         )
         if cand is None:

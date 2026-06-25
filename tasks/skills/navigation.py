@@ -211,6 +211,7 @@ def tilt_head(ctx: TaskContext, angle_rad: float, *, settle: float = 0.0) -> Non
     """
     try:
         ctx.walkie.robot.head.tilt(angle_rad)
+        time.sleep(0.5)  # let the servo start moving before the settle sleep
     except Exception as exc:
         print(f"[skills] head tilt failed ({exc})")
     if settle > 0:

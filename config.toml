@@ -142,6 +142,13 @@ WALKIE_GRASP_TILT_B = "0.35"         # second head tilt (rad)
 WALKIE_GRASP_TILT_SETTLE_SEC = "0.4" # wait after each head tilt before capturing
 WALKIE_GRASP_DEDUP_RADIUS_M = "0.10" # two views are the same object if centroids within this
 WALKIE_GRASP_MERGE_VOXEL_M = "0.003" # voxel size when fusing the two viewpoints' clouds
+# Same-angle fusion (used by pick_object's grasp plan, _grasp_cloud_multi_snap): take N
+# snapshots WITHOUT moving the head and fuse their object clouds before one GraspNet
+# inference. The head holds still, so there's no cross-pose error (unlike MULTI_TILT);
+# the fuse averages per-voxel depth noise and fills single-frame dropouts. "1" disables
+# it (falls back to best-of-N). Reuses DEDUP_RADIUS_M / MERGE_VOXEL_M above.
+WALKIE_GRASP_FUSE_SNAPS = "3"        # snapshots fused per grasp plan ("1" = best-of-N instead)
+WALKIE_GRASP_FUSE_SETTLE_SEC = "0.15" # wait between same-angle snapshots so frames are fresh
 # Grasp execution retries: if arm go_to_pose fails, strafe the base sideways (away from
 # the centreline on the arm's side) + step back, then re-execute the same map-frame
 # candidate (pure translation keeps it valid; new arm geometry can solve a failed IK).
@@ -180,13 +187,22 @@ WALKIE_MIC_DEBUG_DIR = "mic_recording"
 # the empty-space search. CALIBRATE the reach/footprint values on the real arm.
 # Full-scene cloud lift (override the per-detection WALKIE_GRAPHS_* defaults).
 WALKIE_PLACE_SCENE_VOXEL_M = "0.015"   # voxel size for the whole-scene cloud
-WALKIE_PLACE_MAX_DEPTH_M = "3.0"       # drop points farther than this (stereo noise)
+# Depth limit on the raw camera ray (m): drops everything past the workspace right in
+# front, so far walls/people never reach surface detection. ~1 m covers a table within
+# arm reach at the configured head tilts; raise if the far table edge gets clipped.
+WALKIE_PLACE_MAX_DEPTH_M = "1.0"       # close/placement scan: workspace bound (accuracy + bg)
+# The INITIAL surface-finding scan runs before the robot drives in (place_object has its
+# own approach), so it needs more reach than the close placement scan or a table at
+# standoff range gets clipped and place aborts. The normal gate rejects walls/standing
+# bodies at this range too, and the nearest reachable surface is chosen, so background
+# isn't picked. Lower toward placement range if far clutter ever gets selected.
+WALKIE_PLACE_APPROACH_MAX_DEPTH_M = "2.0"  # initial find-a-surface scan depth (before approach)
 # Multi-tilt fused surface scan: take 2 snapshots at these head tilts (rad, +down) and
 # merge their map-frame clouds before detecting surfaces, so two viewpoints fill each
 # other's self-occlusion (denser coverage, truer surface extents).
 WALKIE_PLACE_MULTI_TILT = "1"          # enable the 2-snapshot fused surface scan
 WALKIE_PLACE_TILT_A = "0.2"            # first head tilt (rad) for the fused scan
-WALKIE_PLACE_TILT_B = "0.35"           # second head tilt (rad)
+WALKIE_PLACE_TILT_B = "0.4"           # second head tilt (rad)
 WALKIE_PLACE_TILT_SETTLE_SEC = "0.4"   # wait after each head tilt before capturing
 # Horizontal-surface detection.
 WALKIE_SURFACE_Z_GAP_M = "0.04"        # split height bands at vertical gaps wider than this
@@ -198,10 +214,20 @@ WALKIE_SURFACE_XY_MIN_POINTS = "30"    # DBSCAN min points for an XY cluster
 # 0.05 m^2 ~= a 22x22 cm patch; raise it to ignore small clutter surfaces.
 WALKIE_SURFACE_MIN_AREA_M2 = "0.05"    # drop surfaces below this real flat area
 WALKIE_SURFACE_AREA_CELL_M = "0.05"    # grid resolution of the area estimate
-WALKIE_SURFACE_NORMAL_Z_MIN = ""       # |n_z| gate (needs Open3D); empty = skip the gate
+# Surface height is the MODAL (densest) Z layer at this bin resolution, not a percentile,
+# so an object resting on a surface can't drag its detected height up.
+WALKIE_SURFACE_Z_BIN_M = "0.01"        # bin width for the modal surface-height estimate
+# |n_z| gate (needs Open3D): keep near-horizontal surfaces, reject walls and standing
+# bodies (normals pointing sideways). 0.85 ~= within 32deg of horizontal. Lower toward
+# 0.8 if it strips a noisy real tabletop; set empty ("") to disable the gate.
+WALKIE_SURFACE_NORMAL_Z_MIN = "0.85"   # reject vertical structure (walls/people)
 # Empty-space search + place geometry.
 WALKIE_PLACE_FOOTPRINT_M = "0.12"      # object footprint (square side) when not recorded at pick
 WALKIE_PLACE_CLEARANCE_M = "0.03"      # keep this clear around the placed object
+# Lifts the free-space occupancy floor clear of the surface's OWN sensor-noise band, so
+# the upper tail of the tabletop's points isn't mistaken for clutter (surface z is now the
+# modal/band-centre height, not a high percentile). ~ the depth noise at working range.
+WALKIE_PLACE_SURFACE_SKIN_M = "0.02"   # occupancy floor skin above the surface plane
 WALKIE_PLACE_CELL_M = "0.04"           # occupancy grid resolution
 WALKIE_PLACE_EDGE_MARGIN_M = "0.05"    # keep the object this far from the table edge
 WALKIE_PLACE_Z_OFFSET_M = "0.02"       # extra clearance added above the reconstructed height

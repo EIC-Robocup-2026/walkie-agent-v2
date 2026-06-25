@@ -108,7 +108,13 @@ class Camera:
             RuntimeError: If camera is not open or frame capture fails.
         """
         if self._bot is not None:
-            frame = self._bot.camera.get_frame()
+            import time as _time
+            deadline = _time.monotonic() + 5.0
+            frame = None
+            while frame is None and _time.monotonic() < deadline:
+                frame = self._bot.camera.get_frame()
+                if frame is None:
+                    _time.sleep(0.05)
             if frame is None:
                 raise RuntimeError("Failed to get frame from robot camera.")
         else:
