@@ -525,6 +525,13 @@ def aim_forward_candidate(
     read from ``WALKIE_GRASP_POINT_RPY`` (default ``"0,1.5708,0"`` -> EE +z = base
     +x, horizontal forward) and rotated into the map frame by the current heading.
 
+    That fixed RPY only constrains the approach (EE +z); its roll about that axis
+    can leave the wrist's X axis (rotation column 0) pointing **down**. We roll the
+    wrist 180° about the approach whenever X points down so it always ends up
+    pointing up — the parallel-jaw symmetry (fingers swap, approach unchanged),
+    mirroring ``client.grasp._orient_x_up`` but with "down" taken as the map
+    frame's -Z (true gravity). This holds regardless of the configured RPY.
+
     The grasp *point* is kept; only the orientation, approach axis, and pre-grasp
     (re-backed-off *standoff_m* along the new -forward axis) change. Returns a new
     :class:`GraspCandidate` so the same pose drives both the arm and the held-object
@@ -535,6 +542,9 @@ def aim_forward_candidate(
     theta = ctx.current_pose()["heading"]
     R_base = Rotation.from_euler("xyz", rpy_base).as_matrix()
     R_map = Rotation.from_euler("z", theta).as_matrix() @ R_base
+    if R_map[2, 0] < 0.0:  # X axis (col 0) points down in the map frame (-Z = down)
+        R_map = R_map @ np.diag([-1.0, -1.0, 1.0])  # 180° about approach (Z, col 2)
+        print("[grasp] aim_forward_candidate: rolled wrist 180° so X points up")
     approach = R_map[:, 2]  # gripper points this way (map frame)
     grasp = np.asarray(candidate.grasp_xyz, dtype=float)
     pregrasp = grasp - approach * standoff_m
@@ -621,12 +631,12 @@ def execute_grasp(
         print(f"[grasp] execute_grasp[{side}]: hardware error ({exc})")
         return False
     finally:
-        if tuck_on_abort and not succeeded:
-            try:
-                result = ctx.walkie.arm.go_to_home(group_name=home_group, pose_name=home_pose, blocking=True)
-                print(f"[grasp] execute_grasp[{side}]: tuck-on-abort home -> {result}")
-            except Exception as exc:  # noqa: BLE001
-                print(f"[grasp] execute_grasp[{side}]: tuck-on-abort home failed ({exc})")
+        # if tuck_on_abort and not succeeded:
+        #     try:
+        #         result = ctx.walkie.arm.go_to_home(group_name=home_group, pose_name=home_pose, blocking=True)
+        #         print(f"[grasp] execute_grasp[{side}]: tuck-on-abort home -> {result}")
+        #     except Exception as exc:  # noqa: BLE001
+        #         print(f"[grasp] execute_grasp[{side}]: tuck-on-abort home failed ({exc})")
         # ctx.walkie.robot.arm.set_param_result(name="planner_id", value=original_planner)
         if collision_disabled:
             try:
@@ -644,11 +654,11 @@ def pick_object(
     pregrasp_standoff_m: float = 0.10,
     approach_preference: str = "none",
     approach_weight: float | None = None,
-    optimal_standoff_m: float = 0.55,
-    approach_trigger_m: float = 0.70,
-    grasp_distance_m: float = 0.50,
-    max_reach_xy_m: float = 0.75,
-    min_grasp_z_m: float = 0.70,
+    optimal_standoff_m: float = 0.85,
+    approach_trigger_m: float = 0.90,
+    grasp_distance_m: float = 0.85,
+    max_reach_xy_m: float = 0.90,
+    min_grasp_z_m: float = 0.83,
     deadzone_half_m: float = 0.20,
     default_arm: str = "left",
     point_at_object: bool = True,
@@ -722,7 +732,7 @@ def pick_object(
         return False
 
     base_lift_diff_m = ctx.walkie.robot.transform.lookup("base_footprint", "lift_link")["position"]["z"] - ctx.walkie.robot.lift.get(norm_pos=False) / 100.0
-    optimum_lift_height = cand.grasp_xyz[2] + 0.12
+    optimum_lift_height = cand.grasp_xyz[2] + 0.15
     print(f"[grasp] pick_object: setting lift to {((optimum_lift_height - base_lift_diff_m) * 100):.2f}m for better reach")
     ctx.walkie.robot.lift.set(pos=(optimum_lift_height - base_lift_diff_m) * 100, norm_pos=False)
     

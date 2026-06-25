@@ -63,7 +63,7 @@ def test_infer_round_trips_cloud_and_parses_grasps():
     assert g.translation == (0.1, 0.2, 0.4)
     assert g.rotation.shape == (3, 3)
     assert g.width == 0.05 and g.score == 0.9 and g.antipodal_score == 0.7
-    assert np.allclose(g.approach, [1, 0, 0])   # rotation col-0
+    assert np.allclose(g.approach, [0, 0, 1])   # rotation col-2
     assert np.allclose(g.closing, [0, 1, 0])    # rotation col-1
 
 

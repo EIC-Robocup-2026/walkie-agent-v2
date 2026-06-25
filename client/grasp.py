@@ -37,10 +37,11 @@ from .base import WalkieBaseClient, _numpy_to_npy_bytes
 class GraspPose:
     """One 6-DOF grasp, in the frame of the cloud that was sent.
 
-    ``rotation`` is a 3x3 matrix whose columns are the GraspNet axes: column 0 is
-    the **approach** (travel) direction, column 1 the **closing** (gripper-spread)
-    direction. ``width`` is the gripper opening in metres, ``score`` GraspNet's
-    quality. ``antipodal_score`` is ``None`` unless the request set ``antipodal=True``.
+    ``rotation`` is a 3x3 matrix whose columns are the grasp axes: column 2 is the
+    **approach** (travel) direction — the axis the robot drives the gripper along —
+    and column 1 the **closing** (gripper-spread) direction. ``width`` is the
+    gripper opening in metres, ``score`` GraspNet's quality. ``antipodal_score`` is
+    ``None`` unless the request set ``antipodal=True``.
     """
 
     translation: tuple[float, float, float]
@@ -51,8 +52,8 @@ class GraspPose:
 
     @property
     def approach(self) -> np.ndarray:
-        """Unit approach/travel direction (rotation column 0), in the cloud's frame."""
-        return self.rotation[:, 0]
+        """Unit approach/travel direction (rotation column 2), in the cloud's frame."""
+        return self.rotation[:, 2]
 
     @property
     def closing(self) -> np.ndarray:
@@ -69,6 +70,27 @@ def _deserialize_grasp(g: dict) -> GraspPose:
         score=float(g["score"]),
         antipodal_score=(float(anti) if anti is not None else None),
     )
+
+
+def _orient_x_up(grasp: GraspPose, down: np.ndarray) -> GraspPose:
+    """Roll a grasp 180° about its approach axis when its X axis points *down*.
+
+    GraspNet sometimes returns a wrist rolled so the grasp frame's X axis
+    (``rotation`` column 0) points downward. On Walkie the **forward/approach
+    grasp direction is the Z axis (rotation column 2)** — the axis the robot-side
+    pipeline drives the gripper along (see ``tasks.skills.grasp._to_map_frame``,
+    which reads ``rotation[:, 2]`` as the approach). A parallel-jaw grasp is
+    invariant under a 180° rotation about that approach axis: the two fingers
+    simply swap, so the contact geometry is identical. We exploit that symmetry to
+    roll any X-down grasp upright (X up) without changing where or how it grips,
+    which keeps the wrist orientation consistent and IK-friendlier.
+
+    ``down`` is the downward direction (gravity) expressed in the cloud's frame.
+    Mutates ``grasp.rotation`` in place and returns the same grasp.
+    """
+    if float(grasp.rotation[:, 0] @ down) > 0.0:  # X axis points down -> roll it up
+        grasp.rotation[:, 0:2] *= -1.0  # 180° about the approach (Z, column 2) axis
+    return grasp
 
 
 class GraspClient(WalkieBaseClient):
@@ -118,6 +140,14 @@ class GraspClient(WalkieBaseClient):
         Returns:
             ``list[GraspPose]`` sorted best-first, in the input cloud's frame.
             Empty when GraspNet finds nothing above the threshold.
+
+        Note:
+            Every returned grasp is normalised so its X axis (rotation column 0)
+            points up rather than down, rolling 180° about the approach (Z, column
+            2) axis when needed (see :func:`_orient_x_up`). "Down" is taken from
+            ``up`` when supplied (``down = -up``), otherwise the camera-optical
+            down (``+Y``) — the frame this client recommends sending. Score and
+            best-first ordering are unchanged.
         """
         arr = np.asarray(cloud, dtype=np.float32)
         if arr.ndim != 2 or arr.shape[1] != 3:
@@ -162,4 +192,14 @@ class GraspClient(WalkieBaseClient):
             files={"cloud": ("cloud.npy", _numpy_to_npy_bytes(arr), "application/octet-stream")},
             data={"spec": json.dumps(spec)},
         )
-        return [_deserialize_grasp(g) for g in data.get("grasps", [])]
+        grasps = [_deserialize_grasp(g) for g in data.get("grasps", [])]
+
+        # Roll any X-down grasp upright about the approach (Z) axis. "Down" is
+        # -up in the cloud frame when up was supplied, else camera-optical +Y.
+        down = -np.asarray(up, dtype=float).reshape(3) if up is not None else np.array([0.0, 1.0, 0.0])
+        norm = float(np.linalg.norm(down))
+        if norm > 0.0:
+            down /= norm
+            for g in grasps:
+                _orient_x_up(g, down)
+        return grasps
