@@ -14,59 +14,27 @@ core of Phase 0.
 
 from __future__ import annotations
 
-import difflib
 import os
-import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-Pose = tuple[float, float, float]
-
-
-def _fuzzy_cutoff() -> float:
-    """difflib ratio an STT/LLM near-miss must clear to be accepted as a match
-    (GPSR_GROUNDING_FUZZY_CUTOFF, default 0.8). 0 / unparsable disables fuzzy
-    grounding entirely (exact-alias behaviour only)."""
-    try:
-        return float(os.getenv("GPSR_GROUNDING_FUZZY_CUTOFF", "0.8") or 0)
-    except ValueError:
-        return 0.0
-
-
-def _fuzzy_match(key: str, candidates, cutoff: float) -> str | None:
-    """Closest candidate to *key* at/above *cutoff* (difflib ratio), or None.
-
-    Belt-and-suspenders for STT/LLM near-misses ("kitchen tabel" -> kitchen_table,
-    "couch" -> couches) that survive the parser's vocab-grounded extraction and so
-    would otherwise be an ungrounded gap. Only consulted on an exact-lookup miss,
-    so it can never override a correct exact match. ``cutoff <= 0`` disables it.
-    Pure (no robot/LLM/network) -> unit-tested directly."""
-    if not key or cutoff <= 0:
-        return None
-    hits = difflib.get_close_matches(key, list(candidates), n=1, cutoff=cutoff)
-    return hits[0] if hits else None
-
-
-def _norm(s: str) -> str:
-    """Canonical key for matching: lowercase, spaces/hyphens→underscore, trimmed.
-
-    "the Kitchen Table" -> "the_kitchen_table"; callers strip leading articles.
-    """
-    s = s.strip().lower()
-    s = re.sub(r"[\s\-]+", "_", s)
-    s = re.sub(r"[^\w]", "", s)
-    return s
-
-
-_ARTICLES = ("the_", "a_", "an_", "some_", "my_", "your_")
-
-
-def _strip_article(key: str) -> str:
-    for art in _ARTICLES:
-        if key.startswith(art):
-            return key[len(art):]
-    return key
+# Location primitives live in the shared map layer; GPSR's WorldModel is built on
+# them (correct dependency direction). `_fuzzy_match` is re-exported here because
+# tests/test_gpsr_hardening.py imports it from this module.
+from tasks.skills.locations import (  # noqa: F401  (re-export _fuzzy_match)
+    Location,
+    Pose,
+    Room,
+    _alias_keys,
+    _fuzzy_cutoff,
+    _fuzzy_match,
+    _lookup,
+    _norm,
+    _pose_of,
+    _strip_article,
+    build_rooms_locations,
+)
 
 
 def _singulars(key: str) -> list[str]:
@@ -84,26 +52,6 @@ def _singulars(key: str) -> list[str]:
     if key.endswith("s") and len(key) > 1:
         cands.append(key[:-1])
     return cands
-
-
-@dataclass(frozen=True)
-class Room:
-    name: str
-    pose: Pose = (0.0, 0.0, 0.0)
-    # A human-operated barrier (door/partition/screen) blocks the route here. The
-    # depth check reads it as "open" (it can't see a too-narrow gap), so navigation
-    # asks for it to be opened on a block — see WorldModel.is_barrier / go_to_named.
-    barrier: bool = False
-
-
-@dataclass(frozen=True)
-class Location:
-    name: str
-    room: str | None = None
-    placement: bool = False
-    category: str | None = None
-    pose: Pose = (0.0, 0.0, 0.0)
-    barrier: bool = False  # see Room.barrier
 
 
 @dataclass
@@ -132,16 +80,8 @@ class WorldModel:
     # --- grounding lookups (alias + article tolerant) -------------------
 
     def _lookup(self, table: dict[str, str], text: str | None) -> str | None:
-        if not text:
-            return None
-        key = _norm(text)
-        hit = table.get(key) or table.get(_strip_article(key))
-        if hit is not None:
-            return hit
-        # Exact-alias miss: fall back to a conservative fuzzy match so a mis-heard
-        # noun ("kitchen tabel") still grounds instead of forfeiting the command.
-        cand = _fuzzy_match(_strip_article(key), table.keys(), _fuzzy_cutoff())
-        return table.get(cand) if cand else None
+        # Shared alias/article/fuzzy lookup (tasks.skills.locations._lookup).
+        return _lookup(table, text)
 
     def room(self, text: str | None) -> str | None:
         return self._lookup(self._room_alias, text)
@@ -244,18 +184,6 @@ class WorldModel:
         )
 
 
-def _alias_keys(canonical: str, aliases: list[str] | None) -> list[str]:
-    keys = {_norm(canonical), _norm(canonical.replace("_", " "))}
-    for a in aliases or []:
-        keys.add(_norm(a))
-    return list(keys)
-
-
-def _pose_of(raw: dict) -> Pose:
-    p = raw.get("pose", [0.0, 0.0, 0.0])
-    return (float(p[0]), float(p[1]), float(p[2]))
-
-
 def load_world(
     path: str | os.PathLike | None = None, *, include_absent: bool = False
 ) -> WorldModel:
@@ -280,33 +208,11 @@ def load_world(
 
     wm = WorldModel()
 
-    for name, raw in (data.get("rooms") or {}).items():
-        if not include_absent and not raw.get("present", True):
-            continue  # in the template but ABSENT from this arena — drop it entirely
-        canonical = _norm(name)
-        wm.rooms[canonical] = Room(
-            name=canonical, pose=_pose_of(raw), barrier=bool(raw.get("barrier", False))
-        )
-        for k in _alias_keys(canonical, raw.get("aliases")):
-            wm._room_alias[k] = canonical
-
-    for name, raw in (data.get("locations") or {}).items():
-        if not include_absent and not raw.get("present", True):
-            continue  # absent from this arena — drop so nothing grounds/navigates to it
-        room = _norm(raw["room"]) if raw.get("room") else None
-        if room is not None and room not in wm.rooms:
-            continue  # its room was dropped (present=false / unlisted) — cascade-drop it too
-        canonical = _norm(name)
-        wm.locations[canonical] = Location(
-            name=canonical,
-            room=room,
-            placement=bool(raw.get("placement", False)),
-            category=_norm(raw["category"]) if raw.get("category") else None,
-            pose=_pose_of(raw),
-            barrier=bool(raw.get("barrier", False)),
-        )
-        for k in _alias_keys(canonical, raw.get("aliases")):
-            wm._loc_alias[k] = canonical
+    # Rooms + locations (with present/cascade-drop) come from the shared map layer
+    # so the schema lives in one place; GPSR layers its vocabulary on top below.
+    wm.rooms, wm.locations, wm._room_alias, wm._loc_alias = build_rooms_locations(
+        data, include_absent=include_absent
+    )
 
     for category, items in (data.get("object_categories") or {}).items():
         cat = _norm(category)

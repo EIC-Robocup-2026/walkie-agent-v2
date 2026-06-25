@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 
 from tasks.base import StepResult, SubTask, Task, TaskContext
+from tasks.skills.locations import get_location_book, resolve_pose
 
 from . import prompts
 from .skills import (
@@ -38,14 +39,35 @@ from .skills import (
     sort_object,
 )
 
+# Map each PnP nav waypoint to its canonical name in the shared LocationBook (the
+# map editor's output). NOTE: the arm-frame place poses (PNP_PLACE_POSE_* and the
+# PNP_BREAKFAST_{BOWL,SPOON,MILK,CEREAL}_POSE arm slots) are NOT here — they go
+# through place_at(), not _pose(), and stay env-only.
+_LOCATION_NAME = {
+    "PNP_KITCHEN_POSE": "kitchen",
+    "PNP_DINING_TABLE_POSE": "dining_table",
+    "PNP_DISHWASHER_POSE": "dishwasher",
+    "PNP_CABINET_POSE": "cabinet",
+    "PNP_TRASH_BIN_POSE": "trash_bin",
+    "PNP_BREAKFAST_SURFACE_POSE": "breakfast_surface",
+    "PNP_EXTRA_SURFACE_POSE": "extra_surface",
+}
+
 
 def _pose(env_key: str, default: str = "0.0,0.0,0.0") -> tuple[float, float, float]:
-    """Parse a map-frame waypoint 'x,y,heading_rad' from the environment."""
-    parts = [p.strip() for p in os.getenv(env_key, default).split(",")]
-    if len(parts) != 3:
-        raise ValueError(f"{env_key}: expected 'x,y,heading_rad', got {parts!r}")
-    x, y, h = (float(p) for p in parts)
-    return x, y, h
+    """Map-frame waypoint: shared LocationBook (by name) -> *_POSE env var -> default."""
+    return resolve_pose(_LOCATION_NAME.get(env_key), env_fallback=env_key, default=default)
+
+
+def _has_pose(env_key: str) -> bool:
+    """True if a waypoint is configured for *env_key* — in the map or the env var.
+
+    Lets callers (skills.place_object) decide whether to drive to a furniture
+    waypoint before placing, now that the pose can come from the map and not just
+    the env var.
+    """
+    name = _LOCATION_NAME.get(env_key)
+    return bool(name and get_location_book().has(name)) or bool(os.getenv(env_key))
 
 
 def _optional(env_key: str) -> bool:

@@ -46,6 +46,16 @@ WALKIE_ROS_PORT = "9090"
 # machine as the AI server at WALKIE_AI_BASE_URL — they're separate boxes.
 WALKIE_ROBOT_IP = "127.0.0.1"
 
+[map]
+# Shared named-location ("map") file every challenge drives to (rooms + locations
+# with pose=[x,y,heading_rad], read by tasks/skills/locations.py). This is the
+# world.toml schema — an external map editor writes it. Empty = fall back to
+# $GPSR_WORLD_FILE, else GPSR's tasks/GPSR/world.toml, so one arena file serves
+# every challenge and the teach_poses tool already feeds them all. Each challenge
+# still falls back to its own *_POSE env var when the map lacks a name, so a box
+# with no map file keeps working. See docs/MAP_LOCATIONS.md.
+WALKIE_MAP_FILE = ""
+
 [runtime]
 # 1 = type instructions at a TTY instead of speaking (no mic).
 DISABLE_LISTENING = "0"
