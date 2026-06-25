@@ -40,8 +40,10 @@ class _Ctx:
         self.saids: list[str] = []
         self.asked: list[str] = []
         self.ask_retries: list[int] = []
+        self.scored: list[tuple[str, int]] = []  # (key, n) for each ctx.score()
         self.data: dict = {"world": object()}  # non-None so run() proceeds
         self.model = object()
+        self.disable_listening = False  # answers come via ask() = the STT path
 
     def ask(self, question, retries=1):
         self.asked.append(question)
@@ -50,6 +52,9 @@ class _Ctx:
 
     def say(self, text):
         self.saids.append(text)
+
+    def score(self, key, n=1):
+        self.scored.append((key, n))
 
 
 @pytest.fixture(autouse=True)

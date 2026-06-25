@@ -20,6 +20,8 @@ from dotenv import load_dotenv
 
 from ..base import TaskContext
 from ..common import WalkieBrain, initialize_llm_model, initialize_robot, load_task_config
+from ..scoring import ScoreTracker
+from .scoring import GPSR_SHEET
 from .subtasks import build_gpsr_task
 from .world import load_world
 from client import WalkieAIClient
@@ -43,6 +45,7 @@ def main() -> None:
         except Exception as exc:
             print(f"[gpsr] perception loop failed to start ({exc}); continuing without it")
 
+    scorecard = ScoreTracker(GPSR_SHEET, path=os.getenv("GPSR_SCORECARD_PATH", "gpsr_scorecard.json"))
     ctx = TaskContext(
         walkie=walkie_interface,
         walkieAI=walkie_ai,
@@ -51,6 +54,7 @@ def main() -> None:
         # GPSR is thick with person commands (meet/greet/guide/follow) — reuse
         # HRI's face+attire re-ID people store (§5.4), unlike Restaurant.
         people=PeopleStore.from_env(),
+        scorer=scorecard,  # live tally of attempted/claimed points (ctx.score)
     )
     ctx.data["brain"] = brain
     ctx.data["world"] = load_world()  # arena nouns the parser grounds against
@@ -58,6 +62,8 @@ def main() -> None:
     try:
         build_gpsr_task(ctx).run()
     finally:
+        print(scorecard.summary())  # attempted/claimed points — NOT referee-awarded
+        scorecard.write()
         walkie_interface.close()
 
 

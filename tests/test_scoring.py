@@ -213,3 +213,38 @@ def test_restaurant_award_keys_exist_in_sheet():
     assert keys, "expected ctx.score() awards in the Restaurant task"
     sheet_keys = {ln.key for ln in RESTAURANT_SHEET.lines}
     assert keys <= sheet_keys, f"Restaurant score keys not in RESTAURANT_SHEET: {sorted(keys - sheet_keys)}"
+
+
+def test_hri_award_keys_exist_in_sheet():
+    import tasks.HRI.subtasks as st
+
+    keys = _award_keys(st)
+    assert keys, "expected ctx.score() awards in the HRI task"
+    sheet_keys = {ln.key for ln in HRI_SHEET.lines}
+    assert keys <= sheet_keys, f"HRI score keys not in HRI_SHEET: {sorted(keys - sheet_keys)}"
+
+
+def test_gpsr_award_keys_exist_in_sheet():
+    # ctx.score() swallows a bad key (logs, never raises) so a typo'd key would
+    # silently score 0 forever — this is the only thing that proves GPSR's wiring
+    # (understand/speak/solve/interleave + the penalties unique to GPSR) is live.
+    import tasks.GPSR.subtasks as st
+
+    keys = _award_keys(st)
+    assert keys, "expected ctx.score() awards in the GPSR task"
+    sheet_keys = {ln.key for ln in GPSR_SHEET.lines}
+    assert keys <= sheet_keys, f"GPSR score keys not in GPSR_SHEET: {sorted(keys - sheet_keys)}"
+    # every GPSR positive line is reached by the flow (it's the whole non-arm budget)
+    positives = {ln.key for ln in GPSR_SHEET.positives()}
+    assert positives <= keys, f"GPSR positive lines never awarded: {sorted(positives - keys)}"
+
+
+def test_laundry_award_keys_exist_in_sheet():
+    import tasks.Laundry.subtasks as st
+
+    keys = _award_keys(st)
+    assert keys, "expected ctx.score() awards in the Laundry task"
+    sheet_keys = {ln.key for ln in LAUNDRY_SHEET.lines}
+    assert keys <= sheet_keys, f"Laundry score keys not in LAUNDRY_SHEET: {sorted(keys - sheet_keys)}"
+    # the only non-arm line must be wired — it's the entire arm-gated budget (15 pts)
+    assert "navigate_laundry_area" in keys
