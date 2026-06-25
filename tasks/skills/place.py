@@ -66,7 +66,10 @@ def _b(name: str, default: str) -> bool:
 
 def _surface_kwargs() -> dict:
     """Detection knobs from config (the WALKIE_SURFACE_* family)."""
-    normal_raw = os.getenv("WALKIE_SURFACE_NORMAL_Z_MIN", "").strip()
+    # Vertical-surface gate is ON by default (0.85): rejects walls and standing bodies
+    # whose normals point sideways. Set the knob to "" to disable. Needs Open3D; degrades
+    # to a no-op (one-time warning) without it.
+    normal_raw = os.getenv("WALKIE_SURFACE_NORMAL_Z_MIN", "0.85").strip()
     return {
         "z_gap_m": _f("WALKIE_SURFACE_Z_GAP_M", "0.04"),
         "min_points_per_surface": _i("WALKIE_SURFACE_MIN_POINTS", "150"),
@@ -75,6 +78,7 @@ def _surface_kwargs() -> dict:
         "min_area_m2": _f("WALKIE_SURFACE_MIN_AREA_M2", "0.05"),
         "area_cell_m": _f("WALKIE_SURFACE_AREA_CELL_M", "0.05"),
         "normal_z_min": (float(normal_raw) if normal_raw else None),
+        "z_bin_m": _f("WALKIE_SURFACE_Z_BIN_M", "0.01"),
     }
 
 
@@ -96,7 +100,7 @@ def _full_scene_cloud(
     if snap is None or not getattr(snap, "has_geometry", False):
         return np.zeros((0, 3), dtype=np.float32)
     voxel = _f("WALKIE_PLACE_SCENE_VOXEL_M", "0.015") if voxel is None else voxel
-    max_depth = _f("WALKIE_PLACE_MAX_DEPTH_M", "3.0") if max_depth is None else max_depth
+    max_depth = _f("WALKIE_PLACE_MAX_DEPTH_M", "1.0") if max_depth is None else max_depth
     h, w = snap.depth.shape[:2]
     mask = np.ones((h, w), dtype=np.uint8)
     return snap.mask_to_points(
@@ -109,11 +113,13 @@ def _full_scene_cloud(
     )
 
 
-def _scan(ctx: TaskContext, snap=None) -> tuple[object, np.ndarray, list[SurfacePlane]]:
+def _scan(
+    ctx: TaskContext, snap=None, *, max_depth_m: float | None = None
+) -> tuple[object, np.ndarray, list[SurfacePlane]]:
     """Snapshot -> full-scene cloud -> horizontal surfaces. Returns all three."""
     if snap is None:
         snap = ctx.snapshot()
-    cloud = _full_scene_cloud(snap)
+    cloud = _full_scene_cloud(snap, max_depth=max_depth_m)
     surfaces = detect_horizontal_surfaces(cloud, **_surface_kwargs())
     return snap, cloud, surfaces
 
@@ -124,6 +130,7 @@ def _scan_multi_tilt(
     tilts: tuple[float, ...] | None = None,
     settle_sec: float | None = None,
     merge_voxel: float | None = None,
+    max_depth_m: float | None = None,
 ) -> tuple[object, np.ndarray, list[SurfacePlane]]:
     """Two snapshots at different head tilts, fused, then horizontal-surface detection.
 
@@ -152,14 +159,14 @@ def _scan_multi_tilt(
         snap = ctx.snapshot()
         if snap is None or not getattr(snap, "has_geometry", False):
             continue
-        cloud = _full_scene_cloud(snap)
+        cloud = _full_scene_cloud(snap, max_depth=max_depth_m)
         if cloud.shape[0]:
             clouds.append(cloud)
             last_snap = snap
 
     if not clouds:
         print("[place] multi-tilt scan: no geometry; falling back to single scan")
-        return _scan(ctx, None)
+        return _scan(ctx, None, max_depth_m=max_depth_m)
     if len(clouds) == 1:
         merged = clouds[0]
     else:
@@ -169,15 +176,19 @@ def _scan_multi_tilt(
     return last_snap, merged, surfaces
 
 
-def _scan_auto(ctx: TaskContext, snap=None) -> tuple[object, np.ndarray, list[SurfacePlane]]:
+def _scan_auto(
+    ctx: TaskContext, snap=None, *, max_depth_m: float | None = None
+) -> tuple[object, np.ndarray, list[SurfacePlane]]:
     """Scan the scene, using the 2-tilt fused scan when enabled and no *snap* is given.
 
     Gated by ``WALKIE_PLACE_MULTI_TILT`` (default on). When a caller passes an explicit
     *snap* we honour it with a plain single :func:`_scan` (it already chose the frame).
+    ``max_depth_m`` (``None`` -> the ``WALKIE_PLACE_MAX_DEPTH_M`` config default) bounds
+    the lifted cloud so far background (walls/people) never reaches surface detection.
     """
     if snap is None and _b("WALKIE_PLACE_MULTI_TILT", "1"):
-        return _scan_multi_tilt(ctx)
-    return _scan(ctx, snap)
+        return _scan_multi_tilt(ctx, max_depth_m=max_depth_m)
+    return _scan(ctx, snap, max_depth_m=max_depth_m)
 
 
 def detect_surfaces(
@@ -186,15 +197,20 @@ def detect_surfaces(
     snap=None,
     detect_objects: bool = False,
     object_prompts: list[str] | None = None,
+    max_depth_m: float | None = None,
 ) -> list[SurfacePlane]:
     """Scan for horizontal surfaces around the robot (tables, shelves, the floor).
 
     Returns :class:`SurfacePlane`\\ s sorted highest-first. With *detect_objects*,
     also runs open-vocab detection (*object_prompts*) and prints which objects sit on
     each surface — the inventory an LLM placement agent reads (height + XY distance).
-    Object detection is off by default to keep the place path fast.
+    Object detection is off by default to keep the place path fast. *max_depth_m* bounds
+    the lifted cloud (``None`` -> the ``WALKIE_PLACE_MAX_DEPTH_M`` config default, 1 m) so
+    background walls/people beyond the workspace are never mistaken for surfaces. Pass a
+    larger *max_depth_m* to inventory surfaces from a distance (the 1 m default sees only
+    what's right in front of the robot).
     """
-    snap, _cloud, surfaces = _scan_auto(ctx, snap)
+    snap, _cloud, surfaces = _scan_auto(ctx, snap, max_depth_m=max_depth_m)
     if detect_objects and snap is not None and getattr(snap, "has_geometry", False):
         prompts = object_prompts or ["object"]
         objects: list[tuple[str, Vec3]] = []
@@ -309,6 +325,7 @@ def _choose_surface(
             cloud,
             footprint_m=footprint_m,
             clearance_m=clearance_m,
+            surface_skin_m=_f("WALKIE_PLACE_SURFACE_SKIN_M", "0.02"),
             cell_m=_f("WALKIE_PLACE_CELL_M", "0.04"),
             edge_margin_m=_f("WALKIE_PLACE_EDGE_MARGIN_M", "0.05"),
             prefer="near" if arm_xy is not None else "center",
@@ -411,6 +428,7 @@ def execute_place(
             )
             print(f"[place] execute_place[{side}]: no lift; arm descent -> {res}")
 
+        input("[place] execute_place[{side}]: press Enter to release the object (or Ctrl-C to abort)")
         hand.gripper(1.0, blocking=True)  # open: release the object
 
         # Raise the lift back so the open gripper lifts straight up off the object
@@ -455,6 +473,87 @@ def execute_place(
                 print(f"[place] execute_place[{side}]: tuck-on-abort home failed ({exc})")
 
 
+# --- place-plan visualization -----------------------------------------------
+def _draw_place_plan(
+    ctx: TaskContext,
+    cloud: np.ndarray,
+    surfaces: list[SurfacePlane],
+    chosen_surface: SurfacePlane,
+    place_xyz: Vec3,
+    rotation: np.ndarray,
+    *,
+    footprint_m: float | None = None,
+) -> None:
+    """Best-effort: show the place plan in the shared viewer BEFORE the arm moves.
+
+    Logs, under the ``place_plan/`` namespace (a SIBLING of ``place/`` so
+    :func:`execute_place`'s ``clear("place")`` can't wipe it mid-motion):
+
+    - ``place_plan/scene``     — the full map-frame scene cloud (gray, decimated if
+      huge): the "places to place" point cloud the surface scan ran on;
+    - ``place_plan/surfaces``  — every detected horizontal surface as a flat AABB box;
+    - ``place_plan/chosen``    — the chosen surface's AABB, highlighted (cyan);
+    - ``place_plan/spot``      — the chosen free spot (the place point) as a marker,
+      with the held object's footprint as a box around it;
+    - ``place_plan/ee``        — the release wrist pose (the reused grasp orientation,
+      i.e. the grasp position the object will be set down in) as an XYZ triad.
+
+    So an operator can eyeball *where* the object will land, on *which* surface, and
+    *how* the gripper is oriented before committing. Never raises — viz is never
+    load-bearing (mirrors ``grasp._draw_grasp_viz``).
+    """
+    if getattr(ctx, "viz", None) is None:
+        return
+    try:
+        ctx.viz.clear("place_plan", recursive=True)
+
+        # 1. The scene cloud — the candidate "places to place". Bound the stream size
+        #    the same way the scene-graph background viz does.
+        if cloud is not None and len(cloud):
+            pts = cloud
+            if len(pts) > 50_000:
+                pts = pts[:: len(pts) // 50_000 + 1]
+            ctx.viz.points("place_plan/scene", pts, colors=[(150, 150, 150)], radii=0.004)
+
+        # 2. Every detected surface as a thin AABB slab at its top height.
+        for s in surfaces:
+            cx = (s.aabb_min[0] + s.aabb_max[0]) / 2.0
+            cy = (s.aabb_min[1] + s.aabb_max[1]) / 2.0
+            half = [
+                max((s.aabb_max[0] - s.aabb_min[0]) / 2.0, 1e-3),
+                max((s.aabb_max[1] - s.aabb_min[1]) / 2.0, 1e-3),
+                0.005,
+            ]
+            ctx.viz.box(["place_plan", "surfaces", str(s.id)], [cx, cy, s.z], half,
+                        color=(90, 90, 110), label=f"surface {s.id} z={s.z:.2f}m")
+
+        # 3. The chosen surface, highlighted (drawn separately so an explicit
+        #    surface= that isn't in the scan's list still shows up).
+        cs = chosen_surface
+        ccx = (cs.aabb_min[0] + cs.aabb_max[0]) / 2.0
+        ccy = (cs.aabb_min[1] + cs.aabb_max[1]) / 2.0
+        chalf = [
+            max((cs.aabb_max[0] - cs.aabb_min[0]) / 2.0, 1e-3),
+            max((cs.aabb_max[1] - cs.aabb_min[1]) / 2.0, 1e-3),
+            0.006,
+        ]
+        ctx.viz.box("place_plan/chosen", [ccx, ccy, cs.z], chalf,
+                    color=(0, 200, 255), label=f"chosen z={cs.z:.2f}m")
+
+        # 4. The chosen spot, the object's footprint there, and the release wrist pose.
+        px, py, pz = float(place_xyz[0]), float(place_xyz[1]), float(place_xyz[2])
+        ctx.viz.points("place_plan/spot", [[px, py, pz]], radii=[0.025],
+                       colors=[(255, 180, 0)], labels=["place"])
+        if footprint_m:
+            fp = float(footprint_m) / 2.0
+            ctx.viz.box("place_plan/footprint", [px, py, pz + fp], [fp, fp, fp],
+                        color=(255, 180, 0), label="object")
+        ctx.viz.axes("place_plan/ee", (px, py, pz), rotation=np.asarray(rotation),
+                     length=0.10, labels=True)
+    except Exception as exc:  # noqa: BLE001 — viz is never load-bearing
+        print(f"[place] place-plan viz failed ({exc})")
+
+
 # --- full place -------------------------------------------------------------
 def place_object(
     ctx: TaskContext,
@@ -471,6 +570,8 @@ def place_object(
     approach_trigger_m: float = 0.70,
     max_reach_xy_m: float | None = None,
     min_place_z_m: float | None = None,
+    max_depth_m: float | None = None,
+    approach_max_depth_m: float | None = None,
     default_arm: str = "left",
     track: bool = True,
     viz: bool = True,
@@ -492,6 +593,14 @@ def place_object(
         footprint_m: Object footprint for empty-space sizing; defaults to the value
             recorded at pick time, then the ``WALKIE_PLACE_FOOTPRINT_M`` config.
         clearance_m, place_z_offset_m, max_reach_xy_m, min_place_z_m: see config.
+        max_depth_m: bound the *close* (post-approach) scene scan to this depth (None ->
+            the ``WALKIE_PLACE_MAX_DEPTH_M`` config default, 1 m) so background walls/people
+            can't be detected as the placement surface and the height stays accurate.
+        approach_max_depth_m: depth bound for the *initial* surface-finding scan, run
+            before the robot drives in (None -> ``WALKIE_PLACE_APPROACH_MAX_DEPTH_M``, 2 m).
+            Wider than ``max_depth_m`` so a table at standoff range is still seen; the
+            surface-normal gate still rejects walls/standing bodies at this range, and the
+            nearest reachable surface is chosen, so far background isn't picked.
         optimal_standoff_m, approach_trigger_m: base approach to the surface.
         default_arm: fallback when the holding arm can't be inferred.
 
@@ -508,6 +617,11 @@ def place_object(
     )
     min_place_z_m = (
         _f("WALKIE_PLACE_MIN_Z_M", "0.70") if min_place_z_m is None else min_place_z_m
+    )
+    approach_max_depth_m = (
+        _f("WALKIE_PLACE_APPROACH_MAX_DEPTH_M", "2.0")
+        if approach_max_depth_m is None
+        else approach_max_depth_m
     )
     standoff_m = _f("WALKIE_PLACE_STANDOFF_M", "0.10")
     lower_m = _f("WALKIE_PLACE_LOWER_M", "0.08") if lower_m is None else lower_m
@@ -543,8 +657,11 @@ def place_object(
 
     # 2. Choose a surface + spot. Snapshot now, with the arm tucked from the pick, so
     #    the held object/gripper stay out of the table view. The 2-tilt fused scan
-    #    (when enabled) gives surface detection denser, more-complete coverage.
-    snap, cloud, surfaces = _scan_auto(ctx, None)
+    #    (when enabled) gives surface detection denser, more-complete coverage. Use the
+    #    wider approach depth here: the robot is still at standoff range, so a tight 1 m
+    #    cut would clip the table and abort before we ever drive in (the normal gate still
+    #    rejects walls/standing bodies, and the nearest reachable surface is chosen).
+    snap, cloud, surfaces = _scan_auto(ctx, None, max_depth_m=approach_max_depth_m)
     if surface is not None:
         chosen_surface = surface
     elif not surfaces:
@@ -578,6 +695,7 @@ def place_object(
             free_xy = find_free_placement(
                 chosen_surface, cloud,
                 footprint_m=footprint_m, clearance_m=clearance_m,
+                surface_skin_m=_f("WALKIE_PLACE_SURFACE_SKIN_M", "0.02"),
                 cell_m=_f("WALKIE_PLACE_CELL_M", "0.04"),
                 edge_margin_m=_f("WALKIE_PLACE_EDGE_MARGIN_M", "0.05"),
                 prefer="near" if arm_xy is not None else "center",
@@ -613,7 +731,7 @@ def place_object(
         return False
     if status == "MOVED":
         # Base moved -> the scan is stale. Re-scan and re-pick the same surface/spot.
-        snap, cloud, surfaces = _scan_auto(ctx, None)
+        snap, cloud, surfaces = _scan_auto(ctx, None, max_depth_m=max_depth_m)
         if surfaces:
             chosen_surface = min(
                 surfaces,
@@ -626,6 +744,7 @@ def place_object(
             re_xy = find_free_placement(
                 chosen_surface, cloud,
                 footprint_m=footprint_m, clearance_m=clearance_m,
+                surface_skin_m=_f("WALKIE_PLACE_SURFACE_SKIN_M", "0.02"),
                 cell_m=_f("WALKIE_PLACE_CELL_M", "0.04"),
                 edge_margin_m=_f("WALKIE_PLACE_EDGE_MARGIN_M", "0.05"),
                 prefer="near" if arm_xy is not None else "center",
@@ -647,8 +766,15 @@ def place_object(
         print(f"[place] place_object: out of reach (xy={reach:.2f}m > {max_reach_xy_m:.2f}m); aborting")
         return False
 
-    # 7. Release — park above the surface, then lower onto it with the lift.
+    # 7. Release — park above the surface, then lower onto it with the lift. Draw the
+    #    plan first (scene cloud, candidate surfaces, the spot + the release wrist pose)
+    #    so an operator can eyeball the place before the arm commits.
     rotation = _rotation_for(held, place_orientation)
+    if viz:
+        _draw_place_plan(
+            ctx, cloud, surfaces, chosen_surface, place_xyz, rotation,
+            footprint_m=footprint_m,
+        )
     ok = execute_place(
         ctx, place_xyz, rotation, arm=chosen,
         standoff_m=standoff_m, lower_m=lower_m, settle_sec=settle_sec, viz=viz,

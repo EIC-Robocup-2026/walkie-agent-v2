@@ -58,8 +58,9 @@ _normal_warned = False
 class SurfacePlane:
     """A horizontal support surface in the map frame (gravity = +Z up).
 
-    ``z`` is the surface *top* height (a high percentile of the band, not the mean,
-    so an object resting on it sits just above ``z``). ``aabb_min``/``aabb_max`` are
+    ``z`` is the surface plane height — the **modal** (densest) Z layer of the band,
+    not a percentile or the mean, so it stays on the true tabletop and an object resting
+    on it sits just above ``z`` instead of dragging ``z`` up. ``aabb_min``/``aabb_max`` are
     the axis-aligned bounds of the surface points; ``extent`` is their span
     ``(w, d, h)``. ``points`` is the lifted surface cloud when ``keep_points=True``,
     else ``None``.
@@ -143,6 +144,29 @@ def _split_runs(values_sorted: np.ndarray, gap: float) -> list[tuple[int, int]]:
     return list(zip(starts.tolist(), stops.tolist()))
 
 
+def _plane_height(z: np.ndarray, bin_m: float) -> float:
+    """Robust horizontal-plane height: the densest Z layer (mode), not a percentile.
+
+    A real surface contributes a dense *sheet* of points at one height; objects resting
+    on it add comparatively few points spread above. A high percentile is biased upward
+    by those objects (the place height then reconstructs too high), so we take the modal
+    Z — the peak of a fine histogram (bin width ``bin_m``) — and refine it with the mean
+    of the points that fall in the peak bin. Degrades to the median for tiny inputs or a
+    Z span below one bin, so a flat slab returns its exact height.
+    """
+    z = np.asarray(z, dtype=np.float64).ravel()
+    if z.size == 0:
+        return 0.0
+    lo, hi = float(z.min()), float(z.max())
+    if bin_m <= 0 or z.size < 8 or (hi - lo) < bin_m:
+        return float(np.median(z))
+    nbins = max(1, int(np.ceil((hi - lo) / bin_m)))
+    counts, edges = np.histogram(z, bins=nbins)
+    k = int(np.argmax(counts))
+    in_peak = (z >= edges[k]) & (z <= edges[k + 1])
+    return float(np.mean(z[in_peak])) if in_peak.any() else float(np.median(z))
+
+
 def _covered_area_m2(xy: np.ndarray, cell_m: float) -> float:
     """True flat area: count of distinct occupied (x, y) cells times the cell area.
 
@@ -169,6 +193,7 @@ def detect_horizontal_surfaces(
     min_area_m2: float = 0.05,
     area_cell_m: float = 0.05,
     normal_z_min: float | None = None,
+    z_bin_m: float = 0.01,
     keep_points: bool = False,
     sor_k: int = 0,
 ) -> list[SurfacePlane]:
@@ -188,13 +213,14 @@ def detect_horizontal_surfaces(
        the **true covered area** (occupied XY cells at ``area_cell_m``, not the
        bounding box); drop clusters below ``min_points_per_surface`` or
        ``min_area_m2`` (square metres of real flat area). The surface ``z`` is the
-       90th percentile of the cluster's Z (its *top*).
+       **modal** (densest) Z layer of the cluster at ``z_bin_m`` resolution — robust to
+       objects resting on the surface, which a percentile would let bias ``z`` upward.
 
     Bands thinner than a real surface (a stray Z-run) are filtered by the point/area
     minimums. ``min_area_m2`` is a genuine flat-area threshold: an L-shaped table or a
     sparse scatter with a big bounding box but little real coverage is rejected. A
-    surface's own thickness (sensor noise) is absorbed by the run split and the
-    percentile top. Returns surfaces sorted by ``z``, highest first.
+    surface's own thickness (sensor noise) is absorbed by the run split and the modal
+    height estimate. Returns surfaces sorted by ``z``, highest first.
     """
     pts = np.asarray(points, dtype=np.float64)
     if pts.ndim != 2 or pts.shape[0] < min_points_per_surface:
@@ -238,7 +264,7 @@ def detect_horizontal_surfaces(
             out.append(
                 SurfacePlane(
                     id=sid,
-                    z=float(np.percentile(cluster[:, 2], 90)),
+                    z=_plane_height(cluster[:, 2], z_bin_m),
                     centroid=tuple(float(v) for v in cluster.mean(axis=0)),
                     aabb_min=tuple(float(v) for v in cmin),
                     aabb_max=tuple(float(v) for v in cmax),
@@ -318,6 +344,7 @@ def find_free_placement(
     *,
     footprint_m: float = 0.12,
     clearance_m: float = 0.03,
+    surface_skin_m: float = 0.02,
     cell_m: float = 0.04,
     edge_margin_m: float = 0.05,
     tall_cap_m: float = 0.40,
@@ -328,9 +355,14 @@ def find_free_placement(
 
     Builds a 2-D occupancy grid over the surface AABB at ``cell_m`` resolution. A
     cell is **occupied** when any point of *obstacle_points* (typically the whole
-    scene cloud) falls in it with height in ``(surface.z + clearance_m,
+    scene cloud) falls in it with height in ``(surface.z + surface_skin_m + clearance_m,
     surface.z + tall_cap_m)`` — i.e. something already sits there. ``tall_cap_m``
     keeps a *higher* shelf's underside or the ceiling from masking this surface.
+
+    ``surface_skin_m`` lifts the occupancy floor clear of the surface's own sensor-noise
+    band. ``surface.z`` is the modal (band-centre) height, so without a skin the upper
+    tail of the surface's own points would read as obstacles, get dilated, and falsely
+    fill the surface. Set it to ~the depth noise at working range (a couple cm).
 
     The occupancy is then dilated by the object half-footprint + clearance so the
     returned cell has room for the whole object, and the grid border is shrunk by
@@ -352,7 +384,7 @@ def find_free_placement(
             & (pts[:, 0] < x1)
             & (pts[:, 1] >= y0)
             & (pts[:, 1] < y1)
-            & (pts[:, 2] > surface.z + clearance_m)
+            & (pts[:, 2] > surface.z + surface_skin_m + clearance_m)
             & (pts[:, 2] < surface.z + tall_cap_m)
         )
         if on.any():

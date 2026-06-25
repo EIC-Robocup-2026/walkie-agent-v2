@@ -77,6 +77,20 @@ def test_too_few_points_returns_empty():
     assert detect_horizontal_surfaces(np.zeros((10, 3))) == []
 
 
+def test_object_on_surface_does_not_raise_z():
+    # Regression: an object resting ON a table must NOT pull the detected surface height
+    # up. The table is a dense sheet at z=0.70; an object sits on it, its base contiguous
+    # with the table (within z_gap_m) and its footprint inside the table's, so its points
+    # join the same height-band cluster. The old 90th-percentile estimator reported ~0.80
+    # here (biased upward by the object); the modal (densest-layer) estimator reports the
+    # true tabletop 0.70.
+    table = slab(0, 0.6, 0, 0.6, 0.70)              # dense flat sheet, 900 pts @ 0.70
+    obj = column(0.2, 0.4, 0.2, 0.4, 0.70, 0.84)    # 14 cm tall box resting on the table
+    surfaces = detect_horizontal_surfaces(np.vstack([table, obj]))
+    assert len(surfaces) == 1
+    assert surfaces[0].z == pytest.approx(0.70, abs=0.02)
+
+
 # --- minimum flat-area threshold --------------------------------------------
 def test_area_is_true_coverage_not_bbox():
     # An L-shaped table: bounding box ~1 m^2, but the L only covers ~0.28 m^2. The
@@ -175,6 +189,20 @@ def test_find_free_placement_full_surface_returns_none():
     surfaces = detect_horizontal_surfaces(slab(0, 1, 0, 1, 0.7))
     covered = np.vstack([slab(0, 1, 0, 1, 0.7), slab(0, 1, 0, 1, 0.85)])
     assert find_free_placement(surfaces[0], covered) is None
+
+
+def test_surface_skin_ignores_own_noise_tail():
+    # surface.z is the modal (band-centre) plane; the surface's OWN sensor-noise tail can
+    # sit a few cm above it. surface_skin_m lifts the occupancy floor clear of that skin,
+    # so a layer 4 cm above the plane (within skin+clearance = 0.05) is NOT mistaken for
+    # clutter and the bare table stays placeable. Without the skin the floor sits at +0.03
+    # and this layer would self-occupy the whole surface -> a false "no free space".
+    s = detect_horizontal_surfaces(slab(0, 1, 0, 1, 0.70))[0]
+    skin_tail = np.vstack([slab(0, 1, 0, 1, 0.70), slab(0, 1, 0, 1, 0.74)])
+    assert find_free_placement(s, skin_tail, surface_skin_m=0.02, clearance_m=0.03) is not None
+    # ...but a real object well above the skin DOES occupy and fill the surface.
+    clutter = np.vstack([slab(0, 1, 0, 1, 0.70), slab(0, 1, 0, 1, 0.80)])
+    assert find_free_placement(s, clutter, surface_skin_m=0.02, clearance_m=0.03) is None
 
 
 # --- graceful degradation without Open3D ------------------------------------
