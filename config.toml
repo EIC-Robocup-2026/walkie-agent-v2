@@ -149,6 +149,31 @@ WALKIE_GRASP_MERGE_VOXEL_M = "0.003" # voxel size when fusing the two viewpoints
 # it (falls back to best-of-N). Reuses DEDUP_RADIUS_M / MERGE_VOXEL_M above.
 WALKIE_GRASP_FUSE_SNAPS = "3"        # snapshots fused per grasp plan ("1" = best-of-N instead)
 WALKIE_GRASP_FUSE_SETTLE_SEC = "0.15" # wait between same-angle snapshots so frames are fresh
+# Pre-GraspNet cloud cleanup (tasks/skills/grasp.py::_clean_object_cloud): strip residue
+# noise from the lifted object cloud before it is sent to GraspNet. SOR sheds sparse
+# flying-pixel scatter; the DBSCAN nearest-cluster keep drops the locally-dense blob where
+# the mask bled onto the supporting table/wall (which SOR can't, and which pulls the grasp
+# point off the object). "Nearest" (to the located object centroid) — not "largest" —
+# guards against a badly-bled mask making the table the kept cluster. Cleanup can only
+# shrink the cloud and never trims below CLEAN_MIN_KEEP (falls back to the input).
+WALKIE_GRASP_CLEAN_ENABLE = "1"          # master switch for the cleanup pass
+WALKIE_GRASP_CLEAN_SOR_K = "16"          # statistical-outlier kNN (0 = skip SOR)
+WALKIE_GRASP_CLEAN_SOR_STD = "2.0"       # SOR std-ratio (smaller = more aggressive)
+WALKIE_GRASP_CLEAN_DBSCAN_EPS_M = "0.02" # cluster radius (m) for background-bleed removal
+WALKIE_GRASP_CLEAN_DBSCAN_MIN_PTS = "10" # DBSCAN core min-neighbours
+WALKIE_GRASP_CLEAN_CLUSTER_MIN = "20"    # min points for a cluster to be eligible as the object
+# Don't trim below this — keep it above the server's own min_points (200), since the server
+# re-voxels (0.005 m) + SORs after receiving the cloud and rejects what's left under 200; a
+# too-small clean cluster defers to the fuller (noisier) cloud instead of a guaranteed reject.
+WALKIE_GRASP_CLEAN_MIN_KEEP = "250"
+# WALKIE_GRASP_DEBUG_DUMP = "graph_debug/grasp"  # dir to dump raw/kept clouds (.npy) for inspection
+# Optional GraspNet input-density overrides (server-side knobs passed per request, off by
+# default). The server re-voxels the cloud at 0.005 m and samples 10000 pts; on small
+# objects a finer voxel + larger sample preserves detail the grasp-point regression needs.
+# A/B test on the robot — denser usually helps but can drift if pushed past the model's
+# training density. Empty = leave the server defaults untouched.
+# WALKIE_GRASP_SERVER_VOXEL_M = "0.003"
+# WALKIE_GRASP_SERVER_NUM_POINT = "15000"
 # Grasp execution retries: if arm go_to_pose fails, strafe the base sideways (away from
 # the centreline on the arm's side) + step back, then re-execute the same map-frame
 # candidate (pure translation keeps it valid; new arm geometry can solve a failed IK).
