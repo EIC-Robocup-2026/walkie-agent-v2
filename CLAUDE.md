@@ -25,6 +25,7 @@ uv run python main.py                  # full pipeline (Ready stage by default)
 uv run python -m manual_tests.test_robot_object_detection
 uv run python -m manual_tests.test_captioning
 uv run python -m manual_tests.test_pose_estimation
+uv run python -m manual_tests.test_object_segmentation
 uv run python -m manual_tests.test_graphs_live   # live walkie_graphs ingest + Rerun viz
 
 # The real pytest suite is under tests/ (pyproject testpaths=["tests"]).

@@ -22,7 +22,9 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from interfaces.devices.camera import camera_pose
+from interfaces.perception.geometry import voxel_downsample
 from tasks.base import TaskContext
+from tasks.skills.navigation import move_base_relative, tilt_head
 
 Vec3 = tuple[float, float, float]
 
@@ -30,6 +32,19 @@ Vec3 = tuple[float, float, float]
 # outside this band, so we clamp locally before commanding.
 _HEAD_TILT_MIN = -math.pi / 4  # -45deg, look up
 _HEAD_TILT_MAX = math.pi / 3  # +60deg, look down
+
+
+# --- config helpers (mirror tasks.skills.place) -----------------------------
+def _f(name: str, default: str) -> float:
+    return float(os.getenv(name, default))
+
+
+def _i(name: str, default: str) -> int:
+    return int(os.getenv(name, default))
+
+
+def _b(name: str, default: str) -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
 
 
 @dataclass
@@ -59,6 +74,24 @@ class GraspCandidate:
     object_footprint_m: float | None = None  # map-frame XY span of the grasped cloud
 
 
+@dataclass
+class ObjectLocation:
+    """A cheap detect+lift result — *position only*, no GraspNet (see locate_object).
+
+    ``xyz_map`` is the map-frame centroid of the nearest matching detection;
+    ``cloud_optical`` is that detection's lifted cloud in the camera-optical frame
+    (camera at the origin, +Z forward — the frame GraspNet wants). ``snap`` is the
+    snapshot it came from (carries ``cam.R``/``cam.t`` for re-framing). ``range_m``
+    is the camera-frame median range (nearest object wins).
+    """
+
+    xyz_map: tuple[float, float, float]
+    cloud_optical: np.ndarray
+    snap: object
+    range_m: float
+    confidence: float | None = None
+
+
 def _to_map_frame(snap, g, standoff_m: float) -> GraspCandidate:
     """Lift one GraspNet pose (optical frame) into the snapshot's map frame."""
     R_cam, t_cam = snap.cam.R, snap.cam.t
@@ -76,6 +109,156 @@ def _to_map_frame(snap, g, standoff_m: float) -> GraspCandidate:
     )
 
 
+def locate_object(
+    ctx: TaskContext,
+    prompts: list[str],
+    *,
+    voxel: float = 0.002,
+    erode_px: int = 5,
+    min_points: int = 50,
+    min_confidence: float = 0.3,
+    snap=None,
+) -> ObjectLocation | None:
+    """Cheap detect+lift of the nearest object matching *prompts* — NO GraspNet.
+
+    The fast "where is it" primitive ``pick_object`` uses to position the base/head
+    before committing to the (expensive) grasp plan. Takes a snapshot (or reuses
+    *snap*), runs masked open-vocab detection, drops detections below
+    *min_confidence*, lifts each surviving mask to a camera-optical cloud and keeps
+    the **nearest** (smallest median range — easiest to reach, least likely a
+    far-away false positive). Returns the lifted cloud plus the map-frame centroid,
+    or ``None`` (never raises) when nothing graspable is in view.
+    """
+    snap = snap if snap is not None else ctx.snapshot()
+    if snap is None or not snap.has_geometry:
+        print("[grasp] locate: no snapshot geometry (is the ZED running?)")
+        return None
+
+    detections = ctx.walkieAI.image.detect(snap.img, prompts=prompts, return_mask=True)
+    detections = [
+        d for d in detections
+        if d.mask is not None
+        and (d.confidence is None or d.confidence >= min_confidence)
+    ]
+    if not detections:
+        print(f"[grasp] locate: no masked detections for {prompts} "
+              f"(confidence >= {min_confidence})")
+        return None
+
+    cloud: np.ndarray | None = None
+    nearest_range = float("inf")
+    nearest_conf: float | None = None
+    for det in detections:
+        pts = snap.mask_to_points(det.mask, voxel=voxel, frame="optical", erode_px=erode_px)
+        if pts.shape[0] < min_points:
+            continue
+        rng = float(np.median(np.linalg.norm(pts, axis=1)))
+        if rng < nearest_range:
+            nearest_range, cloud, nearest_conf = rng, pts, det.confidence
+    if cloud is None:
+        print(f"[grasp] locate: no detection lifted >= {min_points} pts — too far/occluded?")
+        return None
+
+    cm = cloud @ snap.cam.R.T + snap.cam.t
+    xyz = np.median(cm, axis=0)
+    xyz_map = (float(xyz[0]), float(xyz[1]), float(xyz[2]))
+    print(f"[grasp] locate: {prompts} at ({xyz_map[0]:+.2f},{xyz_map[1]:+.2f},"
+          f"{xyz_map[2]:+.2f}) range={nearest_range:.2f}m conf={nearest_conf}")
+    return ObjectLocation(
+        xyz_map=xyz_map, cloud_optical=cloud, snap=snap,
+        range_m=nearest_range, confidence=nearest_conf,
+    )
+
+
+def _grasp_cloud_multi_tilt(
+    ctx: TaskContext,
+    prompts: list[str],
+    *,
+    tilts: tuple[float, ...] | None = None,
+    settle_sec: float | None = None,
+    dedup_radius_m: float | None = None,
+    voxel: float = 0.002,
+    erode_px: int = 5,
+    min_points: int = 50,
+    min_confidence: float = 0.3,
+    merge_voxel: float | None = None,
+) -> tuple[np.ndarray, object] | None:
+    """Two snapshots at different head tilts → one dense, deduped optical cloud.
+
+    Tilts the head to each of *tilts* (radians, +down — bypasses ``look_at_object``'s
+    0.436-rad clamp so we can use the shallow operator-tuned angles), locates the
+    nearest object at each, deduplicates them by 3D proximity (same physical object
+    seen twice), and fuses their clouds into ONE denser cloud expressed in the first
+    view's optical frame — ready for a single GraspNet inference. A denser cloud (two
+    viewpoints fill each other's self-occlusion) yields markedly better grasps than a
+    single shot.
+
+    Dedup is the cheap spatial half of the ``services.walkie_graphs`` fusion: two
+    views are the same object iff their map-frame centroids are within
+    *dedup_radius_m*. On a mismatch (the second view's nearest was a different object)
+    we keep the higher-confidence view rather than fuse mismatched clouds.
+
+    Returns ``(cloud_optical, chosen_snap)`` or ``None`` (never raises). Degrades to a
+    single view when only one tilt yields geometry.
+    """
+    tilts = tilts if tilts is not None else (
+        _f("WALKIE_GRASP_TILT_A", "0.2"), _f("WALKIE_GRASP_TILT_B", "0.35"),
+    )
+    settle_sec = _f("WALKIE_GRASP_TILT_SETTLE_SEC", "0.4") if settle_sec is None else settle_sec
+    dedup_radius_m = (
+        _f("WALKIE_GRASP_DEDUP_RADIUS_M", "0.10") if dedup_radius_m is None else dedup_radius_m
+    )
+    merge_voxel = _f("WALKIE_GRASP_MERGE_VOXEL_M", "0.003") if merge_voxel is None else merge_voxel
+
+    locs: list[ObjectLocation] = []
+    for t in tilts:
+        tilt_head(ctx, t, settle=settle_sec)
+        loc = locate_object(
+            ctx, prompts, voxel=voxel, erode_px=erode_px,
+            min_points=min_points, min_confidence=min_confidence,
+        )
+        if loc is not None:
+            locs.append(loc)
+
+    if not locs:
+        print(f"[grasp] multi-tilt: no object located across tilts {tilts}")
+        return None
+    if len(locs) == 1:
+        print("[grasp] multi-tilt: only one view yielded geometry; using it alone")
+        return locs[0].cloud_optical, locs[0].snap
+
+    # Dedup the two views: same object iff their map-frame centroids are close.
+    a, b = locs[0], locs[1]
+    sep = float(np.linalg.norm(np.asarray(a.xyz_map) - np.asarray(b.xyz_map)))
+    if sep > dedup_radius_m:
+        # Different objects in the two views — don't fuse mismatched clouds. Keep
+        # the higher-confidence one (None treated lowest), tie-break on nearer range.
+        def _key(loc: ObjectLocation) -> tuple[float, float]:
+            return (loc.confidence if loc.confidence is not None else -1.0, -loc.range_m)
+
+        keep = max(locs, key=_key)
+        print(f"[grasp] multi-tilt: views {sep:.2f}m apart (> {dedup_radius_m:.2f}m); "
+              f"not fusing, keeping conf={keep.confidence} range={keep.range_m:.2f}m")
+        return keep.cloud_optical, keep.snap
+
+    # Fuse: lift each view's optical cloud to MAP using its OWN pose (common frame),
+    # merge + voxel-downsample, then re-frame into the chosen (first) view's optical
+    # frame so GraspNet sees one consistent cloud.
+    chosen = locs[0]
+    try:
+        clouds_map = []
+        for loc in (a, b):
+            clouds_map.append(loc.cloud_optical @ loc.snap.cam.R.T + loc.snap.cam.t)
+        merged_map = voxel_downsample(np.vstack(clouds_map), merge_voxel)
+        merged_optical = (merged_map - chosen.snap.cam.t) @ chosen.snap.cam.R
+        print(f"[grasp] multi-tilt: fused {a.cloud_optical.shape[0]}+{b.cloud_optical.shape[0]} "
+              f"-> {merged_optical.shape[0]} pts (sep {sep:.2f}m)")
+        return merged_optical, chosen.snap
+    except Exception as exc:  # noqa: BLE001 — fall back to the single chosen view
+        print(f"[grasp] multi-tilt: fuse failed ({exc}); using first view alone")
+        return chosen.cloud_optical, chosen.snap
+
+
 def get_object_grasp_pos(
     ctx: TaskContext,
     prompts: list[str],
@@ -90,6 +273,9 @@ def get_object_grasp_pos(
     approach_preference: str = "none",
     approach_weight: float | None = None,
     compute_support: bool = True,
+    prebuilt: tuple[np.ndarray, object] | None = None,
+    multi_tilt: bool = False,
+    tilts: tuple[float, ...] | None = None,
 ) -> GraspCandidate | None:
     """Best-of-N grasp for the nearest object matching *prompts*, in the map frame.
 
@@ -122,6 +308,15 @@ def get_object_grasp_pos(
         approach_weight: How strongly the preference outranks GraspNet's own score
             (server default ~1.0; higher favours the preferred approach harder). Only
             used when ``approach_preference`` is set; ``None`` keeps the server default.
+        prebuilt: A pre-built ``(optical_cloud, snap)`` to grasp directly — skips the
+            best-of-N snapshot loop and runs GraspNet ONCE on the given cloud. Used by
+            the multi-tilt fast path (see ``_grasp_cloud_multi_tilt``).
+        multi_tilt: When True (and *prebuilt* is None), build the cloud with
+            :func:`_grasp_cloud_multi_tilt` (2 snapshots at *tilts*, deduped + fused)
+            and run GraspNet once. The cheap, accurate path ``pick_object`` uses after
+            it has already approached the object.
+        tilts: Head-tilt angles (rad, +down) for the multi-tilt build; ``None`` uses
+            the ``WALKIE_GRASP_TILT_A``/``_B`` config defaults.
 
     Returns:
         The winning :class:`GraspCandidate` (with ``grasp_xyz`` and
@@ -132,69 +327,84 @@ def get_object_grasp_pos(
     best_snap = None  # the snapshot the winning grasp came from (for surface lookup)
     best_cloud: np.ndarray | None = None  # the winning object cloud (optical frame)
 
-    for i in range(attempts):
-        tag = f"attempt {i + 1}/{attempts}"
-        snap = ctx.snapshot()
-        if snap is None or not snap.has_geometry:
-            print(f"[grasp] {tag}: no snapshot geometry (is the ZED running?)")
-            continue
-
-        detections = ctx.walkieAI.image.detect(snap.img, prompts=prompts, return_mask=True)
-        detections = [
-            d for d in detections
-            if d.mask is not None
-            and (d.confidence is None or d.confidence >= min_confidence)
-        ]
-        if not detections:
-            print(f"[grasp] {tag}: no masked detections for {prompts} "
-                  f"(confidence >= {min_confidence})")
-            continue
-
-        # Lift every surviving detection and keep the one closest to the camera.
-        # The cloud is in the optical frame (camera at the origin, looking down
-        # +Z), so the median point range is the object's distance; the nearest is
-        # easiest to reach and least likely to be a far-away false positive.
-        cloud: np.ndarray | None = None
-        nearest_range = float("inf")
-        for det in detections:
-            pts = snap.mask_to_points(det.mask, voxel=voxel, frame="optical", erode_px=erode_px)
-            if pts.shape[0] < min_points:
-                continue
-            rng = float(np.median(np.linalg.norm(pts, axis=1)))
-            if rng < nearest_range:
-                nearest_range, cloud = rng, pts
-        if cloud is None:
-            print(f"[grasp] {tag}: no detection lifted >= {min_points} pts — too far/occluded?")
-            continue
-
+    def _infer_best(cloud: np.ndarray, snap) -> bool:
+        """Run GraspNet once on *cloud* (optical frame) and keep the best result."""
+        nonlocal best, best_snap, best_cloud
         infer_kwargs: dict = {"antipodal": antipodal, "max_grasps": 1}
         if approach_preference != "none":
-            # World-up = the map frame's +Z (gravity) axis, expressed in the
-            # camera-optical frame the cloud lives in, so the server can bias
-            # side/top approaches against gravity.
             infer_kwargs["approach_preference"] = approach_preference
             infer_kwargs["up"] = snap.cam.R.T @ np.array([0.0, 0.0, 1.0])
             if approach_weight is not None:
                 infer_kwargs["approach_weight"] = approach_weight
         grasps = ctx.walkieAI.grasp.infer(cloud, **infer_kwargs)
         if not grasps:
-            print(f"[grasp] {tag}: GraspNet returned nothing")
-            continue
-
+            print("[grasp] GraspNet returned nothing")
+            return False
         g = grasps[0]
         if best is not None and g.score <= best.score:
-            print(f"[grasp] {tag}: score {g.score:.3f} (keeping best {best.score:.3f})")
-            continue
-
+            return False
         best = _to_map_frame(snap, g, standoff_m)
         best_snap, best_cloud = snap, cloud
         gx, gy, gz = best.grasp_xyz
-        print(f"[grasp] {tag}: new best score {best.score:.3f} "
+        print(f"[grasp] grasp score {best.score:.3f} "
               f"grasp=({gx:+.3f},{gy:+.3f},{gz:+.3f}) width={best.width * 100:.1f}cm")
+        return True
 
-    if best is None:
-        print(f"[grasp] no graspable detection for {prompts} in {attempts} attempt(s)")
-        return None
+    # Fast path: a single GraspNet inference on a pre-built (optionally multi-tilt
+    # fused) cloud, skipping the best-of-N snapshot loop entirely.
+    if prebuilt is not None or multi_tilt:
+        built = prebuilt if prebuilt is not None else _grasp_cloud_multi_tilt(
+            ctx, prompts, tilts=tilts, voxel=voxel, erode_px=erode_px,
+            min_points=min_points, min_confidence=min_confidence,
+        )
+        if built is None:
+            print(f"[grasp] no graspable detection for {prompts} (multi-tilt)")
+            return None
+        cloud, snap = built
+        _infer_best(cloud, snap)
+        if best is None:
+            return None
+    else:
+        for i in range(attempts):
+            tag = f"attempt {i + 1}/{attempts}"
+            snap = ctx.snapshot()
+            if snap is None or not snap.has_geometry:
+                print(f"[grasp] {tag}: no snapshot geometry (is the ZED running?)")
+                continue
+
+            detections = ctx.walkieAI.image.detect(snap.img, prompts=prompts, return_mask=True)
+            detections = [
+                d for d in detections
+                if d.mask is not None
+                and (d.confidence is None or d.confidence >= min_confidence)
+            ]
+            if not detections:
+                print(f"[grasp] {tag}: no masked detections for {prompts} "
+                      f"(confidence >= {min_confidence})")
+                continue
+
+            # Lift every surviving detection and keep the one closest to the camera.
+            # The cloud is in the optical frame (camera at the origin, looking down
+            # +Z), so the median point range is the object's distance; the nearest is
+            # easiest to reach and least likely to be a far-away false positive.
+            cloud = None
+            nearest_range = float("inf")
+            for det in detections:
+                pts = snap.mask_to_points(det.mask, voxel=voxel, frame="optical", erode_px=erode_px)
+                if pts.shape[0] < min_points:
+                    continue
+                rng = float(np.median(np.linalg.norm(pts, axis=1)))
+                if rng < nearest_range:
+                    nearest_range, cloud = rng, pts
+            if cloud is None:
+                print(f"[grasp] {tag}: no detection lifted >= {min_points} pts — too far/occluded?")
+                continue
+
+            _infer_best(cloud, snap)
+
+        if best is None:
+            print(f"[grasp] no graspable detection for {prompts} in {attempts} attempt(s)")
+            return None
 
     # Remember the support surface + object footprint from the winning snapshot, so the
     # object can be placed back later (tasks.skills.place). Computed against the RAW
@@ -645,6 +855,58 @@ def execute_grasp(
                 print(f"[grasp] execute_grasp[{side}]: re-enable gripper collision failed ({exc})")
 
 
+def execute_grasp_with_retry(
+    ctx: TaskContext,
+    candidate: GraspCandidate,
+    *,
+    arm: str,
+    max_reach_xy_m: float,
+    attempts: int | None = None,
+    strafe_m: float | None = None,
+    back_m: float | None = None,
+    viz: bool = True,
+) -> bool:
+    """Execute *candidate*, repositioning the base and retrying on arm-move failure.
+
+    ``go_to_pose`` sometimes fails to plan/reach an otherwise-valid grasp (IK corner
+    cases near the workspace edge). Because the base move is a pure translation
+    (heading held), the map-frame *candidate* stays geometrically valid, and shifting
+    the arm's relative geometry can turn a failed IK into a solvable one. So on each
+    failure we strafe the base sideways (away from the centreline on the chosen arm's
+    side) and step slightly back, then **re-execute the same candidate** — up to
+    *attempts* times, as long as the grasp stays within *max_reach_xy_m*.
+
+    Returns True on the first clean grasp, else False after exhausting attempts (or
+    once the target falls out of reach). Never raises.
+    """
+    side = (arm or "left").strip().lower()
+    if side not in ("left", "right"):
+        side = "left"
+    attempts = _i("WALKIE_GRASP_RETRY_ATTEMPTS", "3") if attempts is None else attempts
+    strafe_m = _f("WALKIE_GRASP_RETRY_STRAFE_M", "0.08") if strafe_m is None else strafe_m
+    back_m = _f("WALKIE_GRASP_RETRY_BACK_M", "0.05") if back_m is None else back_m
+
+    for i in range(max(1, attempts)):
+        reach = _xy_dist(ctx, candidate.grasp_xyz)
+        if reach > max_reach_xy_m:
+            print(f"[grasp] retry {i + 1}/{attempts}: out of reach "
+                  f"(xy={reach:.2f}m > {max_reach_xy_m:.2f}m); stopping")
+            return False
+        print(f"[grasp] grasp attempt {i + 1}/{attempts} (reach {reach:.2f}m)")
+        if execute_grasp(ctx, candidate, arm=side, viz=viz):
+            return True
+        if i + 1 >= attempts:
+            break
+        # Reposition: strafe away from the centreline on the arm's side (+y = base
+        # left, so left arm strafes +y / right arm -y) and step slightly back.
+        dy = strafe_m if side == "left" else -strafe_m
+        print(f"[grasp] retry: repositioning base (back {back_m:.2f}m, strafe {dy:+.2f}m) "
+              f"then re-executing the same candidate")
+        move_base_relative(ctx, dx=-back_m, dy=dy, blocking=True)
+    print(f"[grasp] grasp failed after {attempts} attempt(s)")
+    return False
+
+
 def pick_object(
     ctx: TaskContext,
     prompts: list[str],
@@ -665,30 +927,34 @@ def pick_object(
     track: bool = True,
     viz: bool = True,
 ) -> bool:
-    """Full pick for the nearest object matching *prompts*: detect -> approach -> de-deadzone -> grasp.
+    """Full pick for the nearest object matching *prompts*: locate -> approach -> de-deadzone -> grasp.
 
-    Sequences :func:`get_object_grasp_pos` (best-of-N planning) with the base/head
-    repositioning the robot needs to actually reach the grasp. Every plan first
-    faces the object (:func:`face_object` + :func:`look_at_object`) to centre it
-    in view for a more accurate detection/grasp:
+    Positioning runs on a cheap detect+lift (:func:`locate_object`, NO GraspNet); the
+    expensive grasp plan runs exactly ONCE, after the robot has approached and is in
+    its final grasp pose. This is the main speedup — the old flow planned a full grasp
+    far away and then again up close, paying for GraspNet twice and throwing the first
+    plan away. Each locate first faces the object (:func:`face_object` +
+    :func:`look_at_object`) to centre it in view for a more accurate detection.
 
-    1. Plan a grasp; bail if the object is below *min_grasp_z_m* (no remedy).
+    1. Cheap locate; bail if the object is below *min_grasp_z_m* (no remedy). Raise the
+       lift to the estimated grasp height for better reach.
     2. If it's farther than *approach_trigger_m* (XY), drive to *optimal_standoff_m*
-       facing it (head tracking), then re-plan from the new viewpoint.
+       facing it (head tracking), then re-locate from the new viewpoint.
     3. Pick the arm (``"auto"`` -> object's side, dead-centre -> *default_arm*).
     4. Rotate the base so the chosen arm points straight at the object
        (:func:`face_object_with_arm`, arm-forward = robot heading), recording the
-       pre-rotate heading. This makes "forward" point at the object for the creep and
-       wrist re-aim below; the map-frame candidate stays valid across the rotation.
+       pre-rotate heading. This makes "forward" point at the object for the creep below.
     5. Creep the base straight forward (:func:`creep_to_grasp_distance`) so the
        object ends within *grasp_distance_m* — the approach often halts short of the
        table, leaving it too far to reach accurately. ``None`` disables the creep.
-    6. With *point_at_object* (default), re-point the gripper straight forward along
-       the robot heading (:func:`aim_forward_candidate`) instead of using GraspNet's
-       wrist orientation (often IK-unsolvable on OpenArm) — the arm's forward is
-       taken to be the robot's.
-    7. Execute the grasp on the chosen arm, checking each arm move.
-    8. Restore the pre-rotate heading (:func:`TaskContext.rotate_to`) so the base
+    6. Run the ONE heavy grasp plan from the final pose: two snapshots at the
+       ``WALKIE_GRASP_TILT_A``/``_B`` head tilts, deduped + fused into one dense cloud,
+       one GraspNet inference (:func:`get_object_grasp_pos` ``multi_tilt=True``).
+    7. With *point_at_object* (default), re-point the gripper straight forward along
+       the robot heading (:func:`aim_forward_candidate`) instead of GraspNet's
+       wrist orientation (often IK-unsolvable on OpenArm).
+    8. Execute the grasp with base-reposition retries (:func:`execute_grasp_with_retry`).
+    9. Restore the pre-rotate heading (:func:`TaskContext.rotate_to`) so the base
        ends the pick in its original orientation, whether or not the grasp succeeded.
 
     Returns True only when the grasp executed cleanly. Degrades to False (never
@@ -699,65 +965,61 @@ def pick_object(
     """
     last_xyz: Vec3 | None = None
 
-    def _grasp() -> GraspCandidate | None:
-        # Always face the object before planning: rotating to centre it in the
-        # camera's FOV (then tilting the head down at it) gives the detector and
-        # GraspNet a square-on view, which improves accuracy. The first plan has
-        # no position estimate yet, so it runs from the current view; every
-        # re-plan faces the last known grasp point.
+    def _locate() -> ObjectLocation | None:
+        # Face + tilt toward the last known position to centre the object in view
+        # (a square-on view detects/lifts more reliably), then detect+lift. Cheap —
+        # NO GraspNet. The first call has no estimate yet, so it uses the current view.
         nonlocal last_xyz
         if last_xyz is not None:
             face_object(ctx, last_xyz)
             look_at_object(ctx, last_xyz)
             time.sleep(0.5)  # let the base/head settle before the snapshot
-        cand = get_object_grasp_pos(
-            ctx, prompts, attempts=attempts, standoff_m=pregrasp_standoff_m,
-            approach_preference=approach_preference, approach_weight=approach_weight,
-        )
-        if cand is not None:
-            last_xyz = cand.grasp_xyz
-        return cand
-    
+        loc = locate_object(ctx, prompts)
+        if loc is not None:
+            last_xyz = loc.xyz_map
+        return loc
+
     home_res = ctx.walkie.arm.go_to_home(group_name="both_arms_lift", pose_name="standby", blocking=True)
     if home_res != "SUCCEEDED":  # staging move: warn but press on
         print(f"[grasp] stage home -> {home_res} (continuing)")
 
-    cand = _grasp()
-    if cand is None:
-        print(f"[grasp] pick_object: no grasp for {prompts}")
+    # 1. Cheap locate just to position the base/head (no GraspNet yet).
+    loc = _locate()
+    if loc is None:
+        print(f"[grasp] pick_object: no detection for {prompts}")
         return False
-    if cand.grasp_xyz[2] < min_grasp_z_m:
-        print(f"[grasp] pick_object: object too low (z={cand.grasp_xyz[2]:.2f}m < "
+    if loc.xyz_map[2] < min_grasp_z_m:
+        print(f"[grasp] pick_object: object too low (z={loc.xyz_map[2]:.2f}m < "
               f"{min_grasp_z_m:.2f}m); cannot reach")
         return False
 
     base_lift_diff_m = ctx.walkie.robot.transform.lookup("base_footprint", "lift_link")["position"]["z"] - ctx.walkie.robot.lift.get(norm_pos=False) / 100.0
-    optimum_lift_height = cand.grasp_xyz[2] + 0.15
+    optimum_lift_height = loc.xyz_map[2] + 0.15
     print(f"[grasp] pick_object: setting lift to {((optimum_lift_height - base_lift_diff_m) * 100):.2f}m for better reach")
     ctx.walkie.robot.lift.set(pos=(optimum_lift_height - base_lift_diff_m) * 100, norm_pos=False)
-    
+
     # 2. Approach to the optimal standoff if too far, tracking with the head.
     status = approach_object(
-        ctx, cand.grasp_xyz, standoff_m=optimal_standoff_m,
+        ctx, loc.xyz_map, standoff_m=optimal_standoff_m,
         trigger_m=approach_trigger_m, track=track,
     )
     if status == "FAILED":
         print("[grasp] pick_object: approach failed; aborting")
         return False
-    
-    cand = _grasp()  # grasp again from the new viewpoint
-    if cand is None:
+
+    loc = _locate()  # re-locate from the new viewpoint
+    if loc is None:
         print("[grasp] pick_object: lost the object after approaching")
         return False
-    if cand.grasp_xyz[2] < min_grasp_z_m:
+    if loc.xyz_map[2] < min_grasp_z_m:
         print(f"[grasp] pick_object: object too low after approach "
-                f"(z={cand.grasp_xyz[2]:.2f}m); cannot reach")
+                f"(z={loc.xyz_map[2]:.2f}m); cannot reach")
         return False
 
     # 3. Pick the arm by which side the object is on (dead-centre -> default).
-    in_zone = in_arm_deadzone(ctx, cand.grasp_xyz, half_width_m=deadzone_half_m)
+    in_zone = in_arm_deadzone(ctx, loc.xyz_map, half_width_m=deadzone_half_m)
     if arm == "auto":
-        left = _world_to_base(ctx, cand.grasp_xyz)[1]
+        left = _world_to_base(ctx, loc.xyz_map)[1]
         if in_zone or left == 0:
             chosen = default_arm
         else:
@@ -772,35 +1034,44 @@ def pick_object(
     # 4. Rotate the base so the chosen arm points straight at the object. The arm's
     #    forward is taken to be the robot's heading, so this is a rotate-to-face on the
     #    arm's shoulder (face_object_with_arm). After this the base's "forward" genuinely
-    #    points at the object, which is exactly what the creep (step 5) and the wrist
-    #    re-aim (step 6) both assume. The candidate is a map-frame pose, so it stays
-    #    valid across the rotation. We record the pre-rotate heading and restore it once
-    #    the grasp is done (success or not) so the base ends where it started.
+    #    points at the object, which is exactly what the creep (step 5) assumes. We record
+    #    the pre-rotate heading and restore it once the grasp is done (success or not) so
+    #    the base ends where it started.
     original_heading = ctx.current_pose()["heading"]
-    face_object_with_arm(ctx, cand.grasp_xyz, arm=chosen)
+    face_object_with_arm(ctx, loc.xyz_map, arm=chosen)
 
     try:
         # 5. Creep the base straight forward to close the last gap — the approach often
         #    stops short (Nav2 halts at the table/inflation boundary), leaving the object
-        #    too far to grasp accurately. A pure forward translation keeps the map-frame
-        #    candidate valid (no re-plan). Skipped when already within grasp_distance_m.
+        #    too far to grasp accurately. Skipped when already within grasp_distance_m.
         if grasp_distance_m is not None:
-            creep_to_grasp_distance(ctx, cand.grasp_xyz, target_m=grasp_distance_m)
+            creep_to_grasp_distance(ctx, loc.xyz_map, target_m=grasp_distance_m)
 
-        # 6. Re-point the wrist straight forward at the object (instead of GraspNet's
+        # 6. The ONE heavy grasp plan, now that we're in the final pose: 2 snapshots at
+        #    the configured head tilts, deduped + fused into one dense cloud, GraspNet once.
+        cand = get_object_grasp_pos(
+            ctx, prompts, multi_tilt=True, standoff_m=pregrasp_standoff_m,
+            approach_preference=approach_preference, approach_weight=approach_weight,
+        )
+        if cand is None:
+            print("[grasp] pick_object: grasp planning found nothing from the final pose")
+            return False
+        if cand.grasp_xyz[2] < min_grasp_z_m:
+            print(f"[grasp] pick_object: planned grasp too low "
+                  f"(z={cand.grasp_xyz[2]:.2f}m); cannot reach")
+            return False
+
+        # 7. Re-point the wrist straight forward at the object (instead of GraspNet's
         #    often-IK-unsolvable orientation), taking the arm's forward to be the robot's.
-        #    Done after the creep so it uses the final heading; the new candidate drives
-        #    both the arm and the held-object record (so the placer reuses the real grasp
-        #    pose). Keeps GraspNet's orientation when disabled.
+        #    The new candidate drives both the arm and the held-object record (so the placer
+        #    reuses the real grasp pose). Keeps GraspNet's orientation when disabled.
         if point_at_object:
             cand = aim_forward_candidate(ctx, cand, standoff_m=pregrasp_standoff_m)
 
-        # 7. Final radial reach guard, then execute.
-        reach = _xy_dist(ctx, cand.grasp_xyz)
-        if reach > max_reach_xy_m:
-            print(f"[grasp] pick_object: out of reach (xy={reach:.2f}m > {max_reach_xy_m:.2f}m); aborting")
-            return False
-        ok = execute_grasp(ctx, cand, arm=chosen, viz=viz)
+        # 8. Execute, repositioning the base and retrying on arm-move failure.
+        ok = execute_grasp_with_retry(
+            ctx, cand, arm=chosen, max_reach_xy_m=max_reach_xy_m, viz=viz,
+        )
         if ok:
             # Remember what we're holding (per arm) so tasks.skills.place can put it back
             # down at the same height above whatever surface it's placed on.
@@ -819,7 +1090,7 @@ def pick_object(
             )
         return ok
     finally:
-        # 8. Rotate back to the heading we had before facing the object (the arm is
+        # 9. Rotate back to the heading we had before facing the object (the arm is
         #    home/tucked by now), so the base ends the pick in its original orientation.
         print(f"[grasp] pick_object: restoring heading to {math.degrees(original_heading):+.0f}deg")
         ctx.rotate_to(original_heading)

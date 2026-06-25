@@ -18,11 +18,25 @@ PNP_EXTRA_SURFACE_POSE = "0.0,0.0,0.0"
 
 # Open-vocab detector prompts for the dining-table / extra-surface objects.
 PNP_TABLE_CLASSES = "cup,mug,plate,fork,knife,spoon,bottle,box,can,bowl"
+# Open-vocab prompts for perceiving what is already grouped on the cabinet shelves.
+PNP_CABINET_CLASSES = "box,can,bottle,snack,cup,bowl,carton,jar"
 # Breakfast detector prompts: bowl+spoon on the surface, milk+cereal in the cabinet.
 PNP_BREAKFAST_SURFACE_CLASSES = "bowl,spoon"
 PNP_BREAKFAST_CABINET_CLASSES = "milk,cereal,box,carton"
 # The object category treated as trash this run (announced during Setup Days).
 PNP_TRASH_CATEGORY = ""
+
+# --- Arm gate (mirrors Restaurant's RESTAURANT_ARM_CALIBRATED) ---------------
+# MASTER ARM GATE. 0 (default) = the flow runs end-to-end WITHOUT moving the arm:
+# it navigates, recognizes every object, and *indicates* the correct placement to
+# the referee (rulebook remark 16) — banking the non-arm score budget. The arm is
+# a separate skill under development; flip to 1 only once it lands + is calibrated,
+# which unlocks the picking/placing budget with no flow rewrite.
+PNP_ARM_CALIBRATED = "0"
+# Rotate the base to physically face each object while indicating it. Off by
+# default (naming the object already satisfies remark 16; a base turn per object
+# is slow against the 7-minute clock). On = unambiguous "point" for a demo.
+PNP_POINT_AT_OBJECTS = "0"
 
 # --- Manipulation -----------------------------------------------------------
 # The robot-wide grasp/arm knobs (WALKIE_ARM, WALKIE_GRASP_*, WALKIE_CARRY_POSE,

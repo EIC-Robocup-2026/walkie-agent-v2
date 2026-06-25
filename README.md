@@ -71,17 +71,41 @@ See **[`CLAUDE.md`](./CLAUDE.md)** for the authoritative architecture (middlewar
 Scripted challenge runs (their own state machine over the robot, separate from the conversational agent) live under `tasks/`:
 
 ```bash
-uv run python -m tasks.HRI.run            # 5.1 HRI / Receptionist  (reference implementation)
-uv run python -m tasks.PickAndPlace.run   # 5.2 Pick and Place      (scaffold)
-uv run python -m tasks.GPSR.run           # 5.3 GPSR                (scaffold — delegates to the agent stack)
-uv run python -m tasks.Laundry.run        # 5.4 Doing Laundry       (scaffold)
-uv run python -m tasks.Restaurant.run     # 5.5 Restaurant          (scaffold)
+uv run python -m tasks.HRI.run            # 5.1 HRI / Receptionist
+uv run python -m tasks.PickAndPlace.run   # 5.2 Pick and Place
+uv run python -m tasks.GPSR.run           # 5.3 GPSR
+uv run python -m tasks.Laundry.run        # 5.4 Doing Laundry
+uv run python -m tasks.Restaurant.run     # 5.5 Restaurant
 DISABLE_LISTENING=1 uv run python -m tasks.HRI.run   # type instead of speak (any task)
 ```
 
-A task is an ordered list of `SubTask`s over a shared `TaskContext` (`tasks/base.py`); see `tasks/HRI/` for the reference implementation (greet & learn guests, offer a seat, introduce guests) and `tasks/HRI/config.toml` for its tuning (waypoints, host name, seat classes, …).
+A task is an ordered list of `SubTask`s over a shared `TaskContext` (`tasks/base.py`); every non-critical step **degrades rather than crashes** (partial scoring is allowed, so a failed step logs and the run moves on).
 
-The other four challenges (`tasks/PickAndPlace`, `tasks/GPSR`, `tasks/Laundry`, `tasks/Restaurant`) are **placeholder scaffolds** copying the HRI shape: each lays out its rulebook flow as named `SubTask` steps with honest TODO stubs for the perception/manipulation that doesn't exist yet (degrading like `HRI.FollowHostAndDropBag`, never crashing), plus a `prompts.py`, `config.toml`, and (where useful) a `skills.py`. The per-challenge rulebook excerpts they implement live in [`docs/`](docs/) — one PDF per challenge (`docs/HRI.pdf`, `docs/PickAndPlace.pdf`, `docs/GPSR.pdf`, `docs/Laundry.pdf`, `docs/Restaurant.pdf`), cut from the RoboCup@Home 2026 rulebook chapter 5.
+**The arm is being brought up as a separate skill**, so the manipulation tasks gate every grasp/place behind an `*_ARM_CALIBRATED` flag (default off) and run + score their **non-arm budget** first — navigation, perception, and *communicating perception* to the referee (the rulebook scores recognizing an object / indicating a placement, no grasp required). Flip the flag once the arm lands and the manipulation budget unlocks with no flow rewrite. Most tasks also expose a step-by-step `*_SLICE` runner (e.g. `PNP_SLICE=perceive`, `RESTAURANT_SLICE=phase0`, `HRI_SLICE=greet`) for validating one phase at a time on the robot — no commenting steps in and out.
+
+| Task | Status | Notes |
+|------|--------|-------|
+| **GPSR** (5.3) | mature | STT → parse → **speak a plan** → typed-plan dispatch, with an agent fallback; manipulation gated. Parser corpus-tested. |
+| **Restaurant** (5.5) | Phase-0 serve | detect a waving customer → approach → take + confirm the order → relay to the barman; pick/serve gated (`RESTAURANT_ARM_CALIBRATED`), serial + batched loops, `RESTAURANT_SLICE` runner. |
+| **Pick and Place** (5.2) | non-arm pipeline | navigate, recognize each object, indicate the correct placement (scores ~195 of 3515 with the arm gated); pick/place gated (`PNP_ARM_CALIBRATED`), `PNP_SLICE` runner. |
+| **HRI** (5.1) | reference | face/appearance re-ID, seat detection, guest introductions, follow-host (the most-built flow); run via `HRI_SLICE` (`seats`/`greet`/`follow_host`/`full`, default `full`). Bag handover gated (`HRI_ENABLE_BAG`). |
+| **Laundry** (5.4) | scaffold | almost-pure manipulation: the only non-arm line on the scoresheet is navigating to the laundry area. |
+
+Each task carries a `prompts.py`, `config.toml`, and (where useful) a `skills.py`; the shared grasp/perception primitives live in `tasks/manipulation.py`. The per-challenge rulebook excerpts live in [`docs/`](docs/) — one PDF each (`docs/{HRI,PickAndPlace,GPSR,Laundry,Restaurant}.pdf`), cut from the RoboCup@Home 2026 rulebook chapter 5. Expected points per challenge are tracked in [`docs/SCORING.md`](docs/SCORING.md) — see [Scoring](#scoring).
+
+---
+
+## Scoring
+
+[`docs/SCORING.md`](docs/SCORING.md) is a living worksheet estimating Walkie's expected points per challenge under partial scoring (low / expected / high capture %). The per-line points are **code-backed**: each challenge's rulebook scoresheet is encoded as a `ScoreSheet` in `tasks/<Challenge>/scoring.py`, the framework is `tasks/scoring.py`, and `tests/test_scoring.py` **reconciles every sheet against its official rulebook total**. The same `ScoreSheet` feeds both the planning estimate and a live runtime tally (`ScoreTracker`) — read the tally as *attempted/claimed* points, **not** referee-awarded. This makes the **non-arm budget** each task can score with the arm gated explicit:
+
+| Challenge | Rulebook total | Non-arm budget (arm gated) |
+|-----------|--------------:|---------------------------:|
+| GPSR | 1490 | 740 fixed + draw-dependent solve |
+| Restaurant | 2360 | 960 (Phase-0 serve) |
+| Pick and Place | 3515 | 195 (recognize + indicate) |
+| HRI | 1450 | 950 (gaze / seat / intro / follow) |
+| Laundry | 4415 | 15 (navigate only) |
 
 ---
 
@@ -93,7 +117,7 @@ Tuning knobs live in **TOML** (version-controlled); secrets/endpoints in **`.env
 |------|-------|
 | `config.toml` | App-wide: LLM (`WALKIE_MODEL`), transport, `WALKIE_AI_BASE_URL`, runtime toggles. |
 | `services/walkie_graphs/config.toml` | The perception pipeline: detection classes, ICP/fusion thresholds, maintenance cadences, storage paths, Rerun viz. |
-| `tasks/HRI/config.toml` | The HRI task: waypoints, host, seat detection, camera FOV. Loaded **before** the app config so task values win. |
+| `tasks/<Challenge>/config.toml` | Per-task tuning: waypoints, gating flags (`*_ARM_CALIBRATED`), detector classes, slice/runner knobs. Loaded **before** the app config so task values win. |
 
 **Precedence:** shell env **>** `.env` **>** task `config.toml` **>** app `config.toml` **>** module `config.toml` **>** code default. `walkie_config.py::load_config()` `setdefault`s every key, so the code keeps reading everything via `os.getenv(NAME, default)`.
 
@@ -125,6 +149,7 @@ Interactive demos that need live hardware / the AI server live in `manual_tests/
 uv run python -m manual_tests.test_robot_object_detection   # robot camera + detection
 uv run python -m manual_tests.test_captioning               # image captioning
 uv run python -m manual_tests.test_pose_estimation          # human pose keypoints
+uv run python -m manual_tests.test_object_segmentation      # open-vocab detect + segment masks
 uv run python -m manual_tests.test_graphs_live              # live walkie_graphs ingest + Rerun viz
 ```
 
@@ -150,10 +175,10 @@ interfaces/
 services/
   walkie_graphs/         The 3D scene-graph perception pipeline + store + config.toml + tools/.
 perception/              Stores layer: shared ChromaDB plumbing (vector_db) + PeopleStore (face/attire re-ID).
-tasks/                   Scripted RoboCup challenges (base/common + HRI/).
-tests/                   pytest suite (mostly walkie_graphs).
+tasks/                   Scripted RoboCup challenges: base/common, manipulation, scoring + GPSR/HRI/PickAndPlace/Laundry/Restaurant (each with run/subtasks/skills/prompts/config/scoring).
+tests/                   pytest suite (walkie_graphs, gpsr, hri, restaurant, manipulation, scoring, skills, …).
 manual_tests/            Interactive hardware/server demos (run via python -m manual_tests.*).
-docs/                    Long-form docs (WALKIE_GRAPHS.md pipeline deep-dive, RERUN.md, HRI.pdf).
+docs/                    Long-form docs: WALKIE_GRAPHS.md, SCORING.md, GPSR_DESIGN.md, RESTAURANT_DESIGN.md, RERUN.md + per-challenge rulebook PDFs.
 ```
 
 ---

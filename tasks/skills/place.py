@@ -29,6 +29,7 @@ import time
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+from interfaces.perception.geometry import voxel_downsample
 from interfaces.perception.surfaces import (
     SurfacePlane,
     assign_objects_to_surfaces,
@@ -45,6 +46,7 @@ from tasks.skills.grasp import (
     look_at_object,
 )
 from tasks.skills.held import HeldObject, clear_held_object, held_arms, recall_held_object
+from tasks.skills.navigation import tilt_head
 
 Vec3 = tuple[float, float, float]
 
@@ -56,6 +58,10 @@ def _f(name: str, default: str) -> float:
 
 def _i(name: str, default: str) -> int:
     return int(os.getenv(name, default))
+
+
+def _b(name: str, default: str) -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
 
 
 def _surface_kwargs() -> dict:
@@ -112,6 +118,68 @@ def _scan(ctx: TaskContext, snap=None) -> tuple[object, np.ndarray, list[Surface
     return snap, cloud, surfaces
 
 
+def _scan_multi_tilt(
+    ctx: TaskContext,
+    *,
+    tilts: tuple[float, ...] | None = None,
+    settle_sec: float | None = None,
+    merge_voxel: float | None = None,
+) -> tuple[object, np.ndarray, list[SurfacePlane]]:
+    """Two snapshots at different head tilts, fused, then horizontal-surface detection.
+
+    Tilts the head to each of *tilts* (radians, +down), lifts each frame to a
+    map-frame full-scene cloud, and fuses them (``vstack`` + ``voxel_downsample``)
+    BEFORE detecting surfaces. Two viewpoints fill each other's self-occlusion, so the
+    merged cloud gives ``detect_horizontal_surfaces`` denser, more-complete coverage —
+    fewer surfaces missed, truer extents. The clouds are already in the (gravity-
+    aligned) map frame, so a plain merge is correct — no re-framing needed (unlike the
+    grasp path, which must hand GraspNet an optical-frame cloud).
+
+    Falls back to a single :func:`_scan` when only one tilt yields geometry. Never raises.
+    """
+    tilts = tilts if tilts is not None else (
+        _f("WALKIE_PLACE_TILT_A", "0.2"), _f("WALKIE_PLACE_TILT_B", "0.35"),
+    )
+    settle_sec = _f("WALKIE_PLACE_TILT_SETTLE_SEC", "0.4") if settle_sec is None else settle_sec
+    merge_voxel = (
+        _f("WALKIE_PLACE_SCENE_VOXEL_M", "0.015") if merge_voxel is None else merge_voxel
+    )
+
+    clouds: list[np.ndarray] = []
+    last_snap = None
+    for t in tilts:
+        tilt_head(ctx, t, settle=settle_sec)
+        snap = ctx.snapshot()
+        if snap is None or not getattr(snap, "has_geometry", False):
+            continue
+        cloud = _full_scene_cloud(snap)
+        if cloud.shape[0]:
+            clouds.append(cloud)
+            last_snap = snap
+
+    if not clouds:
+        print("[place] multi-tilt scan: no geometry; falling back to single scan")
+        return _scan(ctx, None)
+    if len(clouds) == 1:
+        merged = clouds[0]
+    else:
+        merged = voxel_downsample(np.vstack(clouds), merge_voxel)
+        print(f"[place] multi-tilt scan: fused {len(clouds)} views -> {merged.shape[0]} pts")
+    surfaces = detect_horizontal_surfaces(merged, **_surface_kwargs())
+    return last_snap, merged, surfaces
+
+
+def _scan_auto(ctx: TaskContext, snap=None) -> tuple[object, np.ndarray, list[SurfacePlane]]:
+    """Scan the scene, using the 2-tilt fused scan when enabled and no *snap* is given.
+
+    Gated by ``WALKIE_PLACE_MULTI_TILT`` (default on). When a caller passes an explicit
+    *snap* we honour it with a plain single :func:`_scan` (it already chose the frame).
+    """
+    if snap is None and _b("WALKIE_PLACE_MULTI_TILT", "1"):
+        return _scan_multi_tilt(ctx)
+    return _scan(ctx, snap)
+
+
 def detect_surfaces(
     ctx: TaskContext,
     *,
@@ -126,7 +194,7 @@ def detect_surfaces(
     each surface — the inventory an LLM placement agent reads (height + XY distance).
     Object detection is off by default to keep the place path fast.
     """
-    snap, _cloud, surfaces = _scan(ctx, snap)
+    snap, _cloud, surfaces = _scan_auto(ctx, snap)
     if detect_objects and snap is not None and getattr(snap, "has_geometry", False):
         prompts = object_prompts or ["object"]
         objects: list[tuple[str, Vec3]] = []
@@ -474,8 +542,9 @@ def place_object(
     arm_xy = _arm_mount_xy(ctx, chosen)
 
     # 2. Choose a surface + spot. Snapshot now, with the arm tucked from the pick, so
-    #    the held object/gripper stay out of the table view.
-    snap, cloud, surfaces = _scan(ctx, None)
+    #    the held object/gripper stay out of the table view. The 2-tilt fused scan
+    #    (when enabled) gives surface detection denser, more-complete coverage.
+    snap, cloud, surfaces = _scan_auto(ctx, None)
     if surface is not None:
         chosen_surface = surface
     elif not surfaces:
@@ -544,7 +613,7 @@ def place_object(
         return False
     if status == "MOVED":
         # Base moved -> the scan is stale. Re-scan and re-pick the same surface/spot.
-        snap, cloud, surfaces = _scan(ctx, None)
+        snap, cloud, surfaces = _scan_auto(ctx, None)
         if surfaces:
             chosen_surface = min(
                 surfaces,

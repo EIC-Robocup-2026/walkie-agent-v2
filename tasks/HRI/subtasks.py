@@ -61,7 +61,6 @@ from tasks.skills import (
     lift_bbox_world_xy,
     match_people_to_seats,
     move_base_relative,
-    parse_pose,
     person_seat_anchor,
     recall_person_xy,
     remember_located_positions,
@@ -74,6 +73,7 @@ from tasks.skills import (
     tilt_head,
     wait_for_person,
 )
+from tasks.skills.locations import resolve_pose
 
 
 def _guest(ctx: TaskContext, n: int) -> dict:
@@ -93,7 +93,7 @@ class GoToDoor(SubTask):
 
     def run(self, ctx: TaskContext) -> StepResult:
         ctx.walkie.robot.arm.go_to_home(group_name="both_arms_lift", blocking=False)  # reset the arm for better nav
-        x, y, heading = parse_pose(os.getenv("HRI_DOOR_POSE", "0.0,0.0,0"))
+        x, y, heading = resolve_pose("entrance_door", env_fallback="HRI_DOOR_POSE", default="0.0,0.0,0")
         if not ctx.goto(x, y, heading):
             return StepResult.RETRY
         # Wait for the guest to come stand in front before greeting. Look
@@ -153,6 +153,7 @@ class GreetAndLearn(SubTask):
             name = record["name"] or "there"
             ctx.say(f"Nice to meet you, {name}!")
         # FaceTracker has now stopped: the base is free to move for the photo.
+        ctx.score("gaze_greeting")  # tracked + faced the guest throughout the Q&A
         self._posed_capture(ctx, record)
         return StepResult.DONE  # partial info still scores — never block here
 
@@ -224,8 +225,11 @@ class GuideToLivingRoom(SubTask):
 
     def run(self, ctx: TaskContext) -> StepResult:
         ctx.say(prompts.FOLLOW_ME)
-        x, y, heading = parse_pose(os.getenv("HRI_LIVING_ROOM_POSE", "0.0,0.0,0"))
-        return StepResult.DONE if ctx.goto(x, y, heading) else StepResult.RETRY
+        x, y, heading = resolve_pose("living_room", env_fallback="HRI_LIVING_ROOM_POSE", default="0.0,0.0,0")
+        if not ctx.goto(x, y, heading):
+            return StepResult.RETRY
+        ctx.score("gaze_navigation")  # guided the guest, facing the navigation goal
+        return StepResult.DONE
 
 
 class OfferSeat(SubTask):
@@ -317,6 +321,7 @@ class OfferSeat(SubTask):
             # No map-frame point to face (3D lift failed) — name the seat
             # without a stale left/right phrase and let the guest find it.
             ctx.say(prompts.OFFER_SEAT_FALLBACK)
+        ctx.score("seat_offer")  # a free seat was found + offered to this guest
         # Before finishing, confirm the guest actually sat down: watch the seat
         # (arm still pointing) and treat them staying recognized in the frame
         # for HRI_SEATED_DWELL_SEC as seated. Persist wherever they ended up —
@@ -354,6 +359,7 @@ class ReceiveBag(SubTask):
             if abs(efforts[3] - initial_effort) > threshold:
                 break
         ctx.data["has_bag"] = True
+        ctx.score("bag_handover")  # arm: received the bag via handover
         ctx.say(prompts.BAG_CLOSING_WARNING)
         time.sleep(1)  # let the nav settle after the arm movement and possible wait
         ctx.walkie.robot.arm.left.gripper(0.0)  # close
@@ -461,11 +467,18 @@ class IntroduceGuests(SubTask):
         speeches = llm_guest_intro_speeches(ctx, acts)
         for act in acts:
             listener = act["listener"]
+            faced = False
             if listener in world:
                 heading = heading_to_point(ctx, *world[listener])
                 if heading is not None:
-                    ctx.rotate_to(heading)
+                    faced = ctx.rotate_to(heading)
             ctx.say(speeches[listener])
+            # Claimed scoring (attempted): we voiced the subject's name/drink and,
+            # when the listener could be anchored, turned to face the right guest.
+            ctx.score("intro_name_drink",
+                      (1 if act["subject_name"] else 0) + (1 if act["subject_drink"] else 0))
+            if faced:
+                ctx.score("intro_gaze_correct")
         return StepResult.DONE
 
 
@@ -520,9 +533,11 @@ class FollowHostAndDropBag(SubTask):
             on_lost=lambda: ctx.say(prompts.FOLLOW_HOST_LOST),
             on_stopped=lambda: ctx.say(prompts.BAG_PLACE_ACK),
         )
-        ctx.walkie.robot.head.set_auto_tilt(True) 
+        ctx.walkie.robot.head.set_auto_tilt(True)
         if reason == "lost":
             print("[HRI] lost the host past the search budget; placing here")
+        else:
+            ctx.score("follow_host")  # followed the host to the bag-drop area
         return self._place_bag(ctx)
 
     def _place_bag(self, ctx: TaskContext) -> StepResult:
@@ -543,6 +558,7 @@ class FollowHostAndDropBag(SubTask):
         except Exception as exc:
             print(f"[HRI] bag release failed ({exc})")
         ctx.data["has_bag"] = False
+        ctx.score("drop_correct_area")  # arm: released the bag at the drop area
         ctx.say(prompts.FINISH_TASK)
         return StepResult.DONE
 
@@ -867,49 +883,66 @@ class TestPlaceBag(SubTask):
         print(result)
 
 
-def build_hri_task(ctx: TaskContext) -> Task:
-    # Guests differ every run — stale identities must never match today's.
+def prepare_run(ctx: TaskContext) -> None:
+    """Reset per-run state before building any HRI slice.
+
+    Guests differ every run, so stale face/attire identities must never match
+    today's, and map-frame person positions are run-local. Called once by the
+    runner before the chosen slice is built (keeps the builders side-effect-free
+    and testable). Gated by HRI_PEOPLE_RESET (default on).
+    """
     if ctx.people is not None and os.getenv("HRI_PEOPLE_RESET", "1").lower() in ("1", "true", "yes"):
         try:
             ctx.people.clear()
             print("[HRI] people memory cleared for a fresh run")
         except Exception as exc:
             print(f"[HRI] people memory reset failed ({exc})")
-    # Positions are map-frame and run-local; never carry them across runs.
     reset_people_positions(ctx)
-    # Standalone follow-host harness (HRI_TEST_FOLLOW_HOST=1): remember the host
-    # standing in front, then follow + drop the bag — the FollowHostAndDropBag
-    # path on its own, without walking the full 12-step receptionist flow.
-    if os.getenv("HRI_TEST_FOLLOW_HOST", "0").lower() in ("1", "true", "yes"):
-        print("[HRI] HRI_TEST_FOLLOW_HOST=1 — running the follow-host test only")
-        return Task("HRI-follow-host-test", [TestRememberAndFollowHost()], ctx)
-    # Standalone seat-scan harness (HRI_TEST_SCAN_SEATS=1): loop scan_seats and
-    # show the detected seats/occupancy/people, for tuning seat detection without
-    # walking the full receptionist flow.
-    if os.getenv("HRI_TEST_SCAN_SEATS", "0").lower() in ("1", "true", "yes"):
-        print("[HRI] HRI_TEST_SCAN_SEATS=1 — running the seat-scan test only")
-        return Task("HRI-scan-seats-test", [TestScanSeats()], ctx)
+
+
+def build_hri_task(ctx: TaskContext) -> Task:
+    """The full Receptionist flow (rulebook 5.1) — the ``full`` slice.
+
+    Two guests arrive in turn: greet + learn each (name, drink, appearance), guide
+    to the living room, offer a free seat; receive + drop the host's bag; audit the
+    two identities, introduce the guests to each other, then follow the host. Every
+    step degrades rather than crashes (partial scoring). Run :func:`prepare_run`
+    first (the runner does). Pure: constructs no hardware at build time.
+    """
     return Task(
         "HRI",
         [
-            # GoToDoor(1),
-            # GreetAndLearn(1),
-            # GuideToLivingRoom(1),
-            # OfferSeat(1),
-            # GoToDoor(2),
-            # GreetAndLearn(2),
-            # ReceiveBag(),
-            # GuideToLivingRoom(2),
-            # OfferSeat(2),
-            # AuditIdentities(),  # flag cross-guest near-duplicate face/attire, lean on face
-            # IntroduceGuests(),  # introduce the two guests to each other
-            # FollowHostAndDropBag(),
-            # Tests
-            TestRememberAndFollowHost(),  # enroll host here, then follow+drop bag (or HRI_TEST_FOLLOW_HOST=1)
-            # FollowNearestPerson(),  # follow-loop test: no identity, no bag
-            # TestScanSeats(),  # scan seats + people, draw/show detections (or HRI_TEST_SCAN_SEATS=1)
-            # TestTask(),
-            # TestMoveBase(),
+            GoToDoor(1),
+            GreetAndLearn(1),
+            GuideToLivingRoom(1),
+            OfferSeat(1),
+            GoToDoor(2),
+            GreetAndLearn(2),
+            ReceiveBag(),            # arm step — gated by HRI_ENABLE_BAG
+            GuideToLivingRoom(2),
+            OfferSeat(2),
+            AuditIdentities(),       # flag cross-guest near-duplicate face/attire, lean on face
+            IntroduceGuests(),       # introduce the two guests to each other
+            FollowHostAndDropBag(),
         ],
         ctx,
     )
+
+
+# --- Isolated slices for step-by-step on-robot bring-up (selected by HRI_SLICE).
+# Order = rough bring-up order: tune seat perception, then greet+learn one guest,
+# then the follow-host re-ID path, then the whole flow. Mirrors the Restaurant /
+# PickAndPlace runners so no step ever needs commenting out to run a sub-path.
+def build_seats_slice(ctx: TaskContext) -> Task:
+    """Loop seat + people detection and show occupancy — tune seat detection alone."""
+    return Task("HRI:seats", [TestScanSeats()], ctx)
+
+
+def build_greet_slice(ctx: TaskContext) -> Task:
+    """Greet + learn a single guest at the door (name, drink, appearance)."""
+    return Task("HRI:greet", [GreetAndLearn(1)], ctx)
+
+
+def build_follow_host_slice(ctx: TaskContext) -> Task:
+    """Remember the host standing in front, then follow + drop the bag."""
+    return Task("HRI:follow-host", [TestRememberAndFollowHost()], ctx)

@@ -18,17 +18,24 @@ from __future__ import annotations
 import os
 
 from tasks.base import StepResult, SubTask, Task, TaskContext
+from tasks.skills.locations import resolve_pose
 
 from . import prompts
 from .skills import Garment, fold_garment, perceive_clothes, pick_garment, stack_garment
 
+# PnP-style: map each Laundry nav waypoint to its canonical name in the shared
+# LocationBook (the map editor's output), with the *_POSE env var as fallback.
+_LOCATION_NAME = {
+    "LAUNDRY_AREA_POSE": "laundry_area",
+    "LAUNDRY_BASKET_POSE": "laundry_basket",
+    "LAUNDRY_TABLE_POSE": "folding_table",
+    "LAUNDRY_WASHER_POSE": "washing_machine",
+}
+
 
 def _pose(env_key: str, default: str = "0.0,0.0,0.0") -> tuple[float, float, float]:
-    parts = [p.strip() for p in os.getenv(env_key, default).split(",")]
-    if len(parts) != 3:
-        raise ValueError(f"{env_key}: expected 'x,y,heading_rad', got {parts!r}")
-    x, y, h = (float(p) for p in parts)
-    return x, y, h
+    """Map-frame waypoint: shared LocationBook (by name) -> *_POSE env var -> default."""
+    return resolve_pose(_LOCATION_NAME.get(env_key), env_fallback=env_key, default=default)
 
 
 def _optional(env_key: str) -> bool:
@@ -43,7 +50,10 @@ class GoToLaundryArea(SubTask):
     def run(self, ctx: TaskContext) -> StepResult:
         ctx.say(prompts.START_ANNOUNCE)
         x, y, h = _pose("LAUNDRY_AREA_POSE")
-        return StepResult.DONE if ctx.goto(x, y, h) else StepResult.RETRY
+        if ctx.goto(x, y, h):
+            ctx.score("navigate_laundry_area")  # the ONLY non-arm line on the sheet
+            return StepResult.DONE
+        return StepResult.RETRY
 
 
 class OpenWashingMachine(SubTask):
@@ -95,9 +105,20 @@ class FoldLaundry(SubTask):
         # Re-perceive on the table rather than trusting the pre-transport list.
         clothes: list[Garment] = perceive_clothes(ctx) or ctx.data.get("clothes", [])
         max_items = int(os.getenv("LAUNDRY_MAX_FOLD", "1"))
+        # The arm lines are guarded on stub success (mirrors PnP's arm pass): the
+        # pick/fold/stack stubs return False today, so nothing below fires until the
+        # deformable-manip skill lands — at which point the tally is already correct.
+        folded = 0
         for garment in clothes[:max_items]:
-            if pick_garment(ctx, garment) and fold_garment(ctx, garment):  # STUBs
-                stack_garment(ctx)  # STUB
+            if not pick_garment(ctx, garment):  # STUB
+                continue
+            ctx.score("pick_up_clothing")  # arm: grasped one garment (claimed)
+            if not fold_garment(ctx, garment):  # STUB
+                continue
+            ctx.score("fold_clothing" if folded == 0 else "fold_additional")  # 1st vs additional
+            folded += 1
+            if stack_garment(ctx):  # STUB
+                ctx.score("stack_folded")  # arm: stacked neatly (claimed)
         ctx.say(prompts.DONE_ANNOUNCE)
         return StepResult.DONE
 

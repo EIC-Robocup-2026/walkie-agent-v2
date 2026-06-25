@@ -14,6 +14,13 @@ Blackboard layout (ctx.data):
     brain:    WalkieBrain          # the agent stack (Tier-2 fallback), set by run.py
     world:    WorldModel           # arena nouns, set by run.py
     commands: list[Command]        # parsed + planned operator commands
+
+Live scoring (ctx.score, GPSR_SHEET): unlike PnP/Restaurant/HRI — whose tallies are
+pure-optimistic positives — GPSR *also* tallies penalties (pen_rephrasing,
+pen_bypass_stt, pen_custom_operator), because they are deterministic and owned by
+this flow. So a GPSR scorecard number below another challenge's is not a regression:
+it nets the re-ask / typed-bypass / custom-operator costs the receive loop incurs.
+Still attempted/claimed, NOT referee-awarded (see tasks/scoring.py).
 """
 
 from __future__ import annotations
@@ -152,10 +159,14 @@ class ReceiveAndPlanCommands(SubTask):
             if rephrasings < max_rephrasings:
                 rephrasings += 1
                 ctx.say(prompts.ASK_REPHRASE)
+                ctx.score("pen_rephrasing")  # −30 per requested rephrasing (claimed)
             elif custom_attempts < max_custom:
                 if not requested_custom:
                     requested_custom = True
                     ctx.say(prompts.REQUEST_CUSTOM_OPERATOR)
+                    # −20 *per command* in the rulebook; we record one unit at the
+                    # request (the optimistic-ceiling choice — see module docstring).
+                    ctx.score("pen_custom_operator")
                 custom_attempts += 1
             else:
                 return []  # rephrasings + custom operator exhausted
@@ -165,10 +176,17 @@ class ReceiveAndPlanCommands(SubTask):
         commands: list[Command] = []
         for i, (text, plan) in enumerate(parsed, 1):
             cmd = Command(id=i, utterance=text, plan=plan)
+            # The command reached us as text → STT understood it (80 each). Typing it
+            # instead (DISABLE_LISTENING) bypasses STT: forfeits the +80, costs −50.
+            if ctx.disable_listening:
+                ctx.score("pen_bypass_stt")
+            else:
+                ctx.score("understand_stt")
             if plan:
                 cmd.status = CmdStatus.PLANNED
                 if _speak_plan_enabled():
                     ctx.say(render_plan_speech(plan, preamble=prompts.PLAN_PREAMBLE.format(n=i)))
+                    ctx.score("speak_plan")  # demonstrated a generated plan (100 each)
                 if not plan.is_complete:
                     print(f"[gpsr] command {i} plan has ungrounded steps: {plan.source!r}")
             else:
@@ -203,10 +221,22 @@ class ExecuteCommands(SubTask):
             return StepResult.DONE
         manip = _manip_enabled()
         planned = [c for c in commands if c.plan]
+        ran_interleaved = False
         if _interleave_enabled() and not _one_by_one() and len(planned) >= 2:
-            if self._run_interleaved(ctx, commands, world, brain, manip):
-                return StepResult.DONE  # else fell through to serial below
-        self._run_serial(ctx, commands, world, brain, manip)
+            ran_interleaved = self._run_interleaved(ctx, commands, world, brain, manip)
+        if not ran_interleaved:  # interleave disabled, unfit, or failed to schedule
+            self._run_serial(ctx, commands, world, brain, manip)
+        # interleave_bonus needs *meaningful* interleaving, not merely all-3-at-once
+        # (docs/GPSR_DESIGN.md §5.5) — so it scores only when the room-batched
+        # scheduler actually executed (GPSR_INTERLEAVE=1), never on the serial MVP.
+        if ran_interleaved:
+            ctx.score("interleave_bonus")
+        # One solve unit (250) per command that made progress. PARTIAL is NOT
+        # pro-rated here — partial-ness lives in the estimate's capture %, while the
+        # live tally is the optimistic claimed ceiling (see tasks/scoring.py).
+        for cmd in commands:
+            if cmd.status in (CmdStatus.DONE, CmdStatus.PARTIAL):
+                ctx.score("solve_command")
         return StepResult.DONE
 
     def _run_serial(self, ctx, commands: list[Command], world, brain, manip: bool) -> None:

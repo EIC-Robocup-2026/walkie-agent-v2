@@ -30,6 +30,9 @@ master.pdf
 # temp
 concept-graphs/
 
+# Live scoring tallies (ScoreTracker writes these to repo root on a real run)
+*_scorecard.json
+
 # Walkie Graphs
 perception.json
 graph_thumbs/

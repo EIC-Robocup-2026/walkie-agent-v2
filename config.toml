@@ -46,6 +46,26 @@ WALKIE_ROS_PORT = "9090"
 # machine as the AI server at WALKIE_AI_BASE_URL — they're separate boxes.
 WALKIE_ROBOT_IP = "127.0.0.1"
 
+[map]
+# Shared named-location ("map") file every challenge drives to (rooms + locations
+# with pose=[x,y,heading_rad], read by tasks/skills/locations.py; GPSR also reads
+# its object/name/gesture vocab from the same file). This is the world.toml schema
+# — the walkie-map-editor app (EIC-Robocup-2026/walkie-map-editor) exports it.
+#
+# GPSR_WORLD_FILE is the canonical knob: it is the ONE var BOTH resolvers honour
+# (tasks/skills/locations.py AND tasks/GPSR/world.py::load_world), so it covers all
+# FIVE challenges. Leave empty to fall back to the sibling tasks/GPSR/world.toml —
+# drop the editor's output there for zero-config — or set it to that file's path.
+GPSR_WORLD_FILE = ""
+#
+# WALKIE_MAP_FILE overrides the map for the four location-based challenges
+# (PnP / Restaurant / HRI / Laundry) ONLY. GPSR's load_world() does NOT read it, so
+# setting this alone leaves GPSR on the stale sibling file — prefer GPSR_WORLD_FILE
+# above. resolve_pose order: $WALKIE_MAP_FILE -> $GPSR_WORLD_FILE -> sibling. Each
+# challenge still falls back to its own *_POSE env var when the map lacks a name, so
+# a box with no map file keeps working. See docs/MAP_LOCATIONS.md.
+WALKIE_MAP_FILE = ""
+
 [runtime]
 # 1 = type instructions at a TTY instead of speaking (no mic).
 DISABLE_LISTENING = "0"
@@ -112,6 +132,22 @@ WALKIE_GRASP_Z_OFFSET_M = "0.0"      # vertical nudge added to the object centro
 WALKIE_PREGRASP_OFFSET_M = "0.10"    # pre-grasp standoff (above for top-down, back for front)
 WALKIE_LIFT_HEIGHT_M = "0.15"        # how far to lift after grasping
 WALKIE_CARRY_POSE = "standby"        # go_to_home preset to tuck the arm for nav
+# GraspNet skill (tasks/skills/grasp.py) multi-tilt fused planning: before the final
+# grasp, take 2 snapshots at these head tilts (rad, +down = look down), dedup the object
+# across the two views and fuse their clouds into one denser cloud for a single GraspNet
+# inference. Shallow angles (below look_at_object's 0.436-rad clamp) suit table-top cans.
+WALKIE_GRASP_MULTI_TILT = "1"        # enable the 2-snapshot fused grasp plan
+WALKIE_GRASP_TILT_A = "0.2"          # first head tilt (rad) for the fused grasp snapshots
+WALKIE_GRASP_TILT_B = "0.35"         # second head tilt (rad)
+WALKIE_GRASP_TILT_SETTLE_SEC = "0.4" # wait after each head tilt before capturing
+WALKIE_GRASP_DEDUP_RADIUS_M = "0.10" # two views are the same object if centroids within this
+WALKIE_GRASP_MERGE_VOXEL_M = "0.003" # voxel size when fusing the two viewpoints' clouds
+# Grasp execution retries: if arm go_to_pose fails, strafe the base sideways (away from
+# the centreline on the arm's side) + step back, then re-execute the same map-frame
+# candidate (pure translation keeps it valid; new arm geometry can solve a failed IK).
+WALKIE_GRASP_RETRY_ATTEMPTS = "3"    # max grasp executions per pick
+WALKIE_GRASP_RETRY_STRAFE_M = "0.08" # sideways base step between retries
+WALKIE_GRASP_RETRY_BACK_M = "0.05"   # backward base step between retries
 
 [skills]
 # Arena-entry door detection (tasks/skills/door.py is_door_open / door_open_from_depth),
@@ -145,6 +181,13 @@ WALKIE_MIC_DEBUG_DIR = "mic_recording"
 # Full-scene cloud lift (override the per-detection WALKIE_GRAPHS_* defaults).
 WALKIE_PLACE_SCENE_VOXEL_M = "0.015"   # voxel size for the whole-scene cloud
 WALKIE_PLACE_MAX_DEPTH_M = "3.0"       # drop points farther than this (stereo noise)
+# Multi-tilt fused surface scan: take 2 snapshots at these head tilts (rad, +down) and
+# merge their map-frame clouds before detecting surfaces, so two viewpoints fill each
+# other's self-occlusion (denser coverage, truer surface extents).
+WALKIE_PLACE_MULTI_TILT = "1"          # enable the 2-snapshot fused surface scan
+WALKIE_PLACE_TILT_A = "0.2"            # first head tilt (rad) for the fused scan
+WALKIE_PLACE_TILT_B = "0.35"           # second head tilt (rad)
+WALKIE_PLACE_TILT_SETTLE_SEC = "0.4"   # wait after each head tilt before capturing
 # Horizontal-surface detection.
 WALKIE_SURFACE_Z_GAP_M = "0.04"        # split height bands at vertical gaps wider than this
 WALKIE_SURFACE_MIN_POINTS = "150"      # drop surfaces with fewer points than this
