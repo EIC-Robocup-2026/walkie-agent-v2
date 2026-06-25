@@ -37,6 +37,7 @@ if TYPE_CHECKING:  # import-time decoupling — these are type-only (annotations
     from interfaces.walkie_interface import WalkieInterface
     from perception import PeopleStore
     from services.viz import VizSession
+    from tasks.scoring import ScoreTracker
 
 
 class StepResult(Enum):
@@ -60,6 +61,7 @@ class TaskContext:
     disable_listening: bool = False  # DISABLE_LISTENING: type at a TTY instead of mic
     people: "PeopleStore | None" = None  # face/appearance person memory (optional)
     viz: "VizSession | None" = None  # shared 3D viz session; auto-filled below
+    scorer: "ScoreTracker | None" = None  # optional live score tally (see ctx.score)
 
     def __post_init__(self) -> None:
         # Wire the shared viz session so every subtask can draw via ctx.viz (e.g.
@@ -216,6 +218,23 @@ class TaskContext:
         """Rotate in place — one-shot 'look toward' for a static target."""
         pose = self.current_pose()
         return self.goto(pose["x"], pose["y"], heading_rad)
+
+    # --- scoring --------------------------------------------------------
+
+    def score(self, key: str, n: int = 1) -> None:
+        """Award *n* units of scoresheet line *key* to the run's ScoreTracker.
+
+        No-op when no scorer is attached. **Observational only** — these are
+        *attempted / claimed* points (the robot believes it did the action), not
+        referee-awarded, and a bad key or tracker error is logged, never raised,
+        so the live tally can never break a task run.
+        """
+        if self.scorer is None:
+            return
+        try:
+            self.scorer.award(key, n)
+        except Exception as exc:
+            _log("ctx", f"score({key!r}) failed ({exc})")
 
 
 class SubTask(ABC):

@@ -151,11 +151,16 @@ class _FakeCtx:
         self.rotations: list[float] = []
         self.saids: list[str] = []
         self.asked: list[str] = []
+        self.scored: list[tuple[str, int]] = []  # (key, n) for each ctx.score()
+        self.disable_listening = False  # answers come via ask() = the STT path
         self.data: dict = {}  # ctx.data["brain"].graphs is the scene memory (run.py)
 
     def goto(self, x, y, h):
         self.gotos.append((x, y, h))
         return self._goto_ok
+
+    def score(self, key, n=1):
+        self.scored.append((key, n))
 
     def current_pose(self):
         return {"x": self._pose[0], "y": self._pose[1], "heading": 0.0}

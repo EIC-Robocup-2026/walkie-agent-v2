@@ -14,6 +14,8 @@ from dotenv import load_dotenv
 
 from ..base import TaskContext
 from ..common import initialize_llm_model, initialize_robot, load_task_config
+from ..scoring import ScoreTracker
+from .scoring import LAUNDRY_SHEET
 from .subtasks import build_laundry_task
 from client import WalkieAIClient
 
@@ -26,16 +28,20 @@ def main() -> None:
     model = initialize_llm_model()
     walkie_ai = WalkieAIClient()
 
+    scorecard = ScoreTracker(LAUNDRY_SHEET, path=os.getenv("LAUNDRY_SCORECARD_PATH", "laundry_scorecard.json"))
     ctx = TaskContext(
         walkie=walkie_interface,
         walkieAI=walkie_ai,
         model=model,
         disable_listening=os.getenv("DISABLE_LISTENING", "0").lower() in ("1", "true", "yes"),
+        scorer=scorecard,  # live tally of attempted/claimed points (ctx.score)
     )
 
     try:
         build_laundry_task(ctx).run()
     finally:
+        print(scorecard.summary())  # attempted/claimed points — NOT referee-awarded
+        scorecard.write()
         walkie_interface.close()
 
 

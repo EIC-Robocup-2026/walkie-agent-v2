@@ -153,6 +153,7 @@ class GreetAndLearn(SubTask):
             name = record["name"] or "there"
             ctx.say(f"Nice to meet you, {name}!")
         # FaceTracker has now stopped: the base is free to move for the photo.
+        ctx.score("gaze_greeting")  # tracked + faced the guest throughout the Q&A
         self._posed_capture(ctx, record)
         return StepResult.DONE  # partial info still scores — never block here
 
@@ -225,7 +226,10 @@ class GuideToLivingRoom(SubTask):
     def run(self, ctx: TaskContext) -> StepResult:
         ctx.say(prompts.FOLLOW_ME)
         x, y, heading = parse_pose(os.getenv("HRI_LIVING_ROOM_POSE", "0.0,0.0,0"))
-        return StepResult.DONE if ctx.goto(x, y, heading) else StepResult.RETRY
+        if not ctx.goto(x, y, heading):
+            return StepResult.RETRY
+        ctx.score("gaze_navigation")  # guided the guest, facing the navigation goal
+        return StepResult.DONE
 
 
 class OfferSeat(SubTask):
@@ -317,6 +321,7 @@ class OfferSeat(SubTask):
             # No map-frame point to face (3D lift failed) — name the seat
             # without a stale left/right phrase and let the guest find it.
             ctx.say(prompts.OFFER_SEAT_FALLBACK)
+        ctx.score("seat_offer")  # a free seat was found + offered to this guest
         # Before finishing, confirm the guest actually sat down: watch the seat
         # (arm still pointing) and treat them staying recognized in the frame
         # for HRI_SEATED_DWELL_SEC as seated. Persist wherever they ended up —
@@ -354,6 +359,7 @@ class ReceiveBag(SubTask):
             if abs(efforts[3] - initial_effort) > threshold:
                 break
         ctx.data["has_bag"] = True
+        ctx.score("bag_handover")  # arm: received the bag via handover
         ctx.say(prompts.BAG_CLOSING_WARNING)
         time.sleep(1)  # let the nav settle after the arm movement and possible wait
         ctx.walkie.robot.arm.left.gripper(0.0)  # close
@@ -461,11 +467,18 @@ class IntroduceGuests(SubTask):
         speeches = llm_guest_intro_speeches(ctx, acts)
         for act in acts:
             listener = act["listener"]
+            faced = False
             if listener in world:
                 heading = heading_to_point(ctx, *world[listener])
                 if heading is not None:
-                    ctx.rotate_to(heading)
+                    faced = ctx.rotate_to(heading)
             ctx.say(speeches[listener])
+            # Claimed scoring (attempted): we voiced the subject's name/drink and,
+            # when the listener could be anchored, turned to face the right guest.
+            ctx.score("intro_name_drink",
+                      (1 if act["subject_name"] else 0) + (1 if act["subject_drink"] else 0))
+            if faced:
+                ctx.score("intro_gaze_correct")
         return StepResult.DONE
 
 
@@ -520,9 +533,11 @@ class FollowHostAndDropBag(SubTask):
             on_lost=lambda: ctx.say(prompts.FOLLOW_HOST_LOST),
             on_stopped=lambda: ctx.say(prompts.BAG_PLACE_ACK),
         )
-        ctx.walkie.robot.head.set_auto_tilt(True) 
+        ctx.walkie.robot.head.set_auto_tilt(True)
         if reason == "lost":
             print("[HRI] lost the host past the search budget; placing here")
+        else:
+            ctx.score("follow_host")  # followed the host to the bag-drop area
         return self._place_bag(ctx)
 
     def _place_bag(self, ctx: TaskContext) -> StepResult:
@@ -543,6 +558,7 @@ class FollowHostAndDropBag(SubTask):
         except Exception as exc:
             print(f"[HRI] bag release failed ({exc})")
         ctx.data["has_bag"] = False
+        ctx.score("drop_correct_area")  # arm: released the bag at the drop area
         ctx.say(prompts.FINISH_TASK)
         return StepResult.DONE
 

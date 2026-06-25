@@ -43,7 +43,10 @@ class GoToLaundryArea(SubTask):
     def run(self, ctx: TaskContext) -> StepResult:
         ctx.say(prompts.START_ANNOUNCE)
         x, y, h = _pose("LAUNDRY_AREA_POSE")
-        return StepResult.DONE if ctx.goto(x, y, h) else StepResult.RETRY
+        if ctx.goto(x, y, h):
+            ctx.score("navigate_laundry_area")  # the ONLY non-arm line on the sheet
+            return StepResult.DONE
+        return StepResult.RETRY
 
 
 class OpenWashingMachine(SubTask):
@@ -95,9 +98,20 @@ class FoldLaundry(SubTask):
         # Re-perceive on the table rather than trusting the pre-transport list.
         clothes: list[Garment] = perceive_clothes(ctx) or ctx.data.get("clothes", [])
         max_items = int(os.getenv("LAUNDRY_MAX_FOLD", "1"))
+        # The arm lines are guarded on stub success (mirrors PnP's arm pass): the
+        # pick/fold/stack stubs return False today, so nothing below fires until the
+        # deformable-manip skill lands — at which point the tally is already correct.
+        folded = 0
         for garment in clothes[:max_items]:
-            if pick_garment(ctx, garment) and fold_garment(ctx, garment):  # STUBs
-                stack_garment(ctx)  # STUB
+            if not pick_garment(ctx, garment):  # STUB
+                continue
+            ctx.score("pick_up_clothing")  # arm: grasped one garment (claimed)
+            if not fold_garment(ctx, garment):  # STUB
+                continue
+            ctx.score("fold_clothing" if folded == 0 else "fold_additional")  # 1st vs additional
+            folded += 1
+            if stack_garment(ctx):  # STUB
+                ctx.score("stack_folded")  # arm: stacked neatly (claimed)
         ctx.say(prompts.DONE_ANNOUNCE)
         return StepResult.DONE
 

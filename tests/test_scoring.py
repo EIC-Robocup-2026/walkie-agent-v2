@@ -157,3 +157,94 @@ def test_non_arm_ceilings_match_transcription():
     assert LAUNDRY_SHEET.non_arm_ceiling() == 15       # navigate only — Laundry is all-arm
     assert GPSR_SHEET.non_arm_ceiling() == 1490        # best-case all-non-arm draw (see module docstring)
     assert PNP_SHEET.non_arm_ceiling() == 195
+
+
+# --- the TaskContext.score() hook -------------------------------------------
+
+def test_ctx_score_awards_to_attached_tracker():
+    # ctx.score() is the runtime integration point — tasks award against the
+    # sheet through it. A bad key is swallowed (logged), never raised, so the
+    # live tally can never break a run.
+    from tasks.base import TaskContext
+
+    tracker = ScoreTracker(PNP_SHEET)
+    ctx = TaskContext(walkie=None, walkieAI=None, model=None, scorer=tracker)
+    ctx.score("recognize_object", 3)
+    assert tracker.units_of("recognize_object") == 3
+    ctx.score("does_not_exist")            # bad key -> logged, must NOT raise
+    assert tracker.earned() == 30          # only the valid award counted
+
+
+def test_ctx_score_is_noop_without_a_scorer():
+    from tasks.base import TaskContext
+
+    ctx = TaskContext(walkie=None, walkieAI=None, model=None)  # scorer=None
+    ctx.score("anything")                  # must be a silent no-op, not raise
+
+
+# --- award-key integrity: every ctx.score("k") in a task is a real sheet key -
+
+def _award_keys(*modules):
+    """The set of literal keys passed to ctx.score("...") across *modules*' source."""
+    import pathlib
+    import re
+
+    keys: set[str] = set()
+    for mod in modules:
+        src = pathlib.Path(mod.__file__).read_text()
+        keys |= set(re.findall(r'ctx\.score\(\s*"([^"]+)"', src))
+    return keys
+
+
+def test_pnp_award_keys_exist_in_sheet():
+    import tasks.PickAndPlace.skills as sk
+    import tasks.PickAndPlace.subtasks as st
+
+    keys = _award_keys(st, sk)
+    assert keys, "expected ctx.score() awards in the PickAndPlace task"
+    sheet_keys = {ln.key for ln in PNP_SHEET.lines}
+    assert keys <= sheet_keys, f"PnP score keys not in PNP_SHEET: {sorted(keys - sheet_keys)}"
+
+
+def test_restaurant_award_keys_exist_in_sheet():
+    import tasks.Restaurant.subtasks as st
+
+    keys = _award_keys(st)
+    assert keys, "expected ctx.score() awards in the Restaurant task"
+    sheet_keys = {ln.key for ln in RESTAURANT_SHEET.lines}
+    assert keys <= sheet_keys, f"Restaurant score keys not in RESTAURANT_SHEET: {sorted(keys - sheet_keys)}"
+
+
+def test_hri_award_keys_exist_in_sheet():
+    import tasks.HRI.subtasks as st
+
+    keys = _award_keys(st)
+    assert keys, "expected ctx.score() awards in the HRI task"
+    sheet_keys = {ln.key for ln in HRI_SHEET.lines}
+    assert keys <= sheet_keys, f"HRI score keys not in HRI_SHEET: {sorted(keys - sheet_keys)}"
+
+
+def test_gpsr_award_keys_exist_in_sheet():
+    # ctx.score() swallows a bad key (logs, never raises) so a typo'd key would
+    # silently score 0 forever — this is the only thing that proves GPSR's wiring
+    # (understand/speak/solve/interleave + the penalties unique to GPSR) is live.
+    import tasks.GPSR.subtasks as st
+
+    keys = _award_keys(st)
+    assert keys, "expected ctx.score() awards in the GPSR task"
+    sheet_keys = {ln.key for ln in GPSR_SHEET.lines}
+    assert keys <= sheet_keys, f"GPSR score keys not in GPSR_SHEET: {sorted(keys - sheet_keys)}"
+    # every GPSR positive line is reached by the flow (it's the whole non-arm budget)
+    positives = {ln.key for ln in GPSR_SHEET.positives()}
+    assert positives <= keys, f"GPSR positive lines never awarded: {sorted(positives - keys)}"
+
+
+def test_laundry_award_keys_exist_in_sheet():
+    import tasks.Laundry.subtasks as st
+
+    keys = _award_keys(st)
+    assert keys, "expected ctx.score() awards in the Laundry task"
+    sheet_keys = {ln.key for ln in LAUNDRY_SHEET.lines}
+    assert keys <= sheet_keys, f"Laundry score keys not in LAUNDRY_SHEET: {sorted(keys - sheet_keys)}"
+    # the only non-arm line must be wired — it's the entire arm-gated budget (15 pts)
+    assert "navigate_laundry_area" in keys

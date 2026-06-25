@@ -26,6 +26,8 @@ from dotenv import load_dotenv
 
 from ..base import TaskContext
 from ..common import initialize_llm_model, initialize_robot, load_task_config
+from ..scoring import ScoreTracker
+from .scoring import RESTAURANT_SHEET
 from .subtasks import (
     build_phase0_slice,
     build_pick_demo,
@@ -125,11 +127,13 @@ def main() -> None:
         walkie_interface.close()
         return
 
+    scorecard = ScoreTracker(RESTAURANT_SHEET, path=os.getenv("RESTAURANT_SCORECARD_PATH", "restaurant_scorecard.json"))
     ctx = TaskContext(
         walkie=walkie_interface,
         walkieAI=walkie_ai,
         model=model,
         disable_listening=_truthy("DISABLE_LISTENING"),
+        scorer=scorecard,  # live tally of attempted/claimed points (ctx.score)
     )
 
     slice_name, build = _select_build()
@@ -138,6 +142,8 @@ def main() -> None:
     try:
         build(ctx).run()
     finally:
+        print(scorecard.summary())  # attempted/claimed points — NOT referee-awarded
+        scorecard.write()
         walkie_interface.close()
 
 

@@ -121,6 +121,8 @@ def _pick_and_serve(ctx: TaskContext, order: Order) -> None:
             print(f"[restaurant] could not pick {item!r}; trying the next item")
             continue
         order.status = OrderStatus.PICKED
+        ctx.score("pickup_items")      # arm: picked an item from the bar
+        ctx.score("first_pick_bonus")  # one-time (clamped to 1)
 
         # 2. Re-acquire the customer visually rather than trusting the stale point (§5.1).
         fresh = return_to_customer(ctx, order.world_xy) if order.world_xy else None
@@ -130,11 +132,14 @@ def _pick_and_serve(ctx: TaskContext, order: Order) -> None:
             return_to_bar(ctx)
             break
         order.world_xy = fresh
+        ctx.score("return_table")      # returned to the customer table with the order
 
         # 3. Place it on a clear spot of the table in front of the customer. place_object
         #    auto-picks the nearest reachable surface; pass surface=/target_xy= to steer it.
         if place_object(ctx):
             served.append(item)
+            ctx.score("serve_order")       # arm: served the item to the customer
+            ctx.score("first_place_bonus")  # one-time (clamped to 1)
             ctx.say(prompts.SERVE_ANNOUNCE.format(items=item))
         else:
             print(f"[restaurant] reached the customer but could not place {item!r}")
@@ -158,10 +163,12 @@ def _take_one_order(ctx: TaskContext, caller, orders: dict[int, Order]) -> Order
     """
     order = Order(id=len(orders) + 1, world_xy=caller.world_xy, bearing=caller.bearing)
     orders[order.id] = order
+    ctx.score("detect_customer")  # detected + selected a waving customer (claimed)
     if not approach_customer(ctx, caller.world_xy):
         order.status = OrderStatus.FAILED
         return None
     order.status = OrderStatus.APPROACHED
+    ctx.score("reach_table")  # reached the customer's table
     order.appearance = capture_appearance(ctx, caller.world_xy)  # for re-ID/logging
     items = take_order(ctx, world_xy=order.world_xy)
     if not items:
@@ -169,6 +176,7 @@ def _take_one_order(ctx: TaskContext, caller, orders: dict[int, Order]) -> Order
         return None
     order.items = items
     order.status = OrderStatus.ORDERED
+    ctx.score("understand_order")  # captured + confirmed the order
     return order
 
 
@@ -181,6 +189,7 @@ def _deliver_order(ctx: TaskContext, order: Order) -> None:
     return_to_bar(ctx)
     if relay_to_barman(ctx, order.items):
         order.status = OrderStatus.RELAYED
+        ctx.score("communicate_barman")  # relayed the order to the barman
     _pick_and_serve(ctx, order)
 
 
