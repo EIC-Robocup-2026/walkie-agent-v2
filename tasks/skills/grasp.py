@@ -22,6 +22,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from interfaces.devices.camera import camera_pose
+from interfaces.perception.dbscan import dbscan_labels, statistical_outlier_removal
 from interfaces.perception.geometry import voxel_downsample
 from tasks.base import TaskContext
 from tasks.skills.navigation import move_base_relative, tilt_head
@@ -45,6 +46,77 @@ def _i(name: str, default: str) -> int:
 
 def _b(name: str, default: str) -> bool:
     return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _clean_object_cloud(pts: np.ndarray, *, ref_optical: np.ndarray | None = None) -> np.ndarray:
+    """Strip residue noise from an object cloud before handing it to GraspNet.
+
+    A masked detection's lifted cloud carries two kinds of junk that ruin a grasp:
+    sparse flying-pixel scatter, and a *locally-dense* blob where the mask bled onto
+    the supporting table/wall at the object's silhouette. The remote server already
+    runs statistical-outlier removal, so the scatter is mostly handled there — the blob
+    is not: it is dense enough to survive SOR and pulls GraspNet's grasp point/width off
+    the real object. This pass removes both, in two rigid-invariant steps (so they are
+    valid in the camera-optical frame the cloud arrives in):
+
+    1. :func:`statistical_outlier_removal` — cheap belt-and-suspenders for scatter.
+    2. **Nearest-cluster keep** — DBSCAN the cloud and keep the single cluster whose
+       centroid is closest to *ref_optical* (the object's expected centre). Picking the
+       *nearest* cluster rather than the *largest* is the guard: a badly-bled mask can
+       make the table the most populous cluster, and a largest-cluster rule would then
+       drop the real object. When *ref_optical* is ``None`` the cloud's median is used
+       (robust while the object is the majority of a good mask).
+
+    Never trims below ``WALKIE_GRASP_CLEAN_MIN_KEEP`` points: on any degenerate result it
+    falls back to the fuller (pre-cluster, post-SOR) cloud, so cleanup can only help. That
+    floor is kept above the server's own ``min_points`` (200) because the server *re*-voxels
+    (0.005 m) + runs SOR after receiving the cloud and rejects what's left under 200 — so a
+    too-small clean cluster must defer to the noisier-but-fuller cloud rather than hand the
+    server something it will throw away. Disabled wholesale by ``WALKIE_GRASP_CLEAN_ENABLE=0``.
+    """
+    pts = np.asarray(pts)
+    pts = pts[np.isfinite(pts).all(axis=1)]  # defensive: drop NaN/inf rows
+    if not _b("WALKIE_GRASP_CLEAN_ENABLE", "1"):
+        return pts
+
+    min_keep = _i("WALKIE_GRASP_CLEAN_MIN_KEEP", "250")
+    if pts.shape[0] < min_keep:
+        return pts  # too sparse to risk trimming — a real detection is never thrown away
+
+    # 1. Statistical-outlier removal (no-op if k <= 0). Already falls back to the input
+    #    on a degenerate spread, so it can only shed genuine low-density scatter.
+    sor = statistical_outlier_removal(
+        pts,
+        k=_i("WALKIE_GRASP_CLEAN_SOR_K", "16"),
+        std_ratio=_f("WALKIE_GRASP_CLEAN_SOR_STD", "2.0"),
+    )
+    base = sor if sor.shape[0] >= min_keep else pts
+
+    # 2. Nearest-cluster keep — drop a dense background-bleed blob.
+    eps = _f("WALKIE_GRASP_CLEAN_DBSCAN_EPS_M", "0.02")
+    min_pts = _i("WALKIE_GRASP_CLEAN_DBSCAN_MIN_PTS", "10")
+    cluster_min = _i("WALKIE_GRASP_CLEAN_CLUSTER_MIN", "20")
+    labels = dbscan_labels(base, eps, min_pts)
+    uniq = [lbl for lbl in set(labels.tolist()) if lbl >= 0]
+    if not uniq:
+        return base  # everything is "noise" at this eps — keep the post-SOR cloud as-is
+
+    ref = (
+        np.asarray(ref_optical, dtype=float)
+        if ref_optical is not None
+        else np.median(base, axis=0)
+    )
+    # Among clusters big enough to be the object, keep the one centred nearest ref.
+    candidates = [(lbl, base[labels == lbl]) for lbl in uniq]
+    eligible = [(lbl, c) for lbl, c in candidates if c.shape[0] >= cluster_min]
+    pool = eligible if eligible else candidates  # fall back to all clusters if all small
+    best = min(pool, key=lambda lc: float(np.linalg.norm(np.median(lc[1], axis=0) - ref)))[1]
+    if best.shape[0] < min_keep:
+        return base  # nearest cluster too small to trust — keep the post-SOR cloud
+    if best.shape[0] < base.shape[0]:
+        print(f"[grasp] cleanup: {pts.shape[0]} -> {best.shape[0]} pts "
+              f"(dropped {pts.shape[0] - best.shape[0]})")
+    return best
 
 
 @dataclass
@@ -107,6 +179,16 @@ def _to_map_frame(snap, g, standoff_m: float) -> GraspCandidate:
         width=float(g.width),
         score=float(g.score),
     )
+
+
+def _optical_ref(loc: "ObjectLocation") -> np.ndarray:
+    """The located object's map-frame centroid, expressed in its snapshot's optical frame.
+
+    The cleanup pass (:func:`_clean_object_cloud`) keeps the cluster nearest this point,
+    so it must be in the same frame as the cloud GraspNet receives (optical). ``xyz_map``
+    is a robust detection median, so it survives the very bleed the cleanup removes.
+    """
+    return (np.asarray(loc.xyz_map, dtype=float) - loc.snap.cam.t) @ loc.snap.cam.R
 
 
 def locate_object(
@@ -182,7 +264,7 @@ def _grasp_cloud_multi_tilt(
     min_points: int = 50,
     min_confidence: float = 0.3,
     merge_voxel: float | None = None,
-) -> tuple[np.ndarray, object] | None:
+) -> tuple[np.ndarray, object, np.ndarray] | None:
     """Two snapshots at different head tilts → one dense, deduped optical cloud.
 
     Tilts the head to each of *tilts* (radians, +down — bypasses ``look_at_object``'s
@@ -225,7 +307,7 @@ def _grasp_cloud_multi_tilt(
         return None
     if len(locs) == 1:
         print("[grasp] multi-tilt: only one view yielded geometry; using it alone")
-        return locs[0].cloud_optical, locs[0].snap
+        return locs[0].cloud_optical, locs[0].snap, _optical_ref(locs[0])
 
     # Dedup the two views: same object iff their map-frame centroids are close.
     a, b = locs[0], locs[1]
@@ -239,7 +321,7 @@ def _grasp_cloud_multi_tilt(
         keep = max(locs, key=_key)
         print(f"[grasp] multi-tilt: views {sep:.2f}m apart (> {dedup_radius_m:.2f}m); "
               f"not fusing, keeping conf={keep.confidence} range={keep.range_m:.2f}m")
-        return keep.cloud_optical, keep.snap
+        return keep.cloud_optical, keep.snap, _optical_ref(keep)
 
     # Fuse: lift each view's optical cloud to MAP using its OWN pose (common frame),
     # merge + voxel-downsample, then re-frame into the chosen (first) view's optical
@@ -253,10 +335,10 @@ def _grasp_cloud_multi_tilt(
         merged_optical = (merged_map - chosen.snap.cam.t) @ chosen.snap.cam.R
         print(f"[grasp] multi-tilt: fused {a.cloud_optical.shape[0]}+{b.cloud_optical.shape[0]} "
               f"-> {merged_optical.shape[0]} pts (sep {sep:.2f}m)")
-        return merged_optical, chosen.snap
+        return merged_optical, chosen.snap, _optical_ref(chosen)
     except Exception as exc:  # noqa: BLE001 — fall back to the single chosen view
         print(f"[grasp] multi-tilt: fuse failed ({exc}); using first view alone")
-        return chosen.cloud_optical, chosen.snap
+        return chosen.cloud_optical, chosen.snap, _optical_ref(chosen)
 
 
 def _grasp_cloud_multi_snap(
@@ -271,7 +353,7 @@ def _grasp_cloud_multi_snap(
     min_points: int = 50,
     min_confidence: float = 0.3,
     merge_voxel: float | None = None,
-) -> tuple[np.ndarray, object] | None:
+) -> tuple[np.ndarray, object, np.ndarray] | None:
     """*snaps* snapshots at the CURRENT head angle → one cleaner, deduped optical cloud.
 
     The head holds still — unlike :func:`_grasp_cloud_multi_tilt`, which moves between
@@ -317,7 +399,7 @@ def _grasp_cloud_multi_snap(
         return None
     if len(locs) == 1:
         print("[grasp] multi-snap: only one snapshot yielded geometry; using it alone")
-        return locs[0].cloud_optical, locs[0].snap
+        return locs[0].cloud_optical, locs[0].snap, _optical_ref(locs[0])
 
     # Consensus anchor = the nearest-to-camera view (least likely a far false positive,
     # mirroring locate_object's nearest-wins rule). Keep every frame whose object
@@ -332,7 +414,7 @@ def _grasp_cloud_multi_snap(
     if len(kept) == 1:
         print(f"[grasp] multi-snap: {len(locs)} views disagree on position "
               f"(> {dedup_radius_m:.2f}m apart); using the nearest alone")
-        return chosen.cloud_optical, chosen.snap
+        return chosen.cloud_optical, chosen.snap, _optical_ref(chosen)
 
     # Fuse: lift each kept view's optical cloud to MAP via its OWN pose (common frame),
     # concatenate + voxel-downsample (the mean-per-cell averages out per-voxel depth
@@ -344,10 +426,10 @@ def _grasp_cloud_multi_snap(
         merged_optical = (merged_map - chosen.snap.cam.t) @ chosen.snap.cam.R
         print(f"[grasp] multi-snap: fused {len(kept)}/{len(locs)} views "
               f"-> {merged_optical.shape[0]} pts")
-        return merged_optical, chosen.snap
+        return merged_optical, chosen.snap, _optical_ref(chosen)
     except Exception as exc:  # noqa: BLE001 — fall back to the nearest view alone
         print(f"[grasp] multi-snap: fuse failed ({exc}); using nearest view alone")
-        return chosen.cloud_optical, chosen.snap
+        return chosen.cloud_optical, chosen.snap, _optical_ref(chosen)
 
 
 def get_object_grasp_pos(
@@ -427,10 +509,27 @@ def get_object_grasp_pos(
     best_snap = None  # the snapshot the winning grasp came from (for surface lookup)
     best_cloud: np.ndarray | None = None  # the winning object cloud (optical frame)
 
-    def _infer_best(cloud: np.ndarray, snap) -> bool:
-        """Run GraspNet once on *cloud* (optical frame) and keep the best result."""
+    def _infer_best(cloud: np.ndarray, snap, ref_optical: np.ndarray | None = None) -> bool:
+        """Run GraspNet once on *cloud* (optical frame) and keep the best result.
+
+        Cleans the cloud first (:func:`_clean_object_cloud`) so GraspNet never sees the
+        background-bleed blob, and remembers the *cleaned* cloud so the object footprint
+        is measured on real object points only.
+        """
         nonlocal best, best_snap, best_cloud
+        raw_cloud = cloud
+        cloud = _clean_object_cloud(cloud, ref_optical=ref_optical)
+        _draw_cloud_viz(ctx, snap, raw_cloud, cloud)
         infer_kwargs: dict = {"antipodal": antipodal, "max_grasps": 10}
+        # Optional: feed GraspNet a finer/denser cloud (off by default). The cleaned object
+        # cloud carries detail the server re-collapses at its 0.005 m voxel; a smaller voxel
+        # + larger sample preserves it for better grasp-point localization on small objects.
+        server_voxel = os.getenv("WALKIE_GRASP_SERVER_VOXEL_M", "").strip()
+        if server_voxel:
+            infer_kwargs["voxel_size"] = float(server_voxel)
+        server_npts = os.getenv("WALKIE_GRASP_SERVER_NUM_POINT", "").strip()
+        if server_npts:
+            infer_kwargs["num_point"] = int(server_npts)
         if approach_preference != "none":
             infer_kwargs["approach_preference"] = approach_preference
             infer_kwargs["up"] = snap.cam.R.T @ np.array([0.0, 0.0, 1.0])
@@ -460,7 +559,9 @@ def get_object_grasp_pos(
     #                       noise/dropout reduction (_grasp_cloud_multi_snap).
     if prebuilt is not None or multi_tilt or fuse_snaps > 1:
         if prebuilt is not None:
-            built = prebuilt
+            # Caller-supplied (cloud, snap) — no located centroid, so cleanup falls
+            # back to the cloud's own median as the nearest-cluster reference.
+            built = (prebuilt[0], prebuilt[1], None)
         elif multi_tilt:
             built = _grasp_cloud_multi_tilt(
                 ctx, prompts, tilts=tilts, voxel=voxel, erode_px=erode_px,
@@ -474,8 +575,8 @@ def get_object_grasp_pos(
         if built is None:
             print(f"[grasp] no graspable detection for {prompts} (fused build)")
             return None
-        cloud, snap = built
-        _infer_best(cloud, snap)
+        cloud, snap, ref_optical = built
+        _infer_best(cloud, snap, ref_optical=ref_optical)
         if best is None:
             return None
     else:
@@ -609,6 +710,44 @@ def _look_down_tilt(cam_t, xyz_map: Vec3) -> float:
     horiz = math.hypot(dx, dy)
     tilt = math.atan2(cam_t[2] - xyz_map[2], horiz)
     return max(_HEAD_TILT_MIN, min(_HEAD_TILT_MAX, tilt))
+
+
+def _draw_cloud_viz(ctx: TaskContext, snap, raw_optical: np.ndarray, kept_optical: np.ndarray) -> None:
+    """Best-effort: show the exact cloud handed to GraspNet and what the cleanup removed.
+
+    Draws the kept/cleaned cloud (green) and the removed points (red) in the **map
+    frame**, so the user can confirm at a glance that (a) the cloud sits on the object
+    and is upright — **not vertically inverted** — and (b) the cleanup is stripping the
+    table/wall bleed rather than the object. When ``WALKIE_GRASP_DEBUG_DUMP`` names a
+    directory, both optical clouds are also written there (``grasp_cloud_raw.npy`` /
+    ``grasp_cloud_kept.npy``) for offline inspection. Never load-bearing.
+    """
+    dump_dir = os.getenv("WALKIE_GRASP_DEBUG_DUMP", "").strip()
+    if getattr(ctx, "viz", None) is None and not dump_dir:
+        return
+    try:
+        raw = np.ascontiguousarray(np.asarray(raw_optical, dtype=np.float32))
+        kept = np.ascontiguousarray(np.asarray(kept_optical, dtype=np.float32))
+        if dump_dir:
+            os.makedirs(dump_dir, exist_ok=True)
+            np.save(os.path.join(dump_dir, "grasp_cloud_raw.npy"), raw)
+            np.save(os.path.join(dump_dir, "grasp_cloud_kept.npy"), kept)
+        if getattr(ctx, "viz", None) is None:
+            return
+        cam = snap.cam
+        kept_map = kept @ cam.R.T + cam.t
+        # kept rows are a byte-identical subset of raw (both filters return raw subsets),
+        # so an exact-bytes set membership recovers exactly the removed points.
+        kept_keys = {row.tobytes() for row in kept}
+        removed = raw[np.array([row.tobytes() not in kept_keys for row in raw], dtype=bool)] \
+            if raw.shape[0] else raw
+        ctx.viz.clear("grasp/cloud", recursive=True)
+        ctx.viz.points("grasp/cloud/kept", kept_map, colors=[(40, 220, 40)], radii=[0.004])
+        if removed.shape[0]:
+            removed_map = removed @ cam.R.T + cam.t
+            ctx.viz.points("grasp/cloud/removed", removed_map, colors=[(230, 40, 40)], radii=[0.006])
+    except Exception as exc:  # noqa: BLE001 — viz/dump is never load-bearing
+        print(f"[grasp] cloud viz failed ({exc})")
 
 
 def _draw_grasp_viz(ctx: TaskContext, candidate: GraspCandidate) -> None:
@@ -1062,9 +1201,11 @@ def pick_object(
     5. Creep the base straight forward (:func:`creep_to_grasp_distance`) so the
        object ends within *grasp_distance_m* — the approach often halts short of the
        table, leaving it too far to reach accurately. ``None`` disables the creep.
-    6. Run the ONE heavy grasp plan from the final pose: two snapshots at the
-       ``WALKIE_GRASP_TILT_A``/``_B`` head tilts, deduped + fused into one dense cloud,
-       one GraspNet inference (:func:`get_object_grasp_pos` ``multi_tilt=True``).
+    6. Run the ONE heavy grasp plan from the final pose: by default
+       (``WALKIE_GRASP_FUSE_SNAPS`` > 1) take that many snapshots at the **current** head
+       angle, dedup + fuse them into one lower-noise cloud, strip residue/background-bleed
+       noise (:func:`_clean_object_cloud`), and run a single GraspNet inference
+       (:func:`get_object_grasp_pos`).
     7. With *point_at_object* (default), re-point the gripper straight forward along
        the robot heading (:func:`aim_forward_candidate`) instead of GraspNet's
        wrist orientation (often IK-unsolvable on OpenArm).

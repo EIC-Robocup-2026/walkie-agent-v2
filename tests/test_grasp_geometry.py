@@ -309,12 +309,15 @@ def test_multi_tilt_fuses_same_object_into_chosen_optical_frame(monkeypatch):
 
     out = _grasp_cloud_multi_tilt(FakeCtx(), ["can"], merge_voxel=1e-6)
     assert out is not None
-    cloud, snap = out
+    cloud, snap, ref = out
     assert snap is a.snap  # chosen = first view
     back = cloud @ snap.cam.R.T + snap.cam.t  # optical -> map via chosen pose
     # Every fused point lies on the original object (within the tiny merge voxel).
     d = np.linalg.norm(back[:, None, :] - world[None, :, :], axis=2).min(axis=1)
     assert d.max() < 1e-3
+    # ref_optical reprojects to the chosen view's map-frame centroid.
+    assert ref.shape == (3,)
+    assert np.allclose(ref @ snap.cam.R.T + snap.cam.t, a.xyz_map, atol=1e-5)
 
 
 def test_multi_tilt_mismatch_keeps_higher_confidence_view(monkeypatch):
@@ -327,9 +330,10 @@ def test_multi_tilt_mismatch_keeps_higher_confidence_view(monkeypatch):
 
     out = _grasp_cloud_multi_tilt(FakeCtx(), ["can"], dedup_radius_m=0.10)
     assert out is not None
-    cloud, snap = out
+    cloud, snap, ref = out
     assert snap is b.snap
     assert np.array_equal(cloud, b.cloud_optical)
+    assert ref.shape == (3,)
 
 
 def test_multi_tilt_single_view_degrades_gracefully(monkeypatch):
@@ -339,8 +343,9 @@ def test_multi_tilt_single_view_degrades_gracefully(monkeypatch):
 
     out = _grasp_cloud_multi_tilt(FakeCtx(), ["can"])
     assert out is not None
-    cloud, snap = out
+    cloud, snap, ref = out
     assert snap is a.snap and np.array_equal(cloud, a.cloud_optical)
+    assert ref.shape == (3,)
 
 
 def test_multi_tilt_no_views_returns_none(monkeypatch):
