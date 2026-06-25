@@ -33,6 +33,7 @@ from tasks.skills import (
     place_object,
     recall_held_object,
 )
+from tasks.skills.locations import get_location_book, resolve_pose
 
 from . import prompts
 from .skills import (
@@ -71,12 +72,14 @@ class Order:
     status: OrderStatus = OrderStatus.DETECTED
 
 
+# Restaurant's one fixed nav waypoint -> its canonical name in the shared
+# LocationBook (the map editor's output), with the env var as fallback.
+_LOCATION_NAME = {"RESTAURANT_KITCHEN_BAR_POSE": "kitchen_bar"}
+
+
 def _pose(env_key: str, default: str = "0.0,0.0,0.0") -> tuple[float, float, float]:
-    parts = [p.strip() for p in os.getenv(env_key, default).split(",")]
-    if len(parts) != 3:
-        raise ValueError(f"{env_key}: expected 'x,y,heading_rad', got {parts!r}")
-    x, y, h = (float(p) for p in parts)
-    return x, y, h
+    """Map-frame waypoint: shared LocationBook (by name) -> *_POSE env var -> default."""
+    return resolve_pose(_LOCATION_NAME.get(env_key), env_fallback=env_key, default=default)
 
 
 def _int(env_key: str, default: str) -> int:
@@ -214,8 +217,12 @@ class GoToStart(SubTask):
 
     def run(self, ctx: TaskContext) -> StepResult:
         raw = os.getenv("RESTAURANT_KITCHEN_BAR_POSE", "current").strip().lower()
+        explicit = raw not in ("", "current", "here", "now")
 
-        if raw in ("", "current", "here", "now"):
+        # Drive only when a bar pose is actually defined — either an explicit env
+        # pose OR a "kitchen_bar" waypoint in the shared map. Otherwise keep the
+        # rulebook default: anchor on wherever the robot stands now and stay put.
+        if not explicit and not get_location_book().has("kitchen_bar"):
             # Start = current pose; stay put. Needs a genuine odometry fix to anchor.
             fix = _odom_fix(ctx)
             if not fix:
@@ -226,7 +233,7 @@ class GoToStart(SubTask):
                   f"({fix['x']:.2f}, {fix['y']:.2f}, {math.degrees(fix['heading']):.0f}deg); staying put")
             return StepResult.DONE
 
-        # Explicit map pose: drive there, then anchor on the pose we actually reached.
+        # Map/explicit bar pose: drive there, then anchor on the pose we actually reached.
         x, y, h = _pose("RESTAURANT_KITCHEN_BAR_POSE")
         ok = ctx.goto(x, y, h)
         # Key off a genuine odometry fix (None) — NOT coordinate truthiness: (0,0) is a

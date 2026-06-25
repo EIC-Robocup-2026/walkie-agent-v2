@@ -61,7 +61,6 @@ from tasks.skills import (
     lift_bbox_world_xy,
     match_people_to_seats,
     move_base_relative,
-    parse_pose,
     person_seat_anchor,
     recall_person_xy,
     remember_located_positions,
@@ -74,6 +73,7 @@ from tasks.skills import (
     tilt_head,
     wait_for_person,
 )
+from tasks.skills.locations import resolve_pose
 
 
 def _guest(ctx: TaskContext, n: int) -> dict:
@@ -93,7 +93,7 @@ class GoToDoor(SubTask):
 
     def run(self, ctx: TaskContext) -> StepResult:
         ctx.walkie.robot.arm.go_to_home(group_name="both_arms_lift", blocking=False)  # reset the arm for better nav
-        x, y, heading = parse_pose(os.getenv("HRI_DOOR_POSE", "0.0,0.0,0"))
+        x, y, heading = resolve_pose("entrance_door", env_fallback="HRI_DOOR_POSE", default="0.0,0.0,0")
         if not ctx.goto(x, y, heading):
             return StepResult.RETRY
         # Wait for the guest to come stand in front before greeting. Look
@@ -225,7 +225,7 @@ class GuideToLivingRoom(SubTask):
 
     def run(self, ctx: TaskContext) -> StepResult:
         ctx.say(prompts.FOLLOW_ME)
-        x, y, heading = parse_pose(os.getenv("HRI_LIVING_ROOM_POSE", "0.0,0.0,0"))
+        x, y, heading = resolve_pose("living_room", env_fallback="HRI_LIVING_ROOM_POSE", default="0.0,0.0,0")
         if not ctx.goto(x, y, heading):
             return StepResult.RETRY
         ctx.score("gaze_navigation")  # guided the guest, facing the navigation goal

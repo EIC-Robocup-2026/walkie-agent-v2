@@ -189,9 +189,9 @@ def place_object(ctx: TaskContext, destination: str, *, group: str | None = None
         "trash": "PNP_TRASH_BIN_POSE",
         "cabinet": "PNP_CABINET_POSE",
     }.get(destination)
-    if pose_key and os.getenv(pose_key):
-        from .subtasks import _pose  # local import: shared pose parser
+    from .subtasks import _has_pose, _pose  # local import: shared pose resolver
 
+    if pose_key and _has_pose(pose_key):  # waypoint in the map or the env var
         x, y, h = _pose(pose_key)
         ctx.goto(x, y, h)
     place_pose = (
