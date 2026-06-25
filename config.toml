@@ -48,12 +48,22 @@ WALKIE_ROBOT_IP = "127.0.0.1"
 
 [map]
 # Shared named-location ("map") file every challenge drives to (rooms + locations
-# with pose=[x,y,heading_rad], read by tasks/skills/locations.py). This is the
-# world.toml schema — an external map editor writes it. Empty = fall back to
-# $GPSR_WORLD_FILE, else GPSR's tasks/GPSR/world.toml, so one arena file serves
-# every challenge and the teach_poses tool already feeds them all. Each challenge
-# still falls back to its own *_POSE env var when the map lacks a name, so a box
-# with no map file keeps working. See docs/MAP_LOCATIONS.md.
+# with pose=[x,y,heading_rad], read by tasks/skills/locations.py; GPSR also reads
+# its object/name/gesture vocab from the same file). This is the world.toml schema
+# — the walkie-map-editor app (EIC-Robocup-2026/walkie-map-editor) exports it.
+#
+# GPSR_WORLD_FILE is the canonical knob: it is the ONE var BOTH resolvers honour
+# (tasks/skills/locations.py AND tasks/GPSR/world.py::load_world), so it covers all
+# FIVE challenges. Leave empty to fall back to the sibling tasks/GPSR/world.toml —
+# drop the editor's output there for zero-config — or set it to that file's path.
+GPSR_WORLD_FILE = ""
+#
+# WALKIE_MAP_FILE overrides the map for the four location-based challenges
+# (PnP / Restaurant / HRI / Laundry) ONLY. GPSR's load_world() does NOT read it, so
+# setting this alone leaves GPSR on the stale sibling file — prefer GPSR_WORLD_FILE
+# above. resolve_pose order: $WALKIE_MAP_FILE -> $GPSR_WORLD_FILE -> sibling. Each
+# challenge still falls back to its own *_POSE env var when the map lacks a name, so
+# a box with no map file keeps working. See docs/MAP_LOCATIONS.md.
 WALKIE_MAP_FILE = ""
 
 [runtime]
