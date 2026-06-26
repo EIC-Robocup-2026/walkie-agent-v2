@@ -93,6 +93,24 @@ WALKIE_GRAPHS_CAPTURE_ICP_MAX_ROT_DEG = "5"
 # Point budgets for the solve (uniform-stride subsampled source / assembled target).
 WALKIE_GRAPHS_CAPTURE_ICP_SRC_BUDGET = "20000"
 WALKIE_GRAPHS_CAPTURE_ICP_TGT_BUDGET = "40000"
+# Motion-aware correction budget. Odometry shifts while the robot drives and settles
+# when it stops, so a frame captured mid-motion needs a BIGGER correction than a still
+# one — a correction roughly equal to how far the robot moved since the last tick is
+# expected drift, not the degenerate solve the fixed MAX_TRANS_M / MAX_CORR_M caps above
+# would reject (and then ingest raw → smear). When adaptive, those caps are raised by
+# MOTION_GAIN × the measured per-tick translation, clamped to the *_CEIL_M ceilings; at
+# zero motion (settled) the caps are exactly the fixed ones — no change to still frames.
+# This is how Walkie keeps ingesting while moving instead of dropping motion frames.
+WALKIE_GRAPHS_CAPTURE_ICP_MOTION_ADAPTIVE = "1"
+WALKIE_GRAPHS_CAPTURE_ICP_MOTION_GAIN = "1.0"
+WALKIE_GRAPHS_CAPTURE_ICP_MAX_TRANS_CEIL_M = "0.6"
+WALKIE_GRAPHS_CAPTURE_ICP_MAX_CORR_CEIL_M = "0.5"
+# Near-field solve: stereo depth error grows ~quadratically with range, so far walls are
+# both the noisiest geometry AND dominate the budgeted source, pulling the fit toward
+# their own noise — "optimizing on the entire snapshot" is the wrong target. Restrict the
+# ICP source + target to points within this range (m) of the camera; the STORED clouds are
+# untouched (still lifted out to MAX_DEPTH_M). 0 disables (whole-frame solve, as before).
+WALKIE_GRAPHS_CAPTURE_ICP_MAX_RANGE_M = "3.0"
 # Open3D compute device for registration / large voxel ops: auto | cpu | cuda.
 # auto takes the GPU iff the installed Open3D build sees a CUDA device.
 WALKIE_GRAPHS_O3D_DEVICE = "auto"
@@ -285,7 +303,10 @@ WALKIE_GRAPHS_MERGE_RESCUE_MAX_ROT_DEG = "10"
 # Shadow/edge trails: the post-alignment voxel+SOR+DBSCAN chain erases sparse halos.
 # REFINE_CORR_M = 0 (code default) disables — enable in config.toml or temporarily
 # via env. REFINE_EVERY_N = 0 (code default) keeps the cadence off for tests.
-WALKIE_GRAPHS_REFINE_EVERY_N = "7"
+# Run a touch more often than the other maintenance passes: it is what converges the
+# early, mid-motion segments (lifted before odometry settled) onto the later settled
+# observations, so a faster cadence pays off the "keep ingesting while moving" choice.
+WALKIE_GRAPHS_REFINE_EVERY_N = "5"
 WALKIE_GRAPHS_REFINE_LIMIT = "3"
 WALKIE_GRAPHS_REFINE_CORR_M = "0.08"
 WALKIE_GRAPHS_REFINE_MIN_FITNESS = "0.6"

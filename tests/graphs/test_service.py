@@ -557,3 +557,65 @@ def test_write_snapshot_degrades_when_robot_pose_none(tmp_path):
     s._write_snapshot(frame, [], {})  # must not raise
     snap = json.loads(out.read_text())
     assert snap["objects"] == []
+
+
+# ---------------------------------------------------------------------------
+# Motion-aware capture ICP: inter-frame motion widens the correction budget
+# ---------------------------------------------------------------------------
+def test_update_motion_tracks_inter_frame_translation(svc):
+    from interfaces.perception.geometry import CameraPose
+
+    f1 = SimpleNamespace(cam=CameraPose(R=np.eye(3), t=np.array([0.0, 0.0, 0.0])))
+    f2 = SimpleNamespace(cam=CameraPose(R=np.eye(3), t=np.array([0.3, 0.0, 0.4])))
+    svc._update_motion(f1)  # first pose: no prev → motion stays 0
+    assert svc._last_motion_m == pytest.approx(0.0)
+    svc._update_motion(f2)  # moved 0.5 m
+    assert svc._last_motion_m == pytest.approx(0.5)
+    # A cam-less frame is unknown motion, not zero: leave the measure AND prev intact.
+    svc._update_motion(SimpleNamespace(cam=None))
+    assert svc._last_motion_m == pytest.approx(0.5)
+    assert np.array_equal(svc._prev_cam.t, f2.cam.t)
+
+
+def test_register_capture_motion_adaptive_widens_caps(monkeypatch, svc):
+    import services.walkie_graphs.service as service_mod
+
+    svc.capture_icp_max_corr_m = 0.25
+    svc.capture_icp_max_trans_m = 0.3
+    svc.capture_icp_max_corr_ceil_m = 0.5
+    svc.capture_icp_max_trans_ceil_m = 0.6
+    svc.capture_icp_motion_gain = 1.0
+    svc.capture_icp_motion_adaptive = True
+    svc.memory.icp_target_near = lambda *a, **k: np.ones((600, 3), np.float32)
+    cap = SimpleNamespace(
+        background=np.ones((600, 3), np.float32),
+        segments=[],
+        cam=SimpleNamespace(t=np.zeros(3)),
+    )
+    seen: dict = {}
+    monkeypatch.setattr(
+        service_mod, "register_capture", lambda capture, target, **kw: (seen.update(kw), capture)[1]
+    )
+
+    svc._last_motion_m = 0.0  # settled → fixed caps
+    svc._register_capture(cap)
+    assert seen["max_corr_dist"] == pytest.approx(0.25)
+    assert seen["max_trans_m"] == pytest.approx(0.3)
+
+    svc._last_motion_m = 0.1  # moving → caps widen by gain × motion
+    svc._register_capture(cap)
+    assert seen["max_corr_dist"] == pytest.approx(0.35)
+    assert seen["max_trans_m"] == pytest.approx(0.4)
+
+    svc._last_motion_m = 5.0  # large motion clamps to the ceilings
+    svc._register_capture(cap)
+    assert seen["max_corr_dist"] == pytest.approx(0.5)
+    assert seen["max_trans_m"] == pytest.approx(0.6)
+
+    svc.capture_icp_motion_adaptive = False  # off → fixed caps regardless of motion
+    svc._last_motion_m = 5.0
+    svc._register_capture(cap)
+    assert seen["max_corr_dist"] == pytest.approx(0.25)
+    assert seen["max_trans_m"] == pytest.approx(0.3)
+    # The near-field range is always forwarded to the solver.
+    assert "max_range_m" in seen

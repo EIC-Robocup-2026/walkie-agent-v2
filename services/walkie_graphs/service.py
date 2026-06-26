@@ -171,6 +171,34 @@ class WalkieGraphsService(threading.Thread):
         self.capture_icp_max_rot_deg = float(os.getenv("WALKIE_GRAPHS_CAPTURE_ICP_MAX_ROT_DEG", "5"))
         self.capture_icp_src_budget = int(os.getenv("WALKIE_GRAPHS_CAPTURE_ICP_SRC_BUDGET", "20000"))
         self.capture_icp_tgt_budget = int(os.getenv("WALKIE_GRAPHS_CAPTURE_ICP_TGT_BUDGET", "40000"))
+        # Motion-aware ICP budget: odometry drifts while the robot drives and settles
+        # when it stops, so a frame captured mid-motion needs a BIGGER correction than a
+        # still one — a correction of ~the distance moved since last tick is expected,
+        # not the degenerate solve the fixed cap would reject (→ raw ingest → smear). So
+        # when adaptive, the trans/corr caps are raised by motion_gain × the measured
+        # per-tick translation, clamped to the ceilings. At zero motion (settled) the
+        # caps are exactly the fixed ones above — today's precise behaviour.
+        self.capture_icp_motion_adaptive = os.getenv(
+            "WALKIE_GRAPHS_CAPTURE_ICP_MOTION_ADAPTIVE", "1"
+        ).strip().lower() in ("1", "true", "yes")
+        self.capture_icp_motion_gain = float(os.getenv("WALKIE_GRAPHS_CAPTURE_ICP_MOTION_GAIN", "1.0"))
+        self.capture_icp_max_trans_ceil_m = float(
+            os.getenv("WALKIE_GRAPHS_CAPTURE_ICP_MAX_TRANS_CEIL_M", "0.6")
+        )
+        self.capture_icp_max_corr_ceil_m = float(
+            os.getenv("WALKIE_GRAPHS_CAPTURE_ICP_MAX_CORR_CEIL_M", "0.5")
+        )
+        # Near-field registration: stereo depth error grows ~quadratically with range,
+        # so far walls are both the noisiest geometry AND dominate the budgeted source —
+        # they pull the solve toward their own noise. Restrict the ICP source + target
+        # to points within this range of the camera; the STORED clouds are untouched
+        # (still lifted out to MAX_DEPTH_M). 0 = off (whole-frame solve, as before).
+        self.capture_icp_max_range_m = float(os.getenv("WALKIE_GRAPHS_CAPTURE_ICP_MAX_RANGE_M", "3.0"))
+        # Per-tick inter-frame motion (m), updated in _observe_once from the camera
+        # pose delta; feeds the adaptive budget above. None-cam frames leave it stale
+        # but the prev-pose slot unchanged (a gap, not zero motion).
+        self._last_motion_m = 0.0
+        self._prev_cam = None
         # Background remainder: lift resolution, mask-union dilation (mask rims are
         # exactly where depth is least reliable), and the store's save cadence.
         self.bg_voxel_m = float(os.getenv("WALKIE_GRAPHS_BG_VOXEL_M", "0.05"))
@@ -342,6 +370,7 @@ class WalkieGraphsService(threading.Thread):
         frame = self._capture_frame()
         if frame is None:
             return []
+        self._update_motion(frame)
         t_det = time.perf_counter()
         # One fused round-trip: detect (+masks) and, for each eligible crop,
         # caption + CLIP-embed server-side. Caption/embed only run for kept
@@ -408,6 +437,25 @@ class WalkieGraphsService(threading.Thread):
                 f"capture window — skipping graph ingest for this frame"
             )
         return moved
+
+    def _update_motion(self, frame: FrameSnapshot) -> None:
+        """Record how far the camera moved since the last frame that carried a pose.
+
+        Stored on ``self._last_motion_m`` and consumed by :meth:`_register_capture` to
+        widen the ICP correction budget when the robot is moving (a big correction is
+        then *expected* drift, not a degenerate solve). The robot keeps moving while the
+        slow detection round-trip runs, so the capture-time pose ``frame.cam`` already
+        trails reality; the tick-to-tick delta is the best cheap proxy for that motion.
+        A ``cam``-less frame (no pose at capture) leaves the previous pose untouched —
+        the gap is unknown motion, not zero — and keeps the last measurement.
+        """
+        cam = frame.cam
+        if cam is None:
+            return
+        prev = self._prev_cam
+        if prev is not None:
+            self._last_motion_m = float(np.linalg.norm(cam.t - prev.t))
+        self._prev_cam = cam
 
     def _capture_frame(self) -> FrameSnapshot | None:
         """Read depth, RGB, camera pose, intrinsics, and robot pose as one atomic frame.
@@ -700,6 +748,13 @@ class WalkieGraphsService(threading.Thread):
         capture has nothing to align, or when the map target around the capture is
         still too thin to anchor a solve (cold start) — ``register_capture`` itself
         enforces the fitness and translation/rotation caps.
+
+        The correspondence/translation caps are widened by the robot's measured
+        per-tick motion (:meth:`_update_motion`): a frame captured while moving needs a
+        bigger correction than a settled one, so the fixed cap that would call it
+        degenerate is raised toward ``*_ceil_m`` instead. Both the solve source and the
+        map target are restricted to ``capture_icp_max_range_m`` of the camera so far,
+        noisy walls don't dominate the registration.
         """
         if self.capture_icp_max_corr_m <= 0:
             return capture
@@ -707,19 +762,33 @@ class WalkieGraphsService(threading.Thread):
         parts = [p for p in parts if len(p)]
         if not parts:
             return capture
+        # Motion-adaptive caps: settled frames (motion ≈ 0) keep the fixed caps.
+        max_corr = self.capture_icp_max_corr_m
+        max_trans = self.capture_icp_max_trans_m
+        if self.capture_icp_motion_adaptive and self._last_motion_m > 0:
+            extra = self.capture_icp_motion_gain * self._last_motion_m
+            max_corr = min(self.capture_icp_max_corr_ceil_m, self.capture_icp_max_corr_m + extra)
+            max_trans = min(self.capture_icp_max_trans_ceil_m, self.capture_icp_max_trans_m + extra)
         mins = np.min([p.min(axis=0) for p in parts], axis=0)
         maxs = np.max([p.max(axis=0) for p in parts], axis=0)
+        cam_t = capture.cam.t if capture.cam is not None else None
         target = self.memory.icp_target_near(
-            tuple(mins), tuple(maxs), pad=0.5, budget=self.capture_icp_tgt_budget
+            tuple(mins),
+            tuple(maxs),
+            pad=0.5,
+            budget=self.capture_icp_tgt_budget,
+            cam_t=cam_t,
+            max_range_m=self.capture_icp_max_range_m,
         )
         return register_capture(
             capture,
             target,
-            max_corr_dist=self.capture_icp_max_corr_m,
+            max_corr_dist=max_corr,
             min_fitness=self.capture_icp_min_fitness,
-            max_trans_m=self.capture_icp_max_trans_m,
+            max_trans_m=max_trans,
             max_rot_deg=self.capture_icp_max_rot_deg,
             src_budget=self.capture_icp_src_budget,
+            max_range_m=self.capture_icp_max_range_m,
         )
 
     def _passes_size_filters(self, d, img_area: int) -> bool:

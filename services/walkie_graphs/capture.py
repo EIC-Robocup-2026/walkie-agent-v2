@@ -156,6 +156,7 @@ def register_capture(
     max_rot_deg: float = 5.0,
     src_budget: int = 20_000,
     min_points: int = 500,
+    max_range_m: float = 0.0,
 ) -> Capture:
     """Solve ONE rigid correction for the whole capture against the map.
 
@@ -166,6 +167,13 @@ def register_capture(
     than plausible pose error is a degenerate solve (e.g. a corridor sliding
     along itself), and the capture ingests raw, exactly as if ICP were off.
     On accept, every segment and the background are transformed in place.
+
+    When ``max_range_m > 0`` the solve source is restricted to points within
+    that distance of the camera (``capture.cam.t``): stereo depth error grows
+    ~quadratically with range, so far walls are the noisiest geometry and would
+    otherwise dominate the budgeted source and pull the fit toward their noise.
+    The crop only affects the registration — the segments transformed on accept
+    (and the clouds they persist) are the full-range originals.
     """
     if max_corr_dist <= 0:
         return capture
@@ -174,6 +182,11 @@ def register_capture(
     if not parts:
         return capture
     src = np.vstack(parts)
+    if max_range_m > 0 and capture.cam is not None:
+        cam_t = np.asarray(capture.cam.t, dtype=np.float64)
+        near = src[np.linalg.norm(src - cam_t, axis=1) <= max_range_m]
+        if len(near) >= min_points:
+            src = near
     if len(src) < min_points or target_points is None or len(target_points) < min_points:
         return capture
     T, fitness = pcd_ops.icp(
