@@ -276,6 +276,7 @@ def go_to_through_door(
     ask_even_if_open: bool = False,
     retry_pause: Optional[float] = None,
     progress_eps: Optional[float] = None,
+    at_goal_m: Optional[float] = None,
     **request_kwargs,
 ) -> bool:
     """Navigate to a map pose, asking a human to open a door in the way.
@@ -306,22 +307,41 @@ def go_to_through_door(
       door problem — it just retries quietly instead of re-asking, so the operator
       isn't pestered again as the robot passes through.
 
+    A nav FAILURE *while the robot is already at the goal* is never a door: a
+    placement pose surveyed right at the furniture (a cabinet/table) routinely
+    returns FAILED because Nav2's goal checker can't settle on a pose touching an
+    obstacle, and the near surface then fills the depth box and reads "closed". So
+    before asking, if the robot is within ``at_goal_m`` metres of the goal this is
+    taken as reached. A genuinely blocking door leaves the robot far from the goal,
+    so this never suppresses the real arena-door ask.
+
     Returns True if the destination was reached, False otherwise. ``request_kwargs``
     pass through to :func:`request_open_door` (prompt, max_wait, …). ``retry_pause``
     defaults to env ``WALKIE_DOOR_RETRY_PAUSE_SEC`` (3 s); ``progress_eps`` to env
-    ``WALKIE_DOOR_PROGRESS_EPS_M`` (0.3 m).
+    ``WALKIE_DOOR_PROGRESS_EPS_M`` (0.3 m); ``at_goal_m`` to env
+    ``WALKIE_DOOR_AT_GOAL_M`` (0.5 m, ``<= 0`` disables the at-goal guard).
     """
     retry_pause = float(os.getenv("WALKIE_DOOR_RETRY_PAUSE_SEC", "3")) if retry_pause is None else retry_pause
     progress_eps = float(os.getenv("WALKIE_DOOR_PROGRESS_EPS_M", "0.3")) if progress_eps is None else progress_eps
+    at_goal_m = float(os.getenv("WALKIE_DOOR_AT_GOAL_M", "0.5")) if at_goal_m is None else at_goal_m
     if ctx.goto(x, y, heading_rad):
         return True
     prev_dist = _dist_to(ctx, x, y)
     for _ in range(max(1, door_attempts)):
+        cur_dist = _dist_to(ctx, x, y)
+        # Nav FAILED but the robot is already essentially at the goal -> not a door
+        # (the placement pose just sits on the furniture, so the goal checker can't
+        # settle and the near surface fills the depth box -> reads "closed"). Treat as
+        # reached rather than asking for a door that isn't there. Checked each retry so
+        # a door we drove through also stops here once we arrive.
+        if at_goal_m > 0 and cur_dist is not None and cur_dist <= at_goal_m:
+            print(f"[skills.door] nav FAILED but robot is {cur_dist:.2f} m from the goal "
+                  f"(<= {at_goal_m:.2f} m) — treating as reached, not a door")
+            return True
         door = is_door_open(ctx)  # True (open) / False (closed) / None (can't tell)
         if door is True and not ask_even_if_open:
             break  # positively open and not door-gated — nav failed for another reason
 
-        cur_dist = _dist_to(ctx, x, y)
         moved_through = (
             prev_dist is not None and cur_dist is not None and (prev_dist - cur_dist) > progress_eps
         )

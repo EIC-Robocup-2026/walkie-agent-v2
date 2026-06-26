@@ -20,6 +20,9 @@ and walkie-ai-server up for STT/TTS. No LLM/API key needed — entry uses neithe
     # Enter the arena -> stop at the instruction point -> (Enter) -> drive to the living
     # room, where a partition blocks nav and gets a "please open it" + retry:
     uv run python -m tasks.GPSR.tools.arena_entry --goto-room living_room
+    # Skip the instruction-point leg entirely and just drive to a named location (e.g.
+    # the instruction point is still an unset placeholder pose):
+    uv run python -m tasks.GPSR.tools.arena_entry --no-door --skip-instruction-point --goto-room cabinet
 
 Reads GPSR_INSTRUCTION_POINT_POSE, the world.toml room poses, and the WALKIE_DOOR_*
 thresholds from config, so it behaves identically to the real run.
@@ -72,7 +75,13 @@ def main() -> None:
                     help="after stopping at the instruction point, continue to this world.toml "
                          "room/location (e.g. living_room) — a partition/screen blocking the route "
                          "reads 'open' on depth but blocks nav, so it gets a 'please open it' + retry")
+    ap.add_argument("--skip-instruction-point", action="store_true",
+                    help="skip Leg 1 (the instruction-point visit) and drive straight to "
+                         "--goto-room — use when you just want to reach a named location, e.g. the "
+                         "instruction point is still an unset placeholder pose")
     args = ap.parse_args()
+    if args.skip_instruction_point and not args.goto_room:
+        ap.error("--skip-instruction-point requires --goto-room (there is nothing else to drive to)")
 
     disable_listening = os.getenv("DISABLE_LISTENING", "0").lower() in ("1", "true", "yes")
 
@@ -107,10 +116,14 @@ def main() -> None:
                       model=None, disable_listening=disable_listening)
 
     door_ok: bool | None = None
+    reached_ip: bool | None = None
     reached_room: bool | None = None
     try:
         # --- Leg 1: enter the arena and drive to the instruction point ---
-        if args.through_door:
+        if args.skip_instruction_point:
+            print(f"[step] --skip-instruction-point: not visiting the instruction point; "
+                  f"driving straight to {args.goto_room!r}...")
+        elif args.through_door:
             # Drive first; ask for the door only if the route is actually blocked.
             # ask_even_if_open mirrors the real entry: a partly-open door reads "open"
             # yet blocks nav, so a block still asks for it to be opened wider.
@@ -131,15 +144,25 @@ def main() -> None:
             reached_ip = go_to_through_door(ctx, ix, iy, ih, ask_even_if_open=True, door_attempts=3)
 
         # --- Stop at the instruction point, then Leg 2: drive to the room ---
-        if room_pose is not None and reached_ip:
-            ctx.say("I have reached the instruction point.")
-            print(f"\n[stop] reached the instruction point — stopped.")
-            _wait_enter(f"[step] press Enter to head to {args.goto_room!r} "
-                        f"(set up the partition first if needed)... ")
+        if room_pose is not None and (args.skip_instruction_point or reached_ip):
+            if not args.skip_instruction_point:
+                ctx.say("I have reached the instruction point.")
+                print(f"\n[stop] reached the instruction point — stopped.")
+                _wait_enter(f"[step] press Enter to head to {args.goto_room!r} "
+                            f"(set up the partition first if needed)... ")
             rx, ry, rh = room_pose
-            print(f"[step] go_to_through_door -> {args.goto_room!r}: driving; if a partition "
-                  f"blocks nav it will ask to open it, then retry...")
-            reached_room = go_to_through_door(ctx, rx, ry, rh, ask_even_if_open=True, door_attempts=3)
+            if args.no_door:
+                # --no-door means plain nav for *both* legs. Otherwise a placement pose
+                # that sits right at the furniture (cabinet/table) returns nav FAILED at
+                # the goal, the surface fills the depth box -> reads "closed", and
+                # go_to_through_door asks for a door that isn't there.
+                print(f"[step] --no-door: driving straight to {args.goto_room!r} "
+                      f"(plain nav, no door ask)...")
+                reached_room = ctx.goto(rx, ry, rh)
+            else:
+                print(f"[step] go_to_through_door -> {args.goto_room!r}: driving; if a partition "
+                      f"blocks nav it will ask to open it, then retry...")
+                reached_room = go_to_through_door(ctx, rx, ry, rh, ask_even_if_open=True, door_attempts=3)
     except KeyboardInterrupt:
         print("\n[abort] interrupted by user")
         return
@@ -149,12 +172,15 @@ def main() -> None:
     print("\n=== result ===")
     if door_ok is not None:
         print(f"door              : {'OPEN (confirmed)' if door_ok else 'proceeded after timeout'}")
-    print(f"instruction point : {'REACHED ✅' if reached_ip else 'NOT reached ❌'}")
+    if args.skip_instruction_point:
+        print(f"instruction point : SKIPPED (--skip-instruction-point)")
+    else:
+        print(f"instruction point : {'REACHED ✅' if reached_ip else 'NOT reached ❌'}")
     if reached_room is not None:
         print(f"room {args.goto_room:<12}: {'REACHED ✅' if reached_room else 'NOT reached ❌'}")
-    elif room_pose is not None and not reached_ip:
+    elif room_pose is not None and not args.skip_instruction_point and not reached_ip:
         print(f"room {args.goto_room:<12}: SKIPPED (never reached the instruction point)")
-    if not reached_ip or reached_room is False:
+    if (not args.skip_instruction_point and not reached_ip) or reached_room is False:
         print("  Nav did not reach a goal. If a door/partition is still in the way, check that "
               "the depth door-check (WALKIE_DOOR_*) is calibrated, or try --through-door so it "
               "re-asks on the block. Otherwise verify the destination pose / map.")

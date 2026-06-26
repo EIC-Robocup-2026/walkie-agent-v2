@@ -244,16 +244,27 @@ def test_partly_open_door_gives_up_after_attempts():
 def test_partly_open_door_stops_asking_once_driving_through():
     # Person opens the door; the robot starts driving through. The transit goto still
     # FAILs once (costmap clearing), but the robot has clearly advanced toward the goal
-    # -> it must NOT pester the operator again, just retry quietly.
+    # -> it must NOT pester the operator again, just retry quietly. The transit waypoint
+    # stays > WALKIE_DOOR_AT_GOAL_M (0.5 m) from the goal so the at-goal guard doesn't
+    # short-circuit it (that path is covered by the test below).
     ctx = _PoseNavCtx(
         2.5,                                           # depth reads open the whole time
         goto_results=[False, False, True],             # stuck, transit-fail, then arrive
-        poses=[(1.0, 0.5), (1.0, 0.5), (1.0, 1.9)],    # far, far (stuck), near (through)
+        poses=[(1.0, 0.5), (1.0, 0.5), (1.0, 1.0)],    # far, far (stuck), advanced 1.0 m short
     )
     assert go_to_through_door(ctx, 1.0, 2.0, 0.0,
                               ask_even_if_open=True, retry_pause=0.0, door_attempts=3) is True
     assert ctx.gotos == 3
     assert sum("all the way" in s.lower() for s in ctx.said) == 1    # asked ONCE, not on transit
+
+
+def test_nav_fails_at_goal_is_treated_as_reached_not_a_door():
+    # A placement pose surveyed right at the furniture (a cabinet/table): nav FAILs at
+    # the goal and the near surface fills the depth box (reads "closed"). The robot is
+    # already there, so it must count as reached, NOT ask for a door that isn't there.
+    ctx = _PoseNavCtx(0.6, goto_results=[False], poses=[(1.0, 1.8)])  # 0.2 m short, depth "closed"
+    assert go_to_through_door(ctx, 1.0, 2.0, 0.0, ask_even_if_open=True) is True
+    assert ctx.gotos == 1 and ctx.said == [] and ctx.listens == 0     # never asked
 
 
 def test_cannot_tell_still_asks_when_blocked():
