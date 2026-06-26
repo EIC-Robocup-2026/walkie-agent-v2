@@ -75,6 +75,7 @@ from interfaces.perception.surfaces import (
 from .navigation import (
     MotionPredictor,
     approach_point,
+    creep_base_relative,
     face_point,
     follow_person,
     heading_to_point,
@@ -151,6 +152,7 @@ __all__ = [
     "split_seat_regions",
     "MotionPredictor",
     "approach_point",
+    "creep_base_relative",
     "face_point",
     "follow_person",
     "heading_to_point",

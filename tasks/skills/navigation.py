@@ -13,6 +13,8 @@ import time
 from collections.abc import Sequence
 from contextlib import nullcontext
 
+from walkie_sdk.config.ros_topics import NAV_TOPICS
+
 from tasks.base import TaskContext
 
 from .geometry import BBox
@@ -199,6 +201,135 @@ def move_base_relative(
     except Exception as exc:
         print(f"[skills] move_base_relative: non-blocking go_to failed ({exc})")
         return False
+
+
+def creep_base_relative(
+    ctx: TaskContext,
+    forward_m: float,
+    left_m: float = 0.0,
+    *,
+    speed_mps: float | None = None,
+    tol_m: float | None = None,
+    hz: float | None = None,
+    hold_heading: bool = True,
+) -> bool:
+    """Nav2-free closed-loop relative translation for final precision docking.
+
+    Drives the omnidirectional base by publishing a body-frame velocity ``Twist``
+    straight to ``cmd_vel`` and integrating ODOMETRY displacement, stopping the
+    instant the travelled planar distance reaches ``hypot(forward_m, left_m)``.
+
+    This deliberately bypasses Nav2's planner / costmap / recovery behaviours,
+    which are exactly what make a short goal **right next to a table** back the
+    base up: the global planner routes around the inflated table obstacle, and/or
+    the local controller can't strafe and so maneuvers (rotate-translate-rotate) —
+    both read on the omni base as "it nudges itself backwards". Commanding the base
+    directly in its own frame removes all of that. Integrating odom (never map)
+    also sidesteps any map↔odom divergence — unlike ``move_base_relative``, which
+    adds the offset to the odom pose and hands the sum to ``nav.go_to`` as a *map*
+    goal — so the move ends exactly where asked relative to the start.
+
+    +forward_m = toward the base heading, +left_m = to its left (REP-103 /
+    actuator-agent convention; a backward step is a negative ``forward_m``).
+    Heading is held with a light P term on yaw when *hold_heading*.
+
+    Because the costmap that used to stop the base short of the table is gone, the
+    drive is hard-guarded: a slow default speed eased down near the goal, a stop
+    margin for publish/odom latency, a wall-clock timeout, and a guaranteed
+    zero-velocity stop in a ``finally`` (so any exception or early return halts the
+    base). Best-effort: True once the target displacement is reached, False on no
+    odom fix or an unavailable cmd_vel channel; never raises.
+    """
+    target = math.hypot(forward_m, left_m)
+    if target < 1e-3:
+        return True
+    speed = float(os.getenv("WALKIE_CREEP_SPEED_MPS", "0.08")) if speed_mps is None else speed_mps
+    tol = float(os.getenv("WALKIE_CREEP_TOL_M", "0.01")) if tol_m is None else tol_m
+    rate = float(os.getenv("WALKIE_CREEP_HZ", "15.0")) if hz is None else hz
+    min_speed = float(os.getenv("WALKIE_CREEP_MIN_SPEED_MPS", "0.03"))
+    kp_lin = float(os.getenv("WALKIE_CREEP_KP_LIN", "1.5"))
+    kp_yaw = float(os.getenv("WALKIE_CREEP_KP_YAW", "1.2"))
+    max_yaw = float(os.getenv("WALKIE_CREEP_MAX_YAW_RPS", "0.4"))
+    stall_eps = float(os.getenv("WALKIE_CREEP_STALL_EPS_M", "0.002"))
+    stall_sec = float(os.getenv("WALKIE_CREEP_STALL_SEC", "0.6"))
+
+    try:
+        nav = ctx.walkie.nav
+        topic = nav.cmd_vel_topic
+        transport = nav._transport  # same channel nav.stop() publishes its e-stop on
+        msg_type = NAV_TOPICS["cmd_vel_type"]
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        print(f"[skills] creep_base_relative: cmd_vel channel unavailable ({exc})")
+        return False
+
+    start = ctx.walkie.status.get_position()
+    if not start:
+        print("[skills] creep_base_relative: no odom fix; refusing to creep")
+        return False
+    x0, y0, h0 = start["x"], start["y"], start["heading"]
+    ux, uy = forward_m / target, left_m / target  # body-frame unit direction
+    dt = 1.0 / max(1.0, rate)
+    # one control cycle of coasting + a tolerance floor cover publish/odom latency
+    stop_margin = max(tol, speed * dt)
+    # Backstop sized to CRUISE speed (not min_speed): when odom drops out mid-loop
+    # `travelled` freezes at 0 and the only thing left to stop the base is this
+    # deadline, so it must reflect how fast we're actually commanding, not the slow
+    # ease-in floor — otherwise it's ~3x too loose and rides full speed into the table.
+    deadline = time.monotonic() + target / max(speed, 1e-3) + 1.0
+    max_stall = max(1, int(stall_sec * rate))  # cycles with no odom progress before bailing
+
+    def _publish(vx: float, vy: float, wz: float) -> None:
+        transport.publish(topic, msg_type, {
+            "linear": {"x": float(vx), "y": float(vy), "z": 0.0},
+            "angular": {"x": 0.0, "y": 0.0, "z": float(wz)},
+        })
+
+    print(f"[skills] creep_base_relative: fwd={forward_m:+.2f} left={left_m:+.2f} "
+          f"(|{target:.2f}|m @ {speed:.2f}m/s, Nav2-free)")
+    reached = False
+    best_travelled = 0.0
+    stalled = 0
+    try:
+        while time.monotonic() < deadline:
+            pose = ctx.walkie.status.get_position()
+            travelled = math.hypot(pose["x"] - x0, pose["y"] - y0) if pose else 0.0
+            remaining = target - travelled
+            if remaining <= stop_margin:
+                reached = True
+                break
+            # No-progress guard: while we ARE commanding motion, dead/frozen odom or a
+            # physically blocked base shows up as travelled not advancing. Bail rather
+            # than ride the deadline at full speed (the distance check can't trip on
+            # frozen odom — it reads the same stale value).
+            if travelled > best_travelled + stall_eps:
+                best_travelled = travelled
+                stalled = 0
+            else:
+                stalled += 1
+                if stalled >= max_stall:
+                    print("[skills] creep_base_relative: no odom progress "
+                          f"({travelled:.3f}m of {target:.2f}m); base stuck or odom "
+                          "stale — stopping")
+                    break
+            v = min(speed, max(min_speed, kp_lin * remaining))  # ease in to the goal
+            wz = 0.0
+            if hold_heading and pose:
+                yaw_err = math.atan2(math.sin(h0 - pose["heading"]),
+                                     math.cos(h0 - pose["heading"]))
+                wz = max(-max_yaw, min(max_yaw, kp_yaw * yaw_err))
+            _publish(v * ux, v * uy, wz)
+            time.sleep(dt)
+        else:
+            print("[skills] creep_base_relative: timed out before reaching target")
+    except Exception as exc:  # noqa: BLE001 — never let a creep raise mid-grasp
+        print(f"[skills] creep_base_relative: drive error ({exc}); stopping")
+    finally:
+        for _ in range(3):  # publish zero a few times so the stop isn't lost
+            try:
+                _publish(0.0, 0.0, 0.0)
+            except Exception:  # noqa: BLE001
+                break
+    return reached
 
 
 def tilt_head(ctx: TaskContext, angle_rad: float, *, settle: float = 0.0) -> None:

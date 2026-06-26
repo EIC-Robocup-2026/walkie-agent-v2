@@ -428,7 +428,6 @@ def execute_place(
             )
             print(f"[place] execute_place[{side}]: no lift; arm descent -> {res}")
 
-        input("[place] execute_place[{side}]: press Enter to release the object (or Ctrl-C to abort)")
         hand.gripper(1.0, blocking=True)  # open: release the object
 
         # Raise the lift back so the open gripper lifts straight up off the object

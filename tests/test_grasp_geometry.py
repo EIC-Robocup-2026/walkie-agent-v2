@@ -183,15 +183,10 @@ def test_face_object_points_heading_at_object():
 
 
 # --- align_arm_to_object ----------------------------------------------------
-class AlignNav:
-    """Records the absolute go_to target (a pure strafe keeps the heading)."""
-
-    def __init__(self):
-        self.last_goto = None
-
-    def go_to(self, x, y, heading=None, blocking=True):
-        self.last_goto = (x, y, heading)
-        return "SUCCEEDED"
+# align_arm_to_object now issues a pure lateral body-frame creep via
+# creep_base_relative (direct cmd_vel, NOT nav.go_to), so the tests capture the
+# (forward_m, left_m) it asks for rather than an absolute map goal. The strafe is
+# body-frame and therefore heading-independent by construction.
 
 
 class AlignTransform:
@@ -210,50 +205,61 @@ class AlignRobot:
 
 
 class AlignWalkie:
-    def __init__(self, transform, nav):
+    def __init__(self, transform):
         self.robot = AlignRobot(transform)
-        self.nav = nav
 
 
 class AlignCtx:
     def __init__(self, arm_left, x=0.0, y=0.0, heading=0.0):
         self._pose = {"x": x, "y": y, "heading": heading}
-        self.nav = AlignNav()
-        self.walkie = AlignWalkie(AlignTransform(arm_left), self.nav)
+        self.walkie = AlignWalkie(AlignTransform(arm_left))
 
     def current_pose(self):
         return self._pose
 
 
-def test_align_arm_strafes_to_put_object_in_front_of_arm():
+@pytest.fixture
+def captured_creep(monkeypatch):
+    """Capture (forward_m, left_m) handed to creep_base_relative; stub the drive out."""
+    calls = []
+
+    def fake_creep(ctx, forward_m, left_m=0.0, **kwargs):
+        calls.append((forward_m, left_m))
+        return True
+
+    monkeypatch.setattr("tasks.skills.grasp.creep_base_relative", fake_creep)
+    return calls
+
+
+def test_align_arm_strafes_to_put_object_in_front_of_arm(captured_creep):
     # Robot facing +x; left arm mounted +0.2 m to the left. Object dead ahead
-    # (0.6, 0) -> obj_left 0, so the base must strafe -0.2 m (to the right) to
-    # line the arm up: target = origin + (-0.2) * base_left_axis(0, 1) = (0, -0.2).
+    # (0.6, 0) -> obj_left 0, so the base must strafe -0.2 m (to the right, i.e.
+    # left_m = -0.2) to line the arm up, with no forward component.
     ctx = AlignCtx(arm_left=0.2)
     assert align_arm_to_object(ctx, (0.6, 0.0, 0.8), arm="left") is True
-    x, y, heading = ctx.nav.last_goto
-    assert (x, y) == pytest.approx((0.0, -0.2), abs=1e-9)
-    assert heading == pytest.approx(0.0)  # pure strafe: heading unchanged
+    forward_m, left_m = captured_creep[-1]
+    assert forward_m == pytest.approx(0.0, abs=1e-9)  # pure strafe, no creep
+    assert left_m == pytest.approx(-0.2, abs=1e-9)
 
 
-def test_align_arm_respects_heading():
-    # Robot facing +y; base +left axis is -x. Object at (0, 0.6) -> obj_left 0,
-    # arm_left 0.2 -> strafe -0.2 along (-1, 0) -> target (+0.2, 0).
+def test_align_arm_strafe_is_heading_independent(captured_creep):
+    # The strafe is a body-frame lateral creep, so the SAME object geometry
+    # relative to the arm yields the same strafe whatever the map heading. Robot
+    # facing +y with the object straight ahead (0, 0.6) -> obj_left 0, arm_left 0.2
+    # -> left_m -0.2, identical to the +x-facing case above.
     ctx = AlignCtx(arm_left=0.2, heading=math.pi / 2)
     align_arm_to_object(ctx, (0.0, 0.6, 0.8), arm="left")
-    x, y, heading = ctx.nav.last_goto
-    assert (x, y) == pytest.approx((0.2, 0.0), abs=1e-9)
-    assert heading == pytest.approx(math.pi / 2)
+    forward_m, left_m = captured_creep[-1]
+    assert forward_m == pytest.approx(0.0, abs=1e-9)
+    assert left_m == pytest.approx(-0.2, abs=1e-9)
 
 
-def test_align_arm_ignores_nav_failure():
-    # A nav that raises must not propagate — the strafe is best-effort.
+def test_align_arm_ignores_creep_failure(captured_creep, monkeypatch):
+    # A blocked/refused strafe (creep returns False) is best-effort — align still
+    # reports True so the grasp proceeds from wherever the base got to.
+    monkeypatch.setattr("tasks.skills.grasp.creep_base_relative",
+                        lambda *a, **k: False)
     ctx = AlignCtx(arm_left=0.2)
-
-    def boom(*a, **k):
-        raise RuntimeError("nav down")
-
-    ctx.nav.go_to = boom
     assert align_arm_to_object(ctx, (0.6, 0.0, 0.8), arm="left") is True
 
 

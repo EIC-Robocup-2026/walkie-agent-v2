@@ -456,7 +456,7 @@ class PickAndPlaceTestTask(SubTask):
         # 1. Pick — on success this records the held object (per arm) for the placer.
         if not pick_object(
             ctx, prompts=["bottle"], arm="left",
-            pregrasp_standoff_m=0.2, approach_preference="side", approach_weight=4.0,
+            pregrasp_standoff_m=0.2, approach_preference="side", approach_weight=1.0,
         ):
             print("[test] pick_object -> False; nothing to place")
             return StepResult.RETRY

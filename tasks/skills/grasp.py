@@ -25,7 +25,7 @@ from interfaces.devices.camera import camera_pose
 from interfaces.perception.dbscan import dbscan_labels, statistical_outlier_removal
 from interfaces.perception.geometry import voxel_downsample
 from tasks.base import TaskContext
-from tasks.skills.navigation import move_base_relative, tilt_head
+from tasks.skills.navigation import creep_base_relative, tilt_head
 
 Vec3 = tuple[float, float, float]
 
@@ -117,6 +117,143 @@ def _clean_object_cloud(pts: np.ndarray, *, ref_optical: np.ndarray | None = Non
         print(f"[grasp] cleanup: {pts.shape[0]} -> {best.shape[0]} pts "
               f"(dropped {pts.shape[0] - best.shape[0]})")
     return best
+
+
+# --- virtual-viewpoint transform (experiment) -------------------------------
+# Rigidly rotate the lifted object cloud into a virtual "side" or "top" viewpoint
+# before handing it to GraspNet, then rotate the returned grasps back into the true
+# optical frame so the rest of the pipeline (``_to_map_frame``) is unchanged. The
+# hypothesis: GraspNet generates better candidates when the graspable surface faces
+# the (virtual) camera square-on, rather than the real ~35deg-down oblique view. A
+# rigid rotation adds NO occluded data, so this is a generation-bias experiment, not a
+# coverage fix — see manual_tests/grasp_virtual_view.py for the A/B harness. Kept as
+# pure, robot-free helpers so they are unit-testable on a single saved cloud.
+def _rotation_between(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Minimal (geodesic) rotation matrix taking unit vector *a* onto unit vector *b*."""
+    a = np.asarray(a, dtype=float).reshape(3)
+    b = np.asarray(b, dtype=float).reshape(3)
+    v = np.cross(a, b)
+    s = float(np.linalg.norm(v))
+    c = float(a @ b)
+    if s < 1e-9:  # parallel (c>0 -> identity) or anti-parallel (c<0 -> 180deg)
+        if c > 0.0:
+            return np.eye(3)
+        axis = np.cross(a, np.array([1.0, 0.0, 0.0]))
+        if np.linalg.norm(axis) < 1e-9:
+            axis = np.cross(a, np.array([0.0, 1.0, 0.0]))
+        axis = axis / np.linalg.norm(axis)
+        return Rotation.from_rotvec(math.pi * axis).as_matrix()
+    return Rotation.from_rotvec(math.atan2(s, c) * (v / s)).as_matrix()
+
+
+def _virtual_view_rotation(
+    cloud_opt: np.ndarray, up_opt: np.ndarray, mode: str
+) -> tuple[np.ndarray, np.ndarray]:
+    """Rotation (about the cloud centroid) reorienting an optical cloud to a virtual view.
+
+    The lifted cloud is in the camera-optical frame (cam at origin, +Z forward, +Y
+    down). Walkie's head looks down at a fixed tilt, so the object is seen obliquely.
+    This returns a rigid rotation ``R_rel`` (in the optical frame) that, applied **about
+    the cloud centroid**, makes a *virtual* camera look:
+
+      - ``"side"``: horizontally at the object (undo the downward tilt) — virtual forward
+        is the horizontal projection of the current forward axis (same azimuth).
+      - ``"top"``: straight down at the object — virtual forward is gravity (down).
+      - ``"none"``: identity.
+
+    Rotating about the centroid preserves the object's range to the (virtual) camera, so
+    the cloud stays at the ~0.4-0.7 m standoff GraspNet expects. ``up_opt`` is world-up
+    expressed in the optical frame (``snap.cam.R.T @ [0,0,1]``); gravity = ``-up_opt``.
+
+    Returns ``(R_rel, centroid)``: ``R_rel`` a ``(3, 3)`` proper rotation (identity for
+    ``"none"`` or a degenerate gravity reference), ``centroid`` the ``(3,)`` median
+    point the rotation pivots about.
+    """
+    pts = np.asarray(cloud_opt, dtype=float)
+    c = np.median(pts, axis=0) if pts.shape[0] else np.zeros(3)
+    mode = (mode or "none").strip().lower()
+    if mode == "none":
+        return np.eye(3), c
+    if mode not in ("side", "top"):
+        raise ValueError(f"mode must be 'none', 'side', or 'top'; got {mode!r}")
+
+    u = np.asarray(up_opt, dtype=float).reshape(3)
+    nu = float(np.linalg.norm(u))
+    if nu < 1e-9:  # no gravity reference — leave the cloud untouched
+        return np.eye(3), c
+    u = u / nu
+
+    fwd = np.array([0.0, 0.0, 1.0])  # current optical viewing axis (camera at origin)
+    if mode == "side":
+        target = fwd - (fwd @ u) * u  # drop the vertical component -> horizontal look
+        nt = float(np.linalg.norm(target))
+        if nt < 1e-9:  # forward is (anti)parallel to up — nothing sensible to do
+            return np.eye(3), c
+        target = target / nt
+    else:  # "top"
+        target = -u  # look straight down (gravity)
+
+    # `target` is the world-direction we want the *virtual camera* to look along (in
+    # optical coords). Rotating the cloud by R_rel is equivalent to moving the camera by
+    # R_rel.T, so the virtual viewing axis is ``R_rel.T @ fwd``. To make that equal
+    # `target` we need ``R_rel @ target = fwd`` — i.e. the rotation taking target -> fwd,
+    # NOT fwd -> target. (Equivalently: this maps the object's target-facing surface
+    # normal onto virtual -Z so it faces the virtual camera.)
+    return _rotation_between(target, fwd), c
+
+
+def _apply_virtual_view(cloud_opt: np.ndarray, R_rel: np.ndarray, c: np.ndarray) -> np.ndarray:
+    """Rotate an optical cloud about centroid *c* by *R_rel* (point p -> R_rel @ (p-c) + c)."""
+    pts = np.asarray(cloud_opt, dtype=float)
+    return (pts - c) @ np.asarray(R_rel, dtype=float).T + c
+
+
+def _invert_grasp_virtual(
+    rotation: np.ndarray, translation, R_rel: np.ndarray, c: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Map a grasp returned in the virtual frame back to the true optical frame.
+
+    Inverse of :func:`_apply_virtual_view`: ``rot_opt = R_rel.T @ rot_v`` and
+    ``t_opt = R_rel.T @ (t_v - c) + c``. Returns ``(rot_opt (3,3), t_opt (3,))``.
+    """
+    R_rel = np.asarray(R_rel, dtype=float)
+    c = np.asarray(c, dtype=float).reshape(3)
+    t_v = np.asarray(translation, dtype=float).reshape(3)
+    rot_opt = R_rel.T @ np.asarray(rotation, dtype=float)
+    t_opt = R_rel.T @ (t_v - c) + c
+    return rot_opt, t_opt
+
+
+def _grasp_to_optical(g, R_rel: np.ndarray, c: np.ndarray):
+    """Return a copy of grasp *g* (virtual frame) re-expressed in the true optical frame.
+
+    Duck-typed on the client ``GraspPose`` dataclass (``rotation``/``translation``); the
+    grasp's frame-relative geometry (approach, width, score) is preserved — only the
+    frame it is expressed in changes. Ready to hand to :func:`_to_map_frame` unchanged.
+    """
+    rot_opt, t_opt = _invert_grasp_virtual(g.rotation, g.translation, R_rel, c)
+    return replace(
+        g, rotation=rot_opt,
+        translation=(float(t_opt[0]), float(t_opt[1]), float(t_opt[2])),
+    )
+
+
+def _resolve_virtual_view(setting: str, approach_preference: str) -> str:
+    """Resolve the ``WALKIE_GRASP_VIRTUAL_VIEW`` setting, expanding ``"auto"``.
+
+    ``"auto"`` couples the transform to the caller's *approach_preference* — so passing
+    ``approach_preference="side"`` both re-ranks AND rotates the cloud to a side view
+    (``"top"`` likewise; any other preference -> ``"none"``). Explicit ``"none"`` /
+    ``"side"`` / ``"top"`` pass through unchanged and are validated downstream by
+    :func:`_virtual_view_rotation`. Note the coupled "side" combo was the weakest arm in
+    the replay experiment (manual_tests/grasp_virtual_view.py), so ``"auto"`` is opt-in;
+    the default stays ``"none"``.
+    """
+    setting = (setting or "none").strip().lower()
+    if setting != "auto":
+        return setting
+    pref = (approach_preference or "none").strip().lower()
+    return pref if pref in ("side", "top") else "none"
 
 
 @dataclass
@@ -520,6 +657,23 @@ def get_object_grasp_pos(
         raw_cloud = cloud
         cloud = _clean_object_cloud(cloud, ref_optical=ref_optical)
         _draw_cloud_viz(ctx, snap, raw_cloud, cloud)
+
+        # Optional virtual-viewpoint transform (WALKIE_GRASP_VIRTUAL_VIEW, default "none").
+        # Rigidly rotate the cleaned cloud into a "side"/"top" virtual view so GraspNet
+        # *generates* grasps for that approach (which re-ranking alone cannot — it only
+        # reorders what GraspNet already proposes), then map the winning grasp back to the
+        # true optical frame so everything downstream is unchanged. Evidence in
+        # manual_tests/grasp_virtual_view.py: on a downward-tilted camera "top" can unlock
+        # steeper top-down grasps the oblique view never proposes, while "side" tends to
+        # produce unreachable grasps (the object's sides aren't captured at a down tilt).
+        # The footprint below is still measured on the UN-rotated `cloud`.
+        up_opt = snap.cam.R.T @ np.array([0.0, 0.0, 1.0])
+        vview = _resolve_virtual_view(
+            os.getenv("WALKIE_GRASP_VIRTUAL_VIEW", "none"), approach_preference
+        )
+        v_rot, v_center = _virtual_view_rotation(cloud, up_opt, vview)
+        cloud_infer = _apply_virtual_view(cloud, v_rot, v_center)
+
         infer_kwargs: dict = {"antipodal": antipodal, "max_grasps": 10}
         # Optional: feed GraspNet a finer/denser cloud (off by default). The cleaned object
         # cloud carries detail the server re-collapses at its 0.005 m voxel; a smaller voxel
@@ -532,14 +686,16 @@ def get_object_grasp_pos(
             infer_kwargs["num_point"] = int(server_npts)
         if approach_preference != "none":
             infer_kwargs["approach_preference"] = approach_preference
-            infer_kwargs["up"] = snap.cam.R.T @ np.array([0.0, 0.0, 1.0])
+            # Gravity must be expressed in the (possibly rotated) frame of the cloud sent.
+            infer_kwargs["up"] = v_rot @ up_opt
             if approach_weight is not None:
                 infer_kwargs["approach_weight"] = approach_weight
-        grasps = ctx.walkieAI.grasp.infer(cloud, **infer_kwargs)
+        grasps = ctx.walkieAI.grasp.infer(cloud_infer, **infer_kwargs)
         if not grasps:
             print("[grasp] GraspNet returned nothing")
             return False
-        g = grasps[0]
+        # Back to the true optical frame before lifting to map (no-op when vview="none").
+        g = _grasp_to_optical(grasps[0], v_rot, v_center)
         if best is not None and g.score <= best.score:
             return False
         best = _to_map_frame(snap, g, standoff_m)
@@ -932,16 +1088,14 @@ def align_arm_to_object(ctx: TaskContext, xyz_map: Vec3, *, arm: str = "left") -
               f"assuming arm on centreline")
     _, obj_left, _ = _world_to_base(ctx, xyz_map)
     strafe = obj_left - arm_left  # base must move this far +left to line the arm up
-    p = ctx.current_pose()
-    lx, ly = -math.sin(p["heading"]), math.cos(p["heading"])  # base +left axis in map frame
-    tx, ty = p["x"] + strafe * lx, p["y"] + strafe * ly
     print(f"[grasp] align_arm_to_object[{side}]: obj_left={obj_left:+.2f}m arm_left={arm_left:+.2f}m "
-          f"-> strafe {strafe:+.2f}m to ({tx:+.2f},{ty:+.2f})")
-    try:
-        res = ctx.walkie.nav.go_to(tx, ty, p["heading"], blocking=True)
-        print(f"[grasp] align_arm_to_object[{side}]: nav -> {res} (failure ignored)")
-    except Exception as exc:  # noqa: BLE001 — nav fail likely means already at the limit
-        print(f"[grasp] align_arm_to_object[{side}]: nav raised ({exc}); ignored")
+          f"-> strafe {strafe:+.2f}m")
+    # Pure lateral creep via direct cmd_vel — NOT nav.go_to. A tiny strafe goal next
+    # to a table makes Nav2 route around the inflation / maneuver, nudging the base
+    # backwards; the direct omni drive just slides sideways. Failure ignored: a
+    # short/blocked strafe usually means the footprint is already as far over as it
+    # can go, which is good enough to grasp from.
+    creep_base_relative(ctx, 0.0, strafe)
     return True
 
 
@@ -963,16 +1117,14 @@ def creep_to_grasp_distance(
     if dist <= target_m:
         return True
     advance = min(dist - target_m, max_advance_m)
-    p = ctx.current_pose()
-    fx, fy = math.cos(p["heading"]), math.sin(p["heading"])  # base +forward in map
-    tx, ty = p["x"] + advance * fx, p["y"] + advance * fy
     print(f"[grasp] creep_to_grasp_distance: {dist:.2f}m -> {target_m:.2f}m "
-          f"(advance {advance:+.2f}m to {tx:+.2f},{ty:+.2f})")
-    try:
-        res = ctx.walkie.nav.go_to(tx, ty, p["heading"], blocking=True)
-        print(f"[grasp] creep_to_grasp_distance: nav -> {res}")
-    except Exception as exc:  # noqa: BLE001 — creep is best-effort
-        print(f"[grasp] creep_to_grasp_distance: nav raised ({exc}); ignored")
+          f"(advance {advance:+.2f}m forward)")
+    # Pure forward creep via direct cmd_vel — NOT nav.go_to. With the object right at
+    # the table edge, the forward goal sits in Nav2's inflation layer, so the planner
+    # routes around it / the controller maneuvers and the base ends up backing off
+    # instead of closing in. A direct omni translation just drives straight at it.
+    # max_advance_m caps the open-loop reach so a bad estimate can't ram the table.
+    creep_base_relative(ctx, advance, 0.0)
     return True
 
 
@@ -1156,7 +1308,9 @@ def execute_grasp_with_retry(
         dy = strafe_m if side == "left" else -strafe_m
         print(f"[grasp] retry: repositioning base (back {back_m:.2f}m, strafe {dy:+.2f}m) "
               f"then re-executing the same candidate")
-        move_base_relative(ctx, dx=-back_m, dy=dy, blocking=True)
+        # Direct cmd_vel creep, not nav.go_to: these cm-scale repositions next to the
+        # table are exactly where Nav2 nudges backwards / refuses to strafe.
+        creep_base_relative(ctx, -back_m, dy)
     print(f"[grasp] grasp failed after {attempts} attempt(s)")
     return False
 
@@ -1170,9 +1324,9 @@ def pick_object(
     pregrasp_standoff_m: float = 0.10,
     approach_preference: str = "none",
     approach_weight: float | None = None,
-    optimal_standoff_m: float = 0.75,
-    approach_trigger_m: float = 0.80,
-    grasp_distance_m: float = 0.70,
+    optimal_standoff_m: float = 0.70,
+    approach_trigger_m: float = 0.75,
+    grasp_distance_m: float = 0.65,
     max_reach_xy_m: float = 0.80,
     min_grasp_z_m: float = 0.80,
     deadzone_half_m: float = 0.20,
@@ -1220,6 +1374,8 @@ def pick_object(
     pre-detected ``DetectedObject``) — import this one from ``tasks.skills``.
     """
     last_xyz: Vec3 | None = None
+
+    print(f"[grasp] pick_object: prompts={prompts} arm={arm} attempts={attempts} ")
 
     def _locate() -> ObjectLocation | None:
         # Face + tilt toward the last known position to centre the object in view
@@ -1308,6 +1464,7 @@ def pick_object(
         cand = get_object_grasp_pos(
             ctx, prompts, attempts=attempts, standoff_m=pregrasp_standoff_m,
             approach_preference=approach_preference, approach_weight=approach_weight,
+            # antipodal=False
         )
         if cand is None:
             print("[grasp] pick_object: grasp planning found nothing from the final pose")
