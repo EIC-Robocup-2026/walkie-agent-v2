@@ -76,7 +76,6 @@ book-first with the old env var as fallback (`resolve_pose(name, env_fallback=..
 | PnP | `trash_bin` | `PNP_TRASH_BIN_POSE` |
 | PnP | `breakfast_surface` | `PNP_BREAKFAST_SURFACE_POSE` |
 | PnP | `extra_surface` | `PNP_EXTRA_SURFACE_POSE` |
-| Restaurant | `kitchen_bar` | `RESTAURANT_KITCHEN_BAR_POSE` |
 | Laundry | `laundry_area` | `LAUNDRY_AREA_POSE` |
 | Laundry | `laundry_basket` | `LAUNDRY_BASKET_POSE` |
 | Laundry | `folding_table` | `LAUNDRY_TABLE_POSE` |
@@ -89,10 +88,12 @@ GPSR resolves arbitrary rooms/locations by name directly through its `WorldModel
 place.
 
 Notes:
-- **Restaurant** keeps its `"current"` sentinel: with no `kitchen_bar` in the map
-  *and* `RESTAURANT_KITCHEN_BAR_POSE` unset/`"current"`, the robot anchors the bar on
-  wherever it stands and does **not** drive (rulebook 5.5 — the arena isn't
-  pre-mapped). Define `kitchen_bar` (or set the env pose) to make it drive.
+- **Restaurant is deliberately NOT in the table above** — it never reads the shared
+  LocationBook. Rulebook 5.5 forbids a pre-mapped arena, so `GoToStart` anchors the
+  bar on wherever the robot is standing and does **not** drive. A `kitchen_bar`
+  waypoint in `world.toml` (e.g. defined for GPSR) is **ignored** by Restaurant. The
+  only override is an explicit `RESTAURANT_KITCHEN_BAR_POSE = "x,y,heading_rad"` env
+  pose (manual bring-up); its `"current"` sentinel keeps the anchor-in-place default.
 
 ### NOT in the map (arm-frame poses, deliberately excluded)
 

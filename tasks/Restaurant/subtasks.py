@@ -34,7 +34,7 @@ from tasks.skills import (
     place_object,
     recall_held_object,
 )
-from tasks.skills.locations import get_location_book, resolve_pose
+from tasks.skills.geometry import parse_pose
 
 from . import prompts
 from .skills import (
@@ -73,14 +73,17 @@ class Order:
     status: OrderStatus = OrderStatus.DETECTED
 
 
-# Restaurant's one fixed nav waypoint -> its canonical name in the shared
-# LocationBook (the map editor's output), with the env var as fallback.
-_LOCATION_NAME = {"RESTAURANT_KITCHEN_BAR_POSE": "kitchen_bar"}
-
-
 def _pose(env_key: str, default: str = "0.0,0.0,0.0") -> tuple[float, float, float]:
-    """Map-frame waypoint: shared LocationBook (by name) -> *_POSE env var -> default."""
-    return resolve_pose(_LOCATION_NAME.get(env_key), env_fallback=env_key, default=default)
+    """Bar pose from the env var ONLY — never the shared map (rulebook 5.5).
+
+    Restaurant is deliberately decoupled from the pre-map LocationBook: the arena
+    isn't surveyed in advance, so the bar is anchored on the robot's pose at
+    GoToStart, not a stored waypoint. An explicit ``RESTAURANT_KITCHEN_BAR_POSE``
+    stays available as a manual bring-up override (drive to a fixed pose); it never
+    falls through to a ``kitchen_bar`` map waypoint, even if one exists for GPSR.
+    """
+    raw = os.getenv(env_key)
+    return parse_pose(raw if raw and raw.strip() else default)
 
 
 def _int(env_key: str, default: str) -> int:
@@ -208,7 +211,11 @@ class GoToStart(SubTask):
     arena isn't pre-mapped (rulebook 5.5), so the start pose is only a relative
     reference — anchoring on the current pose means the operator just places the
     robot at the bar and runs, with no map pose to type each time. Set an explicit
-    ``"x,y,heading_rad"`` to drive to a fixed map pose instead (old behaviour).
+    ``"x,y,heading_rad"`` to drive to a fixed pose instead (manual override).
+
+    This step never reads the shared LocationBook: a ``kitchen_bar`` waypoint in
+    ``world.toml`` (e.g. defined for GPSR) is deliberately ignored here, so the
+    pre-map can never make Restaurant drive somewhere the rulebook forbids.
 
     Later phases re-acquire the bar/barman visually on return rather than trusting
     this point blindly (design doc §5.1).
@@ -220,10 +227,10 @@ class GoToStart(SubTask):
         raw = os.getenv("RESTAURANT_KITCHEN_BAR_POSE", "current").strip().lower()
         explicit = raw not in ("", "current", "here", "now")
 
-        # Drive only when a bar pose is actually defined — either an explicit env
-        # pose OR a "kitchen_bar" waypoint in the shared map. Otherwise keep the
-        # rulebook default: anchor on wherever the robot stands now and stay put.
-        if not explicit and not get_location_book().has("kitchen_bar"):
+        # Drive only when an explicit env pose is set. The shared pre-map is NEVER
+        # consulted (rulebook 5.5 — the arena isn't surveyed in advance), so the
+        # default is to anchor on wherever the robot stands now and stay put.
+        if not explicit:
             # Start = current pose; stay put. Needs a genuine odometry fix to anchor.
             fix = _odom_fix(ctx)
             if not fix:
@@ -234,7 +241,7 @@ class GoToStart(SubTask):
                   f"({fix['x']:.2f}, {fix['y']:.2f}, {math.degrees(fix['heading']):.0f}deg); staying put")
             return StepResult.DONE
 
-        # Map/explicit bar pose: drive there, then anchor on the pose we actually reached.
+        # Explicit env bar pose: drive there, then anchor on the pose we actually reached.
         x, y, h = _pose("RESTAURANT_KITCHEN_BAR_POSE")
         ok = ctx.goto(x, y, h)
         # Key off a genuine odometry fix (None) — NOT coordinate truthiness: (0,0) is a
