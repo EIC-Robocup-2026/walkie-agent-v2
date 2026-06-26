@@ -28,6 +28,7 @@ from enum import Enum, auto
 from tasks.base import StepResult, SubTask, Task, TaskContext
 from tasks.skills import (
     detect_surfaces,
+    get_object_grasp_pos,
     held_arms,
     pick_object,
     place_object,
@@ -407,6 +408,49 @@ class TestTask(SubTask):
         return StepResult.DONE if ok else StepResult.RETRY
 
 
+class GraspPlanTestTask(SubTask):
+    """Plan-only grasp test: call get_object_grasp_pos and print the candidate.
+
+    Runs the grasp PLANNER directly (tasks.skills.get_object_grasp_pos) on the
+    object(s) matching ``RESTAURANT_GRASP_PROMPTS`` (comma-separated; default
+    ``"red can"``) and prints the winning GraspCandidate — map-frame grasp /
+    pre-grasp points, gripper width, GraspNet score, approach axis, footprint, and
+    support surface. No base, arm, or head motion beyond the planner's own snapshots,
+    so it's the cheapest way to eyeball whether detection + GraspNet produce a sane
+    grasp from where the robot stands, before trusting the full pick motion (TestTask).
+    The approach bias mirrors TestTask (side / weight 2.0) so the printed candidate
+    matches what ``pick_object`` would actually plan.
+    """
+
+    critical = True
+
+    def run(self, ctx: TaskContext) -> StepResult:
+        raw = os.getenv("RESTAURANT_GRASP_PROMPTS", "red can")
+        prompts = [p.strip() for p in raw.split(",") if p.strip()]
+        if not prompts:
+            print("[test] grasp-plan: RESTAURANT_GRASP_PROMPTS is empty")
+            return StepResult.RETRY
+        print(f"[test] grasp-plan: planning a grasp for {prompts}")
+
+        cand = get_object_grasp_pos(
+            ctx, prompts,
+            approach_preference="side", approach_weight=2.0,
+        )
+        if cand is None:
+            print("[test] get_object_grasp_pos -> None (no graspable detection)")
+            return StepResult.RETRY
+
+        gx, gy, gz = cand.grasp_xyz
+        px, py, pz = cand.pregrasp_xyz
+        print(f"[test] get_object_grasp_pos -> grasp=({gx:+.3f},{gy:+.3f},{gz:+.3f})m "
+              f"pregrasp=({px:+.3f},{py:+.3f},{pz:+.3f})m "
+              f"width={cand.width:.3f}m score={cand.score:.3f}")
+        print(f"[test]   approach={cand.approach.round(3).tolist()} "
+              f"footprint={cand.object_footprint_m} support_z={cand.support_surface_z} "
+              f"grasp_to_surface_offset={cand.grasp_to_surface_offset}")
+        return StepResult.DONE
+
+
 class SurfaceScanTestTask(SubTask):
     """Read-only demo of surface perception (tasks.skills.detect_surfaces).
 
@@ -455,7 +499,7 @@ class PickAndPlaceTestTask(SubTask):
 
         # 1. Pick — on success this records the held object (per arm) for the placer.
         if not pick_object(
-            ctx, prompts=["bottle"], arm="left",
+            ctx, prompts=["cereal"], arm="left",
             pregrasp_standoff_m=0.2, approach_preference="side", approach_weight=2.0,
         ):
             print("[test] pick_object -> False; nothing to place")
@@ -496,6 +540,11 @@ def build_surface_demo(ctx: TaskContext) -> Task:
 def build_pick_demo(ctx: TaskContext) -> Task:
     """Pick-only demo (grasp skill) — detect -> approach -> grasp. No placement."""
     return Task("Restaurant-PickDemo", [TestTask()], ctx)
+
+
+def build_grasp_plan_demo(ctx: TaskContext) -> Task:
+    """Plan-only grasp test (get_object_grasp_pos) — print the candidate, no motion."""
+    return Task("Restaurant-GraspPlan", [GraspPlanTestTask()], ctx)
 
 
 def build_place_demo(ctx: TaskContext) -> Task:

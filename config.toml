@@ -194,6 +194,16 @@ WALKIE_GRASP_SERVER_VOXEL_M = "0.003"
 # cloud to a side view); note that coupled combo was the weakest arm in replay, so "auto"
 # is opt-in and the default stays "none".
 WALKIE_GRASP_VIRTUAL_VIEW = "auto"   # "none" | "side" | "top" | "auto" (follow approach_preference)
+# XY-recentring (EXPERIMENT, default off): before GraspNet, slide the cleaned object cloud so
+# its centroid sits on the camera optical axis (X=Y=0) while KEEPING its depth (Z) — the
+# winning grasp is mapped back, so nothing downstream changes. Composes with VIRTUAL_VIEW
+# (applies in every mode, including "none"). Motivation: GraspNet sometimes aims grasps toward
+# the frame centre when the object sits off-axis. Caveat: GraspNet-1Billion's PointNet++ backbone
+# is ~translation-invariant, so this may well be a no-op — A/B it first with
+# manual_tests/grasp_virtual_view.py (the "*+ctr" arms), raising WALKIE_GRASP_VV_REPEATS so
+# server-side sampling noise can't fake a difference. NEVER zero Z: that puts the object at the
+# camera, out of GraspNet's ~0.3-1.0 m training distribution.
+WALKIE_GRASP_CENTER_XY = "1"   # "1"/"true" to recentre the cloud's XY (depth kept) before GraspNet
 # Hard-drop "bottom-up" grasps when a side/top approach_preference is active: the max
 # allowed approach·up sent to the server's hemisphere filter (only it reads this). "0.0"
 # keeps only at/below-horizontal approaches (the true bottom-hemisphere cut); the server's
@@ -208,6 +218,20 @@ WALKIE_GRASP_MAX_APPROACH_UP = "0.0"
 WALKIE_GRASP_RETRY_ATTEMPTS = "3"    # max grasp executions per pick
 WALKIE_GRASP_RETRY_STRAFE_M = "0.08" # sideways base step between retries
 WALKIE_GRASP_RETRY_BACK_M = "0.05"   # backward base step between retries
+# Descriptor-prompt detection + CLIP rerank (tasks/skills/grasp.py): YOLOE is prompt-driven
+# and can't box brand names ("coke"), but under a generic visual descriptor ("can","red can")
+# it returns SEVERAL boxes — so we detect with descriptors (the _GRASP_DESCRIPTORS map),
+# then CLIP-rerank the boxes against the SPECIFIC target name and pick the best match.
+# "0" = exactly today's behaviour (single-prompt detect + nearest-wins); the real kill switch
+# if a server lacks per_detection embeddings. Gates BOTH prompt expansion and rerank.
+WALKIE_GRASP_CLIP_RERANK = "1"
+# CLIP cosine floor: drop boxes scoring below this against the target. "0.0" = pure rerank,
+# reject nothing (raw CLIP cosines on small crops are compressed; a high floor on UNTUNED
+# CLIP silently rejects the real target -> nearest fallback). RAISE only after on-robot tuning.
+WALKIE_GRASP_CLIP_SIM_THRESHOLD = "0.0"
+# CLIP text-query template ("{t}" = target); "a photo of {t}" beats a bare brand string
+# in CLIP zero-shot. Tune on-robot.
+WALKIE_GRASP_CLIP_QUERY_TMPL = "a photo of {t}"
 
 [skills]
 # Final-approach "creep" — direct cmd_vel closed-loop relative drive (NOT Nav2), used

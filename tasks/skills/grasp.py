@@ -48,6 +48,121 @@ def _b(name: str, default: str) -> bool:
     return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
 
 
+# --- descriptor-prompt detection + CLIP rerank ------------------------------
+# YOLOE is open-vocab but PROMPT-DRIVEN: it can't box a brand name ("coke") even
+# though the scene-graph loop already prompts it with that exact word. But under a
+# generic *visual* descriptor ("can", "red can") it returns SEVERAL boxes (the coke
+# plus neighbours). So we detect with descriptors, then CLIP-rerank the boxes against
+# the SPECIFIC target name to pick the right one. The correctness trap: detect with the
+# GENERIC descriptor, but embed_text the SPECIFIC target — embedding "can" scores every
+# can equally and defeats disambiguation. Keys are lowercased item names matching the
+# known set (services/walkie_graphs/config.toml WALKIE_GRAPHS_INTERESTED_CLASSES); the
+# descriptor wording is a starting point and must be tuned on-robot against YOLOE's vocab.
+_GRASP_DESCRIPTORS: dict[str, list[str]] = {
+    "coke": ["can", "red can", "soda can"],
+    "red bull": ["can", "blue can", "slim can", "energy drink can"],
+    "ice tea": ["bottle", "carton", "drink bottle"],
+    "orange juice": ["carton", "bottle", "juice carton"],
+    "milk": ["carton", "bottle", "milk carton"],
+    "water bottle": ["bottle", "clear bottle", "plastic bottle"],
+    "pringles": ["can", "tube", "cylindrical can", "chips can"],
+    "chips": ["bag", "snack bag", "chip bag"],
+    "cookies": ["box", "package", "snack box"],
+    "cornflakes": ["box", "cereal box"],
+    "instant noodles": ["cup", "package", "noodle cup"],
+    "tomato soup": ["can", "soup can"],
+    "mixed nuts": ["can", "jar", "package"],
+    "gum": ["box", "small box", "package"],
+    "hand cream": ["tube", "bottle"],
+    "soap": ["bottle", "box", "bar"],
+    "toothpaste": ["box", "tube"],
+}
+
+# Success-only cache for CLIP text embeddings, keyed by the formatted query. NOT
+# functools.lru_cache: that would pin a None failure forever and never retry the server.
+_TEXT_EMB_CACHE: dict[str, list[float]] = {}
+
+
+def _detection_prompts(prompts: list[str]) -> list[str]:
+    """Expand the caller's prompts with curated visual descriptors for CLIP rerank.
+
+    The first prompt is the human target (Restaurant passes ``[item]``); keep it first,
+    append its descriptors, dedup preserving order. Unknown items -> ``[target]`` (today's
+    behaviour, harmless under rerank). Returns *prompts* unchanged when rerank is off.
+    """
+    if not prompts or not _b("WALKIE_GRASP_CLIP_RERANK", "1"):
+        return list(prompts)
+    target = prompts[0].strip().lower()
+    out = list(prompts)
+    for d in _GRASP_DESCRIPTORS.get(target, []):
+        if d not in out:
+            out.append(d)
+    return out
+
+
+def _cosine(a, b) -> float:
+    """Cosine similarity of two vectors; 0.0 on degenerate (zero-norm/empty) input."""
+    a = np.asarray(a, dtype=float).reshape(-1)
+    b = np.asarray(b, dtype=float).reshape(-1)
+    if a.size == 0 or b.size == 0 or a.size != b.size:
+        return 0.0
+    na = float(np.linalg.norm(a))
+    nb = float(np.linalg.norm(b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return float(a @ b) / (na * nb)
+
+
+def _rank_by_clip(detections, text_emb, *, sim_floor: float):
+    """Rank detections by ``cosine(det.embedding, text_emb)`` descending.
+
+    Returns ``[(det, sim)]`` for detections whose cosine is ``>= sim_floor``. Returns
+    ``[]`` (the fall-back-to-nearest signal) when *text_emb* is falsy or no detection
+    carries an embedding. Pure: no network, no snapshot.
+    """
+    if not text_emb:
+        return []
+    scored = []
+    for d in detections:
+        emb = getattr(d, "embedding", None)
+        if not emb:
+            continue
+        sim = _cosine(emb, text_emb)
+        if sim >= sim_floor:
+            scored.append((d, sim))
+    scored.sort(key=lambda ds: ds[1], reverse=True)
+    return scored
+
+
+def _target_text_embedding(ctx, target: str) -> list[float] | None:
+    """CLIP text embedding for the SPECIFIC target, cached across one pick's many locates.
+
+    Builds the query via ``WALKIE_GRASP_CLIP_QUERY_TMPL`` (default ``"a photo of {t}"`` —
+    a bare brand string embeds poorly zero-shot). Returns ``None`` (never raises) on any
+    failure, so the next call retries (the cache stores successes only).
+    """
+    target = (target or "").strip()
+    if not target:
+        return None
+    tmpl = os.getenv("WALKIE_GRASP_CLIP_QUERY_TMPL", "a photo of {t}")
+    try:
+        key = tmpl.format(t=target)
+    except (KeyError, IndexError, ValueError):
+        key = target
+    cached = _TEXT_EMB_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        emb = ctx.walkieAI.image.embed_text(key)
+    except Exception as exc:  # noqa: BLE001 — network/empty-text; degrade to nearest
+        print(f"[grasp] embed_text failed for {key!r} ({exc}); CLIP rerank off this call")
+        return None
+    if emb:
+        _TEXT_EMB_CACHE[key] = list(emb)
+        return _TEXT_EMB_CACHE[key]
+    return None
+
+
 def _clean_object_cloud(pts: np.ndarray, *, ref_optical: np.ndarray | None = None) -> np.ndarray:
     """Strip residue noise from an object cloud before handing it to GraspNet.
 
@@ -147,13 +262,13 @@ def _rotation_between(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 
 def _virtual_view_rotation(
-    cloud_opt: np.ndarray, up_opt: np.ndarray, mode: str
-) -> tuple[np.ndarray, np.ndarray]:
-    """Rotation (about the cloud centroid) reorienting an optical cloud to a virtual view.
+    cloud_opt: np.ndarray, up_opt: np.ndarray, mode: str, *, center_xy: bool = False
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Rigid remap reorienting (and optionally recentring) an optical cloud for GraspNet.
 
     The lifted cloud is in the camera-optical frame (cam at origin, +Z forward, +Y
     down). Walkie's head looks down at a fixed tilt, so the object is seen obliquely.
-    This returns a rigid rotation ``R_rel`` (in the optical frame) that, applied **about
+    This returns a rotation ``R_rel`` (in the optical frame) that, applied **about
     the cloud centroid**, makes a *virtual* camera look:
 
       - ``"side"``: horizontally at the object (undo the downward tilt) — virtual forward
@@ -165,22 +280,35 @@ def _virtual_view_rotation(
     the cloud stays at the ~0.4-0.7 m standoff GraspNet expects. ``up_opt`` is world-up
     expressed in the optical frame (``snap.cam.R.T @ [0,0,1]``); gravity = ``-up_opt``.
 
-    Returns ``(R_rel, centroid)``: ``R_rel`` a ``(3, 3)`` proper rotation (identity for
-    ``"none"`` or a degenerate gravity reference), ``centroid`` the ``(3,)`` median
-    point the rotation pivots about.
+    When *center_xy* is set, the centroid is additionally repositioned so its **XY** sits
+    on the optical axis (lateral offset zeroed) while its **depth (Z) is kept** — the
+    object stays at the standoff GraspNet trained on; zeroing Z would put it at the camera,
+    out of distribution. This is orthogonal to the rotation: it applies in every mode
+    (including ``"none"``), as a pure translation. GraspNet-1Billion's PointNet++ backbone
+    is *approximately* translation-invariant, so in theory this is a near no-op — it exists
+    to A/B whether this particular server has any lateral-position dependence (see
+    manual_tests/grasp_virtual_view.py).
+
+    Returns ``(R_rel, c_in, c_out)``: ``R_rel`` a ``(3, 3)`` proper rotation (identity for
+    ``"none"`` or a degenerate gravity reference); ``c_in`` the ``(3,)`` median point the
+    rotation pivots about; ``c_out`` where that pivot lands afterwards — equal to ``c_in``
+    unless ``center_xy`` zeroes its XY.
     """
     pts = np.asarray(cloud_opt, dtype=float)
     c = np.median(pts, axis=0) if pts.shape[0] else np.zeros(3)
+    # Optional pure-translation recentring: drop the centroid's XY onto the optical axis,
+    # keep its depth. Orthogonal to the rotation, so it is computed once for every mode.
+    c_out = np.array([0.0, 0.0, c[2]]) if center_xy else c.copy()
     mode = (mode or "none").strip().lower()
     if mode == "none":
-        return np.eye(3), c
+        return np.eye(3), c, c_out
     if mode not in ("side", "top"):
         raise ValueError(f"mode must be 'none', 'side', or 'top'; got {mode!r}")
 
     u = np.asarray(up_opt, dtype=float).reshape(3)
     nu = float(np.linalg.norm(u))
-    if nu < 1e-9:  # no gravity reference — leave the cloud untouched
-        return np.eye(3), c
+    if nu < 1e-9:  # no gravity reference — leave the cloud's orientation untouched
+        return np.eye(3), c, c_out
     u = u / nu
 
     fwd = np.array([0.0, 0.0, 1.0])  # current optical viewing axis (camera at origin)
@@ -188,7 +316,7 @@ def _virtual_view_rotation(
         target = fwd - (fwd @ u) * u  # drop the vertical component -> horizontal look
         nt = float(np.linalg.norm(target))
         if nt < 1e-9:  # forward is (anti)parallel to up — nothing sensible to do
-            return np.eye(3), c
+            return np.eye(3), c, c_out
         target = target / nt
     else:  # "top"
         target = -u  # look straight down (gravity)
@@ -199,39 +327,51 @@ def _virtual_view_rotation(
     # `target` we need ``R_rel @ target = fwd`` — i.e. the rotation taking target -> fwd,
     # NOT fwd -> target. (Equivalently: this maps the object's target-facing surface
     # normal onto virtual -Z so it faces the virtual camera.)
-    return _rotation_between(target, fwd), c
+    return _rotation_between(target, fwd), c, c_out
 
 
-def _apply_virtual_view(cloud_opt: np.ndarray, R_rel: np.ndarray, c: np.ndarray) -> np.ndarray:
-    """Rotate an optical cloud about centroid *c* by *R_rel* (point p -> R_rel @ (p-c) + c)."""
+def _apply_virtual_view(
+    cloud_opt: np.ndarray, R_rel: np.ndarray, c_in: np.ndarray, c_out: np.ndarray | None = None
+) -> np.ndarray:
+    """Rigidly remap an optical cloud: ``p -> R_rel @ (p - c_in) + c_out``.
+
+    Rotates about ``c_in`` then places that pivot at ``c_out`` (defaults to ``c_in`` — a
+    pure rotation about the centroid). A ``c_out`` differing only in XY recentres the cloud
+    laterally without touching its depth or orientation.
+    """
+    c_in = np.asarray(c_in, dtype=float)
+    c_out = c_in if c_out is None else np.asarray(c_out, dtype=float)
     pts = np.asarray(cloud_opt, dtype=float)
-    return (pts - c) @ np.asarray(R_rel, dtype=float).T + c
+    return (pts - c_in) @ np.asarray(R_rel, dtype=float).T + c_out
 
 
 def _invert_grasp_virtual(
-    rotation: np.ndarray, translation, R_rel: np.ndarray, c: np.ndarray
+    rotation: np.ndarray, translation, R_rel: np.ndarray,
+    c_in: np.ndarray, c_out: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Map a grasp returned in the virtual frame back to the true optical frame.
 
     Inverse of :func:`_apply_virtual_view`: ``rot_opt = R_rel.T @ rot_v`` and
-    ``t_opt = R_rel.T @ (t_v - c) + c``. Returns ``(rot_opt (3,3), t_opt (3,))``.
+    ``t_opt = R_rel.T @ (t_v - c_out) + c_in``. With ``c_out is None`` this collapses to the
+    pure-rotation case (``c_out = c_in``). Returns ``(rot_opt (3,3), t_opt (3,))``.
     """
     R_rel = np.asarray(R_rel, dtype=float)
-    c = np.asarray(c, dtype=float).reshape(3)
+    c_in = np.asarray(c_in, dtype=float).reshape(3)
+    c_out = c_in if c_out is None else np.asarray(c_out, dtype=float).reshape(3)
     t_v = np.asarray(translation, dtype=float).reshape(3)
     rot_opt = R_rel.T @ np.asarray(rotation, dtype=float)
-    t_opt = R_rel.T @ (t_v - c) + c
+    t_opt = R_rel.T @ (t_v - c_out) + c_in
     return rot_opt, t_opt
 
 
-def _grasp_to_optical(g, R_rel: np.ndarray, c: np.ndarray):
+def _grasp_to_optical(g, R_rel: np.ndarray, c_in: np.ndarray, c_out: np.ndarray | None = None):
     """Return a copy of grasp *g* (virtual frame) re-expressed in the true optical frame.
 
     Duck-typed on the client ``GraspPose`` dataclass (``rotation``/``translation``); the
     grasp's frame-relative geometry (approach, width, score) is preserved — only the
     frame it is expressed in changes. Ready to hand to :func:`_to_map_frame` unchanged.
     """
-    rot_opt, t_opt = _invert_grasp_virtual(g.rotation, g.translation, R_rel, c)
+    rot_opt, t_opt = _invert_grasp_virtual(g.rotation, g.translation, R_rel, c_in, c_out)
     return replace(
         g, rotation=rot_opt,
         translation=(float(t_opt[0]), float(t_opt[1]), float(t_opt[2])),
@@ -298,7 +438,8 @@ class ObjectLocation:
     cloud_optical: np.ndarray
     snap: object
     range_m: float
-    confidence: float | None = None
+    confidence: float | None = None  # detector confidence (drives multi-tilt tie-break)
+    clip_sim: float | None = None  # CLIP cosine to the target (None on the nearest-wins path)
 
 
 def _to_map_frame(snap, g, standoff_m: float) -> GraspCandidate:
@@ -328,6 +469,91 @@ def _optical_ref(loc: "ObjectLocation") -> np.ndarray:
     return (np.asarray(loc.xyz_map, dtype=float) - loc.snap.cam.t) @ loc.snap.cam.R
 
 
+def _detect_and_lift(
+    ctx: TaskContext,
+    snap,
+    prompts: list[str],
+    *,
+    voxel: float,
+    erode_px: int,
+    min_points: int,
+    min_confidence: float,
+) -> tuple[np.ndarray, float, float | None, float | None] | None:
+    """One detect (descriptor prompts + per-detection embed) -> the chosen object's cloud.
+
+    Shared by :func:`locate_object` and the best-of-N loop in
+    :func:`get_object_grasp_pos`. Expands *prompts* with visual descriptors, runs masked
+    detection (requesting per-crop CLIP embeddings in the SAME round trip), drops
+    detections below *min_confidence*, and selects:
+
+      * **CLIP-similarity-first** — when rerank is on and there is more than one box to
+        disambiguate, embed the SPECIFIC target text once and keep the highest-cosine box
+        that lifts to ``>= min_points``;
+      * **nearest-wins fallback** — when rerank is off, no target/embeddings are available,
+        or every CLIP pick lifts too sparse: the smallest-median-range box (today's rule).
+
+    Returns ``(cloud_optical, range_m, det_confidence, clip_sim)`` or ``None`` (never
+    raises). ``clip_sim`` is ``None`` on the fallback path.
+    """
+    det_prompts = _detection_prompts(prompts)
+    rerank_on = _b("WALKIE_GRASP_CLIP_RERANK", "1")
+
+    detections = None
+    if rerank_on:
+        try:
+            # detect() can't pass per_detection, so call process() directly to get masks
+            # AND per-crop CLIP embeddings in one round trip (client/image.py).
+            res = ctx.walkieAI.image.process(
+                snap.img,
+                detection={"prompts": det_prompts, "return_mask": True},
+                per_detection={"embed": True},
+            )
+            detections = res.detection or []
+        except Exception as exc:  # noqa: BLE001 — degrade to a plain masked detect
+            print(f"[grasp] detect+embed failed ({exc}); falling back to plain detect")
+            detections = None
+    if detections is None:
+        detections = ctx.walkieAI.image.detect(snap.img, prompts=det_prompts, return_mask=True)
+
+    detections = [
+        d for d in detections
+        if d.mask is not None
+        and (d.confidence is None or d.confidence >= min_confidence)
+    ]
+    if not detections:
+        return None
+
+    def _lift(det):
+        pts = snap.mask_to_points(det.mask, voxel=voxel, frame="optical", erode_px=erode_px)
+        if pts.shape[0] < min_points:
+            return None
+        return pts, float(np.median(np.linalg.norm(pts, axis=1)))
+
+    # CLIP rerank — only worth a text-embed call when there's more than one box to tell apart.
+    if rerank_on and len(detections) > 1:
+        text_emb = _target_text_embedding(ctx, prompts[0] if prompts else "")
+        scored = _rank_by_clip(
+            detections, text_emb,
+            sim_floor=_f("WALKIE_GRASP_CLIP_SIM_THRESHOLD", "0.0"),
+        )
+        for det, sim in scored:
+            lifted = _lift(det)
+            if lifted is not None:
+                pts, rng = lifted
+                return pts, rng, det.confidence, sim
+
+    # Fallback: nearest-wins among the (expanded) detections — today's selector.
+    best = None
+    for det in detections:
+        lifted = _lift(det)
+        if lifted is None:
+            continue
+        pts, rng = lifted
+        if best is None or rng < best[1]:
+            best = (pts, rng, det.confidence, None)
+    return best
+
+
 def locate_object(
     ctx: TaskContext,
     prompts: list[str],
@@ -342,50 +568,37 @@ def locate_object(
 
     The fast "where is it" primitive ``pick_object`` uses to position the base/head
     before committing to the (expensive) grasp plan. Takes a snapshot (or reuses
-    *snap*), runs masked open-vocab detection, drops detections below
-    *min_confidence*, lifts each surviving mask to a camera-optical cloud and keeps
-    the **nearest** (smallest median range — easiest to reach, least likely a
-    far-away false positive). Returns the lifted cloud plus the map-frame centroid,
-    or ``None`` (never raises) when nothing graspable is in view.
+    *snap*), runs masked open-vocab detection (descriptor prompts + CLIP rerank — see
+    :func:`_detect_and_lift`), drops detections below *min_confidence*, and lifts the
+    chosen detection's mask to a camera-optical cloud: the **CLIP-best** box matching
+    the target when rerank disambiguates several, else the **nearest** (smallest median
+    range). Returns the lifted cloud plus the map-frame centroid, or ``None`` (never
+    raises) when nothing graspable is in view.
     """
     snap = snap if snap is not None else ctx.snapshot()
     if snap is None or not snap.has_geometry:
         print("[grasp] locate: no snapshot geometry (is the ZED running?)")
         return None
 
-    detections = ctx.walkieAI.image.detect(snap.img, prompts=prompts, return_mask=True)
-    detections = [
-        d for d in detections
-        if d.mask is not None
-        and (d.confidence is None or d.confidence >= min_confidence)
-    ]
-    if not detections:
-        print(f"[grasp] locate: no masked detections for {prompts} "
-              f"(confidence >= {min_confidence})")
+    found = _detect_and_lift(
+        ctx, snap, prompts, voxel=voxel, erode_px=erode_px,
+        min_points=min_points, min_confidence=min_confidence,
+    )
+    if found is None:
+        print(f"[grasp] locate: no graspable detection for {prompts} "
+              f"(confidence >= {min_confidence}, lifted >= {min_points} pts)")
         return None
-
-    cloud: np.ndarray | None = None
-    nearest_range = float("inf")
-    nearest_conf: float | None = None
-    for det in detections:
-        pts = snap.mask_to_points(det.mask, voxel=voxel, frame="optical", erode_px=erode_px)
-        if pts.shape[0] < min_points:
-            continue
-        rng = float(np.median(np.linalg.norm(pts, axis=1)))
-        if rng < nearest_range:
-            nearest_range, cloud, nearest_conf = rng, pts, det.confidence
-    if cloud is None:
-        print(f"[grasp] locate: no detection lifted >= {min_points} pts — too far/occluded?")
-        return None
+    cloud, nearest_range, nearest_conf, clip_sim = found
 
     cm = cloud @ snap.cam.R.T + snap.cam.t
     xyz = np.median(cm, axis=0)
     xyz_map = (float(xyz[0]), float(xyz[1]), float(xyz[2]))
+    sim_str = f" clip={clip_sim:.3f}" if clip_sim is not None else ""
     print(f"[grasp] locate: {prompts} at ({xyz_map[0]:+.2f},{xyz_map[1]:+.2f},"
-          f"{xyz_map[2]:+.2f}) range={nearest_range:.2f}m conf={nearest_conf}")
+          f"{xyz_map[2]:+.2f}) range={nearest_range:.2f}m conf={nearest_conf}{sim_str}")
     return ObjectLocation(
         xyz_map=xyz_map, cloud_optical=cloud, snap=snap,
-        range_m=nearest_range, confidence=nearest_conf,
+        range_m=nearest_range, confidence=nearest_conf, clip_sim=clip_sim,
     )
 
 
@@ -667,12 +880,21 @@ def get_object_grasp_pos(
         # steeper top-down grasps the oblique view never proposes, while "side" tends to
         # produce unreachable grasps (the object's sides aren't captured at a down tilt).
         # The footprint below is still measured on the UN-rotated `cloud`.
+        #
+        # Optional XY-recentring (WALKIE_GRASP_CENTER_XY, default off): drop the cloud's
+        # lateral offset onto the optical axis before inference (depth kept), mapping the
+        # winning grasp back afterwards. Orthogonal to the rotation above — it composes with
+        # any vview, including "none". Theory says GraspNet (PointNet++) is ~translation-
+        # invariant so this is near no-op; it's a knob to A/B that on the real server.
         up_opt = snap.cam.R.T @ np.array([0.0, 0.0, 1.0])
         vview = _resolve_virtual_view(
             os.getenv("WALKIE_GRASP_VIRTUAL_VIEW", "none"), approach_preference
         )
-        v_rot, v_center = _virtual_view_rotation(cloud, up_opt, vview)
-        cloud_infer = _apply_virtual_view(cloud, v_rot, v_center)
+        center_xy = _b("WALKIE_GRASP_CENTER_XY", "0")
+        v_rot, v_center, v_center_out = _virtual_view_rotation(
+            cloud, up_opt, vview, center_xy=center_xy
+        )
+        cloud_infer = _apply_virtual_view(cloud, v_rot, v_center, v_center_out)
 
         infer_kwargs: dict = {"antipodal": antipodal, "max_grasps": 10}
         # Optional: feed GraspNet a finer/denser cloud (off by default). The cleaned object
@@ -708,8 +930,9 @@ def get_object_grasp_pos(
         if not grasps:
             print("[grasp] GraspNet returned nothing")
             return False
-        # Back to the true optical frame before lifting to map (no-op when vview="none").
-        g = _grasp_to_optical(grasps[0], v_rot, v_center)
+        # Back to the true optical frame before lifting to map (no-op when vview="none"
+        # and center_xy off).
+        g = _grasp_to_optical(grasps[0], v_rot, v_center, v_center_out)
         if best is not None and g.score <= best.score:
             return False
         best = _to_map_frame(snap, g, standoff_m)
@@ -757,35 +980,19 @@ def get_object_grasp_pos(
                 print(f"[grasp] {tag}: no snapshot geometry (is the ZED running?)")
                 continue
 
-            detections = ctx.walkieAI.image.detect(snap.img, prompts=prompts, return_mask=True)
-            detections = [
-                d for d in detections
-                if d.mask is not None
-                and (d.confidence is None or d.confidence >= min_confidence)
-            ]
-            if not detections:
-                print(f"[grasp] {tag}: no masked detections for {prompts} "
-                      f"(confidence >= {min_confidence})")
+            # Detect + CLIP-rerank + lift the chosen object via the shared path (so the
+            # best-of-N loop disambiguates brand items the same way locate_object does).
+            # Passing snap reuses this attempt's frame; ref_optical anchors the cleanup
+            # on the detection centroid (the old inline loop passed none).
+            loc = locate_object(
+                ctx, prompts, voxel=voxel, erode_px=erode_px,
+                min_points=min_points, min_confidence=min_confidence, snap=snap,
+            )
+            if loc is None:
+                print(f"[grasp] {tag}: no graspable detection for {prompts}")
                 continue
 
-            # Lift every surviving detection and keep the one closest to the camera.
-            # The cloud is in the optical frame (camera at the origin, looking down
-            # +Z), so the median point range is the object's distance; the nearest is
-            # easiest to reach and least likely to be a far-away false positive.
-            cloud = None
-            nearest_range = float("inf")
-            for det in detections:
-                pts = snap.mask_to_points(det.mask, voxel=voxel, frame="optical", erode_px=erode_px)
-                if pts.shape[0] < min_points:
-                    continue
-                rng = float(np.median(np.linalg.norm(pts, axis=1)))
-                if rng < nearest_range:
-                    nearest_range, cloud = rng, pts
-            if cloud is None:
-                print(f"[grasp] {tag}: no detection lifted >= {min_points} pts — too far/occluded?")
-                continue
-
-            _infer_best(cloud, snap)
+            _infer_best(loc.cloud_optical, loc.snap, ref_optical=_optical_ref(loc))
 
         if best is None:
             print(f"[grasp] no graspable detection for {prompts} in {attempts} attempt(s)")

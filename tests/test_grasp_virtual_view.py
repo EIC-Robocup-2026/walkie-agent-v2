@@ -69,15 +69,16 @@ def test_rotation_between_antiparallel_flips():
 # --- _virtual_view_rotation -------------------------------------------------
 def test_virtual_view_none_is_identity_about_median():
     cloud = np.array([[0.0, 0.0, 0.4], [0.1, 0.0, 0.5], [-0.1, 0.05, 0.45]])
-    R, c = _virtual_view_rotation(cloud, _tilted_camera_up_opt(0.6), "none")
+    R, c, c_out = _virtual_view_rotation(cloud, _tilted_camera_up_opt(0.6), "none")
     assert np.allclose(R, np.eye(3))
     assert np.allclose(c, np.median(cloud, axis=0))
+    assert np.allclose(c_out, c)  # center_xy defaults off -> pivot unchanged
 
 
 def test_virtual_view_side_makes_viewing_axis_horizontal():
     up = _tilted_camera_up_opt(np.deg2rad(35.0))
     cloud = np.random.default_rng(0).uniform(-0.05, 0.05, size=(200, 3)) + [0, 0, 0.5]
-    R, _ = _virtual_view_rotation(cloud, up, "side")
+    R, _, _ = _virtual_view_rotation(cloud, up, "side")
     assert _is_proper_rotation(R)
     # Rotating the cloud by R is equivalent to moving the camera by R.T, so the virtual
     # viewing axis (in optical coords) is R.T @ forward. For "side" it must be horizontal
@@ -90,7 +91,7 @@ def test_virtual_view_top_makes_viewing_axis_point_down():
     up = _tilted_camera_up_opt(np.deg2rad(35.0))
     up_unit = up / np.linalg.norm(up)
     cloud = np.random.default_rng(1).uniform(-0.05, 0.05, size=(200, 3)) + [0, 0, 0.5]
-    R, _ = _virtual_view_rotation(cloud, up, "top")
+    R, _, _ = _virtual_view_rotation(cloud, up, "top")
     assert _is_proper_rotation(R)
     view_axis = R.T @ np.array([0.0, 0.0, 1.0])  # virtual viewing axis, optical frame
     assert np.allclose(view_axis, -up_unit, atol=1e-9)  # looks straight down
@@ -102,8 +103,8 @@ def test_rotated_up_is_minus_y_for_side_minus_z_for_top(deg):
     side view and -Z for a top view, pose-independently (no-roll camera)."""
     up = _tilted_camera_up_opt(np.deg2rad(deg))
     cloud = np.full((5, 3), [0.0, 0.0, 0.5])
-    R_side, _ = _virtual_view_rotation(cloud, up, "side")
-    R_top, _ = _virtual_view_rotation(cloud, up, "top")
+    R_side, _, _ = _virtual_view_rotation(cloud, up, "side")
+    R_top, _, _ = _virtual_view_rotation(cloud, up, "top")
     assert np.allclose(R_side @ up, [0.0, -1.0, 0.0], atol=1e-9)
     assert np.allclose(R_top @ up, [0.0, 0.0, -1.0], atol=1e-9)
 
@@ -113,13 +114,13 @@ def test_virtual_view_top_faces_top_surface_at_camera():
     up = _tilted_camera_up_opt(np.deg2rad(35.0))
     up_unit = up / np.linalg.norm(up)
     cloud = np.random.default_rng(5).uniform(-0.05, 0.05, size=(200, 3)) + [0, 0, 0.5]
-    R, _ = _virtual_view_rotation(cloud, up, "top")
+    R, _, _ = _virtual_view_rotation(cloud, up, "top")
     assert np.allclose(R @ up_unit, [0.0, 0.0, -1.0], atol=1e-9)
 
 
 def test_virtual_view_zero_up_is_identity():
     cloud = np.array([[0.0, 0.0, 0.4], [0.1, 0.0, 0.5]])
-    R, _ = _virtual_view_rotation(cloud, np.zeros(3), "side")
+    R, _, _ = _virtual_view_rotation(cloud, np.zeros(3), "side")
     assert np.allclose(R, np.eye(3))
 
 
@@ -133,7 +134,7 @@ def test_virtual_view_bad_mode_raises():
 def test_apply_then_invert_is_identity(mode):
     up = _tilted_camera_up_opt(np.deg2rad(35.0))
     cloud = np.random.default_rng(2).uniform(-0.05, 0.05, size=(300, 3)) + [0, 0, 0.55]
-    R, c = _virtual_view_rotation(cloud, up, mode)
+    R, c, _ = _virtual_view_rotation(cloud, up, mode)
     cloud_v = _apply_virtual_view(cloud, R, c)
     # Inverting a virtual-frame *point* (identity rotation) must recover the original.
     for p_v, p0 in zip(cloud_v, cloud):
@@ -144,7 +145,7 @@ def test_apply_then_invert_is_identity(mode):
 def test_grasp_to_optical_preserves_geometry_and_inverts():
     up = _tilted_camera_up_opt(np.deg2rad(35.0))
     cloud = np.random.default_rng(3).uniform(-0.05, 0.05, size=(200, 3)) + [0, 0, 0.5]
-    R, c = _virtual_view_rotation(cloud, up, "side")
+    R, c, _ = _virtual_view_rotation(cloud, up, "side")
 
     # A grasp as GraspNet would return it in the *virtual* frame.
     rot_v = Rotation.from_euler("xyz", [0.2, -0.4, 0.1]).as_matrix()
@@ -160,6 +161,67 @@ def test_grasp_to_optical_preserves_geometry_and_inverts():
     # Pushing the optical grasp point forward into the virtual frame recovers t_v.
     fwd = _apply_virtual_view(np.asarray(g_opt.translation)[None, :], R, c)[0]
     assert np.allclose(fwd, t_v, atol=1e-9)
+
+
+# --- center_xy: lateral recentring (depth kept) -----------------------------
+def test_center_xy_zeroes_lateral_offset_keeps_depth():
+    """center_xy drops the cloud's XY centroid onto the optical axis, preserving depth."""
+    rng = np.random.default_rng(7)
+    cloud = rng.uniform(-0.05, 0.05, size=(300, 3)) + [0.18, -0.09, 0.55]  # off-axis
+    R, c_in, c_out = _virtual_view_rotation(cloud, np.array([0.0, -1.0, 0.0]), "none",
+                                            center_xy=True)
+    assert np.allclose(R, np.eye(3))
+    assert np.allclose(c_in, np.median(cloud, axis=0))
+    assert np.allclose(c_out[:2], 0.0, atol=1e-12)        # XY zeroed
+    assert np.isclose(c_out[2], c_in[2], atol=1e-12)      # depth kept
+    cloud_v = _apply_virtual_view(cloud, R, c_in, c_out)
+    med = np.median(cloud_v, axis=0)
+    assert np.allclose(med[:2], 0.0, atol=1e-9)           # recentred laterally
+    assert np.isclose(med[2], np.median(cloud, axis=0)[2], atol=1e-9)  # same range
+
+
+def test_center_xy_is_pure_translation_no_rotation():
+    """With mode 'none', recentring must not rotate — it only shifts the cloud rigidly."""
+    rng = np.random.default_rng(8)
+    cloud = rng.uniform(-0.05, 0.05, size=(200, 3)) + [0.2, 0.1, 0.5]
+    R, c_in, c_out = _virtual_view_rotation(cloud, np.array([0.0, -1.0, 0.0]), "none",
+                                            center_xy=True)
+    cloud_v = _apply_virtual_view(cloud, R, c_in, c_out)
+    shift = cloud_v - cloud
+    assert np.allclose(shift, shift[0], atol=1e-9)        # identical per-point => translation
+    assert np.allclose(shift[0], [-c_in[0], -c_in[1], 0.0], atol=1e-9)
+
+
+@pytest.mark.parametrize("mode", ["none", "side", "top"])
+def test_center_xy_grasp_roundtrip_inverts(mode):
+    """A grasp in the centred/rotated frame maps back to true optical exactly."""
+    up = _tilted_camera_up_opt(np.deg2rad(35.0))
+    rng = np.random.default_rng(9)
+    cloud = rng.uniform(-0.05, 0.05, size=(200, 3)) + [0.15, -0.07, 0.55]
+    R, c_in, c_out = _virtual_view_rotation(cloud, up, mode, center_xy=True)
+
+    rot_v = Rotation.from_euler("xyz", [0.1, -0.3, 0.2]).as_matrix()
+    t_v = np.array([0.005, -0.01, 0.55])
+    g_v = GraspPose(translation=tuple(t_v), rotation=rot_v, width=0.05, score=0.9)
+
+    g_opt = _grasp_to_optical(g_v, R, c_in, c_out)
+    assert _is_proper_rotation(g_opt.rotation)
+    assert np.allclose(g_opt.rotation, R.T @ rot_v, atol=1e-9)  # translation never rotates
+    # Pushing the optical grasp point forward through the SAME transform recovers t_v.
+    fwd = _apply_virtual_view(np.asarray(g_opt.translation)[None, :], R, c_in, c_out)[0]
+    assert np.allclose(fwd, t_v, atol=1e-9)
+
+
+def test_center_xy_off_matches_default_path_byte_for_byte():
+    """center_xy=False must reproduce the legacy (c_out is None) behaviour exactly."""
+    up = _tilted_camera_up_opt(np.deg2rad(40.0))
+    rng = np.random.default_rng(10)
+    cloud = rng.uniform(-0.05, 0.05, size=(150, 3)) + [0.2, -0.1, 0.6]
+    R, c_in, c_out = _virtual_view_rotation(cloud, up, "top", center_xy=False)
+    assert np.array_equal(c_out, c_in)
+    legacy = _apply_virtual_view(cloud, R, c_in)            # c_out defaults to c_in
+    explicit = _apply_virtual_view(cloud, R, c_in, c_out)
+    assert np.array_equal(legacy, explicit)
 
 
 # --- _resolve_virtual_view (the "auto" coupling) ----------------------------
@@ -180,7 +242,7 @@ def test_resolve_virtual_view(setting, pref, expected):
 
 def test_grasp_to_optical_none_mode_is_noop():
     cloud = np.array([[0.0, 0.0, 0.4], [0.1, 0.0, 0.5], [-0.1, 0.05, 0.45]])
-    R, c = _virtual_view_rotation(cloud, np.array([0.0, -1.0, 0.0]), "none")
+    R, c, _ = _virtual_view_rotation(cloud, np.array([0.0, -1.0, 0.0]), "none")
     rot = Rotation.from_euler("z", 0.3).as_matrix()
     g = GraspPose(translation=(0.02, 0.0, 0.45), rotation=rot, width=0.04, score=0.8)
     g2 = _grasp_to_optical(g, R, c)

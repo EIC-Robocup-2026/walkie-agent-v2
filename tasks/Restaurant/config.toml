@@ -24,7 +24,7 @@ RESTAURANT_TARGET_CUSTOMERS = "2"
 RESTAURANT_EXTRA_ATTEMPTS = "3"
 # 1 = run only the Phase 0 slice (GoToStart -> scan -> approach) for on-robot bring-up.
 RESTAURANT_PHASE0 = "0"
-RESTAURANT_SLICE = "place"
+RESTAURANT_SLICE = "graspplan"
 
 # --- Phase 0: caller detection + approach -----------------------------------
 # Base-rotation sweep that searches the dining area for a waving customer
