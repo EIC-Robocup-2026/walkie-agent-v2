@@ -195,6 +195,41 @@ def test_register_skips_when_disabled_or_starved():
     assert register_capture(thin, target, max_corr_dist=0.1, min_points=100).icp_accepted is False
 
 
+def _capture_with_cam(background, cam_t):
+    cap = _capture_with(background, [])
+    cap.cam = CameraPose(R=np.eye(3), t=np.asarray(cam_t, dtype=np.float64))
+    return cap
+
+
+def test_register_near_field_trims_far_points_from_solve(monkeypatch):
+    """max_range_m restricts the solve source to points near the camera."""
+    rng = np.random.default_rng(5)
+    near = rng.uniform(0.0, 1.0, (300, 3)).astype(np.float32)  # ≤ ~1.7 m from origin
+    far = (rng.uniform(0.0, 1.0, (300, 3)) + np.array([10.0, 0, 0])).astype(np.float32)
+    cap = _capture_with_cam(np.vstack([near, far]), cam_t=(0.0, 0.0, 0.0))
+    seen = {}
+    monkeypatch.setattr(
+        pcd_ops, "icp", lambda src, tgt, *a, **k: (seen.update(src=src), (np.eye(4), 0.0))[1]
+    )
+    register_capture(cap, _corner_cloud(), max_corr_dist=0.25, max_range_m=3.0, min_points=100)
+    dists = np.linalg.norm(seen["src"], axis=1)
+    assert dists.max() <= 3.0  # every far point (≥10 m) was dropped before the solve
+
+
+def test_register_near_field_keeps_full_source_when_too_few_near(monkeypatch):
+    """If the near crop would starve the solve, fall back to the full source."""
+    far = (np.random.default_rng(6).uniform(0, 1, (300, 3)) + np.array([10.0, 0, 0])).astype(
+        np.float32
+    )
+    cap = _capture_with_cam(far, cam_t=(0.0, 0.0, 0.0))
+    seen = {}
+    monkeypatch.setattr(
+        pcd_ops, "icp", lambda src, tgt, *a, **k: (seen.update(src=src), (np.eye(4), 0.0))[1]
+    )
+    register_capture(cap, _corner_cloud(), max_corr_dist=0.25, max_range_m=3.0, min_points=100)
+    assert len(seen["src"]) == 300  # no near points → full source used
+
+
 # ---------------------------------------------------------------------------
 # CaptureStore — deferred writes, reads, refcounted GC
 # ---------------------------------------------------------------------------

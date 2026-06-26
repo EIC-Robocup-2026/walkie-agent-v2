@@ -1310,13 +1310,27 @@ class GraphMemory:
                     self._refine_pending.add(nid)
         return stats
 
-    def icp_target_near(self, aabb_min, aabb_max, *, pad: float = 0.5, budget: int = 40_000) -> np.ndarray:
+    def icp_target_near(
+        self,
+        aabb_min,
+        aabb_max,
+        *,
+        pad: float = 0.5,
+        budget: int = 40_000,
+        cam_t=None,
+        max_range_m: float = 0.0,
+    ) -> np.ndarray:
         """Assemble the capture-registration target around a capture's AABB.
 
         Background crop (the anchor — walls pin translations a lone object can't)
         plus the fused clouds of every node whose AABB intersects the padded box,
         budget-split ~75/25 in the background's favor. Cloud loads happen outside
         the lock (the same pattern as merge_overlapping_nodes).
+
+        When ``cam_t`` is given and ``max_range_m > 0`` the assembled target is
+        cropped to points within that range of the camera, mirroring the
+        near-field source restriction in ``register_capture`` so both sides of the
+        solve are the trustworthy near geometry.
         """
         bg_budget = int(budget * 0.75)
         parts: list[np.ndarray] = []
@@ -1335,7 +1349,15 @@ class GraphMemory:
             parts.append(subsample(np.vstack(obj_parts), budget - bg_budget))
         if not parts:
             return np.zeros((0, 3), dtype=np.float32)
-        return np.vstack(parts).astype(np.float32)
+        target = np.vstack(parts).astype(np.float32)
+        if cam_t is not None and max_range_m > 0:
+            cam = np.asarray(cam_t, dtype=np.float64)
+            near = target[np.linalg.norm(target - cam, axis=1) <= max_range_m]
+            # Keep the crop only if it leaves a usable anchor; otherwise fall back
+            # to the full target (a sparse near field is worse than far structure).
+            if len(near) >= 500:
+                target = near
+        return target
 
     def flag_for_refine(self, node_ids: list[str]) -> None:
         """Mark nodes for the next per-object refine pass.

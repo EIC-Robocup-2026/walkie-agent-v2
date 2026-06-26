@@ -101,17 +101,35 @@ service feeds it real calibration and pose straight from the **walkie-sdk**.
 - **Config**: just the two TF frame names (`TF_MAP_FRAME`, `TF_CAMERA_FRAME`) and a lookup timeout —
   the calibration and mounts come from the robot, not config.
 
-Pose error is further contained by three defenses:
+The robot's odometry drifts while it drives and self-corrects ("settles") once it stops, so a
+frame captured mid-motion is lifted with a pose that is off by more than a settled frame's. Rather
+than drop those frames (lost coverage), Walkie keeps ingesting while moving and leans on a stronger
+per-frame registration plus the per-object refine pass to converge as odometry settles — the bridge
+between a drifting real robot and ConceptGraphs' ground-truth-pose assumption. Pose error is
+contained by these defenses:
 
 - **Pose-at-capture** (`_capture_frame`): depth, image, camera pose, and intrinsics are read
   back-to-back *before* the slow detection round-trip, so the pose that lifts the depth describes
   the same instant as the frame — not where the robot ended up half a second later.
-- **Motion gate** (`_moved_during`, `MOTION_MAX_TRANS_M` / `MOTION_MAX_ROT_DEG`): the pose is
-  sampled again after detection; if the camera moved across that window, the frame is *not*
-  folded into the graph (its cloud would land mis-posed and smear the object). The live snapshot
-  is still written, and the next still frame is one tick away.
-- **ICP on merge** (see "what merge actually updates" below): the few cm of *residual* pose error
-  is cancelled by aligning clouds on their own shape before fusing.
+- **Motion gate** (`_moved_during`, `MOTION_MAX_TRANS_M` / `MOTION_MAX_ROT_DEG`, **off by default**):
+  optional binary gate — the pose is sampled again after detection and, if the camera moved across
+  that window, the frame is *not* folded into the graph. Superseded in practice by the
+  motion-adaptive registration below, which corrects moving frames instead of discarding them.
+- **Motion-adaptive capture ICP** (`_register_capture` / `register_capture`,
+  `CAPTURE_ICP_MOTION_ADAPTIVE`, `MOTION_GAIN`, `MAX_TRANS_CEIL_M` / `MAX_CORR_CEIL_M`): the one
+  rigid correction per frame is solved against the map, but its trans/correspondence caps are
+  *widened by the robot's measured per-tick motion*. A frame captured while moving legitimately
+  needs a larger correction, so what the fixed cap would reject as a degenerate solve (→ raw,
+  mis-posed ingest) is instead accepted and snapped into place. Settled frames (zero motion) keep
+  today's tight, precise caps.
+- **Near-field solve** (`CAPTURE_ICP_MAX_RANGE_M`): stereo depth error grows ~quadratically with
+  range, so far walls are the noisiest geometry *and* dominate the budgeted source. The ICP source
+  and target are restricted to points within this range of the camera, so close, low-noise geometry
+  drives the alignment instead of distant noise. The stored clouds are untouched (still lifted to
+  `MAX_DEPTH_M`); only the registration solve is near-field.
+- **Per-object refine** (`refine_nodes`, `REFINE_EVERY_N`): runs a touch more often than the other
+  maintenance passes and re-aligns a node's capture segments by ICP — this is what pulls the early,
+  mid-motion segments onto the later settled observations, so smear converges out over time.
 </details>
 
 ### 3. Clean it up
