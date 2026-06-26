@@ -110,6 +110,7 @@ class GraspClient(WalkieBaseClient):
         approach_preference: str = "none",
         up: np.ndarray | Sequence[float] | None = None,
         approach_weight: float | None = None,
+        max_approach_up: float | None = None,
     ) -> list[GraspPose]:
         """Generate grasp poses for an ``(N, 3)`` object cloud.
 
@@ -136,6 +137,13 @@ class GraspClient(WalkieBaseClient):
             approach_weight: Strength of the preference bonus added to the GraspNet
                 score (server default ~1.0; higher favours the preferred approach more
                 strongly). Ignored without a preference.
+            max_approach_up: With a ``side``/``top`` preference, **hard-drop** grasps
+                whose approach points upward (against ``up``) by more than this — the max
+                allowed ``approach·up``. ``0.0`` keeps only at/below-horizontal approaches
+                (the full "bottom hemisphere" cut), a small positive value tolerates a
+                slight upward tilt (server default ~0.2 ≈ 11.5°), ``1.0`` disables it.
+                ``None`` leaves the server default. Ignored without a preference (the
+                server only runs the filter when a preference is active).
 
         Returns:
             ``list[GraspPose]`` sorted best-first, in the input cloud's frame.
@@ -179,6 +187,8 @@ class GraspClient(WalkieBaseClient):
             spec["up"] = up_vec.tolist()
         if approach_weight is not None:
             spec["approach_weight"] = float(approach_weight)
+        if max_approach_up is not None:
+            spec["max_approach_up"] = float(max_approach_up)
         if preference != "none" and "up" not in spec:
             raise ValueError(
                 f"approach_preference={preference!r} requires an 'up' vector "

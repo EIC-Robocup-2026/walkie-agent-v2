@@ -55,6 +55,8 @@ def test_infer_round_trips_cloud_and_parses_grasps():
     assert spec["max_grasps"] == 5
     assert spec["antipodal"] is True
     assert spec["score_threshold"] == 0.1
+    # max_approach_up is omitted unless requested (leave the server default)
+    assert "max_approach_up" not in spec
 
     # response parses into a GraspPose
     assert len(out) == 1
@@ -65,6 +67,15 @@ def test_infer_round_trips_cloud_and_parses_grasps():
     assert g.width == 0.05 and g.score == 0.9 and g.antipodal_score == 0.7
     assert np.allclose(g.approach, [0, 0, 1])   # rotation col-2
     assert np.allclose(g.closing, [0, 1, 0])    # rotation col-1
+
+
+def test_infer_forwards_max_approach_up():
+    client = _StubClient([])
+    cloud = np.random.rand(500, 3).astype(np.float32)
+    client.infer(cloud, approach_preference="side", up=[0.0, -1.0, 0.0], max_approach_up=0.0)
+    spec = json.loads(client.sent_form["spec"])
+    assert spec["max_approach_up"] == 0.0
+    assert spec["approach_preference"] == "side"
 
 
 def test_infer_defaults_omit_optional_overrides():

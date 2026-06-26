@@ -332,7 +332,7 @@ def locate_object(
     ctx: TaskContext,
     prompts: list[str],
     *,
-    voxel: float = 0.002,
+    voxel: float = 0.005,
     erode_px: int = 5,
     min_points: int = 50,
     min_confidence: float = 0.3,
@@ -686,10 +686,24 @@ def get_object_grasp_pos(
             infer_kwargs["num_point"] = int(server_npts)
         if approach_preference != "none":
             infer_kwargs["approach_preference"] = approach_preference
-            # Gravity must be expressed in the (possibly rotated) frame of the cloud sent.
-            infer_kwargs["up"] = v_rot @ up_opt
             if approach_weight is not None:
                 infer_kwargs["approach_weight"] = approach_weight
+            # Hard-drop "bottom-up" grasps: the max allowed approach·up. 0.0 keeps only
+            # at/below-horizontal approaches (the true bottom-hemisphere cut); the server
+            # default (~0.2) tolerates ~11.5deg of upward tilt. Sent per-request so it
+            # holds even against a remote/shared server whose own default differs. Empty
+            # = leave the server default. Only the server's side/top filter reads it.
+            max_up = os.getenv("WALKIE_GRASP_MAX_APPROACH_UP", "0.0").strip()
+            if max_up:
+                infer_kwargs["max_approach_up"] = float(max_up)
+        # Gravity expressed in the (possibly rotated) frame of the cloud sent — once a
+        # transform is active this is NOT global up: it works out to -Y for "side" and -Z
+        # for "top" (v_rot @ up_opt). The re-rank needs it, and it also lets the client
+        # orient each grasp's wrist X-up against the right "down" in the rotated frame.
+        # Sent whenever the transform OR the re-rank is active, so the default
+        # (no-transform, no-preference) path is byte-for-byte unchanged.
+        if approach_preference != "none" or vview != "none":
+            infer_kwargs["up"] = v_rot @ up_opt
         grasps = ctx.walkieAI.grasp.infer(cloud_infer, **infer_kwargs)
         if not grasps:
             print("[grasp] GraspNet returned nothing")
@@ -874,9 +888,11 @@ def _draw_cloud_viz(ctx: TaskContext, snap, raw_optical: np.ndarray, kept_optica
     Draws the kept/cleaned cloud (green) and the removed points (red) in the **map
     frame**, so the user can confirm at a glance that (a) the cloud sits on the object
     and is upright — **not vertically inverted** — and (b) the cleanup is stripping the
-    table/wall bleed rather than the object. When ``WALKIE_GRASP_DEBUG_DUMP`` names a
-    directory, both optical clouds are also written there (``grasp_cloud_raw.npy`` /
-    ``grasp_cloud_kept.npy``) for offline inspection. Never load-bearing.
+    table/wall bleed rather than the object. The **whole frame** is also drawn as gray
+    dots behind them (``WALKIE_GRASP_SCENE_VIZ``, default on) so it is obvious where the
+    green object sits relative to the table/surroundings. When ``WALKIE_GRASP_DEBUG_DUMP``
+    names a directory, both optical clouds are also written there (``grasp_cloud_raw.npy``
+    / ``grasp_cloud_kept.npy``) for offline inspection. Never load-bearing.
     """
     dump_dir = os.getenv("WALKIE_GRASP_DEBUG_DUMP", "").strip()
     if getattr(ctx, "viz", None) is None and not dump_dir:
@@ -898,6 +914,19 @@ def _draw_cloud_viz(ctx: TaskContext, snap, raw_optical: np.ndarray, kept_optica
         removed = raw[np.array([row.tobytes() not in kept_keys for row in raw], dtype=bool)] \
             if raw.shape[0] else raw
         ctx.viz.clear("grasp/cloud", recursive=True)
+        # Whole-frame scene cloud (gray) as context behind the object cloud, so it's
+        # obvious where the green object sits relative to the table/surroundings. The
+        # lift is a local depth deprojection (no server call), capped by the place-scene
+        # depth/voxel; gated by WALKIE_GRASP_SCENE_VIZ (default on) and best-effort.
+        if _b("WALKIE_GRASP_SCENE_VIZ", "1"):
+            try:
+                from tasks.skills.place import _full_scene_cloud  # lazy: place imports grasp
+                scene_map = _full_scene_cloud(snap)
+                if scene_map.shape[0]:
+                    ctx.viz.points("grasp/cloud/scene", scene_map,
+                                   colors=[(150, 150, 150)], radii=[0.0025])
+            except Exception as exc:  # noqa: BLE001 — scene context is never load-bearing
+                print(f"[grasp] scene cloud viz failed ({exc})")
         ctx.viz.points("grasp/cloud/kept", kept_map, colors=[(40, 220, 40)], radii=[0.004])
         if removed.shape[0]:
             removed_map = removed @ cam.R.T + cam.t
@@ -958,32 +987,22 @@ def face_object(ctx: TaskContext, xyz_map: Vec3) -> bool:
     return ctx.rotate_to(desired)
 
 
-def approach_object(
+def _approach_once(
     ctx: TaskContext,
     xyz_map: Vec3,
     *,
-    standoff_m: float = 0.60,
-    trigger_m: float = 0.70,
-    track: bool = True,
-    tick_sec: float = 0.2,
-    timeout_sec: float = 30.0,
+    standoff_m: float,
+    track: bool,
+    tick_sec: float,
+    timeout_sec: float,
 ) -> str:
-    """Drive to a standoff facing the object, tilting the head to keep it in view.
+    """One drive attempt toward the object. Returns ``"MOVED"`` or ``"FAILED"``.
 
-    Uses ``nav.go_to`` with the heading omitted (NavigateToObject) and
-    ``align_method="face_target"`` so the base ends up facing the object at
-    *standoff_m* metres — short of a table edge. With *track* the drive is issued
-    non-blocking and the head is re-aimed every *tick_sec* as the robot closes in
-    (the object is static, so tracking just re-tilts as the distance shrinks).
-
-    Returns ``"CLOSE"`` (already within *trigger_m*, no move — head still aimed),
-    ``"MOVED"`` (drove and the nav goal succeeded / was close enough), or
-    ``"FAILED"`` (nav refused, timed out, or errored).
+    Factored out of :func:`approach_object` so the caller can retry on
+    ``"FAILED"`` — Nav2 aborts here are frequently transient (planner failed to
+    find a path that cycle, costmap not yet settled), so a plain re-issue usually
+    succeeds.
     """
-    if _xy_dist(ctx, xyz_map) <= trigger_m:
-        look_at_object(ctx, xyz_map)
-        return "CLOSE"
-
     ox, oy = float(xyz_map[0]), float(xyz_map[1])
     if not track:
         try:
@@ -1017,6 +1036,100 @@ def approach_object(
     look_at_object(ctx, xyz_map)
     print(f"[grasp] approach_object: nav -> {status}")
     return "MOVED" if status in ("SUCCEEDED", "CLOSE_ENOUGH") else "FAILED"
+
+
+def approach_object(
+    ctx: TaskContext,
+    xyz_map: Vec3,
+    *,
+    standoff_m: float = 0.60,
+    trigger_m: float = 0.70,
+    track: bool = True,
+    tick_sec: float = 0.2,
+    timeout_sec: float = 30.0,
+    retries: int = 2,
+    retry_settle_sec: float = 0.5,
+    success_tolerance_m: float = 1.0,
+    min_progress_m: float = 0.10,
+) -> str:
+    """Drive to a standoff facing the object, tilting the head to keep it in view.
+
+    Uses ``nav.go_to`` with the heading omitted (NavigateToObject) and
+    ``align_method="face_target"`` so the base ends up facing the object at
+    *standoff_m* metres — short of a table edge. With *track* the drive is issued
+    non-blocking and the head is re-aimed every *tick_sec* as the robot closes in
+    (the object is static, so tracking just re-tilts as the distance shrinks).
+
+    **A FAILED nav is not always a real failure.** When the requested standoff is
+    physically unreachable (the classic case: an object in the *middle* of a table,
+    so the standoff point sits inside the table footprint / Nav2 inflation layer),
+    Nav2 drives the base to the closest reachable spot — the table edge — and then
+    reports the goal aborted (``creep_to_grasp_distance`` documents this same Nav2
+    "halts at the inflation boundary" behaviour). But that closest spot is usually
+    close enough to grasp from: the downstream creep pulls the base in by up to
+    ~0.35 m and the grasp is then rejected only past the arm reach
+    (``max_reach_xy_m`` ≈ 0.70 m), so any approach that parks within ~1.05 m still
+    yields a reachable grasp. *success_tolerance_m* defaults just inside that edge,
+    so a FAILED drive that left the base within it is accepted as ``"MOVED"``.
+
+    Otherwise a FAILED drive is retried up to *retries* times — the lingering goal
+    is cancelled, the base settles for *retry_settle_sec*, and the drive is
+    re-issued (transient planner/costmap aborts usually clear on a re-issue). If a
+    re-issue closes less than *min_progress_m* of distance, the base is already at
+    the closest position Nav2 will give it, so retrying further is futile and the
+    call stops early. The trigger distance is re-checked before each attempt, so a
+    partial drive that closed the gap short-circuits to ``"CLOSE"``.
+
+    Returns ``"CLOSE"`` (already within *trigger_m*, no move — head still aimed),
+    ``"MOVED"`` (drove and the nav goal succeeded, or failed but the base is within
+    *success_tolerance_m* — close enough to grasp from), or ``"FAILED"`` (every
+    attempt aborted with the base still too far to reach the object).
+    """
+    attempts = max(1, retries + 1)
+    prev_dist: float | None = None
+    for attempt in range(attempts):
+        if _xy_dist(ctx, xyz_map) <= trigger_m:
+            look_at_object(ctx, xyz_map)
+            return "CLOSE"
+
+        status = _approach_once(
+            ctx, xyz_map, standoff_m=standoff_m, track=track,
+            tick_sec=tick_sec, timeout_sec=timeout_sec,
+        )
+        if status != "FAILED":
+            return status
+
+        # Nav aborted. Did the base still get close enough to grasp from? The
+        # standoff goal is often unreachable (object mid-table) yet the base parked
+        # at the closest reachable spot — accept that as success.
+        dist = _xy_dist(ctx, xyz_map)
+        if dist <= success_tolerance_m:
+            print(f"[grasp] approach_object: nav FAILED but base within "
+                  f"{dist:.2f}m <= {success_tolerance_m:.2f}m; accepting closest reachable")
+            look_at_object(ctx, xyz_map)
+            return "MOVED"
+
+        # Still too far. A re-issue only helps if the last drive actually closed
+        # distance; if it stalled, the base is at the closest Nav2 will give it and
+        # retrying is pointless.
+        if prev_dist is not None and (prev_dist - dist) < min_progress_m:
+            print(f"[grasp] approach_object: nav FAILED, no further progress "
+                  f"({dist:.2f}m, still > {success_tolerance_m:.2f}m); aborting")
+            return "FAILED"
+        prev_dist = dist
+
+        if attempt + 1 < attempts:
+            print(f"[grasp] approach_object: attempt {attempt + 1}/{attempts} failed at "
+                  f"{dist:.2f}m; retrying")
+            try:
+                ctx.walkie.nav.cancel()  # clear any half-issued goal before re-aiming
+            except Exception as exc:  # noqa: BLE001
+                print(f"[grasp] approach_object: cancel before retry raised ({exc})")
+            time.sleep(retry_settle_sec)
+
+    print(f"[grasp] approach_object: all {attempts} attempt(s) failed "
+          f"(base still > {success_tolerance_m:.2f}m from object)")
+    return "FAILED"
 
 
 def in_arm_deadzone(ctx: TaskContext, xyz_map: Vec3, *, half_width_m: float = 0.20) -> bool:
@@ -1324,10 +1437,10 @@ def pick_object(
     pregrasp_standoff_m: float = 0.10,
     approach_preference: str = "none",
     approach_weight: float | None = None,
-    optimal_standoff_m: float = 0.70,
-    approach_trigger_m: float = 0.75,
-    grasp_distance_m: float = 0.65,
-    max_reach_xy_m: float = 0.80,
+    optimal_standoff_m: float = 0.55,
+    approach_trigger_m: float = 0.60,
+    grasp_distance_m: float = 0.60,
+    max_reach_xy_m: float = 0.70,
     min_grasp_z_m: float = 0.80,
     deadzone_half_m: float = 0.20,
     default_arm: str = "left",
@@ -1406,7 +1519,7 @@ def pick_object(
         return False
 
     base_lift_diff_m = ctx.walkie.robot.transform.lookup("base_footprint", "lift_link")["position"]["z"] - ctx.walkie.robot.lift.get(norm_pos=False) / 100.0
-    optimum_lift_height = loc.xyz_map[2] + 0.12
+    optimum_lift_height = loc.xyz_map[2] + 0.18
     print(f"[grasp] pick_object: setting lift to {((optimum_lift_height - base_lift_diff_m) * 100):.2f}m for better reach")
     ctx.walkie.robot.lift.set(pos=(optimum_lift_height - base_lift_diff_m) * 100, norm_pos=False)
 
@@ -1478,7 +1591,7 @@ def pick_object(
         #    often-IK-unsolvable orientation), taking the arm's forward to be the robot's.
         #    The new candidate drives both the arm and the held-object record (so the placer
         #    reuses the real grasp pose). Keeps GraspNet's orientation when disabled.
-        if point_at_object:
+        if approach_preference == "side" and point_at_object:
             cand = aim_forward_candidate(ctx, cand, standoff_m=pregrasp_standoff_m)
 
         # 8. Execute, repositioning the base and retrying on arm-move failure.

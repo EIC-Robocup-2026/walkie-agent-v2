@@ -136,7 +136,7 @@ WALKIE_CARRY_POSE = "standby"        # go_to_home preset to tuck the arm for nav
 # grasp, take 2 snapshots at these head tilts (rad, +down = look down), dedup the object
 # across the two views and fuse their clouds into one denser cloud for a single GraspNet
 # inference. Shallow angles (below look_at_object's 0.436-rad clamp) suit table-top cans.
-WALKIE_GRASP_MULTI_TILT = "1"        # enable the 2-snapshot fused grasp plan
+WALKIE_GRASP_MULTI_TILT = "0"        # enable the 2-snapshot fused grasp plan
 WALKIE_GRASP_TILT_A = "0.2"          # first head tilt (rad) for the fused grasp snapshots
 WALKIE_GRASP_TILT_B = "0.35"         # second head tilt (rad)
 WALKIE_GRASP_TILT_SETTLE_SEC = "0.4" # wait after each head tilt before capturing
@@ -147,7 +147,7 @@ WALKIE_GRASP_MERGE_VOXEL_M = "0.003" # voxel size when fusing the two viewpoints
 # inference. The head holds still, so there's no cross-pose error (unlike MULTI_TILT);
 # the fuse averages per-voxel depth noise and fills single-frame dropouts. "1" disables
 # it (falls back to best-of-N). Reuses DEDUP_RADIUS_M / MERGE_VOXEL_M above.
-WALKIE_GRASP_FUSE_SNAPS = "3"        # snapshots fused per grasp plan ("1" = best-of-N instead)
+WALKIE_GRASP_FUSE_SNAPS = "1"        # snapshots fused per grasp plan ("1" = best-of-N instead)
 WALKIE_GRASP_FUSE_SETTLE_SEC = "0.15" # wait between same-angle snapshots so frames are fresh
 # Pre-GraspNet cloud cleanup (tasks/skills/grasp.py::_clean_object_cloud): strip residue
 # noise from the lifted object cloud before it is sent to GraspNet. SOR sheds sparse
@@ -167,13 +167,41 @@ WALKIE_GRASP_CLEAN_CLUSTER_MIN = "20"    # min points for a cluster to be eligib
 # too-small clean cluster defers to the fuller (noisier) cloud instead of a guaranteed reject.
 WALKIE_GRASP_CLEAN_MIN_KEEP = "250"
 # WALKIE_GRASP_DEBUG_DUMP = "graph_debug/grasp"  # dir to dump raw/kept clouds (.npy) for inspection
-# Optional GraspNet input-density overrides (server-side knobs passed per request, off by
-# default). The server re-voxels the cloud at 0.005 m and samples 10000 pts; on small
-# objects a finer voxel + larger sample preserves detail the grasp-point regression needs.
-# A/B test on the robot — denser usually helps but can drift if pushed past the model's
-# training density. Empty = leave the server defaults untouched.
-# WALKIE_GRASP_SERVER_VOXEL_M = "0.003"
-# WALKIE_GRASP_SERVER_NUM_POINT = "15000"
+WALKIE_GRASP_SCENE_VIZ = "1"         # draw the whole frame as gray dots behind the grasp cloud (viz only)
+# Optional GraspNet input-density overrides (server-side knobs passed per request). The
+# server re-voxels the cloud at 0.005 m, removes outliers, then random-samples to num_point.
+# Measured on a real single-object grasp cloud (graph_debug/grasp_vv_fixture.npz, 4783 pts):
+# the 0.005 m voxel collapses it to ~766 pts, so the default num_point=10000 just pads it
+# ~13x with DUPLICATES — raising num_point is a no-op. The ONLY knob that adds real points
+# is the voxel: 0.005->0.003 m takes ~766 -> ~1824 real pts (2.4x). 0.003 stays closest to
+# GraspNet-1Billion's ~5 mm training density; going finer (0.002/0.001) adds more points but
+# pushes out-of-distribution, so treat it as a separate experiment. num_point left at the
+# server default since it's non-binding at every voxel measured (even 1 mm gives <10000).
+# EXPERIMENT — A/B grasp quality on the robot (point count is NOT an accuracy metric).
+WALKIE_GRASP_SERVER_VOXEL_M = "0.003"
+# WALKIE_GRASP_SERVER_NUM_POINT = "15000"   # non-binding: real cloud never exceeds 10000
+# Virtual-viewpoint transform (EXPERIMENT, tasks/skills/grasp.py::get_object_grasp_pos):
+# before GraspNet, rigidly rotate the cleaned object cloud into a "side" (horizontal) or
+# "top" (straight-down) virtual view so GraspNet GENERATES grasps for that approach —
+# distinct from approach_preference, which only re-ranks what GraspNet already proposes.
+# The winning grasp is mapped back to the true frame, so nothing downstream changes.
+# "none" = off (default). Replay evidence (manual_tests/grasp_virtual_view.py) on this
+# robot's ~32deg-down camera: "top" can unlock steeper top-down grasps the oblique view
+# never proposes; "side" tends to produce unreachable (approach-from-below) grasps because
+# the object's sides aren't captured at a downward tilt. VALIDATE on the arm before relying
+# on it — a rotation cannot add occluded data, only re-present what was captured.
+# "auto" couples it to the call's approach_preference (so a "side" pick also rotates the
+# cloud to a side view); note that coupled combo was the weakest arm in replay, so "auto"
+# is opt-in and the default stays "none".
+WALKIE_GRASP_VIRTUAL_VIEW = "auto"   # "none" | "side" | "top" | "auto" (follow approach_preference)
+# Hard-drop "bottom-up" grasps when a side/top approach_preference is active: the max
+# allowed approach·up sent to the server's hemisphere filter (only it reads this). "0.0"
+# keeps only at/below-horizontal approaches (the true bottom-hemisphere cut); the server's
+# own default (~0.2) lets a grasp tilt ~11.5deg UPWARD — which is why side grasps sometimes
+# come in from a slightly upward angle. Empty = leave the server default. Raise it (e.g.
+# "0.1") if a strict cut leaves no grasp. NOTE: the filter only runs when approach_preference
+# is set, so a transform-only call (VIRTUAL_VIEW=side, preference "none") is NOT filtered.
+WALKIE_GRASP_MAX_APPROACH_UP = "0.0"
 # Grasp execution retries: if arm go_to_pose fails, strafe the base sideways (away from
 # the centreline on the arm's side) + step back, then re-execute the same map-frame
 # candidate (pure translation keeps it valid; new arm geometry can solve a failed IK).
@@ -182,6 +210,21 @@ WALKIE_GRASP_RETRY_STRAFE_M = "0.08" # sideways base step between retries
 WALKIE_GRASP_RETRY_BACK_M = "0.05"   # backward base step between retries
 
 [skills]
+# Final-approach "creep" — direct cmd_vel closed-loop relative drive (NOT Nav2), used
+# for the cm-scale precision moves next to a table where Nav2 would route around the
+# inflation / fail to strafe and nudge the base backwards (tasks/skills/navigation.py
+# creep_base_relative; grasp align/creep/retry-reposition). Stops on integrated odom
+# displacement, hard-guarded by a slow speed, a stop margin, a timeout and a finally-stop.
+WALKIE_CREEP_SPEED_MPS = "0.08"      # cruise speed; eased down to MIN near the goal
+WALKIE_CREEP_MIN_SPEED_MPS = "0.03"  # floor so it overcomes stiction near the goal
+WALKIE_CREEP_TOL_M = "0.01"          # stop when remaining displacement <= this (m)
+WALKIE_CREEP_HZ = "15.0"             # cmd_vel publish / odom poll rate
+WALKIE_CREEP_KP_LIN = "1.5"          # P gain easing speed down as it nears the goal
+WALKIE_CREEP_KP_YAW = "1.2"          # P gain holding the start heading during the creep
+WALKIE_CREEP_MAX_YAW_RPS = "0.4"     # cap on the heading-hold yaw rate (rad/s)
+WALKIE_CREEP_STALL_EPS_M = "0.002"   # odom progress per cycle below this counts as "stuck"
+WALKIE_CREEP_STALL_SEC = "0.6"       # bail after this long of no progress (dead odom / blocked)
+
 # Arena-entry door detection (tasks/skills/door.py is_door_open / door_open_from_depth),
 # the built-in is_open sensor for request_open_door. Reads the depth camera: the door
 # is CLOSED when a near surface fills the central doorway region. CALIBRATE on-robot
@@ -261,7 +304,7 @@ WALKIE_PLACE_STANDOFF_M = "0.10"       # pre-place / retreat height above the ho
 # The arm parks the object this far ABOVE the surface, then the precise torso lift
 # lowers it straight down before releasing (the arm's cartesian descent at full reach
 # is imprecise and drops the object from too high).
-WALKIE_PLACE_LOWER_M = "0.08"          # hover height above the surface; lift lowers by this
+WALKIE_PLACE_LOWER_M = "0.1"          # hover height above the surface; lift lowers by this
 WALKIE_PLACE_SETTLE_SEC = "0.6"        # wait after a lift move to let it settle
 WALKIE_PLACE_MIN_Z_M = "0.70"          # don't place below this height (arm can't reach)
 WALKIE_PLACE_MAX_REACH_XY_M = "0.75"   # abort if the spot is farther than this (planar)

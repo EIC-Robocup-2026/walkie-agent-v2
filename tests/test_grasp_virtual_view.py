@@ -96,6 +96,18 @@ def test_virtual_view_top_makes_viewing_axis_point_down():
     assert np.allclose(view_axis, -up_unit, atol=1e-9)  # looks straight down
 
 
+@pytest.mark.parametrize("deg", [15.0, 35.0, 45.0, 70.0])
+def test_rotated_up_is_minus_y_for_side_minus_z_for_top(deg):
+    """The `up` handed to GraspNet after the transform (v_rot @ up_opt) must be -Y for a
+    side view and -Z for a top view, pose-independently (no-roll camera)."""
+    up = _tilted_camera_up_opt(np.deg2rad(deg))
+    cloud = np.full((5, 3), [0.0, 0.0, 0.5])
+    R_side, _ = _virtual_view_rotation(cloud, up, "side")
+    R_top, _ = _virtual_view_rotation(cloud, up, "top")
+    assert np.allclose(R_side @ up, [0.0, -1.0, 0.0], atol=1e-9)
+    assert np.allclose(R_top @ up, [0.0, 0.0, -1.0], atol=1e-9)
+
+
 def test_virtual_view_top_faces_top_surface_at_camera():
     """The object's top-surface normal (world-up) must map onto virtual -Z (toward cam)."""
     up = _tilted_camera_up_opt(np.deg2rad(35.0))

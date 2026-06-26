@@ -346,7 +346,7 @@ def execute_place(
     standoff_m: float = 0.10,
     lower_m: float = 0.08,
     settle_sec: float = 0.6,
-    home_pose: str = "hands_up",
+    home_pose: str = "standby",
     tuck_on_abort: bool = True,
     viz: bool = True,
 ) -> bool:
@@ -467,7 +467,7 @@ def execute_place(
                 print(f"[place] execute_place[{side}]: re-enable gripper collision failed ({exc})")
         if tuck_on_abort and not succeeded:
             try:
-                ctx.walkie.arm.go_to_home(group_name=home_group, pose_name=home_pose, blocking=True)
+                ctx.walkie.arm.go_to_home(group_name=home_group, pose_name="hands_up", blocking=True)
             except Exception as exc:  # noqa: BLE001
                 print(f"[place] execute_place[{side}]: tuck-on-abort home failed ({exc})")
 
@@ -565,8 +565,8 @@ def place_object(
     clearance_m: float | None = None,
     place_z_offset_m: float | None = None,
     lower_m: float | None = None,
-    optimal_standoff_m: float = 0.60,
-    approach_trigger_m: float = 0.70,
+    optimal_standoff_m: float = 0.55,
+    approach_trigger_m: float = 0.60,
     max_reach_xy_m: float | None = None,
     min_place_z_m: float | None = None,
     max_depth_m: float | None = None,
