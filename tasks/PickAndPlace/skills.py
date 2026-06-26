@@ -1,10 +1,15 @@
 """Pick-and-Place-specific skills (rulebook 5.2).
 
-A thin facade over the shared manipulation layer (tasks/manipulation.py): the
-grasp planner + real pick/place + perception-lift live there and are reused by
-the other manipulation tasks (Restaurant, ...). What stays here is the
-PickAndPlace-specific glue: which classes to detect, the LLM destination sort,
-the destination-furniture place logic, and the *communicate-perception* layer.
+A thin facade over the shared grasp system (``tasks/skills`` — GraspNet pick +
+depth-lifted vision placement, the same layer Restaurant drives). The real arm
+work lives there; what stays here is the PickAndPlace-specific glue: which
+classes to detect, the LLM destination sort, navigating to the destination
+furniture, and the *communicate-perception* layer.
+
+Detection/lift (``perceive_surface`` -> ``DetectedObject``) still comes from the
+older ``tasks/manipulation.py`` perception helpers — those are camera-only and
+feed the non-arm "recognize + indicate placement" budget, so they're orthogonal
+to the grasp migration and stay put.
 
 Arm-gating (mirrors Restaurant's RESTAURANT_ARM_CALIBRATED): the arm is being
 brought up as a separate skill, so PickAndPlace gates every grasp/place behind
@@ -25,10 +30,10 @@ from tasks.base import TaskContext
 from tasks.manipulation import (
     DetectedObject,
     perceive_surface as _perceive_surface,
+)
+from tasks.skills import (
     pick_object as _pick_object,
-    place_at_pose as _place_at_pose,
-    plan_grasp,
-    release_in_front,
+    place_object as _place_object,
 )
 
 from . import prompts
@@ -44,7 +49,6 @@ __all__ = [
     "pick_object",
     "place_at",
     "place_object",
-    "plan_grasp",
     "sort_object",
 ]
 
@@ -155,21 +159,29 @@ def pick_object(ctx: TaskContext, obj: DetectedObject) -> bool:
 
     Gate off (default): no arm motion. Announces that the arm is not enabled and
     returns False so the caller's place step also stays indicate-only. Gate on:
-    delegates to the shared real grasp pipeline (tasks/manipulation.pick_object).
+    delegates to the shared grasp pipeline (``tasks.skills.pick_object``), which
+    re-acquires the object visually by its class name from the current view, runs
+    GraspNet, executes the grasp, and records what it grabbed for the later place.
     """
     if not arm_enabled():
         ctx.say(prompts.PICK_GATED.format(obj=obj.class_name))
         print(f"[pnp.skills] pick_object({obj.class_name}) — arm gated (PNP_ARM_CALIBRATED=0)")
         return False
-    return _pick_object(ctx, obj)
+    return _pick_object(ctx, prompts=[obj.class_name])
 
 
 def place_at(ctx: TaskContext, pose6: str) -> bool:
-    """Release the held object at a fixed arm-frame pose — gated by PNP_ARM_CALIBRATED."""
+    """Release the held object on a clear surface in front — gated by PNP_ARM_CALIBRATED.
+
+    Kept for the breakfast-slot callers; *pose6* is now ignored. The old fixed
+    arm-frame slot poses were never calibrated (they fell through to a blind
+    drop), so this routes to the shared vision placement (scan surface -> empty
+    spot -> set down) like every other PnP place destination.
+    """
     if not arm_enabled():
         print("[pnp.skills] place_at — arm gated; nothing to release")
         return False
-    return _place_at_pose(ctx, pose6)
+    return _place_object(ctx)
 
 
 def place_object(ctx: TaskContext, destination: str, *, group: str | None = None) -> bool:
@@ -177,9 +189,11 @@ def place_object(ctx: TaskContext, destination: str, *, group: str | None = None
 
     Gated by PNP_ARM_CALIBRATED: with the arm off there is nothing held to place,
     so this no-ops (the placement was already *indicated* by indicate_placement).
-    With the arm on, navigation to the furniture waypoint is real (config poses);
-    the place pose is the stub (config PNP_PLACE_POSE_<DEST>), falling back to a
-    drop-in-front when none is configured. Returns whether a located placement was done.
+    With the arm on, navigation to the furniture waypoint is real (config poses),
+    then the shared vision placement (``tasks.skills.place_object``) scans the
+    surface, picks a clear spot, and sets the held object down — recalling the
+    grasp recorded at pick time. *group* only shapes the spoken indication; the
+    vision placer chooses the actual spot. Returns whether the object was released.
     """
     if not arm_enabled():
         print(f"[pnp.skills] place_object({destination}) — arm gated; placement indicated only")
@@ -194,20 +208,7 @@ def place_object(ctx: TaskContext, destination: str, *, group: str | None = None
     if pose_key and _has_pose(pose_key):  # waypoint in the map or the env var
         x, y, h = _pose(pose_key)
         ctx.goto(x, y, h)
-    place_pose = (
-        os.getenv(
-            {
-                "dishwasher": "PNP_PLACE_POSE_DISHWASHER",
-                "trash": "PNP_PLACE_POSE_TRASH",
-                "cabinet": "PNP_PLACE_POSE_CABINET",
-            }.get(destination, ""),
-            "",
-        ).strip()
-        or os.getenv("PNP_PLACE_POSE_DEFAULT", "").strip()
-    )
-    if not place_pose:
-        print(f"[pnp.skills] place_object({destination}) — no place pose; dropping in front")
-        return release_in_front(ctx)
-    ok = _place_at_pose(ctx, place_pose)
-    ctx.say(prompts.PLACED.format(destination=destination))
+    ok = _place_object(ctx)
+    if ok:
+        ctx.say(prompts.PLACED.format(destination=destination))
     return ok

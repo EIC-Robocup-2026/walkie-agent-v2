@@ -232,7 +232,8 @@ def test_skills_pick_object_gated_off_never_calls_arm(monkeypatch):
     from tasks.PickAndPlace import skills
 
     called = {"n": 0}
-    monkeypatch.setattr(skills, "_pick_object", lambda ctx, o: called.__setitem__("n", called["n"] + 1) or True)
+    monkeypatch.setattr(skills, "_pick_object",
+                        lambda ctx, prompts: called.__setitem__("n", called["n"] + 1) or True)
     monkeypatch.setenv("PNP_ARM_CALIBRATED", "0")
     ctx = FakeCtx()
 
@@ -242,15 +243,23 @@ def test_skills_pick_object_gated_off_never_calls_arm(monkeypatch):
 
 
 def test_skills_pick_object_gated_on_calls_arm(monkeypatch):
+    """Gate on: delegates to the shared grasp pipeline with the object's class as the prompt."""
     from tasks.PickAndPlace import skills
 
-    called = {"n": 0}
-    monkeypatch.setattr(skills, "_pick_object", lambda ctx, o: called.__setitem__("n", called["n"] + 1) or True)
+    called = {"n": 0, "prompts": None}
+
+    def _fake_pick(ctx, prompts):
+        called["n"] += 1
+        called["prompts"] = prompts
+        return True
+
+    monkeypatch.setattr(skills, "_pick_object", _fake_pick)
     monkeypatch.setenv("PNP_ARM_CALIBRATED", "1")
     ctx = FakeCtx()
 
     assert skills.pick_object(ctx, _obj("cup")) is True
     assert called["n"] == 1
+    assert called["prompts"] == ["cup"]  # class name passed through as the grasp prompt
 
 
 def test_skills_place_object_gated_off_no_nav(monkeypatch):
@@ -262,3 +271,17 @@ def test_skills_place_object_gated_off_no_nav(monkeypatch):
 
     assert skills.place_object(ctx, "dishwasher") is False
     assert ctx.gotos == []
+
+
+def test_skills_place_object_gated_on_delegates_to_vision_place(monkeypatch):
+    """Gate on: place_object hands off to the shared vision placement (no fixed pose)."""
+    from tasks.PickAndPlace import skills
+
+    called = {"n": 0}
+    monkeypatch.setattr(skills, "_place_object",
+                        lambda ctx: called.__setitem__("n", called["n"] + 1) or True)
+    monkeypatch.setenv("PNP_ARM_CALIBRATED", "1")
+    ctx = FakeCtx()
+
+    assert skills.place_object(ctx, "dishwasher") is True
+    assert called["n"] == 1  # delegated to the shared vision placement

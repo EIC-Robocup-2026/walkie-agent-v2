@@ -8,8 +8,12 @@ only on an execution error (no camera frame, exception), which lets dispatch.py
 hand the clause to the agent stack.
 
 Phase 1 covers the no-arm primitives (navigate, find_object, find_person, count,
-say, greet, get_person_info, get_object_property). Manipulation (pick/place/
-deliver) is gated off and falls through to Tier-2 until Phase 2.
+say, greet, get_person_info, get_object_property). ``pick``/``place`` are wired to
+the shared grasp system (``tasks.skills.pick_object`` / ``place_object``) but stay
+Tier-2 until ``GPSR_ENABLE_MANIPULATION=1`` flips ``manip_enabled`` on (see
+dispatch.prefer_tier1). ``deliver`` remains Tier-2 even with manipulation on: a
+robot->human handover is not a grasp-system primitive, so the agent stack drives
+the social handoff (a prior ``pick`` step still grabs the object deterministically).
 
 `state` is the **per-command** scratch dict. `state["at"]` is the nav-dedup
 (canonical name of where the robot is; in interleaved runs only this key crosses
@@ -42,6 +46,8 @@ from tasks.skills import (
     follow_person,
     go_to_through_door,
     lift_bbox_world_xy,
+    pick_object as _pick_object,
+    place_object as _place_object,
     select_largest_person,
 )
 
@@ -785,9 +791,56 @@ def guide(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> b
     return True
 
 
-# primitive value -> skill. The manipulation primitives (pick/place/deliver) are
-# intentionally absent: they fall through to the Tier-2 agent fallback until
-# Phase 2. `follow`/`guide` reuse HRI's follow_person / nav helpers.
+def pick(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
+    """Grasp the named object via the shared grasp system (GraspNet pick).
+
+    Drives to the object's named location if the command gave one, then re-acquires
+    it visually by class/category and runs the full pick pipeline. On a clean grasp
+    we remember it (``state["holding"]``) for a later place/deliver step and
+    announce success. A failed grasp returns False so dispatch hands the clause to
+    the Tier-2 agent (which can reposition and retry). Only eligible for Tier-1
+    when ``GPSR_ENABLE_MANIPULATION=1`` (dispatch.prefer_tier1); otherwise the step
+    never reaches this skill and goes straight to Tier-2.
+    """
+    obj = step.args.get("object")
+    category = step.args.get("category")
+    where = step.args.get("location")
+    label = (obj or category or "object").replace("_", " ")
+    if where:
+        go_to_named(ctx, where, world, state)
+    classes = _object_classes(obj, category, world) or [label]
+    if _pick_object(ctx, prompts=classes):
+        state["holding"] = obj or category or label
+        ctx.say(f"I have the {label}.")
+        return True
+    return False  # grasp missed -> let the Tier-2 agent reposition and retry
+
+
+def place(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
+    """Set the held object down on the named placement via the shared grasp system.
+
+    Drives to the target placement if named, then runs the vision placement (scan
+    surface -> clear spot -> set down, recalling the grasp recorded at pick time).
+    Returns False on a failed release so dispatch falls to the Tier-2 agent. Same
+    GPSR_ENABLE_MANIPULATION gate as ``pick``.
+    """
+    where = step.args.get("location")
+    label = (step.args.get("object") or state.get("holding") or "object").replace("_", " ")
+    if where:
+        go_to_named(ctx, where, world, state)
+    if _place_object(ctx):
+        state.pop("holding", None)
+        ctx.say(f"I have placed the {label}.")
+        return True
+    return False  # placement missed -> Tier-2 agent fallback
+
+
+# primitive value -> skill. `pick`/`place` route to the shared grasp system but
+# are Tier-1-eligible only when GPSR_ENABLE_MANIPULATION=1 (dispatch.prefer_tier1);
+# otherwise they fall through to the Tier-2 agent. `deliver` is intentionally
+# absent — a robot->human handover is not a grasp-system primitive, so it stays
+# Tier-2 (a prior `pick` step still grabs the object). `follow`/`guide` reuse HRI's
+# follow_person / nav helpers.
 SKILLS = {
     "navigate": navigate,
     "find_object": find_object,
@@ -799,4 +852,6 @@ SKILLS = {
     "greet": greet,
     "get_person_info": get_person_info,
     "get_object_property": get_object_property,
+    "pick": pick,
+    "place": place,
 }

@@ -16,6 +16,7 @@ RETRIEVE_ANNOUNCE = "I will move the clothes to the folding table."
 FOLD_ANNOUNCE = "I will now fold the clothes."
 DONE_ANNOUNCE = "I have finished folding the laundry."
 
-# Placeholder lines for the not-yet-implemented deformable-manipulation steps.
-PICK_NOT_AVAILABLE = "I cannot pick up the clothing yet — manipulation is not implemented."
+# pick_garment is wired to the shared grasp system but gated off by default
+# (LAUNDRY_ARM_CALIBRATED); fold/stack are still genuinely unimplemented.
+PICK_NOT_AVAILABLE = "I cannot pick up the clothing yet — the arm is not enabled."
 FOLD_NOT_AVAILABLE = "I cannot fold yet — folding is not implemented."

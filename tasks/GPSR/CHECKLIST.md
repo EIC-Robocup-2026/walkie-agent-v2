@@ -49,9 +49,13 @@ or real poses** · `[ ]` stub / Tier-2 fallback / not implemented.
         trailing follower (`tracking.companion_present`), prompting + waiting then
         leading on best-effort. Pure bits offline-tested; the turn/camera/wait loop
         needs on-robot validation before the flag is flipped on.
-  - [ ] `pick` / `place` / `deliver` — **gated off** (`GPSR_ENABLE_MANIPULATION=0`)
-        until the arm is calibrated; promote Restaurant's grasp (`tasks/manipulation.py`).
-        Falls through to Tier-2.
+  - [~] `pick` / `place` — Tier-1 skills wired to the shared grasp system
+        (`tasks/skills.pick_object` / `place_object`, the layer Restaurant drives),
+        **gated** behind `GPSR_ENABLE_MANIPULATION` (0 default → Tier-2 fallback;
+        1 → deterministic Tier-1). Needs on-robot validation before the flag flips.
+  - [ ] `deliver` — stays Tier-2 even with manipulation on: a robot→human handover
+        isn't a grasp-system primitive, so the agent stack drives the handoff (a
+        prior `pick` step still grabs the object Tier-1).
 - [~] **Interleaved Task Bonus** (200) — `GPSR_INTERLEAVE` merges all planned commands
       into one **room-batched** order (`schedule.py`), executed with a shared nav cache
       so each room is visited once (the "reduce movements" the bonus rewards). Serial is
@@ -105,7 +109,8 @@ or real poses** · `[ ]` stub / Tier-2 fallback / not implemented.
       robot to each place and capture with `python -m tasks.GPSR.tools.teach_poses`
       (writes `world.toml` in place, preserving fields), then paste the printed
       `GPSR_INSTRUCTION_POINT_POSE` into `config.toml`.
-- [ ] **Manipulation** (`pick`/`place`/`deliver`) once the arm is calibrated.
+- [ ] **Manipulation** — `pick`/`place` are wired (shared grasp system); flip
+      `GPSR_ENABLE_MANIPULATION=1` once the arm is calibrated. `deliver` stays Tier-2.
 - [ ] **Interleave on-robot tuning** — the room-batching lands the bonus's
       movement-reduction; with real poses, consider distance-aware ordering within a
       room and verify the wall-clock saving on the robot.
