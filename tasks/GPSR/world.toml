@@ -26,10 +26,14 @@
 # would be parsed as a member of that table, not a top-level key.
 names = ["Adel", "Angel", "Axel", "Charlie", "Jane", "Jules", "Morgan", "Paris", "Robin", "Simone"]
 
+# Poses below are the re-surveyed practice-arena map frame (walkie-map-editor,
+# 2026-06-27). Room waypoints have no separate survey, so each present room reuses
+# a representative surveyed location pose. Rooms with no surveyed location stay
+# present = false (their old [5.x,...] template poses are a stale, different frame).
 [rooms]
-kitchen     = { pose = [0.0, 0.0, 0.0], present = false }
-bedroom     = { pose = [5.526, 2.248, -0.0903] }
-living_room = { pose = [5.378, -1.617, -0.0806], aliases = ["living room", "lounge"], barrier = true }
+kitchen     = { pose = [2.6216, -1.1501, -1.5708] }  # waypoint = kitchen_table
+bedroom     = { pose = [0.0, 0.0, 0.0], present = false }
+living_room = { pose = [1.5279, 1.1196, 1.6022], aliases = ["living room", "lounge"] }  # waypoint = living_room_table
 office      = { pose = [0.0, 0.0, 0.0], aliases = ["study"], present = false }
 bathroom    = { pose = [0.0, 0.0, 0.0], present = false }
 
@@ -42,16 +46,17 @@ bed           = { room = "bedroom",     placement = true,  pose = [0,0,0], prese
 bedside_table = { room = "bedroom",     placement = true,  pose = [0,0,0], aliases = ["bedside table", "nightstand"], present = false }
 shelf         = { room = "bathroom",    placement = true,  category = "cleaning_supplies", pose = [0,0,0], present = false }
 dishwasher    = { room = "kitchen",     placement = true,  pose = [0,0,0], present = false }
-kitchen_table = { room = "kitchen",     placement = true,  category = "dishes", pose = [0,0,0], aliases = ["kitchen table"], present = false }
+kitchen_table = { room = "kitchen",     placement = true,  category = "dishes", pose = [2.6216, -1.1501, -1.5708], aliases = ["kitchen table"] }
 pantry        = { room = "kitchen",     placement = true,  category = "food", pose = [0,0,0], present = false }
 refrigerator  = { room = "kitchen",     placement = true,  pose = [0,0,0], aliases = ["fridge"], present = false }
 sink          = { room = "kitchen",     placement = true,  pose = [0,0,0], present = false }
-cabinet       = { room = "kitchen",     placement = true,  category = "drinks", pose = [0,0,0], present = false }
+cabinet       = { room = "kitchen",     placement = true,  category = "drinks", pose = [-0.0795, -0.7881, -3.1223] }
 desk          = { room = "office",      placement = true,  category = "fruits", pose = [0,0,0], present = false }
 tv_stand      = { room = "living_room", placement = true,  pose = [0,0,0], aliases = ["tv stand", "television stand"], present = false }
 storage_rack  = { room = "office",      placement = true,  pose = [0,0,0], aliases = ["storage rack"], present = false }
 side_tables   = { room = "living_room", placement = true,  category = "snacks", pose = [0,0,0], aliases = ["side tables", "side table"], present = false }
-sofa          = { room = "living_room", placement = true,  pose = [0,0,0], aliases = ["couch"], present = false }
+living_room_table = { room = "living_room", placement = true, pose = [1.5279, 1.1196, 1.6022], aliases = ["living room table"] }
+sofa          = { room = "living_room", placement = true,  pose = [2.3002, 0.7931, -0.0476], aliases = ["couch"] }
 bookshelf     = { room = "living_room", placement = true,  category = "toys", pose = [0,0,0], present = false }
 trashbin      = { room = "kitchen",     placement = false, pose = [0,0,0], aliases = ["trash bin", "trash can", "bin"], present = false }
 potted_plant  = { room = "living_room", placement = false, pose = [0,0,0], aliases = ["potted plant", "plant"], present = false }
