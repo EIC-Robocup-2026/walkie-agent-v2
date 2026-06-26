@@ -20,3 +20,10 @@ LAUNDRY_MAX_FOLD = "1"
 # Optional goals — off by default until the manipulation primitives exist.
 LAUNDRY_ENABLE_WASHER = "0"   # open the washing-machine door + remove clothes
 LAUNDRY_USE_BASKET = "0"      # carry the basket to transport clothes
+
+# --- Arm gate (mirrors PNP_ARM_CALIBRATED / RESTAURANT_ARM_CALIBRATED) -------
+# MASTER ARM GATE for pick_garment. 0 (default) = announce-only (no arm motion);
+# the nav + clothing-detection flow still runs. 1 = route pick_garment to the
+# shared grasp system (tasks.skills.pick_object). fold/stack stay unimplemented
+# (deformable manipulation) regardless of this gate.
+LAUNDRY_ARM_CALIBRATED = "0"

@@ -55,8 +55,10 @@ GPSR_CUSTOM_OPERATOR_ATTEMPTS = "3"
 # data lives in its own TOML loaded directly (NOT flattened to env vars); only
 # the path is a knob. Relative to the repo root. Override to swap arenas.
 GPSR_WORLD_FILE = "tasks/GPSR/world.toml"
-# Manipulation is gated until the arm is calibrated (mirrors
-# RESTAURANT_ARM_CALIBRATED). Phase 1 is navigation-class; Phase 2 flips this on.
+# Manipulation gate (mirrors RESTAURANT_ARM_CALIBRATED). 0 (default) = pick/place
+# steps fall through to the Tier-2 agent. 1 = the Tier-1 pick/place skills
+# (tasks/GPSR/skills.py -> the shared grasp system) handle them deterministically.
+# `deliver` always stays Tier-2 (a robot->human handover isn't a grasp primitive).
 GPSR_ENABLE_MANIPULATION = "0"
 # For each run the people in the scene is different
 GPSR_PEOPLE_RESET = "1"

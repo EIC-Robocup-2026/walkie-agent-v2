@@ -588,6 +588,63 @@ def test_gated_manipulation_without_a_brain_is_a_failure(world):
     assert status is CmdStatus.FAILED
 
 
+def test_manipulation_enabled_pick_runs_tier1(world, monkeypatch):
+    """manip on → pick routes to the shared grasp system, NOT the Tier-2 agent."""
+    grabbed = {"prompts": None}
+
+    def _fake_pick(ctx, prompts):
+        grabbed["prompts"] = prompts
+        return True
+
+    monkeypatch.setattr(skills, "_pick_object", _fake_pick)
+    ctx = _FakeCtx()
+    brain = _FakeBrain()
+    _, status = _run(ctx, world, RawStep(primitive="pick", object="cola", raw="pick up the cola"),
+                     brain=brain, manip=True)
+
+    assert grabbed["prompts"] == ["cola"]        # class name passed as the grasp prompt
+    assert brain.clauses == []                   # never fell to Tier-2
+    assert any("I have the cola" in s for s in ctx.saids)
+    assert status is CmdStatus.DONE
+
+
+def test_manipulation_enabled_place_runs_tier1(world, monkeypatch):
+    """manip on → place routes to the shared vision placement, NOT the Tier-2 agent."""
+    placed = {"n": 0}
+    monkeypatch.setattr(skills, "_place_object",
+                        lambda ctx: placed.__setitem__("n", placed["n"] + 1) or True)
+    ctx = _FakeCtx()
+    brain = _FakeBrain()
+    # place needs a grounded placement to be Tier-1 eligible (a bare place is
+    # ungrounded by design -> Tier-2); kitchen_table is a placement in the arena.
+    _, status = _run(ctx, world,
+                     RawStep(primitive="place", object="cola", location="kitchen_table",
+                             raw="place the cola on the kitchen table"),
+                     brain=brain, manip=True)
+
+    assert placed["n"] == 1
+    assert brain.clauses == []
+    assert ctx.gotos == [(1.5, 2.5, 0.0)]        # drove to the kitchen table first
+    assert any("placed the cola" in s for s in ctx.saids)
+    assert status is CmdStatus.DONE
+
+
+def test_deliver_stays_tier2_even_with_manipulation_enabled(world):
+    """deliver is a robot->human handover (not a grasp-system primitive) → Tier-2.
+
+    Even with manipulation enabled, deliver has no Tier-1 skill, so dispatch hands
+    the clause to the agent stack (a separate `pick` step still grabs it Tier-1).
+    """
+    ctx = _FakeCtx()
+    brain = _FakeBrain()
+    _, status = _run(ctx, world, RawStep(primitive="deliver", object="cola", raw="bring me the cola"),
+                     brain=brain, manip=True)
+
+    assert len(brain.clauses) == 1 and brain.clauses[0].endswith("bring me the cola")
+    assert ctx.gotos == []                       # no Tier-1 skill drove
+    assert status is CmdStatus.DONE
+
+
 def test_tier2_invalidates_the_nav_cache(world):
     """A Tier-2 step between two navigate(kitchen)s must NOT dedup the second.
 

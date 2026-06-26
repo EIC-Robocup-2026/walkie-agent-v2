@@ -70,8 +70,12 @@ ask-referee / not implemented.
       PickAndPlace waypoints + place poses in `tasks/PickAndPlace/config.toml` (`PNP_*`).
 - [x] Pure-geometry unit tests (`tests/test_manipulation_geometry.py`).
 
-> The grasp/pick/place primitives now live in the shared `tasks/manipulation.py`
-> (reused by Restaurant); `skills.py` is the PickAndPlace-specific facade.
+> The real pick/place now route to the shared **grasp system** (`tasks/skills`:
+> GraspNet pick + depth-lifted vision placement, the same layer Restaurant drives);
+> `skills.py` is the PickAndPlace-specific facade (class detection, LLM sort,
+> destination nav, the gate). Camera-only perception lift (`perceive_surface` ->
+> `DetectedObject`) still comes from `tasks/manipulation.py` and feeds the non-arm
+> "recognize + indicate placement" budget.
 
 ## Calibration TODO (before a real run) — the `[~]` items above depend on this
 
