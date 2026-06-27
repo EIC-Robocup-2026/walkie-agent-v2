@@ -136,6 +136,7 @@ def _pair_ok(
     *,
     overlap_min: float,
     clip_min: float,
+    cross_class_clip_min: float,
     max_dist_m: float,
     require_same_class: bool,
     voxel_m: float,
@@ -157,13 +158,20 @@ def _pair_ok(
     if min(ab, ba) < overlap_min:
         return False
 
-    # (c) class + semantic gate.
+    # (c) semantic gate. With require_same_class, same-class pairs use ``clip_min``;
+    # DIFFERENT-class pairs are allowed only at the stricter ``cross_class_clip_min``
+    # (so the open-vocab detector's label flip-flop — "cup" one frame, "mug" the next,
+    # for one physical object that overlaps and looks near-identical — fuses into a
+    # single node instead of duplicating, while genuinely different objects, which never
+    # reach that CLIP threshold, stay separate). Set ``cross_class_clip_min`` >= 2.0 to
+    # disable cross-class entirely. ``require_same_class=False`` skips the gate (pure
+    # geometry — the mutual-overlap test alone separates a spoon from its table).
     if require_same_class:
-        if a.obs.class_name != b.obs.class_name:
-            return False
         if a.emb is None or b.emb is None:
             return False
-        if cosine(a.emb, b.emb) < clip_min:
+        same = a.obs.class_name == b.obs.class_name
+        thr = clip_min if same else cross_class_clip_min
+        if cosine(a.emb, b.emb) < thr:
             return False
     return True
 
@@ -233,8 +241,8 @@ def _cluster(
         for x in range(len(clusters)):
             for y in range(x + 1, len(clusters)):
                 ca, cb = clusters[x], clusters[y]
-                if require_same_class and items[ca[0]].obs.class_name != items[cb[0]].obs.class_name:
-                    continue
+                # Cross-class eligibility is already encoded in ``eligible`` (the strict
+                # ``cross_class_clip_min`` gate in _pair_ok), so no same-class skip here.
                 if not link_ok(ca, cb):
                     continue
                 if not _merged_extent_ok(
@@ -329,6 +337,7 @@ def associate(
     *,
     overlap_min: float = 0.2,
     clip_min: float = 0.85,
+    cross_class_clip_min: float = 0.95,
     max_dist_m: float = 0.5,
     require_same_class: bool = True,
     voxel_m: float = 0.025,
@@ -346,6 +355,9 @@ def associate(
             be a merge candidate (the flat-object→table guard).
         clip_min: Minimum CLIP cosine for a same-class pair (only used when
             ``require_same_class``).
+        cross_class_clip_min: Stricter CLIP cosine for a DIFFERENT-class pair to merge —
+            recovers detector label flip-flop (cup↔mug) without fusing distinct objects.
+            Set >= 2.0 to disable cross-class merging entirely.
         max_dist_m: Hard cap on the centroid distance of a candidate pair (the
             twin-fusion guard) and the spatial-prefilter radius.
         require_same_class: Require equal ``class_name`` and the CLIP gate for a merge.
@@ -401,6 +413,7 @@ def associate(
             items[j],
             overlap_min=overlap_min,
             clip_min=clip_min,
+            cross_class_clip_min=cross_class_clip_min,
             max_dist_m=max_dist_m,
             require_same_class=require_same_class,
             voxel_m=voxel_m,

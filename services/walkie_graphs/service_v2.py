@@ -97,8 +97,30 @@ class WalkieGraphs:
         self.assoc = dict(
             overlap_min=_envf("WALKIE_GRAPHS_ASSOC_OVERLAP_MIN", "0.2"),
             clip_min=_envf("WALKIE_GRAPHS_ASSOC_CLIP_MIN", "0.85"),
+            cross_class_clip_min=_envf("WALKIE_GRAPHS_ASSOC_CROSS_CLASS_CLIP_MIN", "0.95"),
             max_dist_m=_envf("WALKIE_GRAPHS_ASSOC_MAX_DIST_M", "0.5"),
         )
+        # Lift cleanup (forwarded to deproject_mask in the builder) — reuses the shared
+        # v1 knobs so tuning them takes effect on v2 too.
+        self.lift = dict(
+            erode_px=_envi("WALKIE_GRAPHS_MASK_ERODE_PX", "2"),
+            edge_thresh=_envf("WALKIE_GRAPHS_DEPTH_EDGE_THRESH_M", "0.05"),
+            max_points=_envi("WALKIE_GRAPHS_MAX_POINTS_PER_OBJ", "2000"),
+            sor_k=_envi("WALKIE_GRAPHS_SOR_K", "0"),
+        )
+        # Relation-derivation thresholds (forwarded to relations.derive_relations).
+        self.relations = dict(
+            relation_max_dist=_envf("WALKIE_GRAPHS_RELATION_MAX_DIST", "1.0"),
+            near_m=_envf("WALKIE_GRAPHS_NEAR_M", "0.6"),
+            xy_overlap_min=_envf("WALKIE_GRAPHS_XY_OVERLAP_MIN", "0.15"),
+            z_tol=_envf("WALKIE_GRAPHS_Z_TOL", "0.05"),
+            on_gap=_envf("WALKIE_GRAPHS_ON_GAP", "0.08"),
+            contain_tol=_envf("WALKIE_GRAPHS_CONTAIN_TOL", "0.02"),
+        )
+        # On a cold start (empty store) build sooner so the Database agent isn't blind
+        # for a full REBUILD_EVERY_N window; afterwards the normal cadence applies.
+        self.first_build_n = max(1, min(self.rebuild_every_n,
+                                        _envi("WALKIE_GRAPHS_FIRST_BUILD_N", "10")))
         # detection prompts: interested classes drive the open-vocab detector. (No
         # masking-only excluded classes — v2 has no background carve to feed.)
         self.detect_prompts = sorted(self.interested)
@@ -126,6 +148,7 @@ class WalkieGraphs:
         self._stop = threading.Event()
         self._build_exec = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wg2-build")
         self._build_future = None
+        self._build_lock = threading.Lock()  # serializes merge→install (worker vs observe())
         self._since_build = 0
         self._last_build_ts = 0.0
 
@@ -237,9 +260,15 @@ class WalkieGraphs:
                 cls = (d.class_name or "").lower()
                 if cls in self.exclude or getattr(d, "mask", None) is None:
                     continue
+                # confidence is `float | None` on DetectedObject — coerce, then gate graph
+                # entry on the threshold (the server's per_detection.min_confidence only
+                # gates captioning/embedding, NOT which boxes the detector returns).
+                conf = float(getattr(d, "confidence", 0.0) or 0.0)
+                if conf < self.min_confidence:
+                    continue
                 dets.append(Detection(
                     class_name=d.class_name, class_id=getattr(d, "class_id", None),
-                    conf=float(getattr(d, "confidence", 0.0)), bbox=tuple(d.bbox),
+                    conf=conf, bbox=tuple(int(v) for v in d.bbox),
                     caption=getattr(d, "caption", "") or "",
                     clip_emb=list(getattr(d, "embedding", None) or []),
                     mask=np.asarray(d.mask).astype(np.uint8),
@@ -247,11 +276,16 @@ class WalkieGraphs:
             if not dets:
                 return
             rgb = np.asarray(frame.img)[:, :, :3].astype(np.uint8) if self.keep_rgb else None
+            # Coerce the pose dict to plain floats — the SDK may hand back numpy scalars,
+            # which json.dump (the buffer index) can't serialize.
+            robot_pose = (
+                {k: float(v) for k, v in frame.robot_pose.items()} if frame.robot_pose else None
+            )
             snap = Snapshot(
                 ts=float(frame.ts), depth=np.asarray(frame.depth, np.float32),
                 intr=(intr.fx, intr.fy, intr.cx, intr.cy, intr.width, intr.height),
                 cam_R=np.asarray(frame.cam.R, float), cam_t=np.asarray(frame.cam.t, float),
-                robot_pose=frame.robot_pose, detections=dets, rgb=rgb,
+                robot_pose=robot_pose, detections=dets, rgb=rgb,
             )
             self.buffer.append(snap)
         except Exception as e:  # noqa: BLE001
@@ -259,7 +293,9 @@ class WalkieGraphs:
 
     # ------------------------------------------------------------------ build worker
     def _maybe_build(self) -> None:
-        if self._since_build < self.rebuild_every_n:
+        # Build sooner on a cold start (empty store) so queries work within ~20 s.
+        threshold = self.first_build_n if self.store.count() == 0 else self.rebuild_every_n
+        if self._since_build < threshold:
             return
         if (time.monotonic() - self._last_build_ts) < self.rebuild_min_interval:
             return
@@ -285,11 +321,14 @@ class WalkieGraphs:
             snaps,
             pose_mode=self.pose_mode, do_tsdf=self.do_tsdf,
             voxel_m=self.voxel_m, max_depth=self.max_depth, min_points=self.min_points,
-            **self.assoc, log=self._log,
+            **self.lift, **self.assoc, log=self._log,
         )
-        nodes = self.store.merge(result.observations, now=time.time())
-        rels = derive_relations(nodes)
-        self.store.install(nodes, rels)
+        # Serialize merge→derive→install so a background build and an observe() call
+        # can't interleave and lose one's merged nodes (each merges off the latest scene).
+        with self._build_lock:
+            nodes = self.store.merge(result.observations, now=time.time())
+            rels = derive_relations(nodes, **self.relations)
+            self.store.install(nodes, rels)
         if result.structural_cloud is not None:
             self._save_structural(result.structural_cloud)
         self._update_viz()

@@ -26,13 +26,25 @@ import numpy as np
 from interfaces.perception.geometry import CameraPose
 from .pcd_ops import resolve_device
 
-try:  # Open3D is optional at import time; auto-mode guards every use.
-    import open3d as _o3d  # noqa: F401
-except Exception:  # pragma: no cover - depends on the box
-    _o3d = None
+try:  # cv2 is a hard app dep; guarded so unit tests / no-cv2 boxes still import.
+    import cv2
+except Exception:  # pragma: no cover
+    cv2 = None
+
+_o3d = None
+_o3d_tried = False
 
 
 def _open3d():
+    """Lazily import Open3D once (None if unavailable). Keeps direct module import light."""
+    global _o3d, _o3d_tried
+    if not _o3d_tried:
+        _o3d_tried = True
+        try:
+            import open3d as o3d
+            _o3d = o3d
+        except Exception:  # pragma: no cover - depends on the box
+            _o3d = None
     return _o3d
 
 
@@ -99,18 +111,26 @@ def _intrinsic_o3d(o3d, intr):
 
 
 def _rgbd(o3d, s, max_depth):
-    color = o3d.geometry.Image(np.ascontiguousarray(s.rgb).astype(np.uint8))
     depth = np.asarray(s.depth, np.float32)
     depth = np.where(np.isfinite(depth) & (depth > 0), depth, 0.0)
+    rgb = np.ascontiguousarray(s.rgb).astype(np.uint8)
+    # RGB is captured at the colour resolution; depth (+ its intrinsics) at the depth
+    # resolution. create_from_color_and_depth needs identical sizes, so resize RGB to
+    # the depth grid (the depth-res intrinsics then match).
+    if rgb.shape[:2] != depth.shape[:2]:
+        if cv2 is None:
+            raise RuntimeError("cv2 required to match rgb/depth resolution for odometry")
+        rgb = cv2.resize(rgb, (depth.shape[1], depth.shape[0]), interpolation=cv2.INTER_AREA)
+    color = o3d.geometry.Image(rgb)
     return o3d.geometry.RGBDImage.create_from_color_and_depth(
         color, o3d.geometry.Image(depth),
         depth_scale=1.0, depth_trunc=max_depth, convert_rgb_to_intensity=True,
     )
 
 
-def _odometry(o3d, rgbd_a, rgbd_b, intr_o3d, init):
+def _odometry(o3d, rgbd_a, rgbd_b, intr_o3d, init, *, depth_diff, max_depth):
     """Pairwise RGB-D odometry b←a. Returns (ok, T_ab, info) or (False, None, None)."""
-    opt = o3d.pipelines.odometry.OdometryOption()
+    opt = o3d.pipelines.odometry.OdometryOption(depth_diff_max=depth_diff, depth_max=max_depth)
     ok, T, info = o3d.pipelines.odometry.compute_rgbd_odometry(
         rgbd_a, rgbd_b, intr_o3d, init,
         o3d.pipelines.odometry.RGBDOdometryJacobianFromHybridTerm(), opt,
@@ -128,8 +148,9 @@ def _refine_auto(o3d, snaps, nav, *, device, max_depth, depth_diff,
     nav_inv = [np.linalg.inv(T) for T in nav_T]
 
     pg = reg.PoseGraph()
-    # Node poses are stored as map→camera (Open3D convention: node.pose = T_world_cam
-    # used as extrinsic via inverse). We seed absolute nodes from nav.
+    # node.pose is camera→map (Open3D convention: it transforms a point from the camera
+    # frame INTO the world; the integration extrinsic is its inverse). We seed absolute
+    # nodes from the nav camera→map poses.
     pg.nodes.append(reg.PoseGraphNode(nav_T[0]))
     for i in range(1, n):
         pg.nodes.append(reg.PoseGraphNode(nav_T[i]))
@@ -137,7 +158,8 @@ def _refine_auto(o3d, snaps, nav, *, device, max_depth, depth_diff,
     def add_edge(i, j, uncertain):
         # nav-relative initial guess: map a-cam points into b-cam.
         init = nav_inv[j] @ nav_T[i]
-        ok, T, info = _odometry(o3d, rgbds[i], rgbds[j], intr0, init)
+        ok, T, info = _odometry(o3d, rgbds[i], rgbds[j], intr0, init,
+                                depth_diff=depth_diff, max_depth=max_depth)
         if not ok:
             return False
         # Sanity-bound the solved edge against the nav delta: reject a confident-but-
@@ -170,7 +192,7 @@ def _refine_auto(o3d, snaps, nav, *, device, max_depth, depth_diff,
     log(f"[poses] auto: {n} frames, {n - 1} seq + {loops} loop edges")
 
     opt = reg.GlobalOptimizationOption(
-        max_correspondence_distance=depth_diff, edge_prune_threshold=0.25, reference_node=0,
+        max_correspondence_distance=0.03, edge_prune_threshold=0.25, reference_node=0,
     )
     reg.global_optimization(
         pg, reg.GlobalOptimizationLevenbergMarquardt(),

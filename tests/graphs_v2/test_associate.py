@@ -67,6 +67,14 @@ def _centroids(objs: list[ObjectObservation]) -> np.ndarray:
     return np.asarray([o.centroid for o in objs], dtype=np.float64)
 
 
+def _obs_emb(class_name, points, emb, *, ts=0.0) -> Observation:
+    """An observation with an explicit embedding (for cross-class label-flip tests)."""
+    return Observation(
+        class_name=class_name, class_id=0, conf=0.9, bbox=(0.0, 0.0, 1.0, 1.0),
+        caption=f"a {class_name}", clip_emb=list(emb), ts=ts, points=points,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 1. TWIN FUSION — two identical chairs 1.5 m apart stay two objects.
 # ---------------------------------------------------------------------------
@@ -197,3 +205,43 @@ def test_empty_and_too_few_points_dropped():
 
 def test_empty_input_returns_empty():
     assert associate([]) == []
+
+
+# ---------------------------------------------------------------------------
+# 6. CROSS-CLASS LABEL FLIP-FLOP — one physical object the detector labels "cup"
+#    one frame and "mug" the next (overlapping clouds, near-identical CLIP) fuses
+#    into ONE object; genuinely different overlapping objects stay separate.
+# ---------------------------------------------------------------------------
+_CUP = [1.0, 0.0, 0.0]
+_MUG = [0.985, 0.174, 0.0]   # cosine(cup, mug) ≈ 0.985 >= cross_class_clip_min
+_BOTTLE = [0.0, 1.0, 0.0]    # cosine(cup, bottle) = 0
+
+
+def test_cross_class_label_flipflop_merges():
+    pts = _box((0.0, 0.0, 1.0), (0.12, 0.12, 0.14))
+    objs = associate(
+        [_obs_emb("cup", pts, _CUP, ts=1.0), _obs_emb("mug", pts.copy(), _MUG, ts=2.0)],
+        overlap_min=0.2, clip_min=0.85, cross_class_clip_min=0.95, max_dist_m=0.5,
+    )
+    assert len(objs) == 1
+    assert objs[0].n_obs == 2
+    assert objs[0].class_name in ("cup", "mug")
+
+
+def test_cross_class_disabled_keeps_two_nodes():
+    pts = _box((0.0, 0.0, 1.0), (0.12, 0.12, 0.14))
+    objs = associate(
+        [_obs_emb("cup", pts, _CUP, ts=1.0), _obs_emb("mug", pts.copy(), _MUG, ts=2.0)],
+        overlap_min=0.2, clip_min=0.85, cross_class_clip_min=2.0, max_dist_m=0.5,  # disabled
+    )
+    assert len(objs) == 2
+
+
+def test_cross_class_different_objects_stay_separate():
+    pts = _box((0.0, 0.0, 1.0), (0.12, 0.12, 0.14))
+    objs = associate(
+        [_obs_emb("cup", pts, _CUP, ts=1.0), _obs_emb("bottle", pts.copy(), _BOTTLE, ts=2.0)],
+        overlap_min=0.2, clip_min=0.85, cross_class_clip_min=0.95, max_dist_m=0.5,
+    )
+    # overlapping clouds but cosine 0 << 0.95 → the cross-class gate keeps them separate
+    assert len(objs) == 2

@@ -81,6 +81,7 @@ def build_scene(
     # association
     overlap_min: float = 0.2,
     clip_min: float = 0.85,
+    cross_class_clip_min: float = 0.95,
     max_dist_m: float = 0.5,
     require_same_class: bool = True,
     default_max_extent: float = 2.5,
@@ -105,8 +106,8 @@ def build_scene(
 
     clusters = associate(
         observations,
-        overlap_min=overlap_min, clip_min=clip_min, max_dist_m=max_dist_m,
-        require_same_class=require_same_class, voxel_m=voxel_m,
+        overlap_min=overlap_min, clip_min=clip_min, cross_class_clip_min=cross_class_clip_min,
+        max_dist_m=max_dist_m, require_same_class=require_same_class, voxel_m=voxel_m,
         default_max_extent=default_max_extent, max_extent_by_class=max_extent_by_class,
     )
 

@@ -20,15 +20,27 @@ import numpy as np
 
 from .pcd_ops import resolve_device
 
-try:
-    import open3d as _o3d  # noqa: F401
-except Exception:  # pragma: no cover
-    _o3d = None
+_o3d = None
+_o3d_tried = False
+
+
+def _open3d():
+    """Lazily import Open3D once (None if unavailable). Keeps direct module import light."""
+    global _o3d, _o3d_tried
+    if not _o3d_tried:
+        _o3d_tried = True
+        try:
+            import open3d as o3d
+            _o3d = o3d
+        except Exception:  # pragma: no cover - depends on the box
+            _o3d = None
+    return _o3d
 
 
 def available() -> bool:
     """True when Open3D's tensor geometry is importable (TSDF can run)."""
-    return _o3d is not None and hasattr(_o3d, "t")
+    o = _open3d()
+    return o is not None and hasattr(o, "t")
 
 
 def fuse(
@@ -48,13 +60,10 @@ def fuse(
     Returns ``None`` if Open3D is unavailable, RGB is missing on any frame, or any
     integrate/extract step fails.
     """
-    if not available():
+    o3d = _open3d()
+    if o3d is None or not hasattr(o3d, "t"):
         log("[tsdf] open3d tensor API unavailable — skipping volumetric fusion")
         return None
-    if any(getattr(s, "rgb", None) is None for s in snapshots):
-        log("[tsdf] needs per-frame RGB (WALKIE_GRAPHS_KEEP_RGB=1) — skipping")
-        return None
-    o3d = _o3d
     try:
         import open3d.core as o3c
 

@@ -449,22 +449,32 @@ WALKIE_GRAPHS_KEEP_RGB = "0"
 WALKIE_GRAPHS_POSE_MODE = "baseline"
 # Fuse the volumetric TSDF map (VoxelBlockGrid) during a build. Off by default — the
 # only task consumer needs object centroids, not a surface; turn on once validated on
-# a replayed buffer (needs KEEP_RGB=1 and Open3D, CUDA preferred).
+# a replayed buffer (needs Open3D, CUDA preferred). TSDF is depth-only and does NOT
+# require KEEP_RGB; only pose_mode=auto needs RGB.
 WALKIE_GRAPHS_TSDF = "0"
 
 # Build trigger: rebuild after this many NEW snapshots, but no more often than the
-# min interval (seconds). A build is single-flight (one at a time).
+# min interval (seconds). A build is single-flight (one at a time). On a cold start
+# (empty store) the first build fires sooner (WALKIE_GRAPHS_FIRST_BUILD_N, default 10).
 WALKIE_GRAPHS_REBUILD_EVERY_N = "30"
 WALKIE_GRAPHS_REBUILD_MIN_INTERVAL_SEC = "20"
+WALKIE_GRAPHS_FIRST_BUILD_N = "10"
 # Build over the newest N buffered snapshots (0 = the whole buffer up to the cap).
-WALKIE_GRAPHS_BUILD_WINDOW = "0"
+# Bounded by default so a build stays cheap and the worker doesn't thrash re-associating
+# the whole ring every cadence: ~90 snapshots ≈ a few minutes of recent capture, and
+# merge-into-persisted folds older objects into the durable store regardless.
+WALKIE_GRAPHS_BUILD_WINDOW = "90"
 
 # Batch association (associate.py) — the constrained-agglomerative matcher run once
 # per build over all of the window's detections (with clean poses):
-#   overlap_min  — mutual-min cloud overlap to link two detections (kills flat-into-table)
-#   clip_min     — CLIP cosine to link two same-class detections (semantic agreement)
-#   max_dist_m   — hard centroid cap on any merge (kills identical-twin fusion); also the
-#                  match radius when merging a build's objects into the persisted store.
+#   overlap_min          — mutual-min cloud overlap to link two detections (kills flat-into-table)
+#   clip_min             — CLIP cosine to link two SAME-class detections (semantic agreement)
+#   cross_class_clip_min — stricter CLIP cosine to link two DIFFERENT-class detections;
+#                          recovers detector label flip-flop (cup↔mug) without fusing distinct
+#                          objects. Set >= 2.0 to disable cross-class merging.
+#   max_dist_m           — hard centroid cap on any merge (kills identical-twin fusion); also the
+#                          match radius when merging a build's objects into the persisted store.
 WALKIE_GRAPHS_ASSOC_OVERLAP_MIN = "0.2"
 WALKIE_GRAPHS_ASSOC_CLIP_MIN = "0.85"
+WALKIE_GRAPHS_ASSOC_CROSS_CLASS_CLIP_MIN = "0.95"
 WALKIE_GRAPHS_ASSOC_MAX_DIST_M = "0.5"
