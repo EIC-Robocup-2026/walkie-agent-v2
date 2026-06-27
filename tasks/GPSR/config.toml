@@ -79,7 +79,13 @@ GPSR_WORLD_FILE = "tasks/GPSR/world.toml"
 # steps fall through to the Tier-2 agent. 1 = the Tier-1 pick/place skills
 # (tasks/GPSR/skills.py -> the shared grasp system) handle them deterministically.
 # `deliver` always stays Tier-2 (a robot->human handover isn't a grasp primitive).
-GPSR_ENABLE_MANIPULATION = "1"
+#
+# Kept OFF: enabling it (commit d6ba8c1 "broke") regressed grasping — GPSR switched
+# from the working Tier-2 agent pick to the shared deterministic pick_object, whose
+# base-alignment (face_object_with_arm rotate + straight creep) mis-aligns near the
+# object (rotates to the wrong side of the table / drifts along the wall) and fails
+# to grasp. Re-enable only after that base-alignment is fixed + validated on-robot.
+GPSR_ENABLE_MANIPULATION = "0"
 # For each run the people in the scene is different
 GPSR_PEOPLE_RESET = "1"
 # find_person scan (tasks/GPSR/skills.py): when the forward view at the arrival
