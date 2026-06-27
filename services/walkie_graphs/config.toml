@@ -414,3 +414,57 @@ WALKIE_GRAPHS_EDGES_PATH = "graph_edges.json"
 WALKIE_GRAPHS_CAPTURES_DIR = "graph_captures"
 WALKIE_GRAPHS_BG_PATH = "graph_background.npz"
 WALKIE_GRAPHS_PRUNE_MAX_RECORDS = "500"
+
+
+# ===========================================================================
+# [graphs.v2] — the batch-snapshot redesign (WALKIE_GRAPHS_BACKEND=v2)
+# ===========================================================================
+# v2 trades v1's real-time incremental fold for cheap continuous capture into an
+# on-disk snapshot RING BUFFER plus OCCASIONAL OFFLINE BATCH BUILDS with globally
+# consistent poses (pose-graph + TSDF, Open3D) and a lean numpy SceneStore (no
+# ChromaDB for the scene). It reuses the shared knobs above (INTERVAL_SEC, the
+# *_CLASSES lists, CONFIDENCE_THRESHOLD, CROP_MARGIN_PX, VOXEL_M, MAX_DEPTH_M,
+# MIN_POINTS, MIN_OBS_CONFIRM, REQUIRE_CONFIRMATION, PRUNE_MAX_RECORDS, O3D_DEVICE);
+# only the v2-specific knobs live here. See docs/WALKIE_GRAPHS.md.
+[graphs.v2]
+# Which backend the WalkieGraphs facade builds. "v1" (default) = the original
+# incremental ConceptGraphs pipeline; "v2" = this batch-snapshot redesign. Kept on
+# v1 until v2 reaches parity on replayed buffers.
+WALKIE_GRAPHS_BACKEND = "v1"
+
+# Storage: the lean scene store (nodes.json + embeddings.npy + edges.json + map.npz)
+# and the snapshot ring buffer (index.jsonl + per-snapshot .npz sidecars).
+WALKIE_GRAPHS_STORE_DIR = "graph_scene"
+WALKIE_GRAPHS_BUFFER_DIR = "graph_buffer"
+# Ring-buffer cap (snapshots). ~1 MB each at 720p/10 dets; 400 ≈ a few hundred MB
+# and ~13 min of capture at a 2 s interval. Oldest evict beyond the cap.
+WALKIE_GRAPHS_SNAPSHOT_CAP = "400"
+# Keep the RGB frame in each buffered snapshot. Required ONLY for pose_mode=auto and
+# TSDF (both need color); leave 0 for the baseline object-recall path (saves disk).
+WALKIE_GRAPHS_KEEP_RGB = "0"
+
+# Pose refinement for a build window. "baseline" = trust the nav/TF pose as captured
+# (no Open3D, no risk) — the permanent default until a replayed-buffer measurement
+# proves "auto" (Open3D RGB-D odometry + pose-graph global optimization) actually wins.
+WALKIE_GRAPHS_POSE_MODE = "baseline"
+# Fuse the volumetric TSDF map (VoxelBlockGrid) during a build. Off by default — the
+# only task consumer needs object centroids, not a surface; turn on once validated on
+# a replayed buffer (needs KEEP_RGB=1 and Open3D, CUDA preferred).
+WALKIE_GRAPHS_TSDF = "0"
+
+# Build trigger: rebuild after this many NEW snapshots, but no more often than the
+# min interval (seconds). A build is single-flight (one at a time).
+WALKIE_GRAPHS_REBUILD_EVERY_N = "30"
+WALKIE_GRAPHS_REBUILD_MIN_INTERVAL_SEC = "20"
+# Build over the newest N buffered snapshots (0 = the whole buffer up to the cap).
+WALKIE_GRAPHS_BUILD_WINDOW = "0"
+
+# Batch association (associate.py) — the constrained-agglomerative matcher run once
+# per build over all of the window's detections (with clean poses):
+#   overlap_min  — mutual-min cloud overlap to link two detections (kills flat-into-table)
+#   clip_min     — CLIP cosine to link two same-class detections (semantic agreement)
+#   max_dist_m   — hard centroid cap on any merge (kills identical-twin fusion); also the
+#                  match radius when merging a build's objects into the persisted store.
+WALKIE_GRAPHS_ASSOC_OVERLAP_MIN = "0.2"
+WALKIE_GRAPHS_ASSOC_CLIP_MIN = "0.85"
+WALKIE_GRAPHS_ASSOC_MAX_DIST_M = "0.5"

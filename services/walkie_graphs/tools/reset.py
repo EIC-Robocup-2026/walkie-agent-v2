@@ -30,6 +30,10 @@ def main() -> None:
     args = ap.parse_args()
 
     dirs = [
+        # v2 store + snapshot buffer (batch-snapshot backend)
+        Path(os.getenv("WALKIE_GRAPHS_STORE_DIR", "graph_scene")),
+        Path(os.getenv("WALKIE_GRAPHS_BUFFER_DIR", "graph_buffer")),
+        # v1 store (ConceptGraphs-style incremental backend)
         Path(os.getenv("WALKIE_GRAPHS_CHROMA_DIR", "chroma_db_graph")),
         Path(os.getenv("WALKIE_GRAPHS_PCDS_DIR", "graph_pcds")),
         Path(os.getenv("WALKIE_GRAPHS_THUMBS_DIR", "graph_thumbs")),
