@@ -218,10 +218,14 @@ WALKIE_GRASP_MAX_APPROACH_UP = "0.0"
 WALKIE_GRASP_RETRY_ATTEMPTS = "3"    # max grasp executions per pick
 WALKIE_GRASP_RETRY_STRAFE_M = "0.08" # sideways base step between retries
 WALKIE_GRASP_RETRY_BACK_M = "0.05"   # backward base step between retries
-# After a successful pick, back the base straight off the table (direct cmd_vel) by this
-# much, then tuck both arms to WALKIE_CARRY_POSE — the just-grasped arm is still extended
-# over the table and Nav2's costmap reads it as an obstacle, so nav won't drive away. 0 = off.
-WALKIE_GRASP_RETREAT_M = "0.50"
+# How pick_object lines the chosen arm up with the object before grasping (step 4):
+#   "rotate" (default — the usable PR #31 behaviour) — turn the base so the arm shoulder
+#     aims at the object (face_object_with_arm).
+#   "strafe" (experimental, NOT yet validated on-robot) — slide the omni base sideways
+#     with the heading HELD (align_arm_to_object). Addresses an over-rotation seen when
+#     the object is close ("rotate" can over-shoot and face the wall, dropping the object
+#     out of view). Opt in only after an on-robot A/B.
+WALKIE_GRASP_ARM_ALIGN = "rotate"    # "rotate" | "strafe"
 # Descriptor-prompt detection + CLIP rerank (tasks/skills/grasp.py): YOLOE is prompt-driven
 # and can't box brand names ("coke"), but under a generic visual descriptor ("can","red can")
 # it returns SEVERAL boxes — so we detect with descriptors (the _GRASP_DESCRIPTORS map),
