@@ -95,6 +95,30 @@ class SceneGraphViz:
         self._viz.robot(robot_pose)
         self._viz.camera(cam_pose)
 
+    def update_live(self, frame, detections, *, exclude=()) -> None:
+        """Live feed: draw the CURRENT frame's lifted detections under ``world/live``.
+
+        Refreshed every capture tick (when ``WALKIE_GRAPHS_VIZ_LIVE=1``) so you can watch
+        the scene fill in as walkie_graphs takes each snapshot — independent of the slower
+        batch build that produces the persistent ``world/objects``. Lifts via the canonical
+        :meth:`CameraSnapshot.mask_to_points`, so the live clouds sit exactly where the
+        built object clouds will.
+        """
+        viz = self._viz
+        viz.clear("world/live", recursive=True)  # show only the current frame
+        if not getattr(frame, "has_geometry", False):
+            return
+        for i, d in enumerate(detections):
+            cls = getattr(d, "class_name", "") or ""
+            if cls.lower() in exclude or getattr(d, "mask", None) is None:
+                continue
+            try:
+                pts = frame.mask_to_points(d.mask)
+            except Exception:  # noqa: BLE001
+                continue
+            if len(pts):
+                viz.points(["world", "live", str(i)], np.asarray(pts), colors=[_class_color(cls)])
+
 
 def build_scene_viz():
     """Wrap the process-wide :mod:`services.viz` session in a :class:`SceneGraphViz`.

@@ -110,9 +110,14 @@ class WalkieGraphs:
         self.lift = dict(
             erode_px=_envi("WALKIE_GRAPHS_MASK_ERODE_PX", "2"),
             edge_thresh=_envf("WALKIE_GRAPHS_DEPTH_EDGE_THRESH_M", "0.05"),
+            edge_rel=_envf("WALKIE_GRAPHS_DEPTH_EDGE_REL", "0.0"),
             max_points=_envi("WALKIE_GRAPHS_MAX_POINTS_PER_OBJ", "2000"),
             sor_k=_envi("WALKIE_GRAPHS_SOR_K", "0"),
+            sor_std_ratio=_envf("WALKIE_GRAPHS_SOR_STD_RATIO", "2.0"),
         )
+        # Live scene feed: draw EACH captured frame's lifted detections to Rerun under
+        # world/live (before the batch build), so you can watch the scene fill in live.
+        self.viz_live = _envb("WALKIE_GRAPHS_VIZ_LIVE", "0")
         # Relation-derivation thresholds (forwarded to relations.derive_relations).
         self.relations = dict(
             relation_max_dist=_envf("WALKIE_GRAPHS_RELATION_MAX_DIST", "1.0"),
@@ -225,11 +230,14 @@ class WalkieGraphs:
         if self.snapshot_path is not None:
             self._write_perception(frame, detections)
         # Keep the live robot/camera markers fresh every tick (cheap), so they don't
-        # freeze between the occasional batch builds.
+        # freeze between the occasional batch builds; with VIZ_LIVE, also draw this
+        # frame's lifted detections live (before the batch build folds them in).
         self._last_cam = frame.cam
         if self.viz is not None:
             try:
                 self.viz.update_markers(robot_pose=frame.robot_pose, cam_pose=frame.cam)
+                if self.viz_live:
+                    self.viz.update_live(frame, detections, exclude=self.exclude)
             except Exception:  # noqa: BLE001 — viz is best-effort
                 pass
         # Buffer the frame for the next batch build (only if liftable + has detections).

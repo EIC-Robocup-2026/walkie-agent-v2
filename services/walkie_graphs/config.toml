@@ -36,6 +36,10 @@ WALKIE_GRAPHS_CAPTION_CLASSES = "shirt"
 WALKIE_GRAPHS_VIZ_BOXES = "1"        # per-object AABB box
 WALKIE_GRAPHS_VIZ_LABELS = "1"       # class-name label on each object
 WALKIE_GRAPHS_VIZ_BACKGROUND = "1"   # faint TSDF structural cloud (only when TSDF is on)
+# Live feed: draw every captured frame's lifted detections under world/live as the robot
+# scans (independent of the batch build's world/objects). A debug aid — costs one extra
+# mask-lift per detection per tick, so off by default.
+WALKIE_GRAPHS_VIZ_LIVE = "0"
 
 [graphs.camera]
 # TF lookup that gives each frame its camera→map pose (lift + head-tilt baked in by the TF
@@ -72,12 +76,14 @@ WALKIE_GRAPHS_KEEP_RGB = "0"
 # Build trigger: rebuild after this many NEW snapshots, but no more often than the min
 # interval (seconds); single-flight (one build at a time). On a cold start (empty store) the
 # first build fires after FIRST_BUILD_N so the database agent isn't blind for a full window.
-WALKIE_GRAPHS_REBUILD_EVERY_N = "30"
-WALKIE_GRAPHS_REBUILD_MIN_INTERVAL_SEC = "20"
-WALKIE_GRAPHS_FIRST_BUILD_N = "10"
-# Build over the newest N buffered snapshots (0 = whole buffer). Bounded by default so a build
+# Tuned for a near-real-time scene: a rebuild every ~5 snapshots (~10 s at INTERVAL_SEC=2)
+# so the scene graph keeps up with the robot; merge-into-persisted accretes across builds.
+WALKIE_GRAPHS_REBUILD_EVERY_N = "5"
+WALKIE_GRAPHS_REBUILD_MIN_INTERVAL_SEC = "4"
+WALKIE_GRAPHS_FIRST_BUILD_N = "3"
+# Build over the newest N buffered snapshots (0 = whole buffer). Bounded so each frequent build
 # stays cheap; merge-into-persisted accumulates older objects into the durable store regardless.
-WALKIE_GRAPHS_BUILD_WINDOW = "90"
+WALKIE_GRAPHS_BUILD_WINDOW = "60"
 # Pose refinement for a build window. "baseline" = trust the nav/TF pose as captured (no Open3D,
 # no risk — the permanent default until a replayed-buffer measurement proves "auto" wins).
 # "auto" = Open3D RGB-D odometry + pose-graph global optimization (needs KEEP_RGB=1).

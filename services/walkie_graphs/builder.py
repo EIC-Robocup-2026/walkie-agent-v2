@@ -43,17 +43,22 @@ class BuildResult:
 
 
 def _lift_snapshot(snap, pose, *, voxel_m, max_points, erode_px, max_depth, sor_k,
-                   edge_thresh, min_points) -> list[Observation]:
+                   sor_std_ratio, edge_thresh, edge_rel, min_points) -> list[Observation]:
+    # Mirrors interfaces.devices.camera.CameraSnapshot.mask_to_points (the canonical lift
+    # the live perception path uses) so a buffered frame deprojects to the SAME map-frame
+    # cloud: depth-discontinuity edge mask WITH rel_thresh, then deproject_mask with the
+    # same voxel / erode / SOR / max-depth params, mapped to the (optimized) camera pose.
     fx, fy, cx, cy, w, h = snap.intr
     intr = Intrinsics(fx=fx, fy=fy, cx=cx, cy=cy, width=int(w), height=int(h))
     intr = intr.scaled_to(snap.depth.shape[1], snap.depth.shape[0])
-    edge = depth_discontinuity_mask(snap.depth, edge_thresh) if edge_thresh > 0 else None
+    edge = (depth_discontinuity_mask(snap.depth, edge_thresh, rel_thresh=edge_rel)
+            if edge_thresh > 0 else None)
     out: list[Observation] = []
     for det in snap.detections:
         pts = deproject_mask(
             det.mask, snap.depth, intr, pose,
             voxel=voxel_m, max_points=max_points, erode_px=erode_px,
-            edge_mask=edge, max_depth=max_depth, sor_k=sor_k,
+            edge_mask=edge, max_depth=max_depth, sor_k=sor_k, sor_std_ratio=sor_std_ratio,
         )
         if len(pts) < min_points:
             continue
@@ -76,7 +81,9 @@ def build_scene(
     erode_px: int = 2,
     max_depth: float = 4.0,
     sor_k: int = 0,
+    sor_std_ratio: float = 2.0,
     edge_thresh: float = 0.05,
+    edge_rel: float = 0.0,
     min_points: int = 50,
     # association
     overlap_min: float = 0.2,
@@ -101,7 +108,8 @@ def build_scene(
     for snap, pose in zip(snaps, poses):
         observations.extend(_lift_snapshot(
             snap, pose, voxel_m=voxel_m, max_points=max_points, erode_px=erode_px,
-            max_depth=max_depth, sor_k=sor_k, edge_thresh=edge_thresh, min_points=min_points,
+            max_depth=max_depth, sor_k=sor_k, sor_std_ratio=sor_std_ratio,
+            edge_thresh=edge_thresh, edge_rel=edge_rel, min_points=min_points,
         ))
 
     clusters = associate(
