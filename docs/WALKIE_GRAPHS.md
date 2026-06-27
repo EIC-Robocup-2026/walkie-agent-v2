@@ -16,6 +16,89 @@ and the detection server), just the memory that the eyes fill in over time.
 
 ---
 
+## Two backends — `WALKIE_GRAPHS_BACKEND`
+
+There are now **two** implementations behind the same `WalkieGraphs` facade and the same query
+API. Pick one with `WALKIE_GRAPHS_BACKEND` (default `v1`):
+
+- **`v1`** — the original **real-time incremental** pipeline described in the rest of this doc:
+  fuse every frame immediately, one ICP-corrected capture at a time, with staggered maintenance
+  passes. ChromaDB + capture-segment sidecars. Powerful but heavily tuned (~118 knobs); the
+  complexity exists to fight one thing — pose drift during motion.
+
+- **`v2`** — the **batch-snapshot redesign** (`services/walkie_graphs/{buffer,scene,associate,
+  relations,builder,service_v2,poses,tsdf}.py`). It trades real-time ingest for **cheap
+  continuous capture + occasional offline batch builds**, which removes the reason for almost
+  all of v1's machinery. v2 is the recommended direction; v1 stays the default until v2 is
+  validated on real replayed buffers.
+
+### v2 in one picture
+
+```
+  capture thread (every INTERVAL_SEC)          build worker (every REBUILD_EVERY_N snapshots)
+  ┌───────────────────────────────┐            ┌─────────────────────────────────────────────┐
+  │ 1 RGB-D frame + 1 detect/      │            │ window of buffered snapshots                 │
+  │   caption/embed round-trip     │  buffer    │  → refine_poses (baseline=nav | auto=Open3D) │
+  │ → write live perception.json   │ ─────────► │  → lift each mask with its optimized pose    │
+  │ → append compact Snapshot to   │  (on-disk  │  → BATCH associate (constrained agglomerative)│
+  │   the on-disk ring buffer      │   ring)    │  → MERGE into persisted SceneStore (never    │
+  └───────────────────────────────┘            │     shrink) → derive relations → install      │
+       no ICP, no fusion, no maintenance        │  → (optional) TSDF volumetric map             │
+                                                └─────────────────────────────────────────────┘
+                                                   queries read the last installed scene
+```
+
+**Why this fixes v1's failures.** Pose error is reconciled **once over the whole window**
+(pose-graph, optional) instead of per frame, and instance identity is decided **once over all
+detections** (batch association) instead of pairwise-online:
+
+| v1 failure | v2 fix |
+|---|---|
+| fuzzy clouds (per-frame jitter) | clean poses before any fusion (pose-graph; or just trust settled nav) |
+| ghost duplicates (rejected-ICP inserts) | one association pass; near lifts union together |
+| flat object absorbed into the table | **mutual-min** cloud overlap (spoon→table≈1 but table→spoon≈0 → min≈0) |
+| identical-twin fusion | **hard centroid cap**, independent of CLIP |
+| a row of chairs blobbed into one | **complete-linkage + per-class AABB-extent veto** (no chaining) |
+| detector label flip-flop → duplicates | strict **cross-class CLIP gate** (cup↔mug fuse; distinct objects don't) |
+| ~3-sighting confirmation lag | `n_obs` = cluster member count, available from one build |
+
+**Storage.** No ChromaDB for the scene — the store is a numpy `(N,D)` L2-normalized embedding
+matrix + `nodes.json` + `edges.json` (`graph_scene/`), with `query_text` a single brute-force
+cosine matmul over ≤500 objects. The capture buffer is `graph_buffer/` (an index + per-snapshot
+`.npz` sidecars). Both survive restart and **accrete** (builds merge, never shrink). This removes
+v1's single-process HNSW-corruption constraint, dual locks, and persistence fan-out.
+
+**`perception.json` stays real-time** — it's written straight from each frame's live detections in
+the capture thread, decoupled from the (lagging) batch build, so "what's in front of me now" is
+never stale.
+
+### v2 staging
+
+- **Stage 1 (object recall):** `POSE_MODE=baseline` (trust nav pose) + `TSDF=0`. No Open3D on the
+  build path; fixes ghosts / twins / absorption / lag.
+- **Stage 2 (the clean volumetric map — validate first):** `POSE_MODE=auto` (Open3D RGB-D odometry
+  + pose-graph global optimization, seeded and sanity-bounded by nav so it can never do worse than
+  nav) and `TSDF=1` (VoxelBlockGrid). Measure on a replayed buffer before enabling — a pose graph
+  can make poses *worse* than settled nav, so `baseline` is the permanent default until proven.
+
+### v2 commands
+
+```bash
+# Record once on the robot (capture thread fills graph_buffer/), then replay OFFLINE to tune /
+# measure deterministically — no robot needed:
+uv run python -m services.walkie_graphs.tools.replay graph_buffer                       # baseline, object nodes
+uv run python -m services.walkie_graphs.tools.replay graph_buffer --pose-mode auto --tsdf
+uv run python -m services.walkie_graphs.tools.replay graph_buffer --store graph_scene   # also persist + print
+
+# Wipe both backends' stores (now also clears graph_scene/ + graph_buffer/):
+uv run python -m services.walkie_graphs.tools.reset -y
+```
+
+The v2 knobs (~18, all `WALKIE_GRAPHS_*`) live in `services/walkie_graphs/config.toml` under
+`[graphs.v2]`; v2 reuses the shared lift / class / confirmation knobs from the v1 tables.
+
+---
+
 ## What it does, in one picture
 
 ```
