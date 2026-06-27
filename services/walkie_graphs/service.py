@@ -34,6 +34,7 @@ from .buffer import Detection, Snapshot, SnapshotBuffer
 from .builder import build_scene
 from .relations import derive_relations
 from .scene import ObjectNode, Relation, SceneStore
+from .viz import build_scene_viz
 
 
 def _envf(name, default):
@@ -74,8 +75,13 @@ class WalkieGraphs:
         self.model = model
         self.walkieAI = walkieAI
         self.walkie = walkie
-        self.viz = viz
+        # Build (and thereby START) the shared Rerun session unless one is injected or
+        # viz is disabled — constructing WalkieGraphs is what kicks Rerun off in the
+        # main agent flow, exactly as the v1 facade did.
+        self.viz = viz if viz is not None else build_scene_viz()
         self.snapshot_path = snapshot_path
+        self._last_structural = None  # last TSDF cloud (for the viz background)
+        self._last_cam = None         # last capture's CameraPose (for the camera marker)
 
         # --- config (all WALKIE_GRAPHS_* env, defaulted in services/.../config.toml) ---
         self.interval = _envf("WALKIE_GRAPHS_INTERVAL_SEC", "3.0")
@@ -218,6 +224,14 @@ class WalkieGraphs:
         # Live perception.json — cheap per-detection centroid lift, decoupled from the graph.
         if self.snapshot_path is not None:
             self._write_perception(frame, detections)
+        # Keep the live robot/camera markers fresh every tick (cheap), so they don't
+        # freeze between the occasional batch builds.
+        self._last_cam = frame.cam
+        if self.viz is not None:
+            try:
+                self.viz.update_markers(robot_pose=frame.robot_pose, cam_pose=frame.cam)
+            except Exception:  # noqa: BLE001 — viz is best-effort
+                pass
         # Buffer the frame for the next batch build (only if liftable + has detections).
         if frame.has_geometry:
             self._buffer_frame(frame, detections)
@@ -329,6 +343,7 @@ class WalkieGraphs:
             rels = derive_relations(nodes, **self.relations)
             self.store.install(nodes, rels)
         if result.structural_cloud is not None:
+            self._last_structural = result.structural_cloud
             self._save_structural(result.structural_cloud)
         self._update_viz()
 
@@ -342,10 +357,18 @@ class WalkieGraphs:
             self._log(f"map save failed: {e}")
 
     def _update_viz(self) -> None:
+        """Redraw the whole scene graph after a build (objects + relations + markers)."""
         if self.viz is None:
             return
         try:
-            self.viz.update_v2(self.store)  # only a v2-aware viz; safely ignored otherwise
+            robot_pose = None
+            if self.walkie is not None:
+                try:
+                    robot_pose = self.walkie.status.get_position()
+                except Exception:  # noqa: BLE001
+                    robot_pose = None
+            self.viz.update(self.store, robot_pose=robot_pose,
+                            cam_pose=self._last_cam, structural=self._last_structural)
         except Exception:  # noqa: BLE001 — viz is best-effort
             pass
 

@@ -30,6 +30,12 @@ WALKIE_GRAPHS_INTERESTED_CLASSES = "sofa,door,chair,armchair,table,stool,shirt,s
 WALKIE_GRAPHS_EXCLUDE_CLASSES = "person"
 # Only these classes get a server image-caption (cost control). Empty = same as interested.
 WALKIE_GRAPHS_CAPTION_CLASSES = "shirt"
+# Scene-graph Rerun layer (drawn into the shared services/viz session; enable Rerun itself
+# with WALKIE_VIZ=rerun, the default). These only control WHAT the scene-graph layer draws —
+# object point clouds always show; boxes/labels/background are toggles.
+WALKIE_GRAPHS_VIZ_BOXES = "1"        # per-object AABB box
+WALKIE_GRAPHS_VIZ_LABELS = "1"       # class-name label on each object
+WALKIE_GRAPHS_VIZ_BACKGROUND = "1"   # faint TSDF structural cloud (only when TSDF is on)
 
 [graphs.camera]
 # TF lookup that gives each frame its camera→map pose (lift + head-tilt baked in by the TF
