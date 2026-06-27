@@ -240,6 +240,7 @@ def creep_base_relative(
     base). Best-effort: True once the target displacement is reached, False on no
     odom fix or an unavailable cmd_vel channel; never raises.
     """
+    ctx.walkie.robot.head.set_auto_tilt(False)
     target = math.hypot(forward_m, left_m)
     if target < 1e-3:
         return True
@@ -260,11 +261,13 @@ def creep_base_relative(
         msg_type = NAV_TOPICS["cmd_vel_type"]
     except Exception as exc:  # noqa: BLE001 — best-effort
         print(f"[skills] creep_base_relative: cmd_vel channel unavailable ({exc})")
+        ctx.walkie.robot.head.set_auto_tilt(True)
         return False
 
     start = ctx.walkie.status.get_position()
     if not start:
         print("[skills] creep_base_relative: no odom fix; refusing to creep")
+        ctx.walkie.robot.head.set_auto_tilt(True)
         return False
     x0, y0, h0 = start["x"], start["y"], start["heading"]
     ux, uy = forward_m / target, left_m / target  # body-frame unit direction
@@ -329,6 +332,7 @@ def creep_base_relative(
                 _publish(0.0, 0.0, 0.0)
             except Exception:  # noqa: BLE001
                 break
+        ctx.walkie.robot.head.set_auto_tilt(True)
     return reached
 
 

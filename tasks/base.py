@@ -216,8 +216,10 @@ class TaskContext:
 
     def rotate_to(self, heading_rad: float) -> bool:
         """Rotate in place — one-shot 'look toward' for a static target."""
+        self.walkie.robot.head.set_auto_tilt(False)
         pose = self.current_pose()
-        return self.goto(pose["x"], pose["y"], heading_rad)
+        self.goto(pose["x"], pose["y"], heading_rad)
+        self.walkie.robot.head.set_auto_tilt(True)
 
     # --- scoring --------------------------------------------------------
 

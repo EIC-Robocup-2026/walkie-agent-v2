@@ -295,7 +295,7 @@ def _extract(model, schema: "type[BaseModel]", instructions: str, text: str):
     """
     from langchain.messages import HumanMessage, SystemMessage
     try:
-        structured = model.with_structured_output(schema)
+        structured = model.with_structured_output(schema, method="json_schema")
         return structured.invoke([SystemMessage(content=instructions), HumanMessage(content=text)])
     except Exception as exc:
         print(f"[gpsr] structured extract failed ({exc}); trying JSON fallback")

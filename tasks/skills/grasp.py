@@ -1278,7 +1278,6 @@ def look_at_object(ctx: TaskContext, xyz_map: Vec3) -> bool:
     clamped look-down tilt, and commands the head servo. Returns False (never
     raises) when the camera pose is unavailable or the servo command fails.
     """
-    ctx.walkie.robot.head.get_angle
     cam = camera_pose(ctx.walkie)
     if cam is None:
         print("[grasp] look_at_object: no camera pose")
@@ -1405,6 +1404,7 @@ def approach_object(
     *success_tolerance_m* — close enough to grasp from), or ``"FAILED"`` (every
     attempt aborted with the base still too far to reach the object).
     """
+    ctx.walkie.robot.head.set_auto_tilt(False)
     attempts = max(1, retries + 1)
     prev_dist: float | None = None
     for attempt in range(attempts):
@@ -1446,7 +1446,7 @@ def approach_object(
             except Exception as exc:  # noqa: BLE001
                 print(f"[grasp] approach_object: cancel before retry raised ({exc})")
             time.sleep(retry_settle_sec)
-
+    ctx.walkie.robot.head.set_auto_tilt(True)
     print(f"[grasp] approach_object: all {attempts} attempt(s) failed "
           f"(base still > {success_tolerance_m:.2f}m from object)")
     return "FAILED"
