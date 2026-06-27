@@ -5,18 +5,38 @@
 
 [gpsr]
 # Map-frame waypoint "x,y,heading_rad" announced ~2h before the test.
-GPSR_INSTRUCTION_POINT_POSE = "2.606,0.321,-0.0844"
+GPSR_INSTRUCTION_POINT_POSE = "0.0,0.0,0.0"
 # 1 = on entry, ask a human to open the arena door and wait for it before driving
 # to the instruction point (the robot starts outside a possibly-closed door). Uses
 # the shared tasks.skills.request_open_door. Default OFF so dev/practice runs with
 # no door don't block; turn on for the real run.
-GPSR_REQUEST_DOOR = "1"
+# OFF for practice: with no physical door the depth check sees a near surface in the
+# centre (head tilted down -> floor, or a near wall) within WALKIE_DOOR_CLEAR_M and
+# false-reads "closed", spamming "please open the door". Re-enable ("1") for the real
+# arena entry (and level the head before the check if it still false-triggers).
+GPSR_REQUEST_DOOR = "0"
 # 1 = when a named navigation can't reach its goal, check whether a closed door is
 # blocking the way (depth) and, if so, ask a human to open it and retry
 # (tasks.skills.go_to_through_door). Only asks on a nav FAILURE and not when the
 # path is seen clear, so normal driving is unaffected. Turn OFF (0) if it
 # false-asks at a wall/furniture where nav stalls for non-door reasons.
 GPSR_NAV_DOOR_RETRY = "1"
+# "Close enough" nav promotion (interfaces -> ctx.goto). A placement/pick standing
+# pose surveyed right at the furniture (e.g. the cabinet) routinely makes Nav2's
+# goal checker return FAILED even though the robot is essentially there. With this
+# set, a Nav2 FAILED whose remaining distance is within the tolerance is reported
+# as CLOSE_ENOUGH (= reached), so go_to_named/go_to_through_door succeed on the
+# first drive and never run the door check -> no phantom "please open the door" at a
+# cabinet/table that has no door. A genuinely-blocking arena door leaves the goal
+# metres away (across the door), so its FAILED is well outside the tolerance and the
+# door ask still fires. Mirrors Restaurant's WALKIE_NAV_GOAL_TOLERANCE_M.
+WALKIE_NAV_GOAL_TOLERANCE_M = "0.5"
+# Door at-goal backstop (tasks.skills.go_to_through_door). If nav still FAILs and the
+# robot is within this many metres of the goal, treat it as reached instead of asking
+# for a door — the near furniture surface reads "closed" on depth, not a real door.
+# Widened from the root default (0.5) to cover how far short the robot stops at a
+# cabinet/table standing pose; still far below any real arena-door-blocked goal.
+WALKIE_DOOR_AT_GOAL_M = "1.0"
 # Maximum commands taken in one go (the rulebook issues three).
 GPSR_MAX_COMMANDS = "3"
 # How the operator issues commands: "consecutive" (all at once, enables the
@@ -59,7 +79,7 @@ GPSR_WORLD_FILE = "tasks/GPSR/world.toml"
 # steps fall through to the Tier-2 agent. 1 = the Tier-1 pick/place skills
 # (tasks/GPSR/skills.py -> the shared grasp system) handle them deterministically.
 # `deliver` always stays Tier-2 (a robot->human handover isn't a grasp primitive).
-GPSR_ENABLE_MANIPULATION = "0"
+GPSR_ENABLE_MANIPULATION = "1"
 # For each run the people in the scene is different
 GPSR_PEOPLE_RESET = "1"
 # find_person scan (tasks/GPSR/skills.py): when the forward view at the arrival

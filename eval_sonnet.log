@@ -1,0 +1,59 @@
+corpus: 56 commands | models: ['sonnet'] | agent smoke: True
+
+========================================================================
+  claude-sonnet-4.5  (anthropic/claude-sonnet-4.5 @ https://openrouter.ai/api/v1)
+========================================================================
+[1/3] capability probe ...
+      structured_output=True  tool_calling=True
+[2/3] GPSR coverage over 56 commands ...
+      coverage 56/56 = 100%  (229s, 4.1s/cmd, 0 render defects)
+[3/3] agent delegation smoke (5 cases) ...
+[Walkie SDK] Loaded custom topics from '/home/walkie/robocup2026/walkie-sdk/ros_topics.yaml'
+[walkie] -> actuator: 'move forward 1 meter'
+[STUB][actuator_agent] move_relative({'x': 1, 'y': 0, 'heading': 0}) -> success
+[walkie] <- actuator: 'Moved forward 1 meter successfully.'
+[SPEAK][walkie_agent] Done! I've moved forward one meter.
+[walkie] -> actuator: 'go to the kitchen'
+[STUB][actuator_agent] get_current_pose({}) -> success
+[STUB][actuator_agent] move_absolute({'x': 5.0, 'y': 3.0}) -> success
+[walkie] <- actuator: 'Reached the kitchen at x=5.0, y=3.0.'
+[SPEAK][walkie_agent] I've arrived at the kitchen.
+[walkie] -> vision: 'what do you see in front of you right now?'
+[STUB][vision_agent] get_camera_view_description({}) -> success
+[walkie] <- vision: "I can see a kitchen or dining area. There's a wooden table in the foreground with a white bowl on it. Behind the table, there's a kitchen counter or island with a sink. On and around the counter I can see various items including what appears to be a bottle, possibly some kitchen appliances or containers, and a potted plant. The scene has natural lighting coming from what seems to be a window area, and there are cabinets visible in the background. The overall setting appears to be a residential kitchen space."
+[SPEAK][walkie_agent] I can see a kitchen or dining area. There's a wooden table in front of me with a white bowl on it. Behind that is a kitchen counter with a sink, and I can see various items like a bottle, some containers, and a potted plant. There are also cabinets in the background with natural lighting coming through.
+[walkie] -> database: 'Where did I last see the cola?'
+[STUB][database_agent] find_object({'query': 'cola'}) -> success
+[walkie] <- database: 'The cola was last seen at 3D coordinates **(-0.45, 0.32, 0.85)** meters in the mapped environment. This location is stored in long-term memory from when the robot previously observed it.'
+[SPEAK][walkie_agent] I last saw the cola at coordinates negative 0.45 meters on the x-axis, 0.32 meters on the y-axis, and 0.85 meters high. That's where it was when I observed it before.
+[SPEAK][walkie_agent] Hello everyone! I'm Walkie, nice to meet you all!
+      routing 5/5 = 100% (63s)
+
+========================================================================
+# LLM backend comparison
+
+Same corpus, temperature=0, run offline against each backend.
+
+## Scorecard
+
+| metric | claude-sonnet-4.5 |
+|---|---|
+| structured output | ✅ |
+| tool calling | ✅ |
+| GPSR coverage | **100%** (56/56) |
+| render defects | 0 |
+| parse latency/cmd | 4.1s |
+| agent routing | 100% (5/5) |
+
+## claude-sonnet-4.5 — detail
+
+**Agent routing:**
+
+- ✓ 'Move forward one meter.' expect=delegate_to_actuator got=['delegate_to_actuator', 'speak']
+- ✓ 'Go to the kitchen.' expect=delegate_to_actuator got=['delegate_to_actuator', 'speak']
+- ✓ 'What do you see in front of you right now?' expect=delegate_to_vision got=['delegate_to_vision', 'speak']
+- ✓ 'Where did you last see the cola?' expect=delegate_to_database got=['delegate_to_database', 'speak']
+- ✓ 'Say hello to everyone.' expect=speak got=['speak']
+
+
+[report written to llm_eval_sonnet.md]

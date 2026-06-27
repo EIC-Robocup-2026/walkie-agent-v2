@@ -1684,7 +1684,13 @@ def pick_object(
        the robot heading (:func:`aim_forward_candidate`) instead of GraspNet's
        wrist orientation (often IK-unsolvable on OpenArm).
     8. Execute the grasp with base-reposition retries (:func:`execute_grasp_with_retry`).
-    9. Restore the pre-rotate heading (:func:`TaskContext.rotate_to`) so the base
+    9. On success, hand the workspace back to nav: back the base straight off the table
+       by ``WALKIE_GRASP_RETREAT_M`` (default 0.50m, direct cmd_vel; 0 disables) then tuck
+       both arms into the travel pose (``WALKIE_CARRY_POSE``, default ``"standby"``). The
+       just-grasped arm is left extended over the table (``"hands_up"``), which Nav2's
+       costmap reads as an obstacle and refuses to plan around — so without this the robot
+       grasps the object but won't drive away.
+    10. Restore the pre-rotate heading (:func:`TaskContext.rotate_to`) so the base
        ends the pick in its original orientation, whether or not the grasp succeeded.
 
     Returns True only when the grasp executed cleanly. Degrades to False (never
@@ -1821,9 +1827,30 @@ def pick_object(
                 support_surface_z=cand.support_surface_z,
                 grasp_to_surface_offset=cand.grasp_to_surface_offset,
             )
+
+            # Hand the workspace back to nav. Right after the grasp the arm is still
+            # extended over the table (execute_grasp left it at "hands_up" to lift the
+            # object clear), and Nav2's costmap reads that arm as an obstacle parked on
+            # the robot, so it refuses to plan away ("picked it up but won't move").
+            # Fix: back the base straight off the table — direct cmd_vel, NOT nav.go_to,
+            # since Nav2 won't reverse cleanly right against the table (same reason as the
+            # grasp-retry repositions) — THEN tuck both arms into the travel pose so the
+            # footprint is clean before the next navigation goal. "back" here is along the
+            # current heading, which still faces the object/table, so this reverses away
+            # from it. Heading is restored afterwards in the finally below.
+            retreat_m = _f("WALKIE_GRASP_RETREAT_M", "0.50")
+            if retreat_m > 0:
+                print(f"[grasp] pick_object: retreating {retreat_m:.2f}m to clear the table before stow")
+                creep_base_relative(ctx, -retreat_m)
+            stow_pose = (os.getenv("WALKIE_CARRY_POSE", "standby").strip() or "standby")
+            stow_res = ctx.walkie.arm.go_to_home(
+                group_name="both_arms_lift", pose_name=stow_pose, blocking=True,
+            )
+            if stow_res != "SUCCEEDED":
+                print(f"[grasp] pick_object: stow ({stow_pose}) -> {stow_res} (continuing)")
         return ok
     finally:
-        # 9. Rotate back to the heading we had before facing the object (the arm is
+        # 10. Rotate back to the heading we had before facing the object (the arm is
         #    home/tucked by now), so the base ends the pick in its original orientation.
         print(f"[grasp] pick_object: restoring heading to {math.degrees(original_heading):+.0f}deg")
         ctx.rotate_to(original_heading)

@@ -218,6 +218,10 @@ WALKIE_GRASP_MAX_APPROACH_UP = "0.0"
 WALKIE_GRASP_RETRY_ATTEMPTS = "3"    # max grasp executions per pick
 WALKIE_GRASP_RETRY_STRAFE_M = "0.08" # sideways base step between retries
 WALKIE_GRASP_RETRY_BACK_M = "0.05"   # backward base step between retries
+# After a successful pick, back the base straight off the table (direct cmd_vel) by this
+# much, then tuck both arms to WALKIE_CARRY_POSE — the just-grasped arm is still extended
+# over the table and Nav2's costmap reads it as an obstacle, so nav won't drive away. 0 = off.
+WALKIE_GRASP_RETREAT_M = "0.50"
 # Descriptor-prompt detection + CLIP rerank (tasks/skills/grasp.py): YOLOE is prompt-driven
 # and can't box brand names ("coke"), but under a generic visual descriptor ("can","red can")
 # it returns SEVERAL boxes — so we detect with descriptors (the _GRASP_DESCRIPTORS map),

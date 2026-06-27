@@ -1,0 +1,117 @@
+### waiting for http://localhost:8000/v1/models (up to 8 min) ...
+### up after ~5s
+
+########## PROBE: thinking ON ##########
+probe: qwen3.5-9b @ http://localhost:8000/v1  thinking=on  max_tokens=None
+
+--- RAW chat/completions ---
+  latency        11.8s
+  usage          {'prompt_tokens': 37, 'total_tokens': 345, 'completion_tokens': 308, 'prompt_tokens_details': None}
+  has <think>    False
+  tok/s          26.1  (completion 308 tok)
+  content[:300]  '\n\n<plan>\n  <step>\n    <action>Go to the kitchen</action>\n    <description>Move from current location to the kitchen area</description>\n  </step>\n  <step>\n    <action>Locate the cola</action>\n    <description>Search for a cola bottle or can, typically found on the counter, refrigerator, or pantry</de'
+
+  => big tokens + <think>  => reasoning-bound  => fix client-side here
+     small out + low tok/s => throughput-bound => fix on the serving box
+
+--- REAL parse_command path (structured) ---
+   17.9s  complete=True  'go to the kitchen, find the cola, and bring it to me'
+[gpsr] command 'tell me the name of the person at the bed': 2 ungrounded ref(s): [('which', ''), ('info', '')]
+   24.4s  complete=False  'tell me the name of the person at the bed'
+[gpsr] command "what's the biggest object on the desk": 1 ungrounded ref(s): [('which', '')]
+   26.7s  complete=False  "what's the biggest object on the desk"
+   12.2s  complete=False  'move forward one meter'
+
+########## PROBE: thinking OFF + max_tokens 512 ##########
+probe: qwen3.5-9b @ http://localhost:8000/v1  thinking=off  max_tokens=512
+
+--- RAW chat/completions ---
+  latency        5.3s
+  usage          {'prompt_tokens': 39, 'total_tokens': 181, 'completion_tokens': 142, 'prompt_tokens_details': None}
+  has <think>    False
+  tok/s          26.9  (completion 142 tok)
+  content[:300]  '```json\n{\n  "plan": [\n    {\n      "step": 1,\n      "action": "Go to the kitchen",\n      "description": "Navigate from the current location to the kitchen area."\n    },\n    {\n      "step": 2,\n      "action": "Find the cola",\n      "description": "Locate the cola bottle or can within the kitchen."\n   '
+
+  => big tokens + <think>  => reasoning-bound  => fix client-side here
+     small out + low tok/s => throughput-bound => fix on the serving box
+
+--- REAL parse_command path (structured) ---
+   12.6s  complete=True  'go to the kitchen, find the cola, and bring it to me'
+[gpsr] structured extract failed (Could not parse response content as the length limit was reached - CompletionUsage(completion_tokens=512, prompt_tokens=740, total_tokens=1252, completion_tokens_details=None, prompt_tokens_details=None)); trying JSON fallback
+   25.2s  complete=True  'tell me the name of the person at the bed'
+[gpsr] command "what's the biggest object on the desk": 1 ungrounded ref(s): [('which', '')]
+   12.9s  complete=False  "what's the biggest object on the desk"
+    0.5s  complete=False  'move forward one meter'
+
+########## MATRIX A: local, limit 10, thinking ON ##########
+corpus: 10 commands | models: ['local'] | agent smoke: False
+
+========================================================================
+  local-qwen3.5-9b  (qwen3.5-9b @ http://localhost:8000/v1)
+========================================================================
+[1/3] capability probe ...
+      structured_output=True  tool_calling=True
+[2/3] GPSR coverage over 10 commands ...
+[gpsr] command 'tell me the name of the person at the bed': 2 ungrounded ref(s): [('which', ''), ('info', '')]
+      coverage 9/10 = 90%  (178s, 17.8s/cmd, 0 render defects)
+[3/3] agent smoke skipped (--no-agent)
+
+========================================================================
+# LLM backend comparison
+
+Same corpus, temperature=0, run offline against each backend.
+
+## Scorecard
+
+| metric | local-qwen3.5-9b |
+|---|---|
+| structured output | ✅ |
+| tool calling | ✅ |
+| GPSR coverage | **90%** (9/10) |
+| render defects | 0 |
+| parse latency/cmd | 17.8s |
+
+## local-qwen3.5-9b — detail
+
+**GPSR parse misses:**
+
+- 'tell me the name of the person at the bed' steps=['navigate', 'find_person', 'get_person_info', 'say'] gaps=[('which', ''), ('info', '')]
+
+
+[report written to llm_matrix_think_on.md]
+
+########## MATRIX B: local, limit 10, thinking OFF + max_tokens 512 ##########
+corpus: 10 commands | models: ['local'] | agent smoke: False
+
+========================================================================
+  local-qwen3.5-9b [thinking off] [max_tokens=512]  (qwen3.5-9b @ http://localhost:8000/v1)
+========================================================================
+[1/3] capability probe ...
+      structured_output=True  tool_calling=True
+[2/3] GPSR coverage over 10 commands ...
+[gpsr] structured extract failed (Could not parse response content as the length limit was reached - CompletionUsage(completion_tokens=512, prompt_tokens=739, total_tokens=1251, completion_tokens_details=None, prompt_tokens_details=None)); trying JSON fallback
+[gpsr] structured extract failed (Could not parse response content as the length limit was reached - CompletionUsage(completion_tokens=512, prompt_tokens=740, total_tokens=1252, completion_tokens_details=None, prompt_tokens_details=None)); trying JSON fallback
+      coverage 10/10 = 100%  (102s, 10.2s/cmd, 0 render defects)
+[3/3] agent smoke skipped (--no-agent)
+
+========================================================================
+# LLM backend comparison
+
+Same corpus, temperature=0, run offline against each backend.
+
+## Scorecard
+
+| metric | local-qwen3.5-9b |
+|---|---|
+| structured output | ✅ |
+| tool calling | ✅ |
+| GPSR coverage | **100%** (10/10) |
+| render defects | 0 |
+| parse latency/cmd | 10.2s |
+
+## local-qwen3.5-9b — detail
+
+
+[report written to llm_matrix_think_off.md]
+
+### DONE
