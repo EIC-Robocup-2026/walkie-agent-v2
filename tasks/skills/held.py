@@ -27,20 +27,25 @@ Vec3 = tuple[float, float, float]
 class HeldObject:
     """One object currently grasped in an arm, remembered for placing it back down.
 
-    ``rotation`` is the map-frame grasp orientation (3x3) at pick time — reused as
-    the release wrist pose, since for a rigidly-held object that's the only pose the
-    hand can physically reproduce. ``grasp_xyz`` is kept for reference/debug only;
-    the place *position* is always recomputed from a fresh surface scan (robust to
-    odometry drift). ``footprint_m`` is the object's XY span (for empty-space
-    sizing); ``support_surface_z``/``grasp_to_surface_offset`` may be ``None`` when
-    no support surface was found at pick time (caller falls back to a default offset).
+    ``rotation`` is the map-frame grasp orientation (3x3) at pick time, paired with
+    ``grasp_heading`` (the base's map-frame yaw at that moment). It's reused as the
+    release wrist pose — the only pose a rigidly-held object can reproduce — but the
+    arm is base-mounted and the base re-orients between pick and place, so the placer
+    reproduces the wrist orientation *relative to the base* (rotating ``rotation`` by
+    the heading delta), not its absolute map orientation. ``grasp_xyz`` is kept for
+    reference/debug only; the place *position* is always recomputed from a fresh
+    surface scan (robust to odometry drift). ``footprint_m`` is the object's XY span
+    (for empty-space sizing); ``support_surface_z``/``grasp_to_surface_offset`` may be
+    ``None`` when no support surface was found at pick time (caller falls back to a
+    default offset).
     """
 
     label: str
     arm: str
     grasp_xyz: Vec3
-    rotation: np.ndarray  # (3, 3) map-frame grasp orientation
+    rotation: np.ndarray  # (3, 3) map-frame grasp orientation at pick time
     width: float
+    grasp_heading: float | None = None  # base yaw (map frame, rad) at pick time
     footprint_m: float | None = None
     support_surface_z: float | None = None
     grasp_to_surface_offset: float | None = None
@@ -55,6 +60,7 @@ def record_held_object(
     grasp_xyz: Vec3,
     rotation: np.ndarray,
     width: float,
+    grasp_heading: float | None = None,
     footprint_m: float | None = None,
     support_surface_z: float | None = None,
     grasp_to_surface_offset: float | None = None,
@@ -66,6 +72,7 @@ def record_held_object(
         grasp_xyz=tuple(float(v) for v in grasp_xyz),
         rotation=np.asarray(rotation, dtype=float),
         width=float(width),
+        grasp_heading=(None if grasp_heading is None else float(grasp_heading)),
         footprint_m=(None if footprint_m is None else float(footprint_m)),
         support_surface_z=(None if support_surface_z is None else float(support_surface_z)),
         grasp_to_surface_offset=(

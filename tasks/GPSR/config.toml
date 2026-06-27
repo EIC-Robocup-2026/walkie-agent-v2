@@ -83,7 +83,7 @@ GPSR_WORLD_FILE = "tasks/GPSR/world.toml"
 # Left at PR #31's value (0 = GPSR pick via the Tier-2 agent). Flip to 1 to have GPSR's
 # run-loop use the deterministic shared pick (tasks/GPSR/skills.py -> pick_object); the
 # pick now tucks the arm after grasping so nav can continue. Validate on-robot first.
-GPSR_ENABLE_MANIPULATION = "0"
+GPSR_ENABLE_MANIPULATION = "1"
 # For each run the people in the scene is different
 GPSR_PEOPLE_RESET = "1"
 # find_person scan (tasks/GPSR/skills.py): when the forward view at the arrival

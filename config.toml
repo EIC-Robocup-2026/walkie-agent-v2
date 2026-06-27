@@ -75,6 +75,19 @@ DISABLE_LISTENING = "0"
 # substring ("fifine"); a name survives USB re-enumeration across reboots. List
 # devices + measure the level with:  python -m interfaces.devices.microphone
 WALKIE_MIC_DEVICE = ""
+# Microphone input buffering (seconds). PortAudio's default ('high') buffer is
+# only ~one block (~35ms) — too little to ride out a CPU/GIL stall from the
+# walkie_graphs perception loop while the mic is recording, so captured audio is
+# dropped and the recording comes back choppy/with dropouts. This forces a deeper
+# input buffer that absorbs those stalls; the added latency is harmless for
+# VAD-gated capture (min-silence is already ~1s). Empty = PortAudio default.
+# Each record prints a [mic-diag] line — if it still shows overflow_blocks>0,
+# raise toward 0.5; if even that isn't enough, the callback needs decoupling.
+WALKIE_MIC_INPUT_LATENCY_S = "0.2"
+# Save every record_until_silence capture to this dir as a timestamped WAV +
+# print its duration/peak — turns "STT heard nothing" into a one-glance silent-vs
+# -healthy check. Empty = off. Pairs with the [mic-diag] line above.
+WALKIE_MIC_DEBUG_DIR = "mic_recording"
 
 [people]
 # Face/appearance person memory (perception.PeopleStore): two-modality re-ID
@@ -131,7 +144,7 @@ WALKIE_GRASP_POINT_RPY = "0,1.5708,0"
 WALKIE_GRASP_Z_OFFSET_M = "0.0"      # vertical nudge added to the object centroid
 WALKIE_PREGRASP_OFFSET_M = "0.10"    # pre-grasp standoff (above for top-down, back for front)
 WALKIE_LIFT_HEIGHT_M = "0.15"        # how far to lift after grasping
-WALKIE_CARRY_POSE = "standby"        # go_to_home preset to tuck the arm for nav
+WALKIE_CARRY_POSE = "home"           # go_to_home preset to tuck the arm for nav while carrying. "home" not "standby": standby yaws the shoulder out (j1=0.65) + bends the elbow up (j4=2.08), so the elbow sticks out sideways and clips door frames/walls in transit; "home" keeps the arms in (j1=0.26, near-straight elbow), narrower. Valid both_arms_lift poses: home, standby, hands_up.
 # GraspNet skill (tasks/skills/grasp.py) multi-tilt fused planning: before the final
 # grasp, take 2 snapshots at these head tilts (rad, +down = look down), dedup the object
 # across the two views and fuse their clouds into one denser cloud for a single GraspNet
@@ -140,6 +153,15 @@ WALKIE_GRASP_MULTI_TILT = "0"        # enable the 2-snapshot fused grasp plan
 WALKIE_GRASP_TILT_A = "0.2"          # first head tilt (rad) for the fused grasp snapshots
 WALKIE_GRASP_TILT_B = "0.35"         # second head tilt (rad)
 WALKIE_GRASP_TILT_SETTLE_SEC = "0.4" # wait after each head tilt before capturing
+# Initial-locate head aim (pick_object): tilt the head DOWN to this angle (rad, +down)
+# BEFORE the first object detection. That first locate has no position estimate yet, so
+# it snapshots at whatever angle the head arrived at (look_at_object only tracks once
+# there IS an estimate) — often too level to see a table-top object -> "no detection".
+# Subsequent locates track the object via look_at_object, which itself looks down AT LEAST
+# 0.436rad (its floor) — so keep this >= that or the first search looks up relative to the
+# re-locates. "0" = don't force a tilt. 0.6rad (~34deg) looks well down onto a table from the
+# arrival standoff; raise toward the 1.047rad (pi/3) head limit for a lower/closer surface.
+WALKIE_GRASP_LOCATE_TILT = "0.6"
 WALKIE_GRASP_DEDUP_RADIUS_M = "0.10" # two views are the same object if centroids within this
 WALKIE_GRASP_MERGE_VOXEL_M = "0.003" # voxel size when fusing the two viewpoints' clouds
 # Same-angle fusion (used by pick_object's grasp plan, _grasp_cloud_multi_snap): take N
@@ -240,6 +262,15 @@ WALKIE_GRASP_CLIP_SIM_THRESHOLD = "0.0"
 # CLIP text-query template ("{t}" = target); "a photo of {t}" beats a bare brand string
 # in CLIP zero-shot. Tune on-robot.
 WALKIE_GRASP_CLIP_QUERY_TMPL = "a photo of {t}"
+# Descriptor SOURCE: ask the LLM (ctx.model) to generate the generic visual phrases YOLOE
+# detects with, few-shot-anchored on the _GRASP_DESCRIPTORS map — so an arbitrary GPSR
+# target (not in that map) still gets boxable descriptors instead of just its brand name.
+# Cached once per target. "0" = use ONLY the static map (exactly the pre-LLM behaviour) —
+# the rollback switch. On any LLM failure/timeout it falls back to the static map anyway.
+WALKIE_GRASP_LLM_DESCRIPTORS = "1"
+# Wall-clock cap on that one LLM round-trip (ctx.model is built without an HTTP timeout, so
+# a stalled endpoint must not hang the grasp): on timeout it degrades to the static map.
+WALKIE_GRASP_LLM_DESCRIPTORS_TIMEOUT_S = "10"
 
 [skills]
 # Final-approach "creep" — direct cmd_vel closed-loop relative drive (NOT Nav2), used
@@ -281,8 +312,6 @@ WALKIE_DOOR_AT_GOAL_M = "0.5"        # nav FAILED but robot is within this of th
                                      # reached, not a door (placement poses sit right at furniture,
                                      # which fails the goal checker + fills the depth box). <=0 = off
 
-WALKIE_MIC_DEBUG_DIR = "mic_recording"
-
 [placement]
 # Surface detection + object placement (tasks/skills/place.py, surface geometry in
 # interfaces/perception/surfaces.py). The map frame is gravity-aligned (+Z up), so a
@@ -304,8 +333,8 @@ WALKIE_PLACE_APPROACH_MAX_DEPTH_M = "2.0"  # initial find-a-surface scan depth (
 # merge their map-frame clouds before detecting surfaces, so two viewpoints fill each
 # other's self-occlusion (denser coverage, truer surface extents).
 WALKIE_PLACE_MULTI_TILT = "1"          # enable the 2-snapshot fused surface scan
-WALKIE_PLACE_TILT_A = "0.2"            # first head tilt (rad) for the fused scan
-WALKIE_PLACE_TILT_B = "0.4"           # second head tilt (rad)
+WALKIE_PLACE_TILT_A = "0.3"            # first head tilt (rad) for the fused scan
+WALKIE_PLACE_TILT_B = "0.6"           # second head tilt (rad)
 WALKIE_PLACE_TILT_SETTLE_SEC = "0.4"   # wait after each head tilt before capturing
 # Horizontal-surface detection.
 WALKIE_SURFACE_Z_GAP_M = "0.04"        # split height bands at vertical gaps wider than this
@@ -324,6 +353,12 @@ WALKIE_SURFACE_Z_BIN_M = "0.01"        # bin width for the modal surface-height 
 # bodies (normals pointing sideways). 0.85 ~= within 32deg of horizontal. Lower toward
 # 0.8 if it strips a noisy real tabletop; set empty ("") to disable the gate.
 WALKIE_SURFACE_NORMAL_Z_MIN = "0.85"   # reject vertical structure (walls/people)
+# Release wrist orientation. "hold" reuses the grasp pose (keeps the object upright, but
+# that arbitrary pose is often IK-unsolvable at the new surface -> pre-place FAILED).
+# "topdown" uses the calibrated WALKIE_GRASP_RPY_TOPDOWN (a known-reachable overhead wrist).
+# Either way execute_place now auto-retries top-down if the chosen pose won't solve, so
+# "hold" no longer hard-fails to Tier-2; set "topdown" to skip the doomed hold attempt.
+WALKIE_PLACE_ORIENTATION = "hold"
 # Empty-space search + place geometry.
 WALKIE_PLACE_FOOTPRINT_M = "0.12"      # object footprint (square side) when not recorded at pick
 WALKIE_PLACE_CLEARANCE_M = "0.03"      # keep this clear around the placed object
@@ -341,5 +376,5 @@ WALKIE_PLACE_STANDOFF_M = "0.10"       # pre-place / retreat height above the ho
 # is imprecise and drops the object from too high).
 WALKIE_PLACE_LOWER_M = "0.1"          # hover height above the surface; lift lowers by this
 WALKIE_PLACE_SETTLE_SEC = "0.6"        # wait after a lift move to let it settle
-WALKIE_PLACE_MIN_Z_M = "0.70"          # don't place below this height (arm can't reach)
+WALKIE_PLACE_MIN_Z_M = "0.60"          # don't place below this height (arm can't reach). 0.60 not 0.70: the practice-arena cabinet top is 0.71m, so a 0.70 floor left ~1cm margin and depth-scan noise dropped the surface below it -> "no reachable surface". 0.60 gives ~11cm headroom while still rejecting chairs/low tables.
 WALKIE_PLACE_MAX_REACH_XY_M = "0.75"   # abort if the spot is farther than this (planar)

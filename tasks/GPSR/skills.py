@@ -809,7 +809,7 @@ def pick(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bo
     if where:
         go_to_named(ctx, where, world, state)
     classes = _object_classes(obj, category, world) or [label]
-    if _pick_object(ctx, prompts=classes):
+    if _pick_object(ctx, prompts=classes, approach_preference="side"):
         state["holding"] = obj or category or label
         ctx.say(f"I have the {label}.")
         return True
@@ -828,7 +828,7 @@ def place(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> b
     label = (step.args.get("object") or state.get("holding") or "object").replace("_", " ")
     if where:
         go_to_named(ctx, where, world, state)
-    if _place_object(ctx):
+    if _place_object(ctx,):
         state.pop("holding", None)
         ctx.say(f"I have placed the {label}.")
         return True

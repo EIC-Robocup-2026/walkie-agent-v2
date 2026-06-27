@@ -275,14 +275,25 @@ class Microphone:
         recording_start_time = None
         pause_started = None   # time.time() of the current pause span, or None
         paused_total = 0.0     # accumulated paused seconds (excluded from timeout)
+        # --- diagnostics (cheap; tells choppiness apart: overflow vs pause-drop) ---
+        overflow_count = 0     # PortAudio callbacks flagged with input_overflow
+        last_status = None     # last non-empty CallbackFlags seen
+        pause_fired = False    # did pause() drop any chunk during this recording
 
         def callback(indata, frames, time_info, status):
             nonlocal speech_started, speech_ended, recording_start_time
             nonlocal pause_started, paused_total
+            nonlocal overflow_count, last_status, pause_fired
+            if status:
+                # input_overflow here == the realtime thread fell behind and
+                # PortAudio dropped captured samples -> glitchy/choppy audio.
+                overflow_count += 1
+                last_status = status
             if speech_ended:
                 return
 
             if self._paused.is_set():
+                pause_fired = True
                 # Paused (e.g. the robot is speaking): drop this chunk so its own
                 # voice is neither recorded nor seen by the VAD, and note when the
                 # pause began so the loop can exclude it from the timeout.
@@ -321,15 +332,27 @@ class Microphone:
                     if elapsed >= min_duration and (not wait_for_speech or speech_started):
                         speech_ended = True
 
-        # Record audio at device's native sample rate
-        with sd.InputStream(
+        # Record audio at device's native sample rate.
+        # The default ('high') latency is only ~one block (~35ms) of buffering —
+        # too little to ride out a GIL/CPU stall from the perception loop, which
+        # then shows up as dropped (choppy) input. Setting WALKIE_MIC_INPUT_LATENCY_S
+        # (e.g. 0.2-0.5) forces a deeper buffer that absorbs those stalls. Unset =
+        # unchanged behaviour; flip it the moment [mic-diag] reports overflow_blocks>0.
+        stream_kwargs = dict(
             device=self.device,
             samplerate=self.device_sample_rate,
             channels=1,
             dtype=np.int16,
             blocksize=self.chunk_size,
             callback=callback,
-        ):
+        )
+        _lat = os.getenv("WALKIE_MIC_INPUT_LATENCY_S")
+        if _lat:
+            try:
+                stream_kwargs["latency"] = float(_lat)
+            except ValueError:
+                print(f"[mic] ignoring bad WALKIE_MIC_INPUT_LATENCY_S={_lat!r}")
+        with sd.InputStream(**stream_kwargs):
             start_time = time.time()
             while not speech_ended:
                 # Don't let paused time (the robot speaking) eat the timeout — a
@@ -345,7 +368,29 @@ class Microphone:
             audio_16k = _resample(audio, self.device_sample_rate, self.VAD_SAMPLE_RATE)
             data = audio_16k.tobytes()
         else:
+            audio = np.empty(0, dtype=np.int16)
             data = b""
+
+        # --- diagnostic: distinguish the choppiness cause on the next reproduction ---
+        # captured/expected << 1 -> samples were dropped (overflow); overflow_blocks
+        # > 0 confirms the realtime callback fell behind; pause_fired -> a TTS/pause
+        # span chopped the recording. Compare peak to rail for input-gain sanity.
+        elapsed = time.time() - start_time
+        if pause_started is not None:
+            paused_total += time.time() - pause_started
+        active_s = max(elapsed - paused_total, 1e-6)
+        expected = int(self.device_sample_rate * active_s)
+        captured = int(audio.size)
+        peak = int(np.abs(audio).max()) if captured else 0
+        rail = np.iinfo(np.int16).max
+        print(
+            f"[mic-diag] elapsed={elapsed:.2f}s paused={paused_total:.2f}s "
+            f"captured={captured} expected~{expected} "
+            f"ratio={captured / expected if expected else 0:.2f} "
+            f"overflow_blocks={overflow_count} status={last_status} "
+            f"pause_fired={pause_fired} peak={peak}/{rail}"
+        )
+
         self._save_debug_wav(data)
         return data
 

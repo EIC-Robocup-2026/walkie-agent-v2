@@ -50,7 +50,7 @@ kitchen_table = { room = "kitchen",     placement = true,  category = "dishes", 
 pantry        = { room = "kitchen",     placement = true,  category = "food", pose = [0,0,0], present = false }
 refrigerator  = { room = "kitchen",     placement = true,  pose = [0,0,0], aliases = ["fridge"], present = false }
 sink          = { room = "kitchen",     placement = true,  pose = [0,0,0], present = false }
-cabinet       = { room = "kitchen",     placement = true,  category = "drinks", pose = [-0.0795, -0.7881, -3.1223] }
+cabinet       = { room = "kitchen",     placement = true,  category = "drinks", pose = [0.3267, -0.7881, -3.1223] }
 desk          = { room = "office",      placement = true,  category = "fruits", pose = [0,0,0], present = false }
 tv_stand      = { room = "living_room", placement = true,  pose = [0,0,0], aliases = ["tv stand", "television stand"], present = false }
 storage_rack  = { room = "office",      placement = true,  pose = [0,0,0], aliases = ["storage rack"], present = false }

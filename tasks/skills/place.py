@@ -14,8 +14,11 @@ commands the arm to set the object down and let go.
 Design notes:
 - Map frame is gravity-aligned (+Z up), so a horizontal surface is a constant-Z band.
 - The stored grasp *rotation* is reused as the release wrist pose (the only pose a
-  rigidly-held object can reproduce); the stored grasp *position* is NOT reused — the
-  place point is always recomputed from a fresh scan, so it survives odometry drift.
+  rigidly-held object can reproduce), re-expressed relative to the robot base via the
+  heading recorded at pick time — the arm is base-mounted and the base re-orients
+  between pick and place, so the wrist-to-base orientation (not the absolute map
+  orientation) is what gets reproduced. The stored grasp *position* is NOT reused —
+  the place point is always recomputed from a fresh scan, so it survives odometry drift.
 - Like the grasp skill, every step degrades to ``False`` (never raises) so a task can
   score-degrade gracefully.
 """
@@ -46,7 +49,7 @@ from tasks.skills.grasp import (
     look_at_object,
 )
 from tasks.skills.held import HeldObject, clear_held_object, held_arms, recall_held_object
-from tasks.skills.navigation import tilt_head
+from tasks.skills.navigation import tilt_head, move_base_relative
 
 Vec3 = tuple[float, float, float]
 
@@ -286,18 +289,42 @@ def _nudge_lift(ctx: TaskContext, delta_m: float) -> float | None:
         return None
 
 
-def _rotation_for(held: HeldObject, place_orientation: str) -> np.ndarray:
+def _topdown_rpy() -> tuple[float, float, float]:
+    """Calibrated overhead release-wrist RPY (``WALKIE_GRASP_RPY_TOPDOWN``).
+
+    A known-IK-reachable pose on this arm — used both for ``place_orientation="topdown"``
+    and as the pre-place fallback when the reused grasp ("hold") pose won't solve.
+    """
+    raw = os.getenv("WALKIE_GRASP_RPY_TOPDOWN", "-2.623,-0.033,-1.468")
+    r, p, y = (float(v.strip()) for v in raw.split(","))
+    return (r, p, y)
+
+
+def _rotation_for(held: HeldObject, place_orientation: str, *, heading: float) -> np.ndarray:
     """The release wrist rotation (3x3, map frame).
 
     ``"hold"`` reuses the stored grasp orientation — the only pose a rigidly-held
-    object can reproduce. ``"topdown"`` builds an overhead pose from
-    ``WALKIE_GRASP_RPY_TOPDOWN`` (reused from the manipulation config).
+    object can reproduce — but re-expressed for the robot's *current* heading. The
+    grasp was recorded in the map frame at the base yaw it was taken at
+    (``held.grasp_heading``); the arm is base-mounted and the base re-orients between
+    pick and place, so what must be reproduced is the wrist orientation *relative to
+    the base*, not its absolute map orientation. We rotate the stored map-frame grasp
+    by the heading delta (``place − pick``) about gravity (+Z) — mirroring
+    ``aim_forward_candidate``'s ``Rz(heading) @ R_base`` convention. This keeps the
+    wrist-to-base orientation identical (IK-reachable) and the object the same way up
+    (the base is gravity-aligned, so only its yaw about gravity changes). Records
+    without a ``grasp_heading`` fall back to the raw map-frame reuse (identity delta).
+
+    ``"topdown"`` builds an overhead pose from ``WALKIE_GRASP_RPY_TOPDOWN`` (reused
+    from the manipulation config).
     """
     if place_orientation == "topdown":
-        raw = os.getenv("WALKIE_GRASP_RPY_TOPDOWN", "-2.623,-0.033,-1.468")
-        rpy = [float(p.strip()) for p in raw.split(",")]
-        return Rotation.from_euler("xyz", rpy).as_matrix()
-    return np.asarray(held.rotation, dtype=float)
+        return Rotation.from_euler("xyz", _topdown_rpy()).as_matrix()
+    R_grasp_map = np.asarray(held.rotation, dtype=float)
+    if held.grasp_heading is None:
+        return R_grasp_map
+    delta = heading - held.grasp_heading
+    return Rotation.from_euler("z", delta).as_matrix() @ R_grasp_map
 
 
 def _choose_surface(
@@ -395,17 +422,39 @@ def execute_place(
     collision_disabled = False
     prev_lift_cm: float | None = None
     try:
-        ctx.walkie.arm.toggle_gripper_collision(gripper_group, False)
-        collision_disabled = True
+        # res = ctx.walkie.arm.go_to_home(group_name="both_arms_lift", pose_name="hands_up")
+        # if res != "SUCCEEDED":
+        #     # Try moving back
+        #     move_base_relative(ctx, -0.5)
+        #     res = ctx.walkie.arm.go_to_home(group_name="both_arms_lift", pose_name="hands_up")
+        #     move_base_relative(ctx, 0.5)
 
         res = ctx.walkie.arm.go_to_pose(
             *above, roll, pitch, yaw,
             group_name=home_group, frame_id="map", blocking=True,
         )
+        ctx.walkie.arm.toggle_gripper_collision(gripper_group, False)
+        collision_disabled = True
         print(f"[place] execute_place[{side}]: pre-place -> {res}")
         if res != "SUCCEEDED":
-            print(f"[place] execute_place[{side}]: pre-place failed; aborting")
-            return False
+            # The reused grasp ("hold") wrist pose is often IK-unsolvable at the new
+            # base/surface pose. Before giving up to the Tier-2 agent, retry once from a
+            # known-reachable overhead wrist; adopt it for the rest of the place (hover/
+            # retreat all read roll/pitch/yaw) so the object goes down at the same pose.
+            fr, fp, fy = _topdown_rpy()
+            if (fr, fp, fy) != (roll, pitch, yaw):
+                print(f"[place] execute_place[{side}]: pre-place retry top-down "
+                      f"RPY=({fr:+.2f},{fp:+.2f},{fy:+.2f})")
+                res = ctx.walkie.arm.go_to_pose(
+                    *above, fr, fp, fy,
+                    group_name=home_group, frame_id="map", blocking=True,
+                )
+                print(f"[place] execute_place[{side}]: pre-place (top-down) -> {res}")
+                if res == "SUCCEEDED":
+                    roll, pitch, yaw = fr, fp, fy
+            if res != "SUCCEEDED":
+                print(f"[place] execute_place[{side}]: pre-place failed; aborting")
+                return False
 
         res = ctx.walkie.arm.go_to_pose(
             *hover, roll, pitch, yaw,
@@ -560,7 +609,7 @@ def place_object(
     arm: str = "auto",
     surface: SurfacePlane | None = None,
     target_xy: tuple[float, float] | None = None,
-    place_orientation: str = "hold",
+    place_orientation: str | None = None,
     footprint_m: float | None = None,
     clearance_m: float | None = None,
     place_z_offset_m: float | None = None,
@@ -588,7 +637,9 @@ def place_object(
         arm: ``"auto"`` (the arm currently holding something), ``"left"`` or ``"right"``.
         surface: Place on this surface (skips surface selection).
         target_xy: Map-frame ``(x, y)`` to place at (skips free-space search).
-        place_orientation: ``"hold"`` (reuse grasp pose) or ``"topdown"``.
+        place_orientation: ``"hold"`` (reuse grasp pose) or ``"topdown"``. ``None`` ->
+            the ``WALKIE_PLACE_ORIENTATION`` config (default ``"hold"``). Either way
+            ``execute_place`` falls back to top-down if the chosen wrist pose won't IK-solve.
         footprint_m: Object footprint for empty-space sizing; defaults to the value
             recorded at pick time, then the ``WALKIE_PLACE_FOOTPRINT_M`` config.
         clearance_m, place_z_offset_m, max_reach_xy_m, min_place_z_m: see config.
@@ -607,6 +658,9 @@ def place_object(
         True only when the object was released at a located spot; False (never
         raises) at any failing step, leaving the held-object record intact for retry.
     """
+    place_orientation = (
+        place_orientation or os.getenv("WALKIE_PLACE_ORIENTATION", "hold")
+    ).strip().lower()
     clearance_m = _f("WALKIE_PLACE_CLEARANCE_M", "0.03") if clearance_m is None else clearance_m
     place_z_offset_m = (
         _f("WALKIE_PLACE_Z_OFFSET_M", "0.02") if place_z_offset_m is None else place_z_offset_m
@@ -719,7 +773,7 @@ def place_object(
           f"-> place=({place_xyz[0]:+.2f},{place_xyz[1]:+.2f},{place_z:.2f})")
 
     # 5. Raise the lift for the HOVER height (the lift does the final descent in
-    #    execute_place), then drive to a standoff facing the spot.
+    ctx.walkie.arm.go_to_home(group_name="both_arms", pose_name="pre-place")
     _set_lift_for(ctx, place_z + lower_m)
     status = approach_object(
         ctx, place_xyz, standoff_m=optimal_standoff_m,
@@ -768,7 +822,7 @@ def place_object(
     # 7. Release — park above the surface, then lower onto it with the lift. Draw the
     #    plan first (scene cloud, candidate surfaces, the spot + the release wrist pose)
     #    so an operator can eyeball the place before the arm commits.
-    rotation = _rotation_for(held, place_orientation)
+    rotation = _rotation_for(held, place_orientation, heading=ctx.current_pose()["heading"])
     if viz:
         _draw_place_plan(
             ctx, cloud, surfaces, chosen_surface, place_xyz, rotation,

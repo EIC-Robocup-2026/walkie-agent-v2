@@ -27,6 +27,11 @@ from .world import load_world
 from client import WalkieAIClient
 from perception import PeopleStore
 
+import open3d as o3d
+
+# Set the global verbosity level to ignore warnings and only show critical errors
+o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
+
 
 def main() -> None:
     load_dotenv()

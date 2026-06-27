@@ -30,11 +30,13 @@ from tasks.skills.grasp import (
 
 
 @pytest.fixture(autouse=True)
-def _clear_text_emb_cache():
-    """The success-only text-embed cache is module-global — reset it per test."""
+def _clear_module_caches():
+    """The success-only caches are module-global — reset them per test."""
     grasp._TEXT_EMB_CACHE.clear()
+    grasp._DESCRIPTOR_CACHE.clear()
     yield
     grasp._TEXT_EMB_CACHE.clear()
+    grasp._DESCRIPTOR_CACHE.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -97,36 +99,137 @@ class _FakeImage:
         return list(self._text_emb) if self._text_emb is not None else []
 
 
-def _ctx(image):
-    return SimpleNamespace(walkieAI=SimpleNamespace(image=image))
+class _FakeExtract:
+    """Stand-in for ctx.extract — records targets, returns canned descriptors.
+
+    Raises ``RuntimeError`` on the first ``raises_until`` calls (to exercise the
+    degrade-to-static-map fallback), then returns the descriptor list.
+    """
+
+    def __init__(self, descriptors, *, raises_until=0):
+        self._descriptors = descriptors
+        self._raises_until = raises_until
+        self.calls: list[str] = []
+
+    def __call__(self, schema, instructions, text):
+        self.calls.append(text)
+        if len(self.calls) <= self._raises_until:
+            raise RuntimeError("llm down")
+        return SimpleNamespace(descriptors=list(self._descriptors))
+
+
+def _ctx(image, *, extract=None):
+    ns = SimpleNamespace(walkieAI=SimpleNamespace(image=image))
+    if extract is not None:
+        ns.extract = extract
+    return ns
 
 
 # ---------------------------------------------------------------------------
-# _detection_prompts
+# _detection_prompts — static-map fallback path (LLM descriptors disabled)
 # ---------------------------------------------------------------------------
-def test_detection_prompts_expands_known_item_target_first():
-    out = _detection_prompts(["coke"])
+@pytest.fixture
+def _llm_off(monkeypatch):
+    """Pin _detection_prompts to the static-map path (WALKIE_GRASP_LLM_DESCRIPTORS=0)."""
+    monkeypatch.setenv("WALKIE_GRASP_LLM_DESCRIPTORS", "0")
+
+
+def test_detection_prompts_static_expands_known_item_target_first(_llm_off):
+    out = _detection_prompts(_ctx(_FakeImage([])), ["coke"])
     assert out[0] == "coke"                       # specific target stays first
     assert out == ["coke", *_GRASP_DESCRIPTORS["coke"]]
 
 
-def test_detection_prompts_dedups_preserving_order():
-    out = _detection_prompts(["coke", "can"])     # "can" also a descriptor
+def test_detection_prompts_static_dedups_preserving_order(_llm_off):
+    out = _detection_prompts(_ctx(_FakeImage([])), ["coke", "can"])  # "can" also a descriptor
     assert out.count("can") == 1
     assert out[0] == "coke"
 
 
-def test_detection_prompts_unknown_item_unchanged():
-    assert _detection_prompts(["banana"]) == ["banana"]
+def test_detection_prompts_static_unknown_item_unchanged(_llm_off):
+    assert _detection_prompts(_ctx(_FakeImage([])), ["banana"]) == ["banana"]
 
 
-def test_detection_prompts_empty_unchanged():
-    assert _detection_prompts([]) == []
+def test_detection_prompts_empty_unchanged(_llm_off):
+    assert _detection_prompts(_ctx(_FakeImage([])), []) == []
 
 
 def test_detection_prompts_rerank_off_passes_through(monkeypatch):
     monkeypatch.setenv("WALKIE_GRASP_CLIP_RERANK", "0")
-    assert _detection_prompts(["coke"]) == ["coke"]
+    # rerank off short-circuits BEFORE any LLM call, so the extract must never fire.
+    ctx = _ctx(_FakeImage([]), extract=_FakeExtract(["can"]))
+    assert _detection_prompts(ctx, ["coke"]) == ["coke"]
+    assert ctx.extract.calls == []
+
+
+# ---------------------------------------------------------------------------
+# _detection_prompts — LLM-generated descriptors (the new primary path)
+# ---------------------------------------------------------------------------
+def test_detection_prompts_llm_generates_descriptors_target_first():
+    ctx = _ctx(_FakeImage([]), extract=_FakeExtract(["can", "red can"]))
+    out = _detection_prompts(ctx, ["mystery soda"])
+    assert out == ["mystery soda", "can", "red can"]   # target first, LLM phrases appended
+    assert ctx.extract.calls == ["mystery soda"]        # asked the LLM for the lowercased target
+
+
+def test_detection_prompts_llm_cached_one_call_per_target():
+    ctx = _ctx(_FakeImage([]), extract=_FakeExtract(["can"]))
+    first = _detection_prompts(ctx, ["mystery soda"])
+    second = _detection_prompts(ctx, ["mystery soda"])
+    assert first == second == ["mystery soda", "can"]
+    assert ctx.extract.calls == ["mystery soda"]        # cached, not re-asked
+
+
+def test_detection_prompts_llm_caps_descriptor_count():
+    many = [f"d{i}" for i in range(20)]
+    ctx = _ctx(_FakeImage([]), extract=_FakeExtract(many))
+    out = _detection_prompts(ctx, ["mystery soda"])
+    assert out == ["mystery soda", *many[: grasp._MAX_DESCRIPTORS]]   # trimmed to the cap
+
+
+def test_detection_prompts_llm_skips_brand_name_and_dupes():
+    ctx = _ctx(_FakeImage([]), extract=_FakeExtract(["Coke", "can", "can", "red can"]))
+    out = _detection_prompts(ctx, ["coke"])
+    assert out == ["coke", "can", "red can"]            # brand ("coke") + dup "can" dropped
+
+
+def test_detection_prompts_llm_failure_falls_back_to_static_known():
+    ctx = _ctx(_FakeImage([]), extract=_FakeExtract(["x"], raises_until=99))
+    out = _detection_prompts(ctx, ["coke"])             # LLM raises
+    assert out == ["coke", *_GRASP_DESCRIPTORS["coke"]]  # static map fills in
+    # The miss is cached as [] so a slow/dead endpoint isn't re-hit on every locate;
+    # a second call must not re-invoke the LLM.
+    assert grasp._DESCRIPTOR_CACHE == {"coke": []}
+    out2 = _detection_prompts(ctx, ["coke"])
+    assert out2 == out
+    assert ctx.extract.calls == ["coke"]                # one attempt, then cached miss
+
+
+def test_detection_prompts_llm_failure_unknown_item_bare_target():
+    ctx = _ctx(_FakeImage([]), extract=_FakeExtract(["x"], raises_until=99))
+    assert _detection_prompts(ctx, ["banana"]) == ["banana"]  # no LLM, no static -> bare
+
+
+def test_detection_prompts_bad_ctx_without_extract_falls_back_to_static():
+    # A ctx lacking .extract (AttributeError inside the timeout worker) must degrade,
+    # not raise — guards the production grasp module that only ever touched ctx.walkieAI.
+    out = _detection_prompts(_ctx(_FakeImage([])), ["coke"])
+    assert out == ["coke", *_GRASP_DESCRIPTORS["coke"]]
+
+
+def test_detection_prompts_llm_timeout_falls_back_to_static(monkeypatch):
+    # A slow endpoint must not hang the grasp: the timeout guard fires -> static map.
+    import time as _time
+
+    monkeypatch.setenv("WALKIE_GRASP_LLM_DESCRIPTORS_TIMEOUT_S", "0.1")
+
+    def _slow(schema, instructions, text):
+        _time.sleep(1.0)
+        return SimpleNamespace(descriptors=["can"])
+
+    out = _detection_prompts(_ctx(_FakeImage([]), extract=_slow), ["coke"])
+    assert out == ["coke", *_GRASP_DESCRIPTORS["coke"]]
+    assert grasp._DESCRIPTOR_CACHE == {"coke": []}    # timed-out miss cached -> no re-stall
 
 
 # ---------------------------------------------------------------------------
