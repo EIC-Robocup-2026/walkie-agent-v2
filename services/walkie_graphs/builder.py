@@ -11,7 +11,7 @@ whole window at once, so pose error and instance identity are each resolved **on
    (:class:`~services.walkie_graphs.associate.ObjectObservation`).
 4. (optional) ``tsdf.fuse`` → one clean volumetric structural cloud.
 
-The caller (the build worker in :mod:`~services.walkie_graphs.service_v2`) merges the
+The caller (the build worker in :mod:`~services.walkie_graphs.service`) merges the
 observations into the persisted :class:`~services.walkie_graphs.scene.SceneStore`.
 """
 

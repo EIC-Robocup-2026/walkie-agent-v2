@@ -9,7 +9,7 @@
 # Usage:
 #   ./run.sh                # start the agent
 #   ./run.sh start          # same as above
-#   ./run.sh reset          # wipe the walkie_graphs store (chroma + pcds + captures + bg), no prompt
+#   ./run.sh reset          # wipe the walkie_graphs store (graph_scene + graph_buffer), no prompt
 #   ./run.sh fresh          # reset, then start the agent
 #   ./run.sh task <NAME>    # run a single task (e.g. ./run.sh task HRI)
 #   ./run.sh tasks          # list available tasks
@@ -19,8 +19,8 @@
 # (uv run python -m tasks.<NAME>.run) so its relative imports resolve.
 #
 # The walkie_graphs store is the only long-term memory backend; 'reset' wipes it
-# via services/walkie_graphs/tools/reset.py. Run reset with the robot stopped —
-# ChromaDB's persistent client is single-process.
+# (graph_scene/ + graph_buffer/) via services/walkie_graphs/tools/reset.py. Run reset
+# with the robot stopped so the capture/build threads aren't writing concurrently.
 
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"

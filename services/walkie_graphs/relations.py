@@ -1,9 +1,8 @@
 """Geometric / distance-based relation derivation for the scene graph.
 
-Pure function lifted verbatim from ``GraphMemory.derive_relations`` (predicates,
-thresholds, behaviour unchanged). Given the current object nodes it emits the
-spatial edges (``near`` / ``on`` / ``above`` / ``inside``) implied by their AABBs
-and centroids. No I/O, no graph state — callers persist the returned list.
+A pure function: given the current object nodes it emits the spatial edges
+(``near`` / ``on`` / ``above`` / ``inside``) implied by their AABBs and centroids.
+No I/O, no graph state — callers persist the returned list.
 """
 
 from __future__ import annotations

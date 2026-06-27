@@ -1,15 +1,14 @@
-"""Lean immutable scene store — the query backend for walkie_graphs v2.
+"""Lean immutable scene store — the query backend for walkie_graphs.
 
-Replaces the ChromaDB-backed :class:`GraphMemory` *for queries*. A
-:class:`SceneStore` holds a single immutable :class:`BuiltScene` snapshot
-(nodes + an L2-normalized embedding matrix + an id index + relations) behind one
-:class:`threading.RLock`. Queries read the snapshot pointer after a brief lock;
-a rebuild assembles a brand-new :class:`BuiltScene` and swaps the pointer in one
-assignment, so an in-flight query keeps reading its own consistent snapshot and
-never blocks the rebuild.
+A numpy store, no ChromaDB for the scene. A :class:`SceneStore` holds a single
+immutable :class:`BuiltScene` snapshot (nodes + an L2-normalized embedding matrix
++ an id index + relations) behind one :class:`threading.RLock`. Queries read the
+snapshot pointer after a brief lock; a rebuild assembles a brand-new
+:class:`BuiltScene` and swaps the pointer in one assignment, so an in-flight query
+keeps reading its own consistent snapshot and never blocks the rebuild.
 
-The query contract is a byte-for-byte reproduction of the v1 ``GraphMemory``
-queries (consumers: ``agents/database_agent/tools.py``, ``tasks/GPSR/skills.py``):
+The query contract is what the agents depend on
+(consumers: ``agents/database_agent/tools.py``, ``tasks/GPSR/skills.py``):
 CLIP text search via one normalized matmul with a four-trigger keyword fallback,
 a confirmation gate applied on every list query, spatial filtering, and the exact
 ``to_text_description`` format.
@@ -357,7 +356,7 @@ class SceneStore:
         return best
 
     # ------------------------------------------------------------------
-    # Queries (v1 GraphMemory contract)
+    # Queries (the contract the Database agent + GPSR depend on)
     # ------------------------------------------------------------------
     def query_text(
         self, query: str, k: int = 5, *, near=None, radius: Optional[float] = None
