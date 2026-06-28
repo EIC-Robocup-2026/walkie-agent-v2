@@ -65,6 +65,13 @@ WALKIE_NAV_GOAL_TOLERANCE_M = "0.4"
 # When returning to a customer, accept a re-detected person within this distance
 # of the stored point as "the same customer" (else keep the stored point).
 RESTAURANT_REACQUIRE_RADIUS_M = "1.5"
+# Re-acquire the BAR/barman on return (return_to_bar). 1 = after driving to the bar
+# anchor, also rotate toward the counter (RESTAURANT_COUNTER_REL_DEG) and look for the
+# barman to face them before relaying. 0 = just drive to the fixed bar pose and stop —
+# no rotating, no barman search (the robot simply comes to its station to fetch items).
+# Set to 0 for bring-up/tests where you only want "go to the fixed point", not the
+# turn-and-find behaviour. The two knobs below are only consulted when this is 1.
+RESTAURANT_BAR_REACQUIRE = "0"
 # When back at the bar, treat a person within this distance of the anchor as the barman.
 RESTAURANT_BARMAN_RADIUS_M = "2.5"
 # Rotate this many DEGREES from the bar-anchor heading (which faces the diners) to face
@@ -90,7 +97,27 @@ RESTAURANT_MAX_FAILS_PER_SPOT = "2"
 RESTAURANT_ORDER_RETRIES = "2"
 RESTAURANT_CONFIRM_RETRIES = "1"
 
+# 1 = speak a readiness go-signal once the robot is in position at the bar (after
+# GoToStart), so the operator/referee knows it is set before it starts serving.
+# 0 = start silently. The signal is spoken (TTS) — the robot's available channel.
+RESTAURANT_SIGNAL_READY = "1"
+
+# --- Serve mode -------------------------------------------------------------
+# 1 = TRAY mode: the robot holds its installed tray the whole time, the BARMAN places
+# the items onto the tray, the robot carries the whole order in ONE trip, and the
+# CUSTOMER takes the items off the tray — no arm grasp/place at all (RESTAURANT_ARM_*
+# below is unused). This is the path to use when a tray is mounted on the robot.
+# 0 = the gripper pick/place pipeline (per-item round trips, gated by
+# RESTAURANT_ARM_CALIBRATED below). Default 1 — the robot has a tray fitted.
+RESTAURANT_TRAY_MODE = "1"
+# Tray handoff waits (seconds): after asking the barman to load / the customer to
+# unload, the robot waits for a spoken "ready" and, on silence, dwells this long so
+# the run never stalls on a quiet human. Raise if loading/unloading takes longer.
+RESTAURANT_TRAY_LOAD_WAIT_SEC = "5.0"
+RESTAURANT_TRAY_UNLOAD_WAIT_SEC = "5.0"
+
 # --- Phase 2: manipulation (CALIBRATION-READY, NOT VALIDATED) ----------------
+# Only used when RESTAURANT_TRAY_MODE = 0 (the gripper path).
 # MASTER SAFETY GATE. 0 = pick/serve compute + log the target pose but DO NOT move
 # the arm (fail-safe). Set to 1 only AFTER the on-robot calibration pass below —
 # untested arm motion in a public venue is dangerous (contact = e-stop).

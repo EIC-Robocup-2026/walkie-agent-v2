@@ -32,6 +32,10 @@ def _f(name: str, default: str) -> float:
     return float(os.getenv(name, default))
 
 
+def _b(name: str, default: str) -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _cxcywh_to_xyxy(bbox) -> BBox:
     """Pose-estimation bboxes are (cx, cy, w, h); the depth lift wants xyxy."""
     cx, cy, w, h = bbox
@@ -549,16 +553,21 @@ def take_order(ctx: TaskContext, world_xy: tuple[float, float] | None = None) ->
 
 
 def return_to_bar(ctx: TaskContext) -> bool:
-    """Drive to the bar anchor, then re-acquire the barman and face them.
+    """Drive to the bar anchor; optionally re-acquire the barman and face them.
 
-    go_to gets us near the remembered anchor; the truth is the live camera, so we
-    look for the person there and face them for the relay (design §5.1). Degrades
-    to just reaching the anchor if no barman is seen.
+    go_to gets us near the remembered anchor. With RESTAURANT_BAR_REACQUIRE on
+    (default), the truth is the live camera, so we then turn toward the counter and
+    look for the barman to face them for the relay (design §5.1), degrading to just
+    reaching the anchor if no barman is seen. With it OFF, the robot simply parks at
+    the fixed bar pose and stops — no rotate, no person search (the robot just comes
+    to its station to fetch items).
     """
     bar = ctx.data.get("bar_anchor")
     if not bar:
         return False
     ok = ctx.goto(bar["x"], bar["y"], bar["heading"])
+    if not _b("RESTAURANT_BAR_REACQUIRE", "1"):
+        return ok  # just park at the fixed bar point — no rotate / barman search
     # Turn to face the order station before relaying. The anchor heading points at the
     # DINERS (the robot started facing them), but the counter/kitchen is off to the side —
     # RESTAURANT_COUNTER_REL_DEG is how far to rotate from the anchor heading to face it

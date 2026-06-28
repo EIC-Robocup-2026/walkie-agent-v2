@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import pytest
 
+from tasks.base import StepResult
 from tasks.Restaurant import prompts, subtasks
 from tasks.Restaurant.skills import Caller
-from tasks.Restaurant.subtasks import OrderStatus, ServeCustomers, ServeCustomersBatched
+from tasks.Restaurant.subtasks import OrderStatus, ServeCustomers, ServeCustomersBatched, SignalReady
 
 # Statuses that mean "we secured an order from this customer".
 _SERVED_OR_BETTER = {
@@ -77,7 +78,10 @@ def patched(monkeypatch):
         monkeypatch.setattr(subtasks, "capture_appearance", lambda ctx, xy: None)
         monkeypatch.setattr(subtasks, "return_to_bar", lambda ctx: True)
         monkeypatch.setattr(subtasks, "relay_to_barman", lambda ctx, items: True)
+        # Stub BOTH delivery paths so the loop test is serve-mode agnostic
+        # (_deliver_order picks tray vs gripper from RESTAURANT_TRAY_MODE).
         monkeypatch.setattr(subtasks, "_pick_and_serve", lambda ctx, order: None)
+        monkeypatch.setattr(subtasks, "_serve_with_tray", lambda ctx, order: None)
         if nearest is not None:
             monkeypatch.setattr(subtasks, "nearest_caller", nearest)
         return calls
@@ -163,3 +167,76 @@ def test_batched_walks_past_a_failed_leading_caller(monkeypatch, patched):
     assert len(calls["approach"]) == 3      # A (fail), B, C
     assert len(calls["take_order"]) == 2    # only the two we reached
     assert calls["scan"] == 1               # single sweep, by design
+
+
+# --- tray-mode delivery (_serve_with_tray) ---------------------------------
+
+class _TrayCtx:
+    """Records say/ask/score for the tray serve; ask returns a go-ahead (no dwell)."""
+
+    def __init__(self, reply="ready"):
+        self._reply = reply
+        self.said: list[str] = []
+        self.asked: list[str] = []
+        self.scored: list[tuple[str, int]] = []
+
+    def say(self, text):
+        self.said.append(text)
+
+    def ask(self, q, retries=1):
+        self.asked.append(q)
+        return self._reply
+
+    def score(self, key, n=1):
+        self.scored.append((key, n))
+
+
+def test_serve_with_tray_one_trip_serves_whole_order(monkeypatch):
+    """Tray mode: the barman loads, the robot carries the WHOLE order in one trip, the
+    customer unloads — one return_to_customer, one return_to_bar, per-item scoring."""
+    trips = {"to_customer": 0, "to_bar": 0}
+    monkeypatch.setattr(subtasks, "return_to_customer",
+                        lambda ctx, xy: trips.__setitem__("to_customer", trips["to_customer"] + 1) or xy)
+    monkeypatch.setattr(subtasks, "return_to_bar",
+                        lambda ctx: trips.__setitem__("to_bar", trips["to_bar"] + 1) or True)
+    ctx = _TrayCtx()
+    order = subtasks.Order(id=1, world_xy=(2.0, 3.0), bearing=0.0, items=["coke", "chips"])
+
+    subtasks._serve_with_tray(ctx, order)
+
+    assert order.status is OrderStatus.SERVED
+    assert trips == {"to_customer": 1, "to_bar": 1}    # ONE round trip for both items
+    assert ("pickup_items", 2) in ctx.scored          # scored per item (2)
+    assert ("serve_order", 2) in ctx.scored
+    assert any("tray" in s.lower() for s in ctx.said)  # asked the barman about the tray
+
+
+def test_serve_with_tray_bails_when_customer_lost(monkeypatch):
+    """Loaded the tray but can't re-find the customer: return to the bar, not SERVED."""
+    monkeypatch.setattr(subtasks, "return_to_customer", lambda ctx, xy: None)
+    bar = {"n": 0}
+    monkeypatch.setattr(subtasks, "return_to_bar", lambda ctx: bar.__setitem__("n", bar["n"] + 1) or True)
+    ctx = _TrayCtx()
+    order = subtasks.Order(id=1, world_xy=(2.0, 3.0), bearing=0.0, items=["coke"])
+
+    subtasks._serve_with_tray(ctx, order)
+
+    assert order.status is OrderStatus.PICKED   # tray loaded, but the serve never happened
+    assert bar["n"] == 1                          # bailed back to the bar
+    assert ("serve_order", 1) not in ctx.scored
+
+
+# --- readiness go-signal (SignalReady) -------------------------------------
+
+def test_signal_ready_announces_when_enabled(monkeypatch):
+    monkeypatch.setenv("RESTAURANT_SIGNAL_READY", "1")
+    ctx = FakeCtx()
+    assert SignalReady().run(ctx) is StepResult.DONE
+    assert prompts.READY_TO_START in ctx.said
+
+
+def test_signal_ready_is_silent_when_disabled(monkeypatch):
+    monkeypatch.setenv("RESTAURANT_SIGNAL_READY", "0")
+    ctx = FakeCtx()
+    assert SignalReady().run(ctx) is StepResult.DONE
+    assert ctx.said == []

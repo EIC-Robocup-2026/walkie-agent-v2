@@ -140,3 +140,63 @@ def test_said_no_detects_explicit_rejection(text):
 @pytest.mark.parametrize("text", ["", "yes that's right", "correct, thanks", "sure"])
 def test_said_no_accepts_silence_and_affirmation(text):
     assert _said_no(text) is False
+
+
+# --- return_to_bar: fixed-point vs re-acquire gate --------------------------
+
+class _BarCtx:
+    """Minimal ctx for return_to_bar: records gotos/rotations, holds the anchor."""
+
+    def __init__(self, anchor):
+        self.data = {"bar_anchor": anchor} if anchor else {}
+        self.gotos: list[tuple[float, float, float]] = []
+        self.rotations: list[float] = []
+
+    def goto(self, x, y, h):
+        self.gotos.append((x, y, h))
+        return True
+
+    def rotate_to(self, h):
+        self.rotations.append(h)
+        return True
+
+
+def test_return_to_bar_skips_reacquire_when_disabled(monkeypatch):
+    """RESTAURANT_BAR_REACQUIRE=0: drive to the fixed bar pose and stop — no rotate,
+    no barman search (the robot just comes to its station to fetch items)."""
+    from tasks.Restaurant import skills
+
+    called = {"find": 0, "face": 0}
+    monkeypatch.setattr(skills, "find_person_near",
+                        lambda *a, **k: called.__setitem__("find", called["find"] + 1) or None)
+    monkeypatch.setattr(skills, "face_person",
+                        lambda *a, **k: called.__setitem__("face", called["face"] + 1))
+    monkeypatch.setenv("RESTAURANT_BAR_REACQUIRE", "0")
+    monkeypatch.setenv("RESTAURANT_COUNTER_REL_DEG", "90")  # would rotate if reacquire ran
+    ctx = _BarCtx({"x": 1.0, "y": 2.0, "heading": 0.5})
+
+    assert skills.return_to_bar(ctx) is True
+    assert ctx.gotos == [(1.0, 2.0, 0.5)]   # drove to the fixed bar pose
+    assert ctx.rotations == []              # no rotate toward the counter
+    assert called == {"find": 0, "face": 0}  # no barman search
+
+
+def test_return_to_bar_reacquires_when_enabled(monkeypatch):
+    """RESTAURANT_BAR_REACQUIRE=1 (default): after driving, rotate to the counter and
+    find+face the barman."""
+    from tasks.Restaurant import skills
+
+    seen = {"find": 0, "face": 0}
+    barman = Caller(world_xy=(1.2, 2.0), bearing=0.0, bbox_xyxy=(0, 0, 1, 1), confidence=0.9)
+    monkeypatch.setattr(skills, "find_person_near",
+                        lambda *a, **k: seen.__setitem__("find", seen["find"] + 1) or barman)
+    monkeypatch.setattr(skills, "face_person",
+                        lambda *a, **k: seen.__setitem__("face", seen["face"] + 1))
+    monkeypatch.setenv("RESTAURANT_BAR_REACQUIRE", "1")
+    monkeypatch.setenv("RESTAURANT_COUNTER_REL_DEG", "90")
+    ctx = _BarCtx({"x": 1.0, "y": 2.0, "heading": 0.5})
+
+    assert skills.return_to_bar(ctx) is True
+    assert ctx.gotos == [(1.0, 2.0, 0.5)]
+    assert len(ctx.rotations) == 1          # rotated toward the counter
+    assert seen == {"find": 1, "face": 1}   # searched for + faced the barman
