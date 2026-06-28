@@ -161,9 +161,9 @@ class _BarCtx:
         return True
 
 
-def test_return_to_bar_skips_reacquire_when_disabled(monkeypatch):
-    """RESTAURANT_BAR_REACQUIRE=0: drive to the fixed bar pose and stop — no rotate,
-    no barman search (the robot just comes to its station to fetch items)."""
+def test_return_to_bar_faces_bar_but_skips_barman_when_reacquire_off(monkeypatch):
+    """RESTAURANT_BAR_REACQUIRE=0: drive to the bar and TURN to face it (the bar side,
+    so the barman can load the tray), but skip the camera barman search."""
     from tasks.Restaurant import skills
 
     called = {"find": 0, "face": 0}
@@ -172,13 +172,28 @@ def test_return_to_bar_skips_reacquire_when_disabled(monkeypatch):
     monkeypatch.setattr(skills, "face_person",
                         lambda *a, **k: called.__setitem__("face", called["face"] + 1))
     monkeypatch.setenv("RESTAURANT_BAR_REACQUIRE", "0")
-    monkeypatch.setenv("RESTAURANT_COUNTER_REL_DEG", "90")  # would rotate if reacquire ran
+    monkeypatch.setenv("RESTAURANT_COUNTER_REL_DEG", "90")  # turn to face the bar side
     ctx = _BarCtx({"x": 1.0, "y": 2.0, "heading": 0.5})
 
     assert skills.return_to_bar(ctx) is True
     assert ctx.gotos == [(1.0, 2.0, 0.5)]   # drove to the fixed bar pose
-    assert ctx.rotations == []              # no rotate toward the counter
-    assert called == {"find": 0, "face": 0}  # no barman search
+    assert len(ctx.rotations) == 1          # turned to face the bar (independent of reacquire)
+    assert called == {"find": 0, "face": 0}  # but no camera barman search
+
+
+def test_return_to_bar_no_turn_when_counter_rel_zero(monkeypatch):
+    """COUNTER_REL_DEG=0: no turn at all — just park at the fixed bar pose."""
+    from tasks.Restaurant import skills
+
+    monkeypatch.setattr(skills, "find_person_near", lambda *a, **k: None)
+    monkeypatch.setattr(skills, "face_person", lambda *a, **k: None)
+    monkeypatch.setenv("RESTAURANT_BAR_REACQUIRE", "0")
+    monkeypatch.setenv("RESTAURANT_COUNTER_REL_DEG", "0")
+    ctx = _BarCtx({"x": 1.0, "y": 2.0, "heading": 0.5})
+
+    assert skills.return_to_bar(ctx) is True
+    assert ctx.gotos == [(1.0, 2.0, 0.5)]
+    assert ctx.rotations == []              # no rotate when the angle is zero
 
 
 def test_return_to_bar_reacquires_when_enabled(monkeypatch):

@@ -65,19 +65,20 @@ WALKIE_NAV_GOAL_TOLERANCE_M = "0.4"
 # When returning to a customer, accept a re-detected person within this distance
 # of the stored point as "the same customer" (else keep the stored point).
 RESTAURANT_REACQUIRE_RADIUS_M = "1.5"
-# Re-acquire the BAR/barman on return (return_to_bar). 1 = after driving to the bar
-# anchor, also rotate toward the counter (RESTAURANT_COUNTER_REL_DEG) and look for the
-# barman to face them before relaying. 0 = just drive to the fixed bar pose and stop —
-# no rotating, no barman search (the robot simply comes to its station to fetch items).
-# Set to 0 for bring-up/tests where you only want "go to the fixed point", not the
-# turn-and-find behaviour. The two knobs below are only consulted when this is 1.
+# VISUALLY re-acquire the barman on return (return_to_bar). 1 (default) = after driving
+# to the bar and turning to face it (below), also look for the barman with the camera and
+# face them precisely before relaying. 0 = skip the vision search — just drive to the bar
+# and face it (still turns by RESTAURANT_COUNTER_REL_DEG). Set 0 for bring-up/tests where
+# the camera barman search isn't wanted; the TURN to the bar still happens either way.
 RESTAURANT_BAR_REACQUIRE = "0"
 # When back at the bar, treat a person within this distance of the anchor as the barman.
 RESTAURANT_BARMAN_RADIUS_M = "2.5"
 # Rotate this many DEGREES from the bar-anchor heading (which faces the diners) to face
-# the order station / counter when relaying an order — the counter is off to the side of
-# the customer-facing start pose. 0 = straight ahead (no turn); +90 = counter on the left,
-# -90 = on the right. Flip the sign if the robot turns the wrong way.
+# the order station / counter — the bar is off to the side of the customer-facing start
+# pose, and the robot must face it so the barman can load its tray. Applies on EVERY
+# return_to_bar, independent of RESTAURANT_BAR_REACQUIRE. 0 = no turn; +90 = bar on the
+# left, -90 = on the right, 180 = behind. SET THIS to your arena's bar side; flip the
+# sign if it turns the wrong way.
 RESTAURANT_COUNTER_REL_DEG = "0"
 # Treat a fresh caller within this distance of a customer we already took an order
 # from as the SAME person, and skip them — so a still-waving customer isn't served
