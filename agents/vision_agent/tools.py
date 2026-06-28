@@ -32,16 +32,13 @@ def make_vision_tools(
     walkieAI,
     *,
     agent_name: str = "vision",
-    scene_store=None,
 ):
     """Build the vision sub-agent's tool list.
 
     Detection / caption / pose tools are parallelable; speak is sequential.
 
     Vision is about the **live camera** only. Long-term "where have I seen X?"
-    lookups belong to the Walkie Database sub-agent, so they are not exposed
-    here. ``scene_store`` is accepted for signature stability but not used by
-    these tools.
+    lookups belong to the Walkie Database sub-agent, so they are not exposed here.
     """
 
     def _capture():

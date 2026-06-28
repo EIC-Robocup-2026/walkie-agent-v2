@@ -96,6 +96,16 @@ class RerunSession:
 
         self._rr = rr
         rr.init(_env("WALKIE_VIZ_RECORDING", None, "walkie"))
+        # The robot's map frame is gravity-aligned **+Z up**; declare it so Rerun's 3D
+        # view shows the scene upright instead of its default Y-up (which tips every point
+        # cloud / marker on its side — looks like a bad transform). Logged on the root so
+        # the view inherits it regardless of where it's rooted, and on "world" for viewers
+        # that root the 3D space there.
+        try:
+            rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+            rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+        except Exception:  # noqa: BLE001 — never let a viz convention call break startup
+            pass
 
         self._show_robot = _flag("WALKIE_VIZ_ROBOT", "WALKIE_GRAPHS_VIZ_ROBOT", "1")
         self._show_camera = _flag("WALKIE_VIZ_CAMERA", "WALKIE_GRAPHS_VIZ_CAMERA", "1")

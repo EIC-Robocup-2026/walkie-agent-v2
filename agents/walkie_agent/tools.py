@@ -18,16 +18,12 @@ def make_walkie_main_tools(
     database_agent,
     *,
     agent_name: str = "walkie",
-    scene_store=None,
 ):
     """Tools for the main Walkie agent.
 
-    Sub-agents are wrapped as sequential tools (delegate_to_*). Object lookup
-    is parallelable. Speak is sequential.
-
-    ``scene_store`` (a :class:`perception.SceneStore`) powers
-    ``find_object_from_memory`` and the Walkie Database sub-agent reached via
-    ``delegate_to_database``.
+    Sub-agents are wrapped as sequential tools (delegate_to_*). Speak is sequential.
+    Long-term spatial memory is reached via ``delegate_to_database`` (the Database
+    sub-agent over the walkie_graphs ``SceneStore``).
     """
 
     def _invoke_subagent(graph, task: str, prefix: str) -> str:
@@ -87,11 +83,9 @@ def make_walkie_main_tools(
     def delegate_to_database(task: str) -> str:
         """Delegate a long-term-memory question to the Walkie Database sub-agent.
 
-        Use for richer database work than a single lookup: "what's near the
-        table?", "what did you see in the last minute?", "how many chairs do
-        you know about?", or a "where is X?" that may need follow-up reasoning.
-        For a plain one-shot "where is X?", prefer `find_object_from_memory`.
-        Blocks until the sub-agent finishes.
+        Use for any stored-memory question: "where is the red mug?", "what's
+        near the table?", "what did you see in the last minute?", "how many
+        chairs do you know about?". Blocks until the sub-agent finishes.
 
         Args:
             task: A clear, self-contained question about stored spatial memory.
