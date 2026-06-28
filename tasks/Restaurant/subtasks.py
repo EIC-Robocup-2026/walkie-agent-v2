@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from dataclasses import dataclass, field
 from enum import Enum, auto
 
@@ -88,6 +89,26 @@ def _pose(env_key: str, default: str = "0.0,0.0,0.0") -> tuple[float, float, flo
 
 def _int(env_key: str, default: str) -> int:
     return int(os.getenv(env_key, default))
+
+
+def _f(env_key: str, default: str) -> float:
+    return float(os.getenv(env_key, default))
+
+
+def _tray_mode() -> bool:
+    """TRAY mode (default): the barman loads items onto the robot's tray and the
+    customer takes them off — no arm grasp/place. 0 = the gripper pick/place path."""
+    return os.getenv("RESTAURANT_TRAY_MODE", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _await_handoff(ctx: TaskContext, ask_prompt: str, wait_key: str) -> None:
+    """Wait for a human to load/unload the tray: ask for a spoken go-ahead, and on
+    silence fall back to a fixed dwell so a quiet human never stalls the run."""
+    reply = ctx.ask(ask_prompt, retries=1)
+    if not reply:
+        dwell = _f(wait_key, "5.0")
+        if dwell > 0:
+            time.sleep(dwell)
 
 
 def _odom_fix(ctx: TaskContext) -> dict | None:
@@ -159,6 +180,49 @@ def _pick_and_serve(ctx: TaskContext, order: Order) -> None:
     print(f"[restaurant] order #{order.id}: served {served} of {order.items}")
 
 
+def _serve_with_tray(ctx: TaskContext, order: Order) -> None:
+    """Tray mode: the robot holds its installed tray; the barman loads the items onto
+    it and the customer takes them off — no arm grasp/place.
+
+    The whole order rides on one tray, so this is a SINGLE round trip (load at the
+    bar -> carry -> the customer unloads), not the per-item trips the one-gripper path
+    needs. Scores the same lines as :func:`_pick_and_serve` (per item) so the tally is
+    comparable; assumes the robot is already at the bar (``_deliver_order`` drove here).
+    """
+    if not order.items:
+        return
+    items_str = ", ".join(order.items)
+    n = len(order.items)
+
+    # 1. At the bar: ask the barman to load the tray, then wait for the handoff.
+    ctx.say(prompts.TRAY_ASK_BARMAN.format(items=items_str))
+    _await_handoff(ctx, prompts.TRAY_LOADED_CONFIRM, "RESTAURANT_TRAY_LOAD_WAIT_SEC")
+    order.status = OrderStatus.PICKED
+    ctx.score("pickup_items", n)    # items received onto the tray (per item)
+    ctx.score("first_pick_bonus")   # one-time (clamped to 1 by the sheet)
+
+    # 2. Carry the whole order to the customer in ONE trip; re-acquire them (§5.1).
+    fresh = return_to_customer(ctx, order.world_xy) if order.world_xy else None
+    if fresh is None:
+        ctx.say(prompts.SERVE_NO_CUSTOMER)
+        return_to_bar(ctx)
+        return
+    order.world_xy = fresh
+    ctx.score("return_table")       # returned to the customer's table with the order
+
+    # 3. Present the tray; the customer takes their items off it.
+    ctx.say(prompts.TRAY_PRESENT_CUSTOMER.format(items=items_str))
+    _await_handoff(ctx, prompts.TRAY_TAKEN_CONFIRM, "RESTAURANT_TRAY_UNLOAD_WAIT_SEC")
+    order.status = OrderStatus.SERVED
+    ctx.score("serve_order", n)     # items served off the tray (per item)
+    ctx.score("first_place_bonus")  # one-time (clamped to 1 by the sheet)
+    ctx.say(prompts.SERVE_ANNOUNCE.format(items=items_str))
+
+    # 4. Back to the bar for the next customer.
+    return_to_bar(ctx)
+    print(f"[restaurant] order #{order.id}: served {order.items} via tray")
+
+
 def _take_one_order(ctx: TaskContext, caller, orders: dict[int, Order]) -> Order | None:
     """Approach one caller, capture + confirm their order; return the Order or None.
 
@@ -197,7 +261,10 @@ def _deliver_order(ctx: TaskContext, order: Order) -> None:
     if relay_to_barman(ctx, order.items):
         order.status = OrderStatus.RELAYED
         ctx.score("communicate_barman")  # relayed the order to the barman
-    _pick_and_serve(ctx, order)
+    if _tray_mode():
+        _serve_with_tray(ctx, order)
+    else:
+        _pick_and_serve(ctx, order)
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +319,20 @@ class GoToStart(SubTask):
             if fix else {"x": x, "y": y, "heading": h}
         )
         return StepResult.DONE if ok else StepResult.RETRY
+
+
+class SignalReady(SubTask):
+    """Announce that the robot is in position and ready to begin serving.
+
+    A spoken go-signal emitted after GoToStart, so the operator/referee knows the
+    robot is set before it starts working. Gated by RESTAURANT_SIGNAL_READY (default
+    on); never blocks the run (always DONE).
+    """
+
+    def run(self, ctx: TaskContext) -> StepResult:
+        if os.getenv("RESTAURANT_SIGNAL_READY", "1").strip().lower() in ("1", "true", "yes", "on"):
+            ctx.say(prompts.READY_TO_START)
+        return StepResult.DONE
 
 
 class ScanAndApproach(SubTask):
@@ -571,4 +652,4 @@ def build_restaurant_task(ctx: TaskContext) -> Task:
     """
     batched = os.getenv("RESTAURANT_BATCH", "0").lower() in ("1", "true", "yes")
     serve = ServeCustomersBatched() if batched else ServeCustomers()
-    return Task("Restaurant", [GoToStart(), serve], ctx)
+    return Task("Restaurant", [GoToStart(), SignalReady(), serve], ctx)

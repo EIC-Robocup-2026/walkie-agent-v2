@@ -32,6 +32,10 @@ def _f(name: str, default: str) -> float:
     return float(os.getenv(name, default))
 
 
+def _b(name: str, default: str) -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _cxcywh_to_xyxy(bbox) -> BBox:
     """Pose-estimation bboxes are (cx, cy, w, h); the depth lift wants xyxy."""
     cx, cy, w, h = bbox
@@ -549,24 +553,29 @@ def take_order(ctx: TaskContext, world_xy: tuple[float, float] | None = None) ->
 
 
 def return_to_bar(ctx: TaskContext) -> bool:
-    """Drive to the bar anchor, then re-acquire the barman and face them.
+    """Drive to the bar anchor, turn to face the bar, and optionally find the barman.
 
-    go_to gets us near the remembered anchor; the truth is the live camera, so we
-    look for the person there and face them for the relay (design §5.1). Degrades
-    to just reaching the anchor if no barman is seen.
+    go_to gets us near the remembered anchor. We then TURN to face the counter/bar
+    side — the anchor heading points at the DINERS (the robot started facing them),
+    but the counter/kitchen is off to the side, and we must face it so the barman can
+    reach the robot's tray. ``RESTAURANT_COUNTER_REL_DEG`` is that turn (0 = none); it
+    runs regardless of ``RESTAURANT_BAR_REACQUIRE`` — facing the bar is needed even
+    when we don't visually search for the barman. With ``RESTAURANT_BAR_REACQUIRE`` on
+    we additionally re-acquire the barman from the live camera and face them precisely
+    (design §5.1), degrading to just facing the bar if none is seen.
     """
     bar = ctx.data.get("bar_anchor")
     if not bar:
         return False
     ok = ctx.goto(bar["x"], bar["y"], bar["heading"])
-    # Turn to face the order station before relaying. The anchor heading points at the
-    # DINERS (the robot started facing them), but the counter/kitchen is off to the side —
-    # RESTAURANT_COUNTER_REL_DEG is how far to rotate from the anchor heading to face it
-    # (0 = straight ahead; +90 = counter on the left, -90 = on the right; flip the sign if
-    # it turns the wrong way). Then refine onto the barman if one is visible there.
+    # Turn to face the counter/bar side. +90 = counter on the left, -90 = on the right,
+    # 180 = behind the diner-facing start; flip the sign if it turns the wrong way.
     rel = math.radians(_f("RESTAURANT_COUNTER_REL_DEG", "0"))
     if rel:
         ctx.rotate_to(bar["heading"] + rel)
+    # Optionally also re-acquire the barman visually and face them precisely.
+    if not _b("RESTAURANT_BAR_REACQUIRE", "1"):
+        return ok  # faced the bar; skip the vision barman search
     barman = find_person_near(ctx, (bar["x"], bar["y"]),
                               radius_m=_f("RESTAURANT_BARMAN_RADIUS_M", "2.5"))
     if barman is not None:

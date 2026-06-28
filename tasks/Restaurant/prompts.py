@@ -32,6 +32,8 @@ EXTRACT_ORDER_INSTRUCTIONS = (
 
 
 # --- Spoken lines -----------------------------------------------------------
+# Readiness go-signal, spoken once the robot is in position at the bar (RESTAURANT_SIGNAL_READY).
+READY_TO_START = "I am in position and ready to start serving."
 GREET_CUSTOMER = "Hello! I am Walkie. What would you like to order?"
 ASK_REPEAT = "Sorry, I did not catch that. Could you repeat your order, please?"
 CONFIRM_ORDER = "Let me confirm: you would like {items}. Is that right?"
@@ -53,3 +55,10 @@ CUSTOMER_APPEARANCE_PROMPT = (
 NO_CUSTOMER = "I do not see anyone calling right now."
 # Spoken when the serve loop runs with the arm gated off (RESTAURANT_ARM_CALIBRATED unset).
 PICK_NOT_AVAILABLE = "I cannot bring your order just yet — my arm is not ready."
+
+# --- Tray mode (RESTAURANT_TRAY_MODE): the robot carries a tray; the barman loads
+# the items onto it and the customer takes them off, so no arm grasp/place is used.
+TRAY_ASK_BARMAN = "Could you please place {items} on my tray?"
+TRAY_LOADED_CONFIRM = "Please tell me when the items are on my tray."
+TRAY_PRESENT_CUSTOMER = "Here is your order: {items}. Please take them from my tray."
+TRAY_TAKEN_CONFIRM = "Please tell me when you have taken your items."
