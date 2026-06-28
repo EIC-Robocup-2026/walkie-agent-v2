@@ -2,9 +2,17 @@
 
 For each `PlanStep`: if it's eligible for deterministic dispatch
 (`plan.prefer_tier1` — grounded, and not a gated manipulation step) and a skill
-exists, run the skill; otherwise — or if the skill hard-fails — hand the step's
-clause to the agent stack (Tier-2). The command's `CmdStatus` aggregates per-step
-success so partial scoring is reflected.
+exists, run the skill, **retrying it a few times** before giving up. Most Tier-1
+failures are small and transient (a flickered detection, a nav goal that needs a
+second attempt), so re-running the deterministic skill is cheaper and far more
+reliable than escalating to an LLM agent on the first stumble. Only once the
+retries are exhausted — or the step was never Tier-1 eligible (ungrounded / gated)
+— is the clause handed to a **scoped** agent fallback (Tier-2): the SINGLE
+sub-agent whose domain matches the failed primitive (movement → actuator,
+perception → vision), NOT the full Walkie orchestrator. That confines a recovery
+attempt to the failed step's own kind of work — a nav failure is retried with
+movement only, never by improvising extra actions. The command's `CmdStatus`
+aggregates per-step success so partial scoring is reflected.
 
 The routing/status *policy* is pure and offline-tested (plan.prefer_tier1 /
 plan.summarize_status); this module is the robot-side wiring (it imports skills,
@@ -13,6 +21,8 @@ which import tasks.base) and is verified on the robot.
 
 from __future__ import annotations
 
+import os
+import time
 import uuid
 
 from langchain.messages import HumanMessage
@@ -24,35 +34,116 @@ from .skills import SKILLS
 from .world import WorldModel
 
 
-# Prepended to every Tier-2 clause. The Walkie agent's general prompt lets it ask
-# the operator for help / to choose between candidates — correct for interactive
-# use, but wrong in GPSR: the command is executed autonomously, nobody answers, and
-# the executor does not wait for a reply (it marks the step done and moves on, so a
-# question silently does nothing). Force it to commit to one choice and act.
-_TIER2_DIRECTIVE = (
-    "You are carrying out a single RoboCup GPSR command autonomously. There is NO "
-    "operator available to answer follow-up questions and you will not receive any "
-    "reply, so never ask the user to choose or to clarify. If several candidates "
-    "match, silently pick the single most likely one (most recently / most "
-    "confidently seen) and act on it. Complete the command end to end, then report "
-    "the outcome with `speak` in one short sentence.\n\nCommand: "
-)
+# --- scoped Tier-2 fallback -------------------------------------------------
+# Which sub-agent recovers a failed step, keyed by primitive. The fallback invokes
+# ONLY this one sub-agent (on `brain`), not the full Walkie orchestrator, so it is
+# structurally confined to that agent's own tools: a navigate/guide/follow/pick/
+# place/deliver failure can only be retried with movement+arm (actuator); a find/
+# count/info failure only with the camera (vision). There is deliberately NO
+# escalation to the full agent stack — if the scoped agent can't recover, the step
+# is left FAILED (partial scoring) rather than letting a general agent act beyond
+# the one failed step. (`pick`/`place`/`deliver` reach here either gated-off or
+# after the grasp skill exhausted its own retries; routing them to the actuator
+# matches the documented gate semantics — "fall through to the agent" — without
+# widening the scope to non-arm work.)
+_FALLBACK_ROUTE: dict[str, str] = {
+    "navigate": "actuator",
+    "guide": "actuator",
+    "follow": "actuator",
+    "pick": "actuator",
+    "place": "actuator",
+    "deliver": "actuator",
+    "find_object": "vision",
+    "find_person": "vision",
+    "count": "vision",
+    "greet": "vision",
+    "get_person_info": "vision",
+    "get_object_property": "vision",
+    "say": "vision",
+}
+
+# Prepended to every scoped clause. A sub-agent's own prompt lets it ask the operator
+# / improvise — correct for interactive use, wrong in GPSR: the command runs
+# autonomously, nobody answers, and the executor does not wait for a reply (a question
+# silently does nothing). Force it to commit to one choice, do ONLY the failed step,
+# and not overreach into work the step never asked for.
+_SCOPE_DIRECTIVE: dict[str, str] = {
+    "actuator": (
+        "You are autonomously recovering ONE failed step of a RoboCup GPSR command. "
+        "There is NO operator to answer questions and you get no reply, so never ask "
+        "to clarify — if several options match, silently pick the most likely and act. "
+        "Do ONLY this one movement/arm sub-task; do not add any step beyond it. "
+        "Report the outcome with `speak` in one short sentence.\n\nSub-task: "
+    ),
+    "vision": (
+        "You are autonomously recovering ONE failed step of a RoboCup GPSR command. "
+        "There is NO operator to answer questions and you get no reply, so never ask "
+        "to clarify. Do ONLY this one perception sub-task using the camera and report "
+        "what you see; do not move the robot or add any step beyond it. "
+        "Report the outcome with `speak` in one short sentence.\n\nSub-task: "
+    ),
+}
 
 
-def _tier2(ctx: TaskContext, brain, clause: str) -> bool:
-    """Delegate one clause to the Walkie agent stack (the long-tail fallback)."""
-    if brain is None or not clause:
+def _scoped_fallback(ctx: TaskContext, brain, step, *, state: dict, source: str) -> bool:
+    """Hand one failed step to the single sub-agent that owns its kind of work.
+
+    Routed by primitive (`_FALLBACK_ROUTE`) to one sub-agent on `brain`; that agent
+    only holds its own tools, so recovery stays scoped to the failed step (no full
+    orchestrator, no escalation). Returns ``False`` (step stays failed) when there's
+    no brain, no clause, or no route for the primitive.
+    """
+    clause = step.raw or source
+    route = _FALLBACK_ROUTE.get(step.primitive.value)
+    if brain is None or not clause or route is None:
         return False
-    print(f"[gpsr.dispatch] Tier-2 fallback: {clause!r}")
+    agent = getattr(brain, route, None)
+    if agent is None:
+        print(f"[gpsr.dispatch] no '{route}' sub-agent on brain; {step.primitive.value} failed")
+        return False
+    print(f"[gpsr.dispatch] scoped fallback -> {route}: {clause!r}")
     try:
-        brain.walkie_agent.invoke(
-            {"messages": [HumanMessage(content=_TIER2_DIRECTIVE + clause)]},
-            config={"configurable": {"thread_id": f"gpsr-{uuid.uuid4()}"}},
+        agent.invoke(
+            {"messages": [HumanMessage(content=_SCOPE_DIRECTIVE[route] + clause)]},
+            config={"configurable": {"thread_id": f"gpsr-{route}-{uuid.uuid4()}"}},
         )
-        return True
     except Exception as exc:
-        print(f"[gpsr.dispatch] Tier-2 fallback failed ({exc})")
+        print(f"[gpsr.dispatch] scoped fallback ({route}) failed ({exc})")
         return False
+    # An actuator fallback may have driven the robot, so the deterministic nav cache
+    # (state["at"]) can no longer be trusted — drop it so a following navigate to a
+    # "known" place still actually drives. A vision-only fallback never moves, so the
+    # cache stays valid and is kept (avoids a spurious re-navigation).
+    if route == "actuator":
+        state.pop("at", None)
+    return True
+
+
+def _run_skill_with_retry(ctx, skill, step, world: WorldModel, state: dict) -> bool:
+    """Run a Tier-1 skill, retrying a few times before deferring to the fallback.
+
+    Most Tier-1 failures are transient (a flickered detection, a nav goal that needs
+    a second attempt); retrying the deterministic skill is cheaper and more reliable
+    than escalating to an LLM agent on the first stumble. Attempts and the pause
+    between them are configurable (``GPSR_TIER1_RETRY_ATTEMPTS`` /
+    ``GPSR_TIER1_RETRY_PAUSE_SEC``); a skill that raises is caught and counts as a
+    failed attempt. ``attempts`` is the TOTAL number of tries (1 = today's behaviour,
+    no retry).
+    """
+    attempts = max(1, int(os.getenv("GPSR_TIER1_RETRY_ATTEMPTS", "1")))
+    pause = float(os.getenv("GPSR_TIER1_RETRY_PAUSE_SEC", "1.0"))
+    prim = step.primitive.value
+    for i in range(attempts):
+        try:
+            if skill(ctx, step, world, state):
+                return True
+        except Exception as exc:
+            print(f"[gpsr.dispatch] skill {prim} raised ({exc})")
+        if i + 1 < attempts:
+            print(f"[gpsr.dispatch] Tier-1 {prim} attempt {i + 1}/{attempts} failed; retrying")
+            if pause > 0:
+                time.sleep(pause)
+    return False
 
 
 def execute_step(
@@ -65,7 +156,7 @@ def execute_step(
     state: dict,
     source: str = "",
 ) -> bool:
-    """Run one PlanStep: Tier-1 skill if eligible, else the Tier-2 agent fallback.
+    """Run one PlanStep: Tier-1 skill (with retries) if eligible, else scoped fallback.
 
     Shared by the serial (`execute_plan`) and interleaved (`execute_interleaved`)
     executors so both route identically; `state` is the per-run scratch dict
@@ -75,17 +166,9 @@ def execute_step(
     if prefer_tier1(step, manip_enabled=manip_enabled):
         skill = SKILLS.get(step.primitive.value)
         if skill is not None:
-            try:
-                ok = skill(ctx, step, world, state)
-            except Exception as exc:
-                print(f"[gpsr.dispatch] skill {step.primitive.value} raised ({exc})")
-                ok = False
-    if not ok:  # ungrounded, gated, no skill, or skill error -> agent fallback
-        ok = _tier2(ctx, brain, step.raw or source)
-        # The agent may have driven the robot (delegate_to_actuator), so the
-        # deterministic nav cache (state["at"]) can no longer be trusted — drop it
-        # so a following navigate to a "known" place still actually drives.
-        state.pop("at", None)
+            ok = _run_skill_with_retry(ctx, skill, step, world, state)
+    if not ok:  # ungrounded, gated, no skill, or retries exhausted -> scoped fallback
+        ok = _scoped_fallback(ctx, brain, step, state=state, source=source)
     print(f"[gpsr.dispatch] step {step.primitive.value}: {'ok' if ok else 'failed'}")
     return ok
 

@@ -62,6 +62,17 @@ GPSR_FIND_APPROACH_M = "0.8"
 # 1 = speak the parsed plan for each command before executing — this is what
 # scores "demonstrate a plan has been generated" (3×100). Leave on.
 GPSR_SPEAK_PLAN = "1"
+# Human approval gate (tasks/GPSR/subtasks.py): after speaking a command's plan,
+# ASK a person "should I carry this out?" and only execute if approved. "plan is
+# this — okay?" Off (0) by default because the rulebook GPSR run is autonomous (no
+# operator confirmation during execution); turn ON (1) for supervised practice/demos
+# where a human vets each plan before the robot acts. A clear "no" skips that command
+# (it stays demonstrated/PLANNED but is not executed); a clear "yes" runs it.
+GPSR_CONFIRM_PLAN = "0"
+# What to do when the confirmation answer is UNCLEAR/silent even after one re-ask:
+# "proceed" (default — don't forfeit a command on an STT mishear) or "skip" (require
+# a clear yes). Only consulted when GPSR_CONFIRM_PLAN=1.
+GPSR_CONFIRM_DEFAULT = "proceed"
 # Recovery when a command can't be parsed (rulebook 5.3). Re-ask only on an empty
 # parse and keep it small — each rephrasing request costs −30 (§5.2).
 GPSR_MAX_REPHRASINGS = "2"
@@ -84,6 +95,17 @@ GPSR_WORLD_FILE = "tasks/GPSR/world.toml"
 # run-loop use the deterministic shared pick (tasks/GPSR/skills.py -> pick_object); the
 # pick now tucks the arm after grasping so nav can continue. Validate on-robot first.
 GPSR_ENABLE_MANIPULATION = "1"
+# Tier-1 retry before falling back to the agent (tasks/GPSR/dispatch.py). When a
+# deterministic skill fails, RE-RUN it this many times TOTAL before handing the step
+# to the scoped Tier-2 agent fallback. Most failures are small and transient (a
+# flickered detection, a nav goal that needs a second go), so retrying the cheap
+# deterministic skill beats escalating to an LLM agent on the first stumble. "1" =
+# no retry (the pre-change behaviour, still the in-code default for unit tests);
+# "2"-"3" is a good on-robot range. NB: some skills already retry internally (grasp
+# 3x, approach 3x, nav-door 2x) — this stacks on top, so raise cautiously on the
+# 7-minute GPSR clock. PAUSE_SEC is the wait between attempts (lets the scene settle).
+GPSR_TIER1_RETRY_ATTEMPTS = "2"
+GPSR_TIER1_RETRY_PAUSE_SEC = "1.0"
 # For each run the people in the scene is different
 GPSR_PEOPLE_RESET = "1"
 # find_person scan (tasks/GPSR/skills.py): when the forward view at the arrival

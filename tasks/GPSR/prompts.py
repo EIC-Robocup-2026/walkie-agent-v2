@@ -154,6 +154,13 @@ GIVE_UP_ON_COMMANDS = (
 )
 PLAN_PREAMBLE = "For command {n}, here is my plan."
 CONFIRM_RECEIVED = "Understood. I will get to work."
+# Plan-confirmation gate (GPSR_CONFIRM_PLAN): after speaking a command's plan the
+# robot asks a human to approve it before executing. Off by default (the rulebook
+# run is autonomous); turn on for supervised practice/demos.
+ASK_CONFIRM_PLAN = "Should I carry out this plan for command {n}? Please say yes or no."
+PLAN_CONFIRMED = "Okay, I will carry it out."
+PLAN_REJECTED = "Okay, I will skip this command."
+COMMAND_SKIPPED = "Skipping command {n} — the plan was not approved."
 COMMAND_ANNOUNCE = "Working on command {n}: {command}"
 # Interleaved mode (GPSR_INTERLEAVE): spoken once before the merged execution to
 # demonstrate the robot is interleaving the commands (the bonus condition).

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 from langchain_core.tools import tool
 
 from agents.core.tool_decorators import parallelable_tool, sequential_tool
 from agents.core.robot_context import RobotContext
+from agents.vision_agent.detect import find_object_in_image
 from interfaces.walkie_interface import WalkieInterface
 
 
@@ -50,9 +52,16 @@ def make_vision_tools(
         """Detect and list all objects currently visible in the camera view.
 
         Use when the user asks "what objects do you see?" or "list all items in view".
+        For "do you see a SPECIFIC thing (e.g. the coke)?" prefer `look_for_object`,
+        which matches the arm's detector and finds brand-named items this list misses.
         """
         img = _capture()
         objects = walkieAI.image.detect(img)
+        # Drop low-confidence boxes: open-vocab detectors emit spurious low-score
+        # boxes for absent classes, which read as phantom objects. Mirrors the arm's
+        # confidence gate so the two agree on what's "there".
+        min_conf = float(os.getenv("VISION_DETECT_MIN_CONFIDENCE", "0.2"))
+        objects = [o for o in objects if o.confidence is None or o.confidence >= min_conf]
         if not objects:
             return "No objects detected."
         lines = []
@@ -60,6 +69,37 @@ def make_vision_tools(
             conf = f" conf={o.confidence:.2f}" if o.confidence is not None else ""
             lines.append(f"- {o.class_name}{conf} bbox={tuple(o.bbox)}")
         return "Objects detected:\n" + "\n".join(lines)
+
+    @parallelable_tool
+    @tool(parse_docstring=True)
+    def look_for_object(query: str) -> str:
+        """Check whether a SPECIFIC object is visible right now — the way the arm sees it.
+
+        Use for "do you see the X?" / "is there a X in front of you?" / "find the X in
+        view". Unlike `detect_objects_from_view` (which lists generic detector labels),
+        this expands the target into visual descriptors and CLIP-reranks the boxes, so
+        it finds brand-named items (e.g. "coke") that the bare detector reports as
+        "can"/"bottle". This is the same detection contract the grasp/arm system uses,
+        so if the arm can grasp it, this will report it as seen.
+
+        Args:
+            query: The object to look for, e.g. "coke", "a red can", "the cereal box".
+
+        Returns:
+            Whether the object is visible, with the best match's label and confidence.
+        """
+        img = _capture()
+        matches = find_object_in_image(walkieAI, img, query)
+        if not matches:
+            return f"I do not see {query} in the current view."
+        cls, conf, sim, bbox = matches[0]
+        conf_s = f" conf={conf:.2f}" if conf is not None else ""
+        sim_s = f" clip={sim:.2f}" if sim is not None else ""
+        extra = f" (+{len(matches) - 1} other candidate box(es))" if len(matches) > 1 else ""
+        return (
+            f"Yes, I can see {query} — detected as {cls!r}{conf_s}{sim_s}, "
+            f"bbox={bbox}.{extra}"
+        )
 
     @parallelable_tool
     @tool(parse_docstring=True)
@@ -154,6 +194,7 @@ def make_vision_tools(
 
     return [
         detect_objects_from_view,
+        look_for_object,
         image_caption,
         detect_people_poses,
         get_camera_view_description,
