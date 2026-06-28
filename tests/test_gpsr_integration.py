@@ -122,19 +122,34 @@ class _FakeAI:
 
 
 class _FakeBrain:
-    """Tier-2 stand-in: records the clauses dispatch hands to the agent stack."""
+    """Tier-2 stand-in: records what the scoped fallback hands to each sub-agent.
+
+    ``clauses`` is the flat list of handed-off clauses (route-agnostic, what most
+    tests assert on); ``routed`` is ``(sub-agent-name, clause)`` so a test can prove
+    the fallback went to the RIGHT scoped agent (vision vs actuator).
+    """
 
     def __init__(self):
         self.clauses: list[str] = []
+        self.routed: list[tuple[str, str]] = []
 
         outer = self
 
-        class _Agent:
-            def invoke(self, payload, config=None):
-                outer.clauses.append(payload["messages"][0].content)
-                return {"messages": []}
+        def _make(name):
+            class _Agent:
+                def invoke(self, payload, config=None):
+                    clause = payload["messages"][0].content
+                    outer.clauses.append(clause)
+                    outer.routed.append((name, clause))
+                    return {"messages": []}
 
-        self.walkie_agent = _Agent()
+            return _Agent()
+
+        # The scoped fallback routes a failed step to exactly one of these.
+        self.actuator = _make("actuator")
+        self.vision = _make("vision")
+        self.database = _make("database")
+        self.walkie_agent = _make("walkie")
 
 
 class _FakeCtx:
@@ -592,7 +607,7 @@ def test_manipulation_enabled_pick_runs_tier1(world, monkeypatch):
     """manip on → pick routes to the shared grasp system, NOT the Tier-2 agent."""
     grabbed = {"prompts": None}
 
-    def _fake_pick(ctx, prompts):
+    def _fake_pick(ctx, prompts, **kwargs):  # real _pick_object takes approach_preference=
         grabbed["prompts"] = prompts
         return True
 
@@ -674,6 +689,99 @@ def test_mixed_plan_with_one_failing_step_is_partial(world):
         brain=None, manip=False,
     )
     assert status is CmdStatus.PARTIAL
+
+
+# --- Tier-1 retry-before-fallback -------------------------------------------
+
+def test_tier1_skill_is_retried_then_falls_back(world, monkeypatch):
+    """A failing Tier-1 skill is re-run GPSR_TIER1_RETRY_ATTEMPTS times before the
+    scoped fallback fires ONCE — a small transient failure shouldn't escalate on the
+    first stumble."""
+    from tasks.GPSR import dispatch
+
+    calls = {"n": 0}
+
+    def _always_fail(ctx, step, world, state):
+        calls["n"] += 1
+        return False
+
+    monkeypatch.setitem(dispatch.SKILLS, "navigate", _always_fail)
+    monkeypatch.setenv("GPSR_TIER1_RETRY_ATTEMPTS", "3")
+    monkeypatch.setenv("GPSR_TIER1_RETRY_PAUSE_SEC", "0")
+    brain = _FakeBrain()
+    _, status = _run(_FakeCtx(), world,
+                     RawStep(primitive="navigate", room="kitchen", raw="go to the kitchen"),
+                     brain=brain)
+    assert calls["n"] == 3            # retried up to the attempt cap
+    assert len(brain.clauses) == 1    # then exactly ONE scoped fallback
+    assert status is CmdStatus.DONE   # fallback stub 'handled' it
+
+
+def test_tier1_retry_stops_on_first_success(world, monkeypatch):
+    """Retry stops as soon as the skill succeeds — no extra runs, no fallback."""
+    from tasks.GPSR import dispatch
+
+    calls = {"n": 0}
+
+    def _fail_then_succeed(ctx, step, world, state):
+        calls["n"] += 1
+        return calls["n"] >= 2  # fail once, succeed on the 2nd attempt
+
+    monkeypatch.setitem(dispatch.SKILLS, "navigate", _fail_then_succeed)
+    monkeypatch.setenv("GPSR_TIER1_RETRY_ATTEMPTS", "3")
+    monkeypatch.setenv("GPSR_TIER1_RETRY_PAUSE_SEC", "0")
+    brain = _FakeBrain()
+    _, status = _run(_FakeCtx(), world,
+                     RawStep(primitive="navigate", room="kitchen", raw="go to the kitchen"),
+                     brain=brain)
+    assert calls["n"] == 2            # stopped the instant it succeeded
+    assert brain.clauses == []        # never fell back
+    assert status is CmdStatus.DONE
+
+
+# --- scoped fallback routing ------------------------------------------------
+
+def test_scoped_fallback_routes_perception_to_vision(world, monkeypatch):
+    """A failed perception step is recovered by the VISION sub-agent only."""
+    from tasks.GPSR import dispatch
+
+    monkeypatch.setitem(dispatch.SKILLS, "find_object",
+                        lambda ctx, step, world, state: False)
+    brain = _FakeBrain()
+    _run(_FakeCtx(), world,
+         RawStep(primitive="find_object", object="cola", location="kitchen_table",
+                 raw="find the cola"),
+         brain=brain)
+    assert [name for name, _ in brain.routed] == ["vision"]
+
+
+def test_scoped_fallback_routes_movement_to_actuator(world):
+    """A gated pick (arm work) is recovered by the ACTUATOR sub-agent only."""
+    brain = _FakeBrain()
+    _run(_FakeCtx(), world,
+         RawStep(primitive="pick", object="cola", raw="pick up the cola"),
+         brain=brain, manip=False)
+    assert [name for name, _ in brain.routed] == ["actuator"]
+
+
+def test_vision_fallback_keeps_the_nav_cache(world, monkeypatch):
+    """A vision-only fallback never moves, so a navigate(kitchen) before it is NOT
+    re-driven by a navigate(kitchen) after it (contrast test_tier2_invalidates...)."""
+    from tasks.GPSR import dispatch
+
+    monkeypatch.setitem(dispatch.SKILLS, "find_object",
+                        lambda ctx, step, world, state: False)
+    ctx = _FakeCtx()
+    brain = _FakeBrain()
+    _run(
+        ctx, world,
+        RawStep(primitive="navigate", room="kitchen", raw="go to the kitchen"),
+        RawStep(primitive="find_object", object="cola", room="kitchen", raw="find the cola"),
+        RawStep(primitive="navigate", room="kitchen", raw="go back to the kitchen"),
+        brain=brain,
+    )
+    assert [name for name, _ in brain.routed] == ["vision"]   # perception fallback
+    assert ctx.gotos == [(1.0, 2.0, 0.0)]                     # kitchen ONCE — cache kept
 
 
 # --- interleave (the bonus path) --------------------------------------------

@@ -106,6 +106,24 @@ APPEARANCE_MATCH_THRESHOLD = "0.5"
 WALKIE_SUMMARIZE_AT_TOKENS = "6000"
 WALKIE_SUMMARIZE_KEEP_MSGS = "12"
 
+[vision]
+# Vision sub-agent detection (agents/vision_agent/). The robot used to "not see" an
+# object the arm could grasp because the vision tool ran the open-vocab detector with
+# no prompts and no confidence floor. `look_for_object(query)` now mirrors the arm's
+# grasp detector — descriptor expansion + CLIP rerank against the specific target —
+# so "what the arm can grasp" and "what the robot says it sees" agree.
+# Minimum detector confidence to count a box (drops spurious low-score boxes for
+# absent classes). Mirrors WALKIE_GRASP locate's 0.2 floor. "0" keeps every box.
+VISION_DETECT_MIN_CONFIDENCE = "0.2"
+# CLIP cosine floor for the rerank (drop boxes scoring below this against the target).
+# "0.0" = pure rerank, reject nothing (raw CLIP cosines on small crops are compressed;
+# a high floor on UNTUNED CLIP silently rejects the real target). RAISE only after
+# on-robot tuning. Mirrors WALKIE_GRASP_CLIP_SIM_THRESHOLD.
+VISION_CLIP_SIM_FLOOR = "0.0"
+# CLIP text-query template ("{t}" = target); "a photo of {t}" beats a bare brand
+# string in CLIP zero-shot. Mirrors WALKIE_GRASP_CLIP_QUERY_TMPL.
+VISION_CLIP_QUERY_TMPL = "a photo of {t}"
+
 [robot]
 # 1 = pause after each movement / arm action (debugging).
 PAUSE_AFTER_WALK = "0"
