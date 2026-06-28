@@ -714,17 +714,41 @@ def _capture_order(ctx: TaskContext, recenter, first_prompt: str) -> list[str]:
 
     Without this loop a single unclear reply returned [] and ServeCustomers gave up on the
     customer and went looking for a NEW one — the robot should ask again first (observed
-    on-robot). The first prompt greets/asks; later tries nudge them to repeat.
+    on-robot). A poor accent often makes STT mis-transcribe a real, spoken order, so we
+    re-ask persistently (default 9 extra times = 10 listens) rather than abandon a customer
+    who IS talking. The first prompt greets/asks; later tries nudge them to repeat (and,
+    after the first re-ask, to slow down — see :data:`prompts.ASK_REPEAT_SLOW`).
+
+    Bounding the worst case is COUNT-based, not duration-based (shortening the listen timeout
+    would cut off slow/accented speakers — the opposite of the goal). The empty-vs-garbled
+    answer is the discriminator: a non-empty-but-unparseable reply is the accent case and gets
+    the full retry budget, but a string of EMPTY replies (true silence) means the seat is
+    likely empty / the customer disengaged, so we bail after RESTAURANT_ORDER_MAX_SILENT
+    consecutive empties instead of burning all 10 listen timeouts on dead air.
     """
-    retries = int(os.getenv("RESTAURANT_ORDER_RETRIES", "2"))
-    prompt = first_prompt
-    for _ in range(retries + 1):
+    retries = int(os.getenv("RESTAURANT_ORDER_RETRIES", "9"))
+    max_silent = int(os.getenv("RESTAURANT_ORDER_MAX_SILENT", "3"))
+    silent = 0
+    for attempt in range(retries + 1):
         recenter()
+        # Attempt 0 greets/asks; the first miss nudges a repeat; later misses ask them to
+        # slow down (the accent-garble case the persistent re-ask is here to recover).
+        if attempt == 0:
+            prompt = first_prompt
+        elif attempt == 1:
+            prompt = prompts.ASK_REPEAT
+        else:
+            prompt = prompts.ASK_REPEAT_SLOW
         answer = ctx.ask(prompt, retries=0)
         parsed = ctx.extract(prompts.Order, prompts.EXTRACT_ORDER_INSTRUCTIONS, answer or "")
         if parsed and parsed.items:
             return parsed.items
-        prompt = prompts.ASK_REPEAT
+        if answer:
+            silent = 0  # heard something (accent garble) — keep spending the full budget
+        else:
+            silent += 1
+            if silent >= max_silent:
+                break  # repeated dead air -> customer absent, stop wasting timeouts
     return []
 
 

@@ -38,6 +38,9 @@ READY_TO_START = "I am in position and ready to start serving."
 FOUND_CUSTOMER = "I see you waving! I'm coming over to take your order."
 GREET_CUSTOMER = "Hello! I am Walkie. What would you like to order?"
 ASK_REPEAT = "Sorry, I did not catch that. Could you repeat your order, please?"
+# Used after the first re-ask: a poor accent garbles STT, so nudge the customer to slow
+# down rather than repeating the identical line many times.
+ASK_REPEAT_SLOW = "I am still having trouble hearing your order. Could you say it again, a little more slowly?"
 CONFIRM_ORDER = "Let me confirm: you would like {items}. Is that right?"
 ORDER_TAKEN = "Thank you, I will bring that right over."
 RELAY_TO_BARMAN = "Order for a customer: {items}, please."

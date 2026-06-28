@@ -131,10 +131,17 @@ RESTAURANT_HANDLED_RADIUS_M = "0.6"
 # attempt while a second waving customer is never reached. < this = transient retry.
 RESTAURANT_MAX_FAILS_PER_SPOT = "2"
 # Order-taking dialogue (HRI). On an empty/garbled parse, RE-ASK the SAME customer this
-# many extra times before giving up — without it one unclear reply made the serve loop
-# wander off to find a new customer. CONFIRM_RETRIES = extra re-takes on an explicit "no"
-# at the "is that right?" step (a silent/garbled reply still counts as acceptance).
-RESTAURANT_ORDER_RETRIES = "2"
+# many EXTRA times before giving up (9 => 10 listens total) — without persistence one
+# unclear reply made the serve loop wander off to find a new customer, and a poor accent
+# routinely makes STT mis-transcribe a real, spoken order. ORDER_MAX_SILENT bounds the
+# worst case WITHOUT cutting accented speakers off mid-sentence: a non-empty-but-unparseable
+# reply (the accent case) keeps the full retry budget, but this many CONSECUTIVE empty
+# (true-silence) replies means the seat is likely empty, so the robot stops re-asking
+# instead of burning all 10 listen timeouts on dead air. CONFIRM_RETRIES = extra re-takes
+# on an explicit "no" at the "is that right?" step (a silent/garbled reply still counts as
+# acceptance).
+RESTAURANT_ORDER_RETRIES = "9"
+RESTAURANT_ORDER_MAX_SILENT = "3"
 RESTAURANT_CONFIRM_RETRIES = "1"
 
 # 1 = speak a readiness go-signal once the robot is in position at the bar (after

@@ -360,3 +360,74 @@ def test_signal_ready_is_silent_when_disabled(monkeypatch):
     ctx = FakeCtx()
     assert SignalReady().run(ctx) is StepResult.DONE
     assert ctx.said == []
+
+
+# --- order capture: persist through accent garble, bail on dead air ----------
+# A poor accent makes STT mis-transcribe a real, spoken order, so _capture_order re-asks
+# the SAME customer many times (RESTAURANT_ORDER_RETRIES). The bound is count-based: a
+# non-empty-but-unparseable reply (accent) keeps the full budget, but a run of EMPTY
+# (true-silence) replies bails early (RESTAURANT_ORDER_MAX_SILENT) instead of burning every
+# listen timeout on an empty seat.
+
+class _CaptureCtx:
+    """Drives _capture_order: ask() pops scripted STT replies (then ''); extract() parses
+    a reply into one item unless it's empty or the literal 'garble' sentinel."""
+
+    def __init__(self, replies):
+        self._replies = list(replies)
+        self.asked: list[str] = []
+
+    def ask(self, q, retries=0):
+        self.asked.append(q)
+        return self._replies.pop(0) if self._replies else ""
+
+    def extract(self, schema, instructions, text):
+        if not text or text == "garble":
+            return None              # silence or accent-garble -> unparseable
+        return schema(items=[text])
+
+
+def test_capture_order_persists_through_accent_garble(monkeypatch):
+    """The customer IS speaking but STT garbles it several times before a clean parse —
+    the robot keeps re-asking the SAME person and recovers the order."""
+    from tasks.Restaurant import skills
+    monkeypatch.setenv("RESTAURANT_ORDER_RETRIES", "9")
+    monkeypatch.setenv("RESTAURANT_ORDER_MAX_SILENT", "3")
+    ctx = _CaptureCtx(["garble", "garble", "garble", "garble", "coke"])
+
+    items = skills._capture_order(ctx, lambda: None, prompts.GREET_CUSTOMER)
+
+    assert items == ["coke"]
+    assert len(ctx.asked) == 5                       # garble never trips the silence cap
+    assert ctx.asked[0] == prompts.GREET_CUSTOMER     # first ask greets
+    assert ctx.asked[1] == prompts.ASK_REPEAT         # first miss: "could you repeat?"
+    assert ctx.asked[2] == prompts.ASK_REPEAT_SLOW    # later misses: "say it more slowly"
+
+
+def test_capture_order_bails_after_max_consecutive_silence(monkeypatch):
+    """Pure silence (empty seat / disengaged) stops after RESTAURANT_ORDER_MAX_SILENT
+    instead of spending all 10 listen timeouts on dead air."""
+    from tasks.Restaurant import skills
+    monkeypatch.setenv("RESTAURANT_ORDER_RETRIES", "9")
+    monkeypatch.setenv("RESTAURANT_ORDER_MAX_SILENT", "3")
+    ctx = _CaptureCtx([])                             # every listen returns ''
+
+    items = skills._capture_order(ctx, lambda: None, prompts.GREET_CUSTOMER)
+
+    assert items == []
+    assert len(ctx.asked) == 3                        # bailed at the silence cap, not 10
+
+
+def test_capture_order_silence_cap_counts_consecutively(monkeypatch):
+    """A heard (garble) reply RESETS the silence counter, so intermittent dead air between
+    real (if unparseable) speech doesn't trip the early-out."""
+    from tasks.Restaurant import skills
+    monkeypatch.setenv("RESTAURANT_ORDER_RETRIES", "9")
+    monkeypatch.setenv("RESTAURANT_ORDER_MAX_SILENT", "3")
+    # silence, silence, garble (resets), silence, silence, then a clean parse.
+    ctx = _CaptureCtx(["", "", "garble", "", "", "sprite"])
+
+    items = skills._capture_order(ctx, lambda: None, prompts.GREET_CUSTOMER)
+
+    assert items == ["sprite"]
+    assert len(ctx.asked) == 6                        # never hit 3 consecutive empties
