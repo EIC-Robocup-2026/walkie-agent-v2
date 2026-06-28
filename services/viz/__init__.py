@@ -31,16 +31,50 @@ def _resolve_backend() -> str:
     return _env("WALKIE_VIZ", "WALKIE_GRAPHS_VIZ", "none").strip().lower()
 
 
+def _build_rerun() -> VizSession:
+    """Build a RerunSession, but never let it HANG the caller.
+
+    ``RerunSession.__init__`` stands up rerun's gRPC sink + web viewer in native
+    code. In a busy multi-threaded robot process that native setup can *deadlock*
+    rather than raise — observed on-robot during a task: ``serve_grpc`` binds its
+    port but ``serve_web_viewer`` never returns and the calling thread parks in a
+    futex, freezing the whole task before its first step (it builds on the MAIN
+    thread via ``TaskContext.__post_init__``). A plain ``try/except`` can't catch a
+    hang. Since viz is best-effort, build it in a daemon thread and fall back to
+    :class:`NoOpViz` if it doesn't come up within ``WALKIE_VIZ_INIT_TIMEOUT_S``
+    (default 10s; 0 = wait forever, the old behavior) — so a viz deadlock degrades
+    to no-viz instead of hanging the run. When the build is fast (the normal case)
+    ``join`` returns the instant it finishes, adding no startup latency.
+    """
+    timeout = float(_env("WALKIE_VIZ_INIT_TIMEOUT_S", None, "10"))
+    box: dict[str, object] = {}
+
+    def _work() -> None:
+        try:
+            box["viz"] = RerunSession()
+        except Exception as e:  # noqa: BLE001 — viz is best-effort, never crash a caller
+            box["err"] = e
+
+    t = threading.Thread(target=_work, name="viz-init", daemon=True)
+    t.start()
+    t.join(timeout if timeout > 0 else None)
+    if t.is_alive():
+        print(f"[viz] rerun init did not finish in {timeout:.0f}s (likely a serve "
+              "deadlock); visualization disabled for this run. Set WALKIE_VIZ=none "
+              "to skip it, or raise WALKIE_VIZ_INIT_TIMEOUT_S to wait longer.")
+        return NoOpViz()
+    if "err" in box:
+        print(f"[viz] backend 'rerun' unavailable: {box['err']}; visualization disabled")
+        return NoOpViz()
+    return box["viz"]  # type: ignore[return-value]
+
+
 def _build() -> VizSession:
     backend = _resolve_backend()
     if backend in ("", "none"):
         return NoOpViz()
     if backend == "rerun":
-        try:
-            return RerunSession()
-        except Exception as e:  # noqa: BLE001 — viz is best-effort, never crash a caller
-            print(f"[viz] backend 'rerun' unavailable: {e}; visualization disabled")
-            return NoOpViz()
+        return _build_rerun()
     print(f"[viz] unknown backend {backend!r}; visualization disabled")
     return NoOpViz()
 

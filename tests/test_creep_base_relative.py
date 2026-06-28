@@ -54,7 +54,11 @@ class FrozenStatus:
 
 
 def _ctx(nav, status):
-    return SimpleNamespace(walkie=SimpleNamespace(nav=nav, status=status))
+    # creep_base_relative disables head auto-tilt before the blind cmd_vel dock, so the
+    # fake walkie must expose robot.head.set_auto_tilt (no-op here).
+    head = SimpleNamespace(set_auto_tilt=lambda *_a, **_k: None)
+    robot = SimpleNamespace(head=head)
+    return SimpleNamespace(walkie=SimpleNamespace(nav=nav, status=status, robot=robot))
 
 
 @pytest.fixture(autouse=True)

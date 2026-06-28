@@ -43,6 +43,7 @@ from .skills import (
     approach_customer,
     capture_appearance,
     exclude_handled,
+    find_first_caller,
     nearest_caller,
     relay_to_barman,
     return_to_bar,
@@ -93,6 +94,23 @@ def _int(env_key: str, default: str) -> int:
 
 def _f(env_key: str, default: str) -> float:
     return float(os.getenv(env_key, default))
+
+
+def _b(env_key: str, default: str) -> bool:
+    return os.getenv(env_key, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _next_caller(ctx: TaskContext, blocked: list[tuple[float, float]], radius: float):
+    """Pick the next customer to serve.
+
+    Default (``RESTAURANT_APPROACH_FIRST=1``): stop at the FIRST waver seen during the
+    sweep and head straight over (``find_first_caller`` — exclusion of handled/given-up
+    spots happens in-sweep). Set 0 for the original behaviour: finish the whole arc, drop
+    handled spots, then take the nearest. (Batched order-taking always does the full sweep.)
+    """
+    if _b("RESTAURANT_APPROACH_FIRST", "1"):
+        return find_first_caller(ctx, blocked, radius)
+    return nearest_caller(ctx, exclude_handled(scan_for_callers(ctx), blocked, radius))
 
 
 def _tray_mode() -> bool:
@@ -345,8 +363,7 @@ class ScanAndApproach(SubTask):
     max_retries = 2
 
     def run(self, ctx: TaskContext) -> StepResult:
-        callers = scan_for_callers(ctx)
-        target = nearest_caller(ctx, callers)
+        target = _next_caller(ctx, [], _f("RESTAURANT_HANDLED_RADIUS_M", "0.6"))
         if target is None:
             ctx.say(prompts.NO_CUSTOMER)
             return StepResult.RETRY
@@ -397,10 +414,10 @@ class ServeCustomers(SubTask):
             attempts += 1
 
             # 1. Detect + approach + take the order (Phase 0), skipping anyone already
-            # handled and any spot we've given up on (failed max_fails times).
+            # handled and any spot we've given up on (failed max_fails times). By default
+            # this stops at the FIRST waver and drives straight over (RESTAURANT_APPROACH_FIRST).
             blocked = handled + [(g[0], g[1]) for g in giveups if g[2] >= max_fails]
-            callers = exclude_handled(scan_for_callers(ctx), blocked, radius)
-            caller = nearest_caller(ctx, callers)
+            caller = _next_caller(ctx, blocked, radius)
             if caller is None:
                 ctx.say(prompts.NO_CUSTOMER)
                 continue

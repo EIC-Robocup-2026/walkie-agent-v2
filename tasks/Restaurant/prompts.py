@@ -34,6 +34,8 @@ EXTRACT_ORDER_INSTRUCTIONS = (
 # --- Spoken lines -----------------------------------------------------------
 # Readiness go-signal, spoken once the robot is in position at the bar (RESTAURANT_SIGNAL_READY).
 READY_TO_START = "I am in position and ready to start serving."
+# Spoken the moment a calling customer is detected and the robot starts heading over.
+FOUND_CUSTOMER = "I see you waving! I'm coming over to take your order."
 GREET_CUSTOMER = "Hello! I am Walkie. What would you like to order?"
 ASK_REPEAT = "Sorry, I did not catch that. Could you repeat your order, please?"
 CONFIRM_ORDER = "Let me confirm: you would like {items}. Is that right?"

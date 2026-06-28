@@ -200,6 +200,7 @@ def scan_for_callers(ctx: TaskContext) -> list[Caller]:
     center = bar["heading"] if bar else pose["heading"]
     settle = _f("RESTAURANT_SCAN_SETTLE_SEC", "0.8")
     callers: list[Caller] = []
+    seen_persons = seen_calling = 0  # diagnostics: why a sweep finds no callers
     for off in _scan_offsets():
         ctx.rotate_to(center + math.radians(off))
         if settle > 0:
@@ -212,9 +213,11 @@ def scan_for_callers(ctx: TaskContext) -> list[Caller]:
         except Exception as exc:
             print(f"[restaurant.skills] pose estimation failed ({exc})")
             continue
+        seen_persons += len(persons)
         for p in persons:
             if not is_calling(p):
                 continue
+            seen_calling += 1
             xyxy = _cxcywh_to_xyxy(p.bbox)
             world_xy = _person_world_xy(snap, p)
             if world_xy is None:
@@ -224,8 +227,83 @@ def scan_for_callers(ctx: TaskContext) -> list[Caller]:
     ctx.rotate_to(center)  # leave the base back at the entry heading
     ctx.walkie.robot.head.set_auto_tilt(True)
     callers = _dedup_callers(callers, _f("RESTAURANT_CALLER_DEDUP_M", "0.6"))
-    print(f"[restaurant.skills] scan found {len(callers)} caller(s)")
+    # The counts pin WHERE detection broke: 0 persons -> pose model saw nobody; persons but
+    # 0 calling -> is_calling too strict (tune RESTAURANT_CALL_WRIST_MARGIN / _KP_CONF);
+    # calling but 0 callers -> the depth lift failed (no/under-range depth on the body).
+    print(f"[restaurant.skills] scan found {len(callers)} caller(s) "
+          f"(saw {seen_persons} person-detection(s), {seen_calling} with a raised hand)")
     return callers
+
+
+def find_first_caller(ctx: TaskContext,
+                      blocked: list[tuple[float, float]] | None = None,
+                      radius_m: float | None = None) -> Caller | None:
+    """Approach-on-first-sighting: sweep the dining area and return the FIRST calling
+    customer found, stopping the sweep the instant one appears.
+
+    Unlike :func:`scan_for_callers` (which finishes the whole arc, dedups, and hands the
+    batched loop every caller to choose from), this bails out at the first offset that
+    yields a usable waver and leaves the base pointed at them — so the robot reacts
+    immediately and the customer needn't keep waving through a full sweep + rotate-back.
+    ``blocked`` map points (already-handled / given-up spots) are skipped in-sweep; returns
+    None if the whole arc is clear of fresh wavers (base left back at the dining centre).
+    """
+    if blocked is None:
+        blocked = []
+    if radius_m is None:
+        radius_m = _f("RESTAURANT_HANDLED_RADIUS_M", "0.6")
+    pose = _robot_pose(ctx)
+    ctx.walkie.robot.head.set_auto_tilt(False)
+    if pose is None:
+        print("[restaurant.skills] find_first_caller: no odometry fix; skipping sweep")
+        ctx.walkie.robot.head.set_auto_tilt(True)
+        return None
+    rx, ry = pose["x"], pose["y"]
+    bar = ctx.data.get("bar_anchor")
+    center = bar["heading"] if bar else pose["heading"]
+    settle = _f("RESTAURANT_SCAN_SETTLE_SEC", "0.8")
+    seen_persons = seen_calling = 0
+    try:
+        for off in _scan_offsets():
+            ctx.rotate_to(center + math.radians(off))
+            if settle > 0:
+                time.sleep(settle)  # let the base + depth settle before capturing
+            snap = ctx.snapshot()
+            if snap is None:
+                continue
+            try:
+                persons = ctx.walkieAI.image.estimate_poses(snap.img)
+            except Exception as exc:
+                print(f"[restaurant.skills] pose estimation failed ({exc})")
+                continue
+            seen_persons += len(persons)
+            # Among the wavers visible at THIS offset, take the nearest usable one and go —
+            # don't sweep on past a customer who's already waving at us.
+            best: tuple[float, tuple[float, float], object] | None = None
+            for p in persons:
+                if not is_calling(p):
+                    continue
+                seen_calling += 1
+                wxy = _person_world_xy(snap, p)
+                if wxy is None:
+                    continue  # waving, but no depth to place them on the map
+                if any(math.hypot(wxy[0] - bx, wxy[1] - by) <= radius_m for bx, by in blocked):
+                    continue  # already handled / given up on this spot
+                d = math.hypot(wxy[0] - rx, wxy[1] - ry)
+                if best is None or d < best[0]:
+                    best = (d, wxy, p)
+            if best is not None:
+                d, wxy, p = best
+                bearing = math.atan2(wxy[1] - ry, wxy[0] - rx)
+                print(f"[restaurant.skills] find_first_caller: waving customer at offset "
+                      f"{off:+.0f}deg, {d:.1f}m away → going straight to them")
+                return Caller(wxy, bearing, _cxcywh_to_xyxy(p.bbox), p.confidence or 0.0)
+        print(f"[restaurant.skills] find_first_caller: none waving across the sweep "
+              f"(saw {seen_persons} person-detection(s), {seen_calling} with a raised hand)")
+        ctx.rotate_to(center)  # nothing found → leave the base back at the dining centre
+        return None
+    finally:
+        ctx.walkie.robot.head.set_auto_tilt(True)
 
 
 def nearest_caller(ctx: TaskContext, callers: list[Caller]) -> Caller | None:
@@ -353,7 +431,7 @@ def approach_to_standoff(ctx: TaskContext, world_xy: tuple[float, float], *,
 
 
 def approach_customer(ctx: TaskContext, world_xy: tuple[float, float], *,
-                      max_steps: int = 5) -> bool:
+                      max_steps: int | None = None) -> bool:
     """Approach a waving customer in steps, re-detecting them as we close in.
 
     The depth camera is only accurate to ~``RESTAURANT_DEPTH_RELIABLE_M`` (≈ 4 m), so a
@@ -364,10 +442,26 @@ def approach_customer(ctx: TaskContext, world_xy: tuple[float, float], *,
     globally nearest caller, so we can't hop to another table), refine the point, and
     repeat. The final step parks at the conversational stand-off. Returns True once we end
     within reach of the customer, False if we lost them / nav refused throughout.
+
+    Stall guard (RESTAURANT_APPROACH_MIN_PROGRESS_M / _MAX_STALLS): after each step we
+    measure how far the base ACTUALLY translated. If it barely moved while the customer is
+    still far, the path is blocked (chairs / a narrow aisle / no reachable free spot) and
+    pressing on just burns steps — so we STOP and take the order from where we stand (return
+    True) rather than abandoning a customer we simply can't roll right up to.
     """
+    if max_steps is None:
+        max_steps = int(os.getenv("RESTAURANT_APPROACH_MAX_STEPS", "3"))
+    max_steps = max(1, max_steps)
+    # Let the customer know they've been seen and we're on our way (rulebook-friendly
+    # HRI; also tells the operator the detection fired). Best-effort — say() degrades
+    # to print on audio failure and never blocks the approach.
+    ctx.say(prompts.FOUND_CUSTOMER)
     standoff = _f("RESTAURANT_STANDOFF_M", "0.8")
     reliable = _f("RESTAURANT_DEPTH_RELIABLE_M", "3.5")
+    min_progress = _f("RESTAURANT_APPROACH_MIN_PROGRESS_M", "0.2")
+    max_stalls = max(1, int(os.getenv("RESTAURANT_APPROACH_MAX_STALLS", "1")))
     target = world_xy
+    stalls = 0
     for step in range(max_steps):
         pose = _robot_pose(ctx)
         if pose is None:
@@ -381,7 +475,24 @@ def approach_customer(ctx: TaskContext, world_xy: tuple[float, float], *,
         intermediate = max(standoff, min(0.5 * dist, reliable))
         print(f"[restaurant.skills] approach_customer step {step + 1}/{max_steps}: "
               f"customer ~{dist:.1f}m away → stepping in to {intermediate:.1f}m")
+        before = (pose["x"], pose["y"])
         approach_to_standoff(ctx, target, standoff_m=intermediate)
+        # Did the base actually make headway this step? A near-stationary step means the
+        # robot can't get any closer (blocked); honour the rulebook-friendly policy of
+        # serving from where we can rather than giving the customer up.
+        after = _robot_pose(ctx)
+        moved = math.hypot(after["x"] - before[0], after["y"] - before[1]) if after else 0.0
+        if moved < min_progress:
+            stalls += 1
+            print(f"[restaurant.skills] approach_customer: base moved only {moved:.2f}m this "
+                  f"step (< {min_progress:.2f}m); stall {stalls}/{max_stalls}")
+            if stalls >= max_stalls:
+                print("[restaurant.skills] approach_customer: can't get closer (path blocked) "
+                      "— stopping here and taking the order from this spot")
+                face_person(ctx, target)
+                return True
+        else:
+            stalls = 0  # made headway → reset the consecutive-stall streak
         # Re-detect the SAME customer from the closer, now-reliable viewpoint. Anchor to the
         # running estimate with a radius generous enough to absorb the far-lift error
         # (which biases short), tightening as we approach.

@@ -180,3 +180,13 @@ GPSR_COVERAGE_MIN = "0.85"
 GPSR_ROBOT_NAME = "Walkie"
 GPSR_TEAM_NAME = "EIC"
 GPSR_TEAM_AFFILIATION = "Chulalongkorn University"
+
+# --- Visualization ----------------------------------------------------------
+# Disable Rerun viz for competition runs. The shared viz service defaults to
+# "rerun" (services/viz/config.toml), and a TASK builds it synchronously on the
+# main thread (TaskContext.__post_init__ -> get_viz), where its native gRPC/web
+# serve can deadlock and freeze the whole run before the first step. GPSR doesn't
+# need the viewer, so turn it off here (WALKIE_VIZ_INIT_TIMEOUT_S is a backstop).
+# Set "rerun" temporarily to debug geometry on the LAN viewer.
+[viz]
+WALKIE_VIZ = "none"

@@ -24,7 +24,7 @@ RESTAURANT_TARGET_CUSTOMERS = "2"
 RESTAURANT_EXTRA_ATTEMPTS = "3"
 # 1 = run only the Phase 0 slice (GoToStart -> scan -> approach) for on-robot bring-up.
 RESTAURANT_PHASE0 = "0"
-RESTAURANT_SLICE = "graspplan"
+RESTAURANT_SLICE = "full"
 
 # --- Phase 0: caller detection + approach -----------------------------------
 # Base-rotation sweep that searches the dining area for a waving customer
@@ -32,6 +32,11 @@ RESTAURANT_SLICE = "graspplan"
 RESTAURANT_SCAN_ARC_DEG = "180"      # total arc swept, centered on the dining heading (±90° = full front; widen more if tables wrap to the sides)
 RESTAURANT_SCAN_STEP_DEG = "30"      # rotation between snapshots within the arc
 RESTAURANT_SCAN_SETTLE_SEC = "0.8"   # settle time after each rotation before capture
+# Approach-on-first-sighting. 1 (default) = the MOMENT a waving customer is detected during
+# the sweep, stop sweeping and drive straight to them (more responsive; the customer needn't
+# keep waving through a full sweep + rotate-back). 0 = finish the whole arc, then pick the
+# nearest. Batched order-taking (RESTAURANT_BATCH=1) always does the full sweep regardless.
+RESTAURANT_APPROACH_FIRST = "1"
 # is_calling: a wrist must sit above its shoulder by this fraction of the person's
 # bbox height (rejects an arm resting near shoulder level); keypoint conf floor.
 RESTAURANT_CALL_WRIST_MARGIN = "0.05"
@@ -49,6 +54,21 @@ RESTAURANT_DEPTH_RELIABLE_M = "3.5"
 # Conservative approach speed for the public venue — a Nav2/robot-side param;
 # recorded here for that tuning (go_to does not cap velocity itself).
 RESTAURANT_APPROACH_SPEED = "0.3"
+# Max drive-then-redetect steps when closing in on a customer (approach_customer).
+# Each step drives part-way and re-detects to refine the far/coarse point; 3 is
+# enough to bring a far customer into the reliable depth band and park. Lower =
+# fewer stop-go cycles (faster, less re-detect drift); raise only if customers sit
+# beyond ~3 steps of depth-band hops.
+RESTAURANT_APPROACH_MAX_STEPS = "3"
+# Stall detection while stepping in (approach_customer). After each step's drive we
+# measure how far the base ACTUALLY moved; below this, the path is blocked (chairs /
+# a narrow aisle / no reachable free spot) and the robot can't get closer.
+RESTAURANT_APPROACH_MIN_PROGRESS_M = "0.2"
+# Consecutive stalled steps to tolerate before giving up the approach and TAKING THE
+# ORDER from where the robot stands (instead of abandoning the customer and looking
+# for a new one). 1 = stop on the first stalled step; raise to ride out a transient
+# Nav2 alignment step that translates little.
+RESTAURANT_APPROACH_MAX_STALLS = "1"
 # Generic ctx.goto knob (not RESTAURANT_*): promote a Nav2 FAILED to CLOSE_ENOUGH
 # when the robot ended within this many metres of the goal. Stops in-place
 # scan rotations logging a spurious FAILED, and — critically — stops the serve
@@ -158,3 +178,13 @@ RESTAURANT_BATCH_SIZE = "2"
 # 1 = use an unattached tray to transport orders (optional bonus, 2x200 pts).
 # Bimanual + uncalibrated -> currently a logged no-move stub (transport_with_tray).
 RESTAURANT_USE_TRAY = "0"
+
+# --- Visualization ----------------------------------------------------------
+# Disable Rerun viz for competition runs. The shared viz service defaults to
+# "rerun" (services/viz/config.toml), and a TASK builds it synchronously on the
+# main thread (TaskContext.__post_init__ -> get_viz), where its native gRPC/web
+# serve can deadlock and freeze the whole run before the first step. Restaurant
+# doesn't need the viewer, so turn it off here (WALKIE_VIZ_INIT_TIMEOUT_S is a
+# backstop). Set "rerun" temporarily to debug geometry on the LAN viewer.
+[viz]
+WALKIE_VIZ = "none"

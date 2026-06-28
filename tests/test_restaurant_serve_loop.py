@@ -103,6 +103,7 @@ def test_serial_does_not_double_serve_a_persistent_waver(monkeypatch, patched):
     monkeypatch.setenv("RESTAURANT_TARGET_CUSTOMERS", "2")
     monkeypatch.setenv("RESTAURANT_EXTRA_ATTEMPTS", "3")  # max_attempts = 5
     monkeypatch.setenv("RESTAURANT_HANDLED_RADIUS_M", "0.6")
+    monkeypatch.setenv("RESTAURANT_APPROACH_FIRST", "0")  # exercise the full-sweep path this stubs
     calls = patched(
         scan=lambda: [_caller(2.0, 0.0)],   # the SAME customer, waving every sweep
         approach=lambda xy: True,
@@ -128,6 +129,7 @@ def test_serial_gives_up_on_a_bad_spot_after_max_fails(monkeypatch, patched):
     monkeypatch.setenv("RESTAURANT_EXTRA_ATTEMPTS", "3")  # max_attempts = 5
     monkeypatch.setenv("RESTAURANT_MAX_FAILS_PER_SPOT", "2")
     monkeypatch.setenv("RESTAURANT_HANDLED_RADIUS_M", "0.6")
+    monkeypatch.setenv("RESTAURANT_APPROACH_FIRST", "0")  # exercise the full-sweep path this stubs
     calls = patched(
         scan=lambda: [_caller(3.0, 0.0)],
         approach=lambda xy: False,          # this spot never lets us approach

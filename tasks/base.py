@@ -12,6 +12,7 @@ logs and the task moves on — it never raises out of `Task.run()`.
 
 from __future__ import annotations
 
+import ast
 import json
 import math
 import os
@@ -21,7 +22,7 @@ import traceback
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence, get_origin
 
 from langchain.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -48,6 +49,55 @@ class StepResult(Enum):
 
 def _log(task: str, msg: str) -> None:
     print(f"[{task}] {msg}", file=sys.stderr)
+
+
+def _schema_list_field(schema: type[BaseModel]) -> str | None:
+    """Name of the schema's SOLE list-typed field, else None.
+
+    Lets :func:`_parse_to_schema` coerce a model that answered with a bare array
+    (``['coke']``) instead of the wrapping object (``{'items': ['coke']}``) — a
+    common local-LLM slip — back into the schema.
+    """
+    lists = [name for name, f in schema.model_fields.items()
+             if get_origin(f.annotation) is list]
+    return lists[0] if len(lists) == 1 else None
+
+
+def _parse_to_schema(content: str, schema: type[BaseModel]) -> BaseModel | None:
+    """Best-effort coerce raw LLM text into ``schema`` — tolerant of local-LLM quirks.
+
+    Handles markdown code fences, a JSON object OR a bare JSON/Python array,
+    single-quoted Python literals (``['coke']``, ``{'items': ['coke']}``), and a bare
+    array wrapped into the schema's sole list field. Returns a validated instance, or
+    None if nothing parseable is found.
+    """
+    text = content.strip()
+    if text.startswith("```"):  # ```json ... ``` fences
+        text = re.sub(r"^```[a-zA-Z]*\n?|\n?```$", "", text).strip()
+    for pattern in (r"\{.*\}", r"\[.*\]"):  # prefer an object, then a bare array
+        m = re.search(pattern, text, re.DOTALL)
+        if not m:
+            continue
+        data = None
+        for parser in (json.loads, ast.literal_eval):  # JSON first, then Python literal
+            try:
+                data = parser(m.group(0))
+                break
+            except Exception:
+                continue
+        if isinstance(data, dict):
+            try:
+                return schema.model_validate(data)
+            except Exception:
+                continue
+        if isinstance(data, list):
+            field_name = _schema_list_field(schema)
+            if field_name is not None:
+                try:
+                    return schema.model_validate({field_name: data})
+                except Exception:
+                    continue
+    return None
 
 
 @dataclass
@@ -119,16 +169,23 @@ class TaskContext:
     ) -> BaseModel | None:
         """LLM structured extraction of `schema` from `text`.
 
-        Tries with_structured_output first; falls back to a JSON-mode prompt
-        for models without tool-calling (LLM_USE_LOCAL backends).
+        Cloud models use ``with_structured_output`` (native tool-calling/json-schema).
+        Local backends (``LLM_USE_LOCAL``) SKIP that and go straight to a JSON-mode
+        prompt + a tolerant parser: their structured path reliably returns malformed
+        values (e.g. a bare ``['coke']`` instead of ``{"items": ["coke"]}``), so
+        attempting it just wastes a round-trip and logs a scary validation error.
+        Either way the reply is run through :func:`_parse_to_schema`, which recovers
+        bare arrays / single-quoted literals the strict validator would reject.
         """
-        try:
-            structured = self.model.with_structured_output(schema)
-            return structured.invoke(
-                [SystemMessage(content=instructions), HumanMessage(content=text)]
-            )
-        except Exception as exc:
-            _log("ctx", f"extract: structured output failed ({exc}); trying JSON fallback")
+        use_local = os.getenv("LLM_USE_LOCAL", "0").strip().lower() in ("1", "true", "yes")
+        if not use_local:
+            try:
+                structured = self.model.with_structured_output(schema, method="json_schema")
+                return structured.invoke(
+                    [SystemMessage(content=instructions), HumanMessage(content=text)]
+                )
+            except Exception as exc:
+                _log("ctx", f"extract: structured output failed ({exc}); trying JSON fallback")
         try:
             prompt = (
                 f"{instructions}\n\nRespond ONLY with a JSON object matching this "
@@ -137,9 +194,11 @@ class TaskContext:
             reply = self.model.invoke(
                 [SystemMessage(content=prompt), HumanMessage(content=text)]
             )
-            match = re.search(r"\{.*\}", str(reply.content), re.DOTALL)
-            if match:
-                return schema.model_validate(json.loads(match.group(0)))
+            parsed = _parse_to_schema(str(reply.content), schema)
+            if parsed is not None:
+                return parsed
+            _log("ctx", f"extract: no parseable {schema.__name__} in reply "
+                        f"{str(reply.content)[:160]!r}")
         except Exception as exc:
             _log("ctx", f"extract: JSON fallback failed ({exc})")
         return None
