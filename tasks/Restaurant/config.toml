@@ -79,7 +79,8 @@ RESTAURANT_BARMAN_RADIUS_M = "2.5"
 # return_to_bar, independent of RESTAURANT_BAR_REACQUIRE. 0 = no turn; +90 = bar on the
 # left, -90 = on the right, 180 = behind. SET THIS to your arena's bar side; flip the
 # sign if it turns the wrong way.
-RESTAURANT_COUNTER_REL_DEG = "0"
+# Set to +90: the bar is on the robot's LEFT when it stands facing the diners.
+RESTAURANT_COUNTER_REL_DEG = "90"
 # Treat a fresh caller within this distance of a customer we already took an order
 # from as the SAME person, and skip them — so a still-waving customer isn't served
 # twice (the loop needs >= 2 DISTINCT customers, rulebook 5.5). MUST be < the table
