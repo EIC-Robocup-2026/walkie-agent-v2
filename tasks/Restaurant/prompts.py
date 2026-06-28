@@ -64,3 +64,5 @@ TRAY_ASK_BARMAN = "Could you please place {items} on my tray?"
 TRAY_LOADED_CONFIRM = "Please tell me when the items are on my tray."
 TRAY_PRESENT_CUSTOMER = "Here is your order: {items}. Please take them from my tray."
 TRAY_TAKEN_CONFIRM = "Please tell me when you have taken your items."
+# Re-asked when the human said "not yet" / stayed silent during a tray handoff.
+TRAY_STILL_WAITING = "No problem, take your time. Just say 'ready' when it's done."

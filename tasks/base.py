@@ -22,7 +22,7 @@ import traceback
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, Sequence, get_origin
+from typing import TYPE_CHECKING, Any, Literal, Sequence, Union, get_args, get_origin
 
 from langchain.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -61,6 +61,89 @@ def _schema_list_field(schema: type[BaseModel]) -> str | None:
     lists = [name for name, f in schema.model_fields.items()
              if get_origin(f.annotation) is list]
     return lists[0] if len(lists) == 1 else None
+
+
+def _literal_choices(annotation) -> list | None:
+    """Allowed values if *annotation* is a ``Literal`` (also inside ``Optional``)."""
+    origin = get_origin(annotation)
+    if origin is Literal:
+        return list(get_args(annotation))
+    if origin is Union:
+        for arg in get_args(annotation):
+            found = _literal_choices(arg)
+            if found:
+                return found
+    return None
+
+
+def _schema_example(annotation):
+    """A minimal example value for a pydantic field annotation.
+
+    Drives the local-LLM JSON-mode prompt (:meth:`TaskContext.extract`): small local
+    models echo a raw JSON Schema back verbatim (burying the real answer inside
+    ``properties.<field>.items``), so instead of dumping the schema we show them a
+    concrete instance of the exact shape to fill. ``Optional`` fields render as
+    ``null`` (signalling "leave null when not applicable"); ``Literal`` fields render
+    as their first choice; nested models recurse.
+    """
+    origin = get_origin(annotation)
+    if origin is Union:  # Optional[X] -> null (teaches "omit/null when irrelevant")
+        if type(None) in get_args(annotation):
+            return None
+        annotation = next(a for a in get_args(annotation) if a is not type(None))
+        origin = get_origin(annotation)
+    if origin is Literal:
+        return get_args(annotation)[0]
+    if annotation is str:
+        return "..."
+    if annotation is bool:
+        return False
+    if annotation is int:
+        return 0
+    if annotation is float:
+        return 0.0
+    if origin is list:
+        (inner,) = get_args(annotation) or (str,)
+        return [_schema_example(inner)]
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return {n: _schema_example(f.annotation) for n, f in annotation.model_fields.items()}
+    return "..."
+
+
+def _schema_field_lines(schema: type[BaseModel], indent: str = "") -> list[str]:
+    """Per-field ``- "name": description`` lines, with Literal choices spelled out and
+    one level of nesting for list-of-model / model fields."""
+    lines: list[str] = []
+    for name, f in schema.model_fields.items():
+        desc = (f.description or "").strip()
+        choices = _literal_choices(f.annotation)
+        if choices:
+            desc = (desc + " " if desc else "") + "One of: " + " | ".join(map(str, choices)) + "."
+        lines.append(f'{indent}- "{name}": {desc}'.rstrip())
+        inner = f.annotation
+        if get_origin(inner) is list and get_args(inner):
+            inner = get_args(inner)[0]
+        if isinstance(inner, type) and issubclass(inner, BaseModel):
+            lines += _schema_field_lines(inner, indent + "    ")
+    return lines
+
+
+def _schema_prompt(instructions: str, schema: type[BaseModel]) -> str:
+    """JSON-mode system prompt that shows an EXAMPLE instance, not the raw JSON Schema.
+
+    Dumping ``schema.model_json_schema()`` makes small local models parrot the schema
+    back (answer buried in ``properties.<field>.items``), which the strict validator
+    then reads as an empty object — the "heard the order but said 'did not catch
+    that'" bug. An example object of the exact shape + field descriptions parses
+    reliably on the same models (validated against the on-robot qwen/gemma endpoint).
+    """
+    example = {n: _schema_example(f.annotation) for n, f in schema.model_fields.items()}
+    fields = "\n".join(_schema_field_lines(schema))
+    return (
+        f"{instructions}\n\n"
+        f"Respond with ONLY a single JSON object, no markdown fences and no other "
+        f"text, in EXACTLY this shape:\n{json.dumps(example)}\n\nFields:\n{fields}"
+    )
 
 
 def _parse_to_schema(content: str, schema: type[BaseModel]) -> BaseModel | None:
@@ -174,8 +257,13 @@ class TaskContext:
         prompt + a tolerant parser: their structured path reliably returns malformed
         values (e.g. a bare ``['coke']`` instead of ``{"items": ["coke"]}``), so
         attempting it just wastes a round-trip and logs a scary validation error.
-        Either way the reply is run through :func:`_parse_to_schema`, which recovers
-        bare arrays / single-quoted literals the strict validator would reject.
+        The JSON-mode prompt (:func:`_schema_prompt`) shows the model an EXAMPLE
+        instance of the target shape rather than the raw JSON Schema — dumping the
+        schema makes small local models parrot it back with the answer buried inside
+        ``properties.<field>.items`` (read as an empty object: "heard the order but
+        said 'did not catch that'"). Either way the reply is run through
+        :func:`_parse_to_schema`, which recovers bare arrays / single-quoted literals
+        the strict validator would reject.
         """
         use_local = os.getenv("LLM_USE_LOCAL", "0").strip().lower() in ("1", "true", "yes")
         if not use_local:
@@ -187,10 +275,7 @@ class TaskContext:
             except Exception as exc:
                 _log("ctx", f"extract: structured output failed ({exc}); trying JSON fallback")
         try:
-            prompt = (
-                f"{instructions}\n\nRespond ONLY with a JSON object matching this "
-                f"schema:\n{json.dumps(schema.model_json_schema())}"
-            )
+            prompt = _schema_prompt(instructions, schema)
             reply = self.model.invoke(
                 [SystemMessage(content=prompt), HumanMessage(content=text)]
             )

@@ -129,7 +129,7 @@ def probe_capability(chat) -> CapabilityResult:
         age: int = Field(description="age in years")
 
     try:
-        out = chat.with_structured_output(_Person).invoke(
+        out = chat.with_structured_output(_Person, method="json_schema").invoke(
             [SystemMessage(content="Extract the person."),
              HumanMessage(content="Alice is 30 years old.")]
         )

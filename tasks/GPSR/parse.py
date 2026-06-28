@@ -15,7 +15,6 @@ draw-independent 540 (understand + speak-a-plan) and feeds every solve.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 from typing import TYPE_CHECKING
@@ -290,24 +289,34 @@ def ground_plan(raw: RawPlan, world: WorldModel, *, source: str = "") -> Plan:
 def _extract(model, schema: "type[BaseModel]", instructions: str, text: str):
     """Standalone structured extraction (mirrors TaskContext.extract).
 
-    Tries with_structured_output, then a JSON-mode fallback for models without
-    tool-calling. Returns a validated `schema` instance or None.
+    Cloud models use ``with_structured_output``. Local backends (``LLM_USE_LOCAL``)
+    SKIP it — their structured path reliably returns malformed values — and go
+    straight to the JSON-mode prompt, which shows the model an EXAMPLE instance of
+    the shape (``_schema_prompt``) rather than the raw JSON Schema: dumping the
+    schema makes small local models parrot it back with the answer buried in
+    ``properties.<field>.items``, validated as an empty object. Either way the reply
+    is run through the tolerant ``_parse_to_schema``. Returns a validated instance or
+    None. Imports from ``tasks.base`` are import-light (no robot/CUDA chain).
     """
     from langchain.messages import HumanMessage, SystemMessage
+
+    from tasks.base import _parse_to_schema, _schema_prompt
+
+    use_local = os.getenv("LLM_USE_LOCAL", "0").strip().lower() in ("1", "true", "yes")
+    if not use_local:
+        try:
+            structured = model.with_structured_output(schema, method="json_schema")
+            return structured.invoke([SystemMessage(content=instructions), HumanMessage(content=text)])
+        except Exception as exc:
+            print(f"[gpsr] structured extract failed ({exc}); trying JSON fallback")
     try:
-        structured = model.with_structured_output(schema, method="json_schema")
-        return structured.invoke([SystemMessage(content=instructions), HumanMessage(content=text)])
-    except Exception as exc:
-        print(f"[gpsr] structured extract failed ({exc}); trying JSON fallback")
-    try:
-        prompt = (
-            f"{instructions}\n\nRespond ONLY with a JSON object matching this "
-            f"schema:\n{json.dumps(schema.model_json_schema())}"
-        )
+        prompt = _schema_prompt(instructions, schema)
         reply = model.invoke([SystemMessage(content=prompt), HumanMessage(content=text)])
-        match = re.search(r"\{.*\}", str(reply.content), re.DOTALL)
-        if match:
-            return schema.model_validate(json.loads(match.group(0)))
+        parsed = _parse_to_schema(str(reply.content), schema)
+        if parsed is not None:
+            return parsed
+        print(f"[gpsr] JSON-fallback: no parseable {schema.__name__} in "
+              f"{str(reply.content)[:160]!r}")
     except Exception as exc:
         print(f"[gpsr] JSON-fallback extract failed ({exc})")
     return None

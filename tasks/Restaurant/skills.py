@@ -22,6 +22,11 @@ from tasks.base import TaskContext
 
 from . import prompts
 
+try:  # servo tilt limits (+ = down, - = up); mirror the SDK on a dev box w/o the robot
+    from walkie_sdk.modules.head import HEAD_TILT_MAX, HEAD_TILT_MIN
+except Exception:  # pragma: no cover - SDK import is hardware-side
+    HEAD_TILT_MIN, HEAD_TILT_MAX = -math.pi / 4, math.pi / 3
+
 BBox = tuple[float, float, float, float]
 
 
@@ -148,7 +153,15 @@ def _person_world_xy(snap, person: PersonPose,
 
 
 def _scan_offsets() -> list[float]:
-    """Base-rotation offsets (deg) covering the scan arc, centered on entry heading."""
+    """Base-rotation offsets (deg) covering the scan arc, CENTER-OUT from the entry heading.
+
+    Ordered by distance from centre — [0, -step, +step, -2·step, +2·step, …] — so the
+    sweep checks STRAIGHT AHEAD first and only turns to the edges if nobody's there.
+    With approach-on-first-sighting this means: when the next customer is in front (the
+    common case, since we return to the bar facing the diners), the robot finds them
+    without rotating the base at all — no swinging out to ±90° first ("turning idly
+    before getting to work"). The set of angles is unchanged; only the visit order is.
+    """
     arc = _f("RESTAURANT_SCAN_ARC_DEG", "180")
     step = max(5.0, _f("RESTAURANT_SCAN_STEP_DEG", "30"))
     half = arc / 2.0
@@ -157,6 +170,8 @@ def _scan_offsets() -> list[float]:
     while off <= half + 1e-6:
         offsets.append(off)
         off += step
+    # Visit nearest-to-centre first (ties: negative before positive, stable).
+    offsets.sort(key=lambda o: (abs(o), o))
     return offsets
 
 
@@ -176,6 +191,46 @@ def _dedup_callers(callers: list[Caller], radius_m: float) -> list[Caller]:
     return kept
 
 
+def _person_look_tilt() -> float:
+    """Head tilt (rad) to hold whenever we look FOR PEOPLE. Default 0.0 = look straight
+    forward (level): the key is to never leave the head pointing DOWN at a table/floor
+    (which sees 0 persons). + = down, - = up; clamped to the servo range. Go negative
+    via ``RESTAURANT_PERSON_LOOK_TILT_RAD`` (down to ``HEAD_TILT_MIN`` ≈ -45°) only if a
+    low camera mount needs to look UP at people."""
+    raw = _f("RESTAURANT_PERSON_LOOK_TILT_RAD", "0.0")
+    return max(HEAD_TILT_MIN, min(HEAD_TILT_MAX, raw))
+
+
+def _aim_head_for_people(ctx: TaskContext) -> None:
+    """Disable auto-tilt and RAISE the head to the person-search tilt before a capture.
+
+    Used everywhere we run pose estimation to find a person (sweep, re-acquire,
+    appearance). Two traps it avoids: (1) ``set_auto_tilt(False)`` alone leaves the head
+    wherever it was pointing — often tilted down at a table/floor from a prior action, so
+    pose estimation sees 0 persons (the "saw 0 person-detection(s)" symptom); (2)
+    ``ctx.rotate_to`` / ``go_to`` RE-ENABLE auto-tilt, so the head must be re-aimed right
+    before EACH capture, not once. ``tilt()`` is fire-and-forget, so the callers settle
+    briefly after. Best-effort — never breaks the detection on a head fault.
+    """
+    head = ctx.walkie.robot.head
+    try:
+        head.set_auto_tilt(False)
+        head.tilt(_person_look_tilt())
+    except Exception as exc:  # out-of-range / transport — never break the detection
+        print(f"[restaurant.skills] person-look head-aim failed ({exc})")
+
+
+def _aim_for_person_capture(ctx: TaskContext) -> None:
+    """Raise the head and let it settle before a ONE-SHOT person capture (re-acquire /
+    appearance). The sweep manages its own per-offset settle; these single snapshots
+    don't, so without the short dwell ``tilt()`` (fire-and-forget) hasn't physically
+    moved when the frame is grabbed and we'd detect against the old, down-pointed view."""
+    _aim_head_for_people(ctx)
+    settle = _f("RESTAURANT_PERSON_LOOK_SETTLE_SEC", "0.4")
+    if settle > 0:
+        time.sleep(settle)
+
+
 def scan_for_callers(ctx: TaskContext) -> list[Caller]:
     """Sweep the base across the dining area and return every calling customer.
 
@@ -187,9 +242,10 @@ def scan_for_callers(ctx: TaskContext) -> list[Caller]:
     the entry heading). Returns deduplicated callers; empty on no fix / none found.
     """
     pose = _robot_pose(ctx)
-    ctx.walkie.robot.head.set_auto_tilt(False)
+    _aim_head_for_people(ctx)  # raise the head up-front (re-aimed per offset below)
     if pose is None:
         print("[restaurant.skills] scan_for_callers: no odometry fix; skipping sweep")
+        ctx.walkie.robot.head.set_auto_tilt(True)
         return []
     rx, ry = pose["x"], pose["y"]
     # Centre the sweep on the DINING area (the bar-anchor heading = the direction the robot
@@ -203,8 +259,9 @@ def scan_for_callers(ctx: TaskContext) -> list[Caller]:
     seen_persons = seen_calling = 0  # diagnostics: why a sweep finds no callers
     for off in _scan_offsets():
         ctx.rotate_to(center + math.radians(off))
+        _aim_head_for_people(ctx)  # rotate_to re-enables auto-tilt; re-raise before capturing
         if settle > 0:
-            time.sleep(settle)  # let the base + depth settle before capturing
+            time.sleep(settle)  # let the base + head + depth settle before capturing
         snap = ctx.snapshot()
         if snap is None:
             continue
@@ -248,6 +305,7 @@ def find_first_caller(ctx: TaskContext,
     ``blocked`` map points (already-handled / given-up spots) are skipped in-sweep; returns
     None if the whole arc is clear of fresh wavers (base left back at the dining centre).
     """
+    print("[restaurant.skills] Finding first caller")
     if blocked is None:
         blocked = []
     if radius_m is None:
@@ -266,8 +324,9 @@ def find_first_caller(ctx: TaskContext,
     try:
         for off in _scan_offsets():
             ctx.rotate_to(center + math.radians(off))
+            _aim_head_for_people(ctx)  # rotate_to re-enables auto-tilt; re-raise before capturing
             if settle > 0:
-                time.sleep(settle)  # let the base + depth settle before capturing
+                time.sleep(settle)  # let the base + head + depth settle before capturing
             snap = ctx.snapshot()
             if snap is None:
                 continue
@@ -533,6 +592,7 @@ def capture_appearance(ctx: TaskContext, world_xy: tuple[float, float]) -> str |
     Detection + caption share one snapshot so the bbox lines up with the image.
     Best-effort; None if no person/geometry. Stored on the Order for re-ID/logging.
     """
+    _aim_for_person_capture(ctx)  # raise the head before framing the person
     snap = ctx.snapshot()
     if snap is None or not getattr(snap, "has_geometry", False):
         return None
@@ -554,24 +614,46 @@ def capture_appearance(ctx: TaskContext, world_xy: tuple[float, float]) -> str |
     return describe_customer(ctx, snap, best_box) if best_box is not None else None
 
 
+_APPEARANCE_STOPWORDS = {
+    "a", "an", "the", "with", "and", "is", "are", "wearing", "wears", "person",
+    "customer", "seated", "sitting", "this", "who", "has", "have", "their", "in",
+    "on", "of", "short", "sentence", "appears", "to", "be", "they", "them", "looks",
+    "that", "very", "or", "man", "woman", "guy", "lady",
+}
+
+
+def _appearance_overlap(stored: str, candidate: str) -> int:
+    """Count of shared distinctive words between two appearance captions (stopwords
+    removed). A cheap lexical re-ID tiebreaker — distinguishing 'red shirt, glasses'
+    from 'blue hoodie' is enough to pick the right neighbour without a CLIP round-trip."""
+    def words(s: str) -> set[str]:
+        return {w for w in re.findall(r"[a-z]+", (s or "").lower())
+                if w not in _APPEARANCE_STOPWORDS and len(w) > 2}
+    return len(words(stored) & words(candidate))
+
+
 def find_person_near(ctx: TaskContext, world_xy: tuple[float, float], *,
                      radius_m: float | None = None,
-                     prefer_calling: bool = False) -> Caller | None:
+                     prefer_calling: bool = False,
+                     appearance: str | None = None) -> Caller | None:
     """Re-acquire a person near a remembered map point (anti-drift, design §5.1).
 
-    One forward snapshot: detect people, lift each, return the one closest to
-    *world_xy* within *radius_m*. None if nobody qualifies. Used to re-find the
-    customer (before serving) or the barman (at the bar) rather than trusting a
+    One forward snapshot (head raised first): detect people, lift each, return the one
+    closest to *world_xy* within *radius_m*. None if nobody qualifies. Used to re-find
+    the customer (before serving) or the barman (at the bar) rather than trusting a
     stored coordinate after minutes in a moving room.
 
-    With *prefer_calling* a still-waving person within range wins over a closer
-    non-waving one — disambiguates the customer from a neighbour at an adjacent table
-    (only ~1 m away here). Falls back to the nearest person if nobody is waving, since
-    the customer often lowers their hand once the robot is clearly coming to them.
+    Selection among in-range candidates: with *appearance* (the caption captured when
+    the order was taken) AND more than one candidate, pick the best lexical caption
+    match — re-identifying the SAME customer instead of a neighbour at an adjacent table
+    (~1 m away). Else with *prefer_calling* a still-waving person wins. Otherwise the
+    nearest. (The customer often lowers their hand once the robot is clearly coming, so
+    calling is only a soft preference, not a filter.)
     """
     if radius_m is None:
         radius_m = _f("RESTAURANT_REACQUIRE_RADIUS_M", "1.5")
     pose = _robot_pose(ctx)
+    _aim_for_person_capture(ctx)  # raise the head before re-acquiring (never look down)
     snap = ctx.snapshot()
     if snap is None or not getattr(snap, "has_geometry", False):
         return None
@@ -591,6 +673,21 @@ def find_person_near(ctx: TaskContext, world_xy: tuple[float, float], *,
             cands.append((d, wxy, xyxy, p.confidence or 0.0, is_calling(p)))
     if not cands:
         return None
+    # Appearance re-ID first (only worth the per-candidate caption calls when there's an
+    # actual ambiguity to resolve): pick the candidate whose crop caption best matches
+    # the stored appearance; ignore it on a zero-overlap tie and fall through.
+    if appearance and len(cands) > 1:
+        scored = [
+            (_appearance_overlap(appearance, describe_customer(ctx, snap, c[2]) or ""), -c[0], c)
+            for c in cands
+        ]
+        scored.sort(key=lambda s: (s[0], s[1]), reverse=True)
+        if scored[0][0] > 0:
+            _, _, (d, wxy, xyxy, conf, _calling) = scored[0]
+            bearing = math.atan2(wxy[1] - pose["y"], wxy[0] - pose["x"]) if pose else 0.0
+            print(f"[restaurant.skills] re-acquire: appearance-matched customer "
+                  f"(overlap={scored[0][0]}) at ({wxy[0]:.2f},{wxy[1]:.2f})")
+            return Caller(wxy, bearing, xyxy, conf)
     pool = [c for c in cands if c[4]] if prefer_calling else []
     pool = pool or cands
     d, wxy, xyxy, conf, _ = min(pool, key=lambda c: c[0])
@@ -647,6 +744,7 @@ def take_order(ctx: TaskContext, world_xy: tuple[float, float] | None = None) ->
             face_person(ctx, world_xy)
 
     items = _capture_order(ctx, recenter, prompts.GREET_CUSTOMER)
+    print(f"[restaurant.skills] captured items: {items}")
     if not items:
         return []  # un-parseable even after re-asking; the caller decides what to do next
 
@@ -663,7 +761,7 @@ def take_order(ctx: TaskContext, world_xy: tuple[float, float] | None = None) ->
     return items
 
 
-def return_to_bar(ctx: TaskContext) -> bool:
+def return_to_bar(ctx: TaskContext, *, face_counter: bool = True) -> bool:
     """Drive to the bar anchor, turn to face the bar, and optionally find the barman.
 
     go_to gets us near the remembered anchor. We then TURN to face the counter/bar
@@ -674,6 +772,13 @@ def return_to_bar(ctx: TaskContext) -> bool:
     when we don't visually search for the barman. With ``RESTAURANT_BAR_REACQUIRE`` on
     we additionally re-acquire the barman from the live camera and face them precisely
     (design §5.1), degrading to just facing the bar if none is seen.
+
+    ``face_counter=False`` parks at the anchor WITHOUT the counter turn: the caller is
+    about to do something that faces the diners anyway (a scan for the next customer),
+    so turning to the counter here would only be whipped back a moment later — the idle
+    back-and-forth spin the robot showed between serving and looking for the next caller.
+    Pass True (default) only when the NEXT action at the bar is a load/pick (it needs to
+    face the counter).
     """
     bar = ctx.data.get("bar_anchor")
     if not bar:
@@ -682,11 +787,11 @@ def return_to_bar(ctx: TaskContext) -> bool:
     # Turn to face the counter/bar side. +90 = counter on the left, -90 = on the right,
     # 180 = behind the diner-facing start; flip the sign if it turns the wrong way.
     rel = math.radians(_f("RESTAURANT_COUNTER_REL_DEG", "0"))
-    if rel:
+    if face_counter and rel:
         ctx.rotate_to(bar["heading"] + rel)
     # Optionally also re-acquire the barman visually and face them precisely.
-    if not _b("RESTAURANT_BAR_REACQUIRE", "1"):
-        return ok  # faced the bar; skip the vision barman search
+    if not face_counter or not _b("RESTAURANT_BAR_REACQUIRE", "1"):
+        return ok  # parked at the bar; skip the vision barman search
     barman = find_person_near(ctx, (bar["x"], bar["y"]),
                               radius_m=_f("RESTAURANT_BARMAN_RADIUS_M", "2.5"))
     if barman is not None:
@@ -694,15 +799,23 @@ def return_to_bar(ctx: TaskContext) -> bool:
     return ok
 
 
-def return_to_customer(ctx: TaskContext, world_xy: tuple[float, float]) -> tuple[float, float] | None:
+def return_to_customer(ctx: TaskContext, world_xy: tuple[float, float], *,
+                       appearance: str | None = None) -> tuple[float, float] | None:
     """Return to a customer: go near the stored point, then re-acquire them fresh.
 
-    Returns the customer's refreshed map point (for serving) or None if they
-    could not be re-found. Approaches the fresh detection to a stand-off; updates
-    nothing in place (caller stores the returned point on the Order).
+    Returns the customer's refreshed map point (for serving) or None if they could not
+    be re-found. Approaches the fresh detection to a stand-off; updates nothing in place
+    (caller stores the returned point on the Order).
+
+    Re-acquisition uses a TIGHTER radius than the approach re-acquire
+    (``RESTAURANT_SERVE_REACQUIRE_RADIUS_M``, default 0.7 m < the ~1 m table spacing): we
+    already drove back to a good point, so anyone beyond that is a neighbour, not our
+    customer. *appearance* (captured at order time) breaks ties when two people fall
+    inside the radius — re-identifying the right diner rather than serving the neighbour.
     """
     approach_to_standoff(ctx, world_xy)  # get into viewing range of the table
-    fresh = find_person_near(ctx, world_xy)
+    radius = _f("RESTAURANT_SERVE_REACQUIRE_RADIUS_M", "0.7")
+    fresh = find_person_near(ctx, world_xy, radius_m=radius, appearance=appearance)
     target = fresh.world_xy if fresh is not None else world_xy
     approach_to_standoff(ctx, target)
     return target if fresh is not None else None

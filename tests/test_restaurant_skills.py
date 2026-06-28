@@ -114,16 +114,20 @@ def test_exclude_handled_empty_handled_keeps_all():
 
 # --- scan sweep + bbox conversion ------------------------------------------
 
-def test_scan_offsets_cover_the_arc_symmetrically(monkeypatch):
+def test_scan_offsets_cover_the_arc_center_out(monkeypatch):
     monkeypatch.setenv("RESTAURANT_SCAN_ARC_DEG", "120")
     monkeypatch.setenv("RESTAURANT_SCAN_STEP_DEG", "30")
-    assert _scan_offsets() == [-60.0, -30.0, 0.0, 30.0, 60.0]
+    # Same set of angles as the arc, but visited CENTER-OUT (forward first) so the robot
+    # doesn't swing to an edge before checking straight ahead.
+    offs = _scan_offsets()
+    assert sorted(offs) == [-60.0, -30.0, 0.0, 30.0, 60.0]   # same coverage
+    assert offs == [0.0, -30.0, 30.0, -60.0, 60.0]           # nearest-to-centre first
 
 
 def test_scan_offsets_step_has_a_floor(monkeypatch):
     monkeypatch.setenv("RESTAURANT_SCAN_ARC_DEG", "10")
     monkeypatch.setenv("RESTAURANT_SCAN_STEP_DEG", "0")  # floored to 5
-    assert _scan_offsets() == [-5.0, 0.0, 5.0]
+    assert _scan_offsets() == [0.0, -5.0, 5.0]            # centre first, then out
 
 
 def test_cxcywh_to_xyxy():
@@ -179,6 +183,24 @@ def test_return_to_bar_faces_bar_but_skips_barman_when_reacquire_off(monkeypatch
     assert ctx.gotos == [(1.0, 2.0, 0.5)]   # drove to the fixed bar pose
     assert len(ctx.rotations) == 1          # turned to face the bar (independent of reacquire)
     assert called == {"find": 0, "face": 0}  # but no camera barman search
+
+
+def test_return_to_bar_face_counter_false_skips_the_turn(monkeypatch):
+    """face_counter=False (post-serve, about to scan): park at the anchor WITHOUT the
+    counter turn, so the robot doesn't whip to the counter then straight back to scan."""
+    from tasks.Restaurant import skills
+
+    monkeypatch.setenv("RESTAURANT_BAR_REACQUIRE", "1")     # would normally also search
+    monkeypatch.setenv("RESTAURANT_COUNTER_REL_DEG", "90")  # ...and turn to the counter
+    called = {"find": 0}
+    monkeypatch.setattr(skills, "find_person_near",
+                        lambda *a, **k: called.__setitem__("find", called["find"] + 1) or None)
+    ctx = _BarCtx({"x": 1.0, "y": 2.0, "heading": 0.5})
+
+    assert skills.return_to_bar(ctx, face_counter=False) is True
+    assert ctx.gotos == [(1.0, 2.0, 0.5)]   # drove to the bar...
+    assert ctx.rotations == []              # ...but did NOT turn to the counter
+    assert called["find"] == 0              # and skipped the barman search
 
 
 def test_return_to_bar_no_turn_when_counter_rel_zero(monkeypatch):

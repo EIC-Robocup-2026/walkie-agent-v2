@@ -34,11 +34,15 @@ class FakeCtx:
         self.frames = list(frames)
         self.idx = 0
         self.rotations: list[float] = []
-        self.tilt: list[bool] = []
+        self.tilt: list[bool] = []        # set_auto_tilt(bool) calls
+        self.head_tilt: list[float] = []  # head.tilt(rad) calls
         self.data: dict = {}
         self.walkie = SimpleNamespace(
             status=SimpleNamespace(get_position=lambda: {"x": 0.0, "y": 0.0, "heading": 0.0}),
-            robot=SimpleNamespace(head=SimpleNamespace(set_auto_tilt=self.tilt.append)),
+            robot=SimpleNamespace(head=SimpleNamespace(
+                set_auto_tilt=self.tilt.append,
+                tilt=self.head_tilt.append,  # the sweep levels the head each offset
+            )),
         )
         self.walkieAI = SimpleNamespace(image=SimpleNamespace(estimate_poses=self._estimate))
 
@@ -63,9 +67,10 @@ def _stub_detection(monkeypatch):
 
 
 def test_returns_first_waver_and_stops_sweeping(monkeypatch):
-    monkeypatch.setenv("RESTAURANT_SCAN_ARC_DEG", "90")   # offsets [-45,-15,15,45]
+    monkeypatch.setenv("RESTAURANT_SCAN_ARC_DEG", "90")   # angles {-45,-15,15,45}
     monkeypatch.setenv("RESTAURANT_SCAN_STEP_DEG", "30")
-    # Waver appears at the 2nd offset (-15°); 3rd/4th must never be looked at.
+    # CENTER-OUT visit order is [-15, 15, -45, 45]: the waver appears at the 2nd offset
+    # visited (+15°); the wider -45/45 must never be looked at.
     ctx = FakeCtx([[], [P((3.0, 0.0))], [P((9.0, 0.0))], [P((1.0, 0.0))]])
 
     out = skills.find_first_caller(ctx)
@@ -73,7 +78,12 @@ def test_returns_first_waver_and_stops_sweeping(monkeypatch):
     assert isinstance(out, Caller) and out.world_xy == (3.0, 0.0)
     assert ctx.idx == 2                                   # stopped after the 2nd offset
     assert len(ctx.rotations) == 2                        # didn't sweep the rest...
-    assert math.isclose(ctx.rotations[-1], math.radians(-15))  # ...and stayed facing them
+    assert math.isclose(ctx.rotations[-1], math.radians(15))   # ...and stayed facing them
+    # the sweep checks centre first, then steps out — never starts by swinging to an edge
+    assert math.isclose(ctx.rotations[0], math.radians(-15))
+    # head aimed to the person-look tilt (never left pointing down) before each capture
+    look = skills._person_look_tilt()
+    assert ctx.head_tilt == [look, look]
 
 
 def test_skips_blocked_spots(monkeypatch):
