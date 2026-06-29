@@ -15,7 +15,7 @@ from tasks.skills import (
     mapped_door_near,
     request_open_door,
 )
-from tasks.skills.locations import _reset_cache
+from walkie_world.map.locations import _reset_cache
 
 
 @pytest.fixture(autouse=True)

@@ -2,7 +2,7 @@
 
 Leaf modules (numpy / cv2 / open3d / scipy only, no SDK or service imports) that
 turn camera pixels into map-frame geometry. Kept here, next to the camera device
-wrapper that consumes them, rather than inside ``services.walkie_graphs`` — they
+wrapper that consumes them, rather than inside ``services.realtime_explore`` — they
 are reusable across tasks (manipulation, HRI, navigation) via
 :class:`interfaces.devices.camera.CameraSnapshot`, and living outside the service
 package keeps the camera ↔ walkie_graphs import graph acyclic.

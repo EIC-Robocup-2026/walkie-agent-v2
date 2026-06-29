@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 
 from tasks.base import StepResult, SubTask, Task, TaskContext
-from tasks.skills.locations import resolve_pose
+from walkie_world.map.locations import resolve_pose
 
 from . import prompts
 from .skills import Garment, fold_garment, perceive_clothes, pick_garment, stack_garment

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from tasks.GPSR.world import load_world
+from walkie_world.map.vocab import load_world
 
 gen_corpus = pytest.importorskip("tasks.GPSR.tools.gen_corpus")
 

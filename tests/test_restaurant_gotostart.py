@@ -52,7 +52,7 @@ def test_default_anchors_on_current_pose_and_never_touches_the_map(monkeypatch):
     """Unset env -> anchor on the current pose, don't drive, never read the map."""
     monkeypatch.delenv("RESTAURANT_KITCHEN_BAR_POSE", raising=False)
     # If GoToStart consulted the shared book at all, this would blow up.
-    monkeypatch.setattr("tasks.skills.locations.get_location_book", _explode)
+    monkeypatch.setattr("walkie_world.map.locations.get_location_book", _explode)
 
     ctx = FakeCtx(_FIX)
     assert GoToStart().run(ctx) is StepResult.DONE
@@ -72,7 +72,7 @@ def test_kitchen_bar_waypoint_in_the_map_is_ignored(monkeypatch):
             return (9.0, 9.0, 9.0)
 
     monkeypatch.setattr(
-        "tasks.skills.locations.get_location_book", lambda: _BookWithBar()
+        "walkie_world.map.locations.get_location_book", lambda: _BookWithBar()
     )
 
     ctx = FakeCtx(_FIX)

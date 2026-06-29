@@ -1,7 +1,7 @@
 """Render the scene graph into the shared viz session (see :mod:`services.viz`).
 
 The scene-graph-specific *layer*: it knows how to turn a
-:class:`~services.walkie_graphs.scene.SceneStore` into draw calls, but owns no Rerun
+:class:`~walkie_world.scene.store.SceneStore` into draw calls, but owns no Rerun
 session of its own — it draws through a :class:`~services.viz.session.VizSession` (real
 or no-op) under the ``world/...`` namespace, so it coexists with task-level
 visualization (e.g. a grasp triad under ``grasp/...``) in one viewer.

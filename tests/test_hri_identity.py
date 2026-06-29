@@ -13,7 +13,7 @@ from PIL import Image
 
 from client import FaceEmbedding, PersonPose
 from perception import PeopleStore
-from perception.people_store import _mean_unit
+from walkie_world.people.store import _mean_unit
 from tasks.HRI.identity import (
     _avg_unit,
     _gate_candidates,

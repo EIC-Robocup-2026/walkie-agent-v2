@@ -188,7 +188,7 @@ class CoverageResult:
 def run_coverage(chat, corpus: list[str]) -> CoverageResult:
     from tasks.GPSR.parse import parse_command
     from tasks.GPSR.plan import render_plan_speech
-    from tasks.GPSR.world import load_world
+    from walkie_world.map.vocab import load_world
 
     world = load_world(include_absent=True)
     res = CoverageResult(total=len(corpus))

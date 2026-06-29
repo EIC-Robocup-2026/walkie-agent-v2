@@ -93,7 +93,7 @@ def main() -> None:
 
     load_dotenv()
     from ...common import initialize_robot, load_task_config  # type: ignore  # heavy: torch
-    from ..world import load_world
+    from walkie_world.map.vocab import load_world
 
     load_task_config(Path(__file__).resolve().parents[1])
 
@@ -102,7 +102,7 @@ def main() -> None:
     ap.add_argument("--all", action="store_true", help="re-survey poses already set (default: only [0,0,0])")
     args = ap.parse_args()
 
-    from .. import world as world_mod
+    from walkie_world.map import vocab as world_mod
     path = Path(args.file or os.getenv("GPSR_WORLD_FILE") or Path(world_mod.__file__).with_name("world.toml"))
     if not path.exists():
         raise SystemExit(f"world file not found: {path}")

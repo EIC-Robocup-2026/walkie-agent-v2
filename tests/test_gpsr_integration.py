@@ -26,7 +26,7 @@ from tasks.GPSR.dispatch import execute_plan
 from tasks.GPSR.parse import ground_step
 from tasks.GPSR.plan import CmdStatus, Plan
 from tasks.GPSR.prompts import RawStep
-from tasks.GPSR.world import load_world
+from walkie_world.map.vocab import load_world
 
 # --- fixtures: a small arena with DISTINCT poses (so "which place" is provable) -
 

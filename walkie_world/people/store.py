@@ -21,7 +21,7 @@ The two-modality fusion design is by **Chalk (EIC team)** — adopted from the
 ``eic-human`` subproject (``eic_human/core.py::_fuse_score`` and
 ``pipeline/store.py``); this file is a port of his ``PeopleStore`` from the
 ``feat/appearance-reid-chalk`` branch, re-homed onto the shared
-:mod:`perception.vector_db` ChromaDB layer and extended with caller-chosen
+:mod:`walkie_world.people.vector_db` ChromaDB layer and extended with caller-chosen
 record ids (``person_id``) so a guest whose name was never understood can
 still be enrolled under a stable key ("guest-1").
 

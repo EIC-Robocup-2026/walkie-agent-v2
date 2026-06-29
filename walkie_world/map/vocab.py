@@ -21,7 +21,7 @@ from pathlib import Path
 
 # Location primitives live in the shared map layer; the vocab model is built on
 # them (correct dependency direction). `_fuzzy_match` is re-exported here because
-# tests/test_gpsr_hardening.py imports it (via the tasks.GPSR.world shim).
+# tests/test_gpsr_hardening.py imports it from this module.
 from walkie_world.map.locations import (  # noqa: F401  (re-export _fuzzy_match)
     Location,
     Pose,
@@ -80,7 +80,7 @@ class WorldModel:
     # --- grounding lookups (alias + article tolerant) -------------------
 
     def _lookup(self, table: dict[str, str], text: str | None) -> str | None:
-        # Shared alias/article/fuzzy lookup (tasks.skills.locations._lookup).
+        # Shared alias/article/fuzzy lookup (walkie_world.map.locations._lookup).
         return _lookup(table, text)
 
     def room(self, text: str | None) -> str | None:

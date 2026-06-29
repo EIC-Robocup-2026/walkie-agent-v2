@@ -24,7 +24,7 @@ from walkie_sdk import WalkieRobot
 from client import WalkieAIClient
 from interfaces.walkie_interface import WalkieInterface
 from walkie_config import load_config
-from services.walkie_graphs import WalkieGraphs
+from services.realtime_explore import RealtimeExplore
 
 ZENOH_PORT = 7447
 
@@ -43,7 +43,7 @@ def test_graphs_live() -> None:
     walkieAI = WalkieAIClient(
         base_url=os.getenv("WALKIE_AI_BASE_URL", "http://localhost:5000"),
     )
-    graphs = WalkieGraphs(walkieAI=walkieAI, walkie=walkie)
+    graphs = RealtimeExplore(walkieAI=walkieAI, walkie=walkie)
     print("[graphs-live] starting observer — Ctrl+C to stop.")
 
     try:

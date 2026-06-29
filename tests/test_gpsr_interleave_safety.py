@@ -34,7 +34,7 @@ from tasks.GPSR.parse import ground_step
 from tasks.GPSR.plan import CmdStatus, Plan, summarize_status
 from tasks.GPSR.prompts import RawStep
 from tasks.GPSR.schedule import interleave
-from tasks.GPSR.world import load_world
+from walkie_world.map.vocab import load_world
 
 _WORLD_TOML = textwrap.dedent(
     """

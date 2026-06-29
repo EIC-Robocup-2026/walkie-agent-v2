@@ -2,7 +2,7 @@
 
 Run with::
 
-    uv run python -m services.walkie_graphs.tools.check_gpu
+    uv run python -m services.realtime_explore.tools.check_gpu
 
 Reports, in order:
 

@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 
 from tasks.GPSR.parse import parse_command
 from tasks.GPSR.plan import render_plan_speech
-from tasks.GPSR.world import load_world
+from walkie_world.map.vocab import load_world
 
 load_dotenv()
 

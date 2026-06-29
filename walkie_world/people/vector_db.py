@@ -1,7 +1,7 @@
 """Shared ChromaDB plumbing for every vector store in the repo.
 
-Extracted from ``services/walkie_graphs/memory.py`` so the scene graph, the
-people memory (:mod:`perception.people_store`), and future long-term memory
+Extracted from ``the legacy walkie_graphs memory layer`` so the scene graph, the
+people memory (:mod:`walkie_world.people.store`), and future long-term memory
 all build their clients/collections the same way instead of hand-rolling
 ``chromadb`` calls.
 

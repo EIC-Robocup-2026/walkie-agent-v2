@@ -1,6 +1,6 @@
 """Live perception snapshot — the ``perception.json`` the agents read each turn.
 
-The perception loop (:class:`~walkie_graphs.service.WalkieGraphsService`) folds every frame
+The perception loop (:class:`~services.realtime_explore.service.RealtimeExplore`) folds every frame
 into the durable scene graph, then writes this small, ephemeral view of *what's in front of
 the robot right now* for ``PerceptionContextMiddleware`` to inject into the prompt. Object
 positions/captions come from the same ingest pass (no extra detection/caption work); these

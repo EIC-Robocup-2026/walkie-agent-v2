@@ -54,7 +54,7 @@ from tasks.skills import (
 from . import gestures
 from .plan import PlanStep, _person_phrase
 from .tracking import ArrivalStopper, companion_present, heading_between, segment_route
-from .world import WorldModel
+from walkie_world.map.vocab import WorldModel
 
 
 # --- low-level helpers ------------------------------------------------------
