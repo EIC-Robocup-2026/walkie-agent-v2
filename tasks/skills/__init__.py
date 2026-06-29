@@ -37,7 +37,13 @@ from .seating import (
     scan_seats,
     split_seat_regions,
 )
-from .door import door_open_from_depth, go_to_through_door, is_door_open, request_open_door
+from .door import (
+    door_open_from_depth,
+    go_to_through_door,
+    is_door_open,
+    mapped_door_near,
+    request_open_door,
+)
 from .grasp import (
     GraspCandidate,
     ObjectLocation,
@@ -101,6 +107,7 @@ __all__ = [
     "go_to_through_door",
     "is_door_open",
     "door_open_from_depth",
+    "mapped_door_near",
     "GraspCandidate",
     "ObjectLocation",
     "get_object_grasp_pos",

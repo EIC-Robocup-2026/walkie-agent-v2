@@ -6,13 +6,29 @@ Pure control flow over a mock ctx.say / ctx.listen — no robot, no mic.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from tasks.skills import (
     door_open_from_depth,
     go_to_through_door,
     is_door_open,
+    mapped_door_near,
     request_open_door,
 )
+from tasks.skills.locations import _reset_cache
+
+
+@pytest.fixture(autouse=True)
+def _fresh_location_book():
+    """Drop the process-wide LocationBook cache around every test.
+
+    The map gate reads ``get_location_book()`` (cached). Resetting before AND after
+    each test keeps the doors a map-gate test installs from leaking into the depth-only
+    tests (which must see the real, door-less sibling world.toml → gate None → legacy).
+    """
+    _reset_cache()
+    yield
+    _reset_cache()
 
 
 class _Ctx:
@@ -272,3 +288,67 @@ def test_cannot_tell_still_asks_when_blocked():
     ctx = _NavCtx(None, goto_results=[False, True], replies=["done"])
     assert go_to_through_door(ctx, 1.0, 2.0, 0.0) is True
     assert ctx.gotos == 2 and ctx.listens == 1
+
+
+# --- map-gated door asking (a [doors] table makes the ask location-precise) --
+
+def _map_with_door(tmp_path, monkeypatch, x, y, *, radius=None):
+    """Write a world.toml whose only content is one door at (x, y) and point the
+    shared LocationBook at it. Returns nothing — the gate reads the cached book."""
+    toml = f"[doors.entrance]\npose = [{x}, {y}, 0.0]\n"
+    if radius is not None:
+        toml += f"radius = {radius}\n"
+    p = tmp_path / "world.toml"
+    p.write_text(toml)
+    monkeypatch.setenv("WALKIE_MAP_FILE", str(p))
+    _reset_cache()  # the autouse fixture cleared it; drop the no-map book loaded since
+
+
+def test_mapped_door_near_is_tristate(tmp_path, monkeypatch):
+    # No doors mapped -> None (caller keeps legacy depth behaviour).
+    assert mapped_door_near(_PoseNavCtx(2.5, [True], poses=[(0.0, 0.0)])) is None
+    # Door at (1, 2): robot on it -> True, robot far -> False.
+    _map_with_door(tmp_path, monkeypatch, 1.0, 2.0, radius=1.5)
+    assert mapped_door_near(_PoseNavCtx(2.5, [True], poses=[(1.0, 2.0)])) is True
+    assert mapped_door_near(_PoseNavCtx(2.5, [True], poses=[(10.0, 10.0)])) is False
+
+
+def test_mapped_door_near_none_when_pose_unknown(tmp_path, monkeypatch):
+    # Doors mapped, but a mock ctx with no current_pose() can't be gated -> None.
+    _map_with_door(tmp_path, monkeypatch, 1.0, 2.0)
+    assert mapped_door_near(_NavCtx(2.5, goto_results=[True])) is None
+
+
+def test_mapped_door_gate_off_returns_none(tmp_path, monkeypatch):
+    _map_with_door(tmp_path, monkeypatch, 1.0, 2.0)
+    monkeypatch.setenv("WALKIE_DOOR_MAP_GATE", "0")
+    assert mapped_door_near(_PoseNavCtx(2.5, [True], poses=[(1.0, 2.0)])) is None
+
+
+def test_asks_at_a_mapped_door_even_when_depth_reads_open(tmp_path, monkeypatch):
+    # Depth reads OPEN, but the robot is sitting on a mapped door and nav is blocked
+    # -> treat as a partly-open door (we KNOW one is here): ask to widen, retry, reach.
+    _map_with_door(tmp_path, monkeypatch, 1.0, 1.0)
+    ctx = _PoseNavCtx(2.5, goto_results=[False, True], poses=[(1.0, 1.0)])
+    assert go_to_through_door(ctx, 1.0, 5.0, 0.0, retry_pause=0.0) is True
+    assert ctx.gotos == 2 and ctx.listens == 0
+    assert any("all the way" in s.lower() for s in ctx.said)  # asked because mapped door
+
+
+def test_no_ask_when_block_is_away_from_every_mapped_door(tmp_path, monkeypatch):
+    # Depth reads CLOSED (legacy would ask) but no mapped door is near -> not a door,
+    # so the robot doesn't pester anyone: precisely the false-ask the map kills.
+    _map_with_door(tmp_path, monkeypatch, 9.0, 9.0)
+    ctx = _PoseNavCtx(0.6, goto_results=[False], poses=[(1.0, 1.0)])
+    assert go_to_through_door(ctx, 1.0, 5.0, 0.0) is False
+    assert ctx.gotos == 1 and ctx.said == [] and ctx.listens == 0
+
+
+def test_gate_off_restores_depth_only_behaviour(tmp_path, monkeypatch):
+    # A door is mapped far away, but with the gate OFF it's ignored: the legacy
+    # ask_even_if_open partly-open path runs as before, regardless of the map.
+    _map_with_door(tmp_path, monkeypatch, 9.0, 9.0)
+    monkeypatch.setenv("WALKIE_DOOR_MAP_GATE", "0")
+    ctx = _PoseNavCtx(2.5, goto_results=[False, True], poses=[(1.0, 1.0)])
+    assert go_to_through_door(ctx, 1.0, 5.0, 0.0, ask_even_if_open=True, retry_pause=0.0) is True
+    assert any("all the way" in s.lower() for s in ctx.said)
