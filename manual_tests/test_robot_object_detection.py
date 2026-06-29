@@ -23,7 +23,7 @@ def test_object_detection():
     robot = get_robot()
     walkie = WalkieInterface(robot)
     walkieAI = WalkieAIClient(
-        base_url=os.getenv("WALKIE_AI_BASE_URL", "http://10.30.0.201:5000"),
+        base_url=os.getenv("WALKIE_AI_BASE_URL", "http://10.30.0.202:5000"),
     )
     print("Walkie Client initialized")
 

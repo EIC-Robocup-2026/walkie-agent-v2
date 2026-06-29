@@ -1,0 +1,235 @@
+[Walkie SDK] Loaded custom topics from '/home/walkie/robocup2026/walkie-sdk/ros_topics.yaml'
+Connecting to Walkie robot at 127.0.0.1...
+  Protocol: hybrid
+  → Connecting to Zenoh Router at 127.0.0.1:7447...
+  ✓ Connected to Zenoh (Session ID: 60ea036712bef8e7a94782ff0bab8527)
+  → Connecting to ROSBridge at 127.0.0.1:9090...
+  ✓ ROSBridge connected
+[ZenohTransport] Subscribing to: current_pose (nav_msgs/msg/Odometry)
+[JointStateHub] Subscribing to 'joint_states'
+[ZenohTransport] Subscribing to: joint_states (sensor_msgs/msg/JointState)
+[JointStateHub] Subscribed to 'joint_states'
+  → Connecting Camera to Zenoh at 127.0.0.1:7447...
+  → Subscribing to camera topic: /zed_head/zed_node/rgb/color/rect/image
+  → Subscribing to depth topic: /zed_head/zed_node/depth/depth_registered
+  ✓ Camera Stream Started
+[ZenohTransport] Subscribing to: /zed_head/zed_node/point_cloud/cloud_registered/filtered_map (sensor_msgs/msg/PointCloud2)
+  ⚠ pynput not installed — button module will not receive events.
+✓ Robot connected!
+[microphone] using input device default -> 'default' @ 44100 Hz (in_channels=64)
+[main] Using OpenRouter LLM provider
+[viz] Rerun viewer live on the LAN — open from any computer:
+          browser: http://10.0.0.201:8008/?url=rerun%2Bhttp%3A%2F%2F10.0.0.201%3A9876%2Fproxy
+          native : rerun rerun+http://10.0.0.201:9876/proxy
+          Can't connect from another machine? The servers bind 0.0.0.0,
+          so it's the robot's host firewall dropping the ports. Open BOTH
+          (web page + data stream): sudo ufw allow 8008/tcp && sudo ufw allow 9876/tcp
+[graphs] started (interval=2.0s)
+[GPSR] people memory cleared for a fresh run
+[GPSR] step 1/4: GoToInstructionPoint
+[ctx] goto x=0.00 y=0.00 heading=0deg
+[ZenohTransport] Subscribing to: /zed_head/zed_node/rgb/color/rect/camera_info (sensor_msgs/msg/CameraInfo)
+[GPSR] step 2/4: ReceiveAndPlanCommands
+[say] Hello, I am Walkie. Please give me all three of your commands now, one after another, and I will plan and carry them out.
+============== Microphone paused ==============
+============== Microphone resumed ==============
+[say] What would you like me to do?
+============== Microphone paused ==============
+============== Microphone resumed ==============
+[listen] Listening... (timeout 30s)
+============== Microphone recording started ==============
+[mic-diag] elapsed=11.87s paused=0.00s captured=515015 expected~523638 ratio=0.98 overflow_blocks=0 status=None pause_fired=False peak=4666/32767
+[mic] debug saved 11.68s, 186853 samples, peak 4646/32767 -> mic_recording/rec_0001.wav
+[heard] Please grab the Coke at the kitchen table and place it on the cabinet.  For the second task, please also grab the Coke on the kitchen table and place it on the cabinet.
+[say] For command 1, here is my plan. First I will go to the kitchen table, then find the cola at the kitchen table, then pick up the cola from the kitchen table, then go to the cabinet, and finally place the cola on the cabinet.
+============== Microphone paused ==============
+============== Microphone resumed ==============
+[gpsr] command 1: 'grab the Coke at the kitchen table and place it on the cabinet' -> ['navigate', 'find_object', 'pick', 'navigate', 'place']
+[say] For command 2, here is my plan. First I will go to the kitchen table, then find the cola at the kitchen table, then pick up the cola from the kitchen table, then go to the cabinet, and finally place the cola on the cabinet.
+============== Microphone paused ==============
+============== Microphone resumed ==============
+[gpsr] command 2: 'grab the Coke on the kitchen table and place it on the cabinet' -> ['navigate', 'find_object', 'pick', 'navigate', 'place']
+[say] Understood. I will get to work.
+============== Microphone paused ==============
+============== Microphone resumed ==============
+[GPSR] step 3/4: ExecuteCommands
+[say] Working on command 1: grab the Coke at the kitchen table and place it on the cabinet
+============== Microphone paused ==============
+============== Microphone resumed ==============
+[ctx] goto x=2.62 y=-1.15 heading=-90deg
+[gpsr.dispatch] step navigate: ok
+[gpsr.skill] find_object: memory recalls 'cola' near (-0.56, -0.97); approaching
+[ctx] goto x=0.24 y=-1.02 heading=177deg
+[say] I could not find the cola.
+============== Microphone paused ==============
+============== Microphone resumed ==============
+[gpsr.dispatch] step find_object: ok
+[ctx] goto x=2.62 y=-1.15 heading=-90deg
+[grasp] pick_object: prompts=['cola'] arm=auto attempts=10 
+[grasp] pick_object: tilting head down 0.60rad before first locate
+[grasp] llm descriptors outputs: ['can', 'red can', 'soda can']
+[grasp] locate: ['cola'] at (+2.66,-1.70,+0.86) range=0.56m conf=0.39497920870780945
+[grasp] pick_object: setting lift to 60.90m for better reach
+[ctx] goto x=2.58 y=-1.12 heading=-81deg
+[grasp] locate: ['cola'] at (+2.67,-1.70,+0.86) range=0.46m conf=0.6548882722854614
+[grasp] pick_object: chosen arm = left
+[grasp] face_object_with_arm[left]: link=(+2.74,-1.23) obj=(+2.67,-1.70) -> heading -99deg
+[ctx] goto x=2.58 y=-1.13 heading=-99deg
+[grasp] creep_to_grasp_distance: 0.61m -> 0.60m (advance +0.01m forward)
+[skills] creep_base_relative: fwd=+0.01 left=+0.00 (|0.01|m @ 0.08m/s, Nav2-free)
+[grasp] locate: ['cola'] at (+2.66,-1.68,+0.86) range=0.46m conf=0.5854159593582153
+[grasp] cleanup: 11550 -> 11280 pts (dropped 270)
+[grasp] grasp score 0.712 grasp=(+2.646,-1.682,+0.879) width=4.3cm
+[grasp] locate: ['cola'] at (+2.66,-1.68,+0.86) range=0.46m conf=0.5825524926185608
+[grasp] cleanup: 11510 -> 11257 pts (dropped 253)
+[grasp] locate: ['cola'] at (+2.66,-1.68,+0.86) range=0.46m conf=0.586078941822052
+[grasp] cleanup: 11553 -> 11181 pts (dropped 372)
+[grasp] locate: ['cola'] at (+2.66,-1.68,+0.86) range=0.46m conf=0.5928378701210022
+[grasp] cleanup: 11434 -> 11227 pts (dropped 207)
+[grasp] grasp score 0.772 grasp=(+2.642,-1.685,+0.878) width=3.8cm
+[grasp] locate: ['cola'] at (+2.66,-1.68,+0.86) range=0.46m conf=0.5842208862304688
+[grasp] cleanup: 11369 -> 11009 pts (dropped 360)
+[grasp] grasp score 0.792 grasp=(+2.646,-1.682,+0.879) width=4.1cm
+[grasp] locate: ['cola'] at (+2.66,-1.68,+0.86) range=0.46m conf=0.5663368701934814
+[grasp] cleanup: 11483 -> 11166 pts (dropped 317)
+[grasp] grasp score 0.813 grasp=(+2.648,-1.681,+0.872) width=4.3cm
+[grasp] locate: ['cola'] at (+2.66,-1.68,+0.86) range=0.46m conf=0.5841810703277588
+[grasp] cleanup: 11320 -> 11019 pts (dropped 301)
+[grasp] locate: ['cola'] at (+2.66,-1.68,+0.86) range=0.46m conf=0.5610119104385376
+[grasp] cleanup: 11535 -> 11238 pts (dropped 297)
+[grasp] locate: ['cola'] at (+2.66,-1.68,+0.86) range=0.46m conf=0.5534425973892212
+[grasp] cleanup: 11622 -> 11428 pts (dropped 194)
+[grasp] locate: ['cola'] at (+2.66,-1.68,+0.86) range=0.46m conf=0.5611119270324707
+[grasp] cleanup: 11347 -> 10996 pts (dropped 351)
+[grasp] grasp score 0.820 grasp=(+2.648,-1.681,+0.876) width=4.2cm
+[grasp] support surface z=0.78m (grasp 0.88m, offset +0.10m)
+[grasp] aim_forward_candidate: rolled wrist 180° so X points up
+[grasp] aim_forward_candidate: heading=-98deg approach=(-0.14,-0.99,-0.00)
+[grasp] grasp attempt 1/3 (reach 0.58m)
+[grasp] execute_grasp[left]: RPY=(-3.14,-1.57,-1.71) grasp=(2.6478171689139, -1.6812403651745191, 0.9059574838025861) pregrasp=(2.662135827950255, -1.5822707940768042, 0.9059578511230965)
+[Arm] toggle_gripper_collision: Gripper collision DISABLED for left_gripper
+[grasp] execute_grasp[left]: pregrasp -> SUCCEEDED
+[grasp] execute_grasp[left]: grasp -> SUCCEEDED
+[grasp] execute_grasp[left]: success
+[Arm] toggle_gripper_collision: Gripper collision ENABLED for left_gripper
+[held] left now holding 'cola' (offset=0.09908190688208018, footprint=0.052931129631130336)
+[grasp] pick_object: restoring heading to -82deg
+[ctx] goto x=2.57 y=-1.10 heading=-82deg
+[say] I have the cola.
+============== Microphone paused ==============
+============== Microphone resumed ==============
+[gpsr.dispatch] step pick: ok
+[ctx] goto x=0.33 y=-0.79 heading=-179deg
+[gpsr.dispatch] step navigate: ok
+[place] multi-tilt scan: fused 2 views -> 49479 pts
+[place] place_object: surface z=0.75m offset=0.10m -> place=(-0.27,-0.93,0.87)
+[place] setting lift to 64.0 (for ee_z=0.97m)
+[grasp] align_arm_to_object[left]: obj_left=+0.15m arm_left=+0.15m -> strafe -0.00m
+[skills] creep_base_relative: fwd=+0.00 left=-0.00 (|0.00|m @ 0.08m/s, Nav2-free)
+[place] execute_place[left]: place=(-0.274,-0.933,+0.870) hover=+0.10m RPY=(+3.14,-1.57,-3.13)
+[Arm] toggle_gripper_collision: Gripper collision DISABLED for left_gripper
+[place] execute_place[left]: pre-place -> SUCCEEDED
+[place] execute_place[left]: hover -> SUCCEEDED
+[place] execute_place[left]: retreat -> SUCCEEDED
+2026-06-27T20:43:47.531080Z  WARN re_quota_channel::async_broadcast_channel: re_grpc_server broadcast: Sender has been blocked for over 5 seconds waiting for space in channel
+2026-06-27T20:43:47.533145Z  WARN re_quota_channel::async_mpsc_channel: re_grpc_server events: Sender has been blocked for more than 5 seconds
+[place] execute_place[left]: success
+[Arm] toggle_gripper_collision: Gripper collision ENABLED for left_gripper
+[place] place_object: placed 'cola'; left arm now empty
+[say] I have placed the cola.
+============== Microphone paused ==============
+============== Microphone resumed ==============
+[gpsr.dispatch] step place: ok
+[gpsr] command 1 -> DONE
+[say] Working on command 2: grab the Coke on the kitchen table and place it on the cabinet
+============== Microphone paused ==============
+============== Microphone resumed ==============
+[ctx] goto x=2.62 y=-1.15 heading=-90deg
+[gpsr.dispatch] step navigate: ok
+[gpsr.skill] find_object: memory recalls 'cola' near (-0.56, -0.98); approaching
+[ctx] goto x=0.24 y=-1.01 heading=178deg
+[say] I could not find the cola.
+============== Microphone paused ==============
+============== Microphone resumed ==============
+[gpsr.dispatch] step find_object: ok
+[ctx] goto x=2.62 y=-1.15 heading=-90deg
+[grasp] pick_object: prompts=['cola'] arm=auto attempts=10 
+[grasp] pick_object: tilting head down 0.60rad before first locate
+[grasp] locate: ['cola'] at (+2.55,-1.65,+0.86) range=0.52m conf=0.4144646227359772
+[grasp] pick_object: setting lift to 61.35m for better reach
+[ctx] goto x=2.58 y=-1.16 heading=-94deg
+[grasp] locate: ['cola'] at (+2.55,-1.64,+0.87) range=0.42m conf=0.5426519513130188
+[grasp] pick_object: chosen arm = left
+[grasp] face_object_with_arm[left]: link=(+2.72,-1.26) obj=(+2.55,-1.64) -> heading -114deg
+[ctx] goto x=2.57 y=-1.13 heading=-114deg
+[grasp] locate: ['cola'] at (+2.54,-1.63,+0.87) range=0.39m conf=0.5648109912872314
+[grasp] grasp score 0.597 grasp=(+2.527,-1.630,+0.878) width=5.0cm
+[grasp] locate: ['cola'] at (+2.54,-1.63,+0.87) range=0.39m conf=0.5449113845825195
+[grasp] locate: ['cola'] at (+2.54,-1.63,+0.86) range=0.40m conf=0.5462566614151001
+[grasp] locate: ['cola'] at (+2.54,-1.63,+0.87) range=0.39m conf=0.5354658961296082
+[grasp] grasp score 0.636 grasp=(+2.528,-1.630,+0.869) width=5.0cm
+[grasp] locate: ['cola'] at (+2.54,-1.63,+0.86) range=0.40m conf=0.5222528576850891
+[grasp] grasp score 0.803 grasp=(+2.527,-1.630,+0.873) width=4.8cm
+[grasp] locate: ['cola'] at (+2.54,-1.63,+0.87) range=0.39m conf=0.5406339764595032
+[grasp] locate: ['cola'] at (+2.54,-1.63,+0.86) range=0.40m conf=0.5248646140098572
+[grasp] locate: ['cola'] at (+2.54,-1.63,+0.86) range=0.40m conf=0.5417410135269165
+[grasp] locate: ['cola'] at (+2.54,-1.63,+0.87) range=0.39m conf=0.5254083275794983
+[grasp] locate: ['cola'] at (+2.54,-1.63,+0.86) range=0.40m conf=0.5576441884040833
+[grasp] support surface z=0.78m (grasp 0.87m, offset +0.09m)
+[grasp] aim_forward_candidate: rolled wrist 180° so X points up
+[grasp] aim_forward_candidate: heading=-113deg approach=(-0.39,-0.92,-0.00)
+[grasp] grasp attempt 1/3 (reach 0.48m)
+[grasp] execute_grasp[left]: RPY=(+3.14,-1.57,-1.98) grasp=(2.5272459147545403, -1.6300730272729753, 0.9026594957189458) pregrasp=(2.566644820465947, -1.538161514236747, 0.9026598630394561)
+[Arm] toggle_gripper_collision: Gripper collision DISABLED for left_gripper
+[grasp] execute_grasp[left]: pregrasp -> SUCCEEDED
+[grasp] execute_grasp[left]: grasp -> SUCCEEDED
+[grasp] execute_grasp[left]: success
+[Arm] toggle_gripper_collision: Gripper collision ENABLED for left_gripper
+[held] left now holding 'cola' (offset=0.09366546983705093, footprint=0.05241585577002006)
+[grasp] pick_object: restoring heading to -93deg
+[ctx] goto x=2.56 y=-1.15 heading=-93deg
+[say] I have the cola.
+============== Microphone paused ==============
+============== Microphone resumed ==============
+[gpsr.dispatch] step pick: ok
+[ctx] goto x=0.33 y=-0.79 heading=-179deg
+[gpsr.dispatch] step navigate: ok
+[place] multi-tilt scan: fused 2 views -> 41289 pts
+[place] place_object: surface z=0.75m offset=0.09m -> place=(-0.55,-0.89,0.87)
+[place] setting lift to 63.7 (for ee_z=0.97m)
+[grasp] approach_object: nav -> SUCCEEDED
+[place] multi-tilt scan: fused 2 views -> 8812 pts
+[place] setting lift to 62.7 (for ee_z=0.96m)
+[grasp] align_arm_to_object[left]: obj_left=+0.08m arm_left=+0.15m -> strafe -0.07m
+[skills] creep_base_relative: fwd=+0.00 left=-0.07 (|0.07|m @ 0.08m/s, Nav2-free)
+[skills] creep_base_relative: no odom progress (0.000m of 0.07m); base stuck or odom stale — stopping
+[place] execute_place[left]: place=(-0.560,-0.986,+0.857) hover=+0.10m RPY=(+3.14,-1.57,-3.00)
+[Arm] toggle_gripper_collision: Gripper collision DISABLED for left_gripper
+[place] execute_place[left]: pre-place -> SUCCEEDED
+[place] execute_place[left]: hover -> SUCCEEDED
+[place] execute_place[left]: retreat -> SUCCEEDED
+[place] execute_place[left]: success
+[Arm] toggle_gripper_collision: Gripper collision ENABLED for left_gripper
+[place] place_object: placed 'cola'; left arm now empty
+[say] I have placed the cola.
+============== Microphone paused ==============
+============== Microphone resumed ==============
+[gpsr.dispatch] step place: ok
+[gpsr] command 2 -> DONE
+[GPSR] step 4/4: ReturnToInstructionPoint
+[say] I have finished. Returning to the instruction point.
+============== Microphone paused ==============
+============== Microphone resumed ==============
+[ctx] goto x=0.00 y=0.00 heading=0deg
+[say] I have completed all the commands.
+============== Microphone paused ==============
+============== Microphone resumed ==============
+[GPSR] task complete
+[scorecard] GPSR — ATTEMPTED/claimed points (NOT referee-awarded; a wrong detection still counts here)
+   2 x Understand a command (STT): +160
+   2 x Speak a plan (parse + TTS): +200
+   2 x Execute a drawn command (partial scoring): +500
+  = +860 claimed  (positives +860, penalties +0; non-arm ceiling 1490, rulebook total 1490)
+Disconnecting from robot...
+  ✓ ROSBridge disconnected
+✓ Robot disconnected

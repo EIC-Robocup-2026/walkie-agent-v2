@@ -8,6 +8,7 @@ Step-by-step on-robot bring-up — pick an isolated slice with RESTAURANT_SLICE
 (like GPSR's runbook; validate each subtask before running the whole flow):
 
     RESTAURANT_SLICE=surfaces ...   # read-only: list detected surfaces (no motion)
+    RESTAURANT_SLICE=people ...     # read-only: detect people (pose) + caption each one's appearance
     RESTAURANT_SLICE=graspplan ...  # plan-only: get_object_grasp_pos, print candidate (no motion)
     RESTAURANT_SLICE=pick ...       # pick only (grasp skill, no placement)
     RESTAURANT_SLICE=place ...      # surface scan -> full pick -> place
@@ -34,6 +35,7 @@ from .subtasks import (
     build_phase0_slice,
     build_pick_demo,
     build_place_demo,
+    build_pose_appearance_demo,
     build_restaurant_task,
     build_surface_demo,
 )
@@ -49,6 +51,7 @@ def _truthy(name: str, default: str = "0") -> bool:
 # bring-up order: prove perception, then pick, then place, then HRI, then the lot.
 _SLICES = {
     "surfaces": build_surface_demo,   # read-only surface detection (no motion)
+    "people": build_pose_appearance_demo,  # read-only: detect people + caption appearance
     "graspplan": build_grasp_plan_demo,  # plan-only: get_object_grasp_pos (no motion)
     "pick": build_pick_demo,          # grasp skill only
     "place": build_place_demo,        # surface scan -> pick -> place

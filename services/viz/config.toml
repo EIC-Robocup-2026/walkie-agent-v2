@@ -15,6 +15,14 @@ WALKIE_VIZ = "rerun"
 # Recording name shown in the Rerun viewer.
 WALKIE_VIZ_RECORDING = "walkie"
 
+# Watchdog for the FIRST get_viz() build. RerunSession init stands up the gRPC/web
+# servers in native code, which can occasionally DEADLOCK in a busy robot process
+# (serve_grpc binds, serve_web_viewer never returns) — and since tasks build viz on
+# the main thread, that freezes the whole run. We build viz in a daemon thread and
+# fall back to no-viz if it doesn't come up in this many seconds (0 = wait forever,
+# the old behavior). Fast builds return instantly, so this adds no normal-path delay.
+WALKIE_VIZ_INIT_TIMEOUT_S = "10"
+
 # Viewer reachability. 0 = spawn a native window ON THE ROBOT (needs a display, local
 # only). 1 = serve a browser viewer + gRPC data stream bound to 0.0.0.0 so any computer
 # on the LAN can watch (prints the URL on startup).

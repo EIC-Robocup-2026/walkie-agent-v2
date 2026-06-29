@@ -13,8 +13,6 @@ import time
 from collections.abc import Sequence
 from contextlib import nullcontext
 
-from walkie_sdk.config.ros_topics import NAV_TOPICS
-
 from tasks.base import TaskContext
 
 from .geometry import BBox
@@ -254,13 +252,9 @@ def creep_base_relative(
     stall_eps = float(os.getenv("WALKIE_CREEP_STALL_EPS_M", "0.002"))
     stall_sec = float(os.getenv("WALKIE_CREEP_STALL_SEC", "0.6"))
 
-    try:
-        nav = ctx.walkie.nav
-        topic = nav.cmd_vel_topic
-        transport = nav._transport  # same channel nav.stop() publishes its e-stop on
-        msg_type = NAV_TOPICS["cmd_vel_type"]
-    except Exception as exc:  # noqa: BLE001 — best-effort
-        print(f"[skills] creep_base_relative: cmd_vel channel unavailable ({exc})")
+    nav = ctx.walkie.nav
+    if not hasattr(nav, "set_velocity"):
+        print("[skills] creep_base_relative: nav.set_velocity unavailable")
         ctx.walkie.robot.head.set_auto_tilt(True)
         return False
 
@@ -282,10 +276,10 @@ def creep_base_relative(
     max_stall = max(1, int(stall_sec * rate))  # cycles with no odom progress before bailing
 
     def _publish(vx: float, vy: float, wz: float) -> None:
-        transport.publish(topic, msg_type, {
-            "linear": {"x": float(vx), "y": float(vy), "z": 0.0},
-            "angular": {"x": 0.0, "y": 0.0, "z": float(wz)},
-        })
+        # SDK helper: builds the correct geometry_msgs/msg/TwistStamped and publishes it to
+        # cmd_vel. A raw plain-Twist publish is malformed for this base (cmd_vel_type is
+        # TwistStamped) and moves it 0 m — the "base stuck" symptom we saw.
+        nav.set_velocity(float(vx), float(vy), float(wz))
 
     print(f"[skills] creep_base_relative: fwd={forward_m:+.2f} left={left_m:+.2f} "
           f"(|{target:.2f}|m @ {speed:.2f}m/s, Nav2-free)")

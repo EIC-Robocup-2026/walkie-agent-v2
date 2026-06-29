@@ -12,6 +12,7 @@ logs and the task moves on — it never raises out of `Task.run()`.
 
 from __future__ import annotations
 
+import ast
 import json
 import math
 import os
@@ -21,7 +22,7 @@ import traceback
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any, Literal, Sequence, Union, get_args, get_origin
 
 from langchain.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -48,6 +49,138 @@ class StepResult(Enum):
 
 def _log(task: str, msg: str) -> None:
     print(f"[{task}] {msg}", file=sys.stderr)
+
+
+def _schema_list_field(schema: type[BaseModel]) -> str | None:
+    """Name of the schema's SOLE list-typed field, else None.
+
+    Lets :func:`_parse_to_schema` coerce a model that answered with a bare array
+    (``['coke']``) instead of the wrapping object (``{'items': ['coke']}``) — a
+    common local-LLM slip — back into the schema.
+    """
+    lists = [name for name, f in schema.model_fields.items()
+             if get_origin(f.annotation) is list]
+    return lists[0] if len(lists) == 1 else None
+
+
+def _literal_choices(annotation) -> list | None:
+    """Allowed values if *annotation* is a ``Literal`` (also inside ``Optional``)."""
+    origin = get_origin(annotation)
+    if origin is Literal:
+        return list(get_args(annotation))
+    if origin is Union:
+        for arg in get_args(annotation):
+            found = _literal_choices(arg)
+            if found:
+                return found
+    return None
+
+
+def _schema_example(annotation):
+    """A minimal example value for a pydantic field annotation.
+
+    Drives the local-LLM JSON-mode prompt (:meth:`TaskContext.extract`): small local
+    models echo a raw JSON Schema back verbatim (burying the real answer inside
+    ``properties.<field>.items``), so instead of dumping the schema we show them a
+    concrete instance of the exact shape to fill. ``Optional`` fields render as
+    ``null`` (signalling "leave null when not applicable"); ``Literal`` fields render
+    as their first choice; nested models recurse.
+    """
+    origin = get_origin(annotation)
+    if origin is Union:  # Optional[X] -> null (teaches "omit/null when irrelevant")
+        if type(None) in get_args(annotation):
+            return None
+        annotation = next(a for a in get_args(annotation) if a is not type(None))
+        origin = get_origin(annotation)
+    if origin is Literal:
+        return get_args(annotation)[0]
+    if annotation is str:
+        return "..."
+    if annotation is bool:
+        return False
+    if annotation is int:
+        return 0
+    if annotation is float:
+        return 0.0
+    if origin is list:
+        (inner,) = get_args(annotation) or (str,)
+        return [_schema_example(inner)]
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return {n: _schema_example(f.annotation) for n, f in annotation.model_fields.items()}
+    return "..."
+
+
+def _schema_field_lines(schema: type[BaseModel], indent: str = "") -> list[str]:
+    """Per-field ``- "name": description`` lines, with Literal choices spelled out and
+    one level of nesting for list-of-model / model fields."""
+    lines: list[str] = []
+    for name, f in schema.model_fields.items():
+        desc = (f.description or "").strip()
+        choices = _literal_choices(f.annotation)
+        if choices:
+            desc = (desc + " " if desc else "") + "One of: " + " | ".join(map(str, choices)) + "."
+        lines.append(f'{indent}- "{name}": {desc}'.rstrip())
+        inner = f.annotation
+        if get_origin(inner) is list and get_args(inner):
+            inner = get_args(inner)[0]
+        if isinstance(inner, type) and issubclass(inner, BaseModel):
+            lines += _schema_field_lines(inner, indent + "    ")
+    return lines
+
+
+def _schema_prompt(instructions: str, schema: type[BaseModel]) -> str:
+    """JSON-mode system prompt that shows an EXAMPLE instance, not the raw JSON Schema.
+
+    Dumping ``schema.model_json_schema()`` makes small local models parrot the schema
+    back (answer buried in ``properties.<field>.items``), which the strict validator
+    then reads as an empty object — the "heard the order but said 'did not catch
+    that'" bug. An example object of the exact shape + field descriptions parses
+    reliably on the same models (validated against the on-robot qwen/gemma endpoint).
+    """
+    example = {n: _schema_example(f.annotation) for n, f in schema.model_fields.items()}
+    fields = "\n".join(_schema_field_lines(schema))
+    return (
+        f"{instructions}\n\n"
+        f"Respond with ONLY a single JSON object, no markdown fences and no other "
+        f"text, in EXACTLY this shape:\n{json.dumps(example)}\n\nFields:\n{fields}"
+    )
+
+
+def _parse_to_schema(content: str, schema: type[BaseModel]) -> BaseModel | None:
+    """Best-effort coerce raw LLM text into ``schema`` — tolerant of local-LLM quirks.
+
+    Handles markdown code fences, a JSON object OR a bare JSON/Python array,
+    single-quoted Python literals (``['coke']``, ``{'items': ['coke']}``), and a bare
+    array wrapped into the schema's sole list field. Returns a validated instance, or
+    None if nothing parseable is found.
+    """
+    text = content.strip()
+    if text.startswith("```"):  # ```json ... ``` fences
+        text = re.sub(r"^```[a-zA-Z]*\n?|\n?```$", "", text).strip()
+    for pattern in (r"\{.*\}", r"\[.*\]"):  # prefer an object, then a bare array
+        m = re.search(pattern, text, re.DOTALL)
+        if not m:
+            continue
+        data = None
+        for parser in (json.loads, ast.literal_eval):  # JSON first, then Python literal
+            try:
+                data = parser(m.group(0))
+                break
+            except Exception:
+                continue
+        if isinstance(data, dict):
+            try:
+                return schema.model_validate(data)
+            except Exception:
+                continue
+        if isinstance(data, list):
+            field_name = _schema_list_field(schema)
+            if field_name is not None:
+                try:
+                    return schema.model_validate({field_name: data})
+                except Exception:
+                    continue
+    return None
 
 
 @dataclass
@@ -119,27 +252,38 @@ class TaskContext:
     ) -> BaseModel | None:
         """LLM structured extraction of `schema` from `text`.
 
-        Tries with_structured_output first; falls back to a JSON-mode prompt
-        for models without tool-calling (LLM_USE_LOCAL backends).
+        Cloud models use ``with_structured_output`` (native tool-calling/json-schema).
+        Local backends (``LLM_USE_LOCAL``) SKIP that and go straight to a JSON-mode
+        prompt + a tolerant parser: their structured path reliably returns malformed
+        values (e.g. a bare ``['coke']`` instead of ``{"items": ["coke"]}``), so
+        attempting it just wastes a round-trip and logs a scary validation error.
+        The JSON-mode prompt (:func:`_schema_prompt`) shows the model an EXAMPLE
+        instance of the target shape rather than the raw JSON Schema — dumping the
+        schema makes small local models parrot it back with the answer buried inside
+        ``properties.<field>.items`` (read as an empty object: "heard the order but
+        said 'did not catch that'"). Either way the reply is run through
+        :func:`_parse_to_schema`, which recovers bare arrays / single-quoted literals
+        the strict validator would reject.
         """
+        use_local = os.getenv("LLM_USE_LOCAL", "0").strip().lower() in ("1", "true", "yes")
+        if not use_local:
+            try:
+                structured = self.model.with_structured_output(schema, method="json_schema")
+                return structured.invoke(
+                    [SystemMessage(content=instructions), HumanMessage(content=text)]
+                )
+            except Exception as exc:
+                _log("ctx", f"extract: structured output failed ({exc}); trying JSON fallback")
         try:
-            structured = self.model.with_structured_output(schema)
-            return structured.invoke(
-                [SystemMessage(content=instructions), HumanMessage(content=text)]
-            )
-        except Exception as exc:
-            _log("ctx", f"extract: structured output failed ({exc}); trying JSON fallback")
-        try:
-            prompt = (
-                f"{instructions}\n\nRespond ONLY with a JSON object matching this "
-                f"schema:\n{json.dumps(schema.model_json_schema())}"
-            )
+            prompt = _schema_prompt(instructions, schema)
             reply = self.model.invoke(
                 [SystemMessage(content=prompt), HumanMessage(content=text)]
             )
-            match = re.search(r"\{.*\}", str(reply.content), re.DOTALL)
-            if match:
-                return schema.model_validate(json.loads(match.group(0)))
+            parsed = _parse_to_schema(str(reply.content), schema)
+            if parsed is not None:
+                return parsed
+            _log("ctx", f"extract: no parseable {schema.__name__} in reply "
+                        f"{str(reply.content)[:160]!r}")
         except Exception as exc:
             _log("ctx", f"extract: JSON fallback failed ({exc})")
         return None
@@ -214,12 +358,32 @@ class TaskContext:
             _log("ctx", f"current_pose failed ({exc})")
         return {"x": 0.0, "y": 0.0, "heading": 0.0}
 
-    def rotate_to(self, heading_rad: float) -> bool:
-        """Rotate in place — one-shot 'look toward' for a static target."""
+    def rotate_to(self, heading_rad: float, *, blocking: bool = True) -> bool:
+        """Rotate in place — one-shot 'look toward' for a static target.
+
+        ``blocking=True`` (default, unchanged behaviour — every existing caller
+        passes a heading only): disable head auto-tilt, drive to the heading and
+        wait, then re-enable auto-tilt; returns whether the goal was reached.
+
+        ``blocking=False``: command the rotation and return immediately WITHOUT
+        re-enabling auto-tilt (the live-scan / live-approach own the head and keep
+        it aimed at people). The caller MUST ``nav.cancel()`` before issuing a
+        second non-blocking nav goal — ``nav.go_to(blocking=False)`` spawns a
+        *competing* async action thread, it does not preempt the in-flight one
+        (walkie_sdk navigation.py). Returns True once the goal was dispatched.
+        """
         self.walkie.robot.head.set_auto_tilt(False)
         pose = self.current_pose()
-        self.goto(pose["x"], pose["y"], heading_rad)
-        self.walkie.robot.head.set_auto_tilt(True)
+        if blocking:
+            reached = self.goto(pose["x"], pose["y"], heading_rad)
+            self.walkie.robot.head.set_auto_tilt(True)
+            return reached
+        try:
+            self.walkie.nav.go_to(pose["x"], pose["y"], heading_rad, blocking=False)
+        except Exception as exc:
+            _log("ctx", f"rotate_to(blocking=False) failed ({exc})")
+            return False
+        return True
 
     # --- scoring --------------------------------------------------------
 

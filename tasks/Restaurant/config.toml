@@ -24,7 +24,7 @@ RESTAURANT_TARGET_CUSTOMERS = "2"
 RESTAURANT_EXTRA_ATTEMPTS = "3"
 # 1 = run only the Phase 0 slice (GoToStart -> scan -> approach) for on-robot bring-up.
 RESTAURANT_PHASE0 = "0"
-RESTAURANT_SLICE = "graspplan"
+RESTAURANT_SLICE = "full"
 
 # --- Phase 0: caller detection + approach -----------------------------------
 # Base-rotation sweep that searches the dining area for a waving customer
@@ -32,6 +32,23 @@ RESTAURANT_SLICE = "graspplan"
 RESTAURANT_SCAN_ARC_DEG = "180"      # total arc swept, centered on the dining heading (±90° = full front; widen more if tables wrap to the sides)
 RESTAURANT_SCAN_STEP_DEG = "30"      # rotation between snapshots within the arc
 RESTAURANT_SCAN_SETTLE_SEC = "0.8"   # settle time after each rotation before capture
+# Head tilt held WHENEVER the robot looks for a person — the sweep, the approach
+# re-acquire, the appearance capture, the barman re-acquire (radians): + = camera down,
+# - = up, 0.0 = look straight forward (level). The head is re-aimed right before every
+# capture (rotate_to/go_to re-enable auto-tilt), and is NEVER left pointing down at a
+# table/floor (which saw 0 persons). Set to 0.0 = look level. Go negative (e.g. -0.4 /
+# the servo max-up -0.785) only if a low camera mount needs to look UP at people; go
+# slightly + if seated diners sit low in frame. (Tilt offset is uncalibrated — tune
+# against the "saw N person-detection(s)" log.)
+RESTAURANT_PERSON_LOOK_TILT_RAD = "0.0"
+# Settle after raising the head before a ONE-SHOT person capture (re-acquire / appearance).
+# tilt() is fire-and-forget, so without this the frame is grabbed before the head moves.
+RESTAURANT_PERSON_LOOK_SETTLE_SEC = "0.4"
+# Approach-on-first-sighting. 1 (default) = the MOMENT a waving customer is detected during
+# the sweep, stop sweeping and drive straight to them (more responsive; the customer needn't
+# keep waving through a full sweep + rotate-back). 0 = finish the whole arc, then pick the
+# nearest. Batched order-taking (RESTAURANT_BATCH=1) always does the full sweep regardless.
+RESTAURANT_APPROACH_FIRST = "1"
 # is_calling: a wrist must sit above its shoulder by this fraction of the person's
 # bbox height (rejects an arm resting near shoulder level); keypoint conf floor.
 RESTAURANT_CALL_WRIST_MARGIN = "0.05"
@@ -49,6 +66,21 @@ RESTAURANT_DEPTH_RELIABLE_M = "3.5"
 # Conservative approach speed for the public venue — a Nav2/robot-side param;
 # recorded here for that tuning (go_to does not cap velocity itself).
 RESTAURANT_APPROACH_SPEED = "0.3"
+# Max drive-then-redetect steps when closing in on a customer (approach_customer).
+# Each step drives part-way and re-detects to refine the far/coarse point; 3 is
+# enough to bring a far customer into the reliable depth band and park. Lower =
+# fewer stop-go cycles (faster, less re-detect drift); raise only if customers sit
+# beyond ~3 steps of depth-band hops.
+RESTAURANT_APPROACH_MAX_STEPS = "3"
+# Stall detection while stepping in (approach_customer). After each step's drive we
+# measure how far the base ACTUALLY moved; below this, the path is blocked (chairs /
+# a narrow aisle / no reachable free spot) and the robot can't get closer.
+RESTAURANT_APPROACH_MIN_PROGRESS_M = "0.2"
+# Consecutive stalled steps to tolerate before giving up the approach and TAKING THE
+# ORDER from where the robot stands (instead of abandoning the customer and looking
+# for a new one). 1 = stop on the first stalled step; raise to ride out a transient
+# Nav2 alignment step that translates little.
+RESTAURANT_APPROACH_MAX_STALLS = "1"
 # Generic ctx.goto knob (not RESTAURANT_*): promote a Nav2 FAILED to CLOSE_ENOUGH
 # when the robot ended within this many metres of the goal. Stops in-place
 # scan rotations logging a spurious FAILED, and — critically — stops the serve
@@ -61,10 +93,66 @@ RESTAURANT_APPROACH_SPEED = "0.3"
 # from the customer — a safe conversational distance.
 WALKIE_NAV_GOAL_TOLERANCE_M = "0.4"
 
+# --- Live scan + live approach (RESTAURANT_LIVE_SCAN) ------------------------
+# The new find+approach path: a bearing-first sweep (deduping callers by absolute BEARING,
+# depth unreliable far away) feeding a single non-blocking drive that re-detects/refines
+# the customer, faces+tilts the head at them, captures their appearance up close, and
+# aborts on a velocity stall or a lost customer.
+# 1 = use this live path; 0 (default) = the old discrete sweep + step-approach. Kept
+# opt-in for on-robot A/B until the live path is validated on the real robot.
+RESTAURANT_LIVE_SCAN = "1"
+# Approach after finding a caller (1, default) vs find-and-announce only (0).
+RESTAURANT_DO_APPROACH = "1"
+# HOW the scan rotates:
+#   gotostep (default) = discrete in-place go_to steps (RESTAURANT_SCAN_STEP_DEG +
+#       _SETTLE_SEC), detect at each STATIONARY stop. RELIABLE — go_to always moves the
+#       base, and bearings are skew-free.
+#   cmdvel = ONE continuous turn at RESTAURANT_SCAN_RATE_DPS, publishing a Twist to cmd_vel
+#       (the original "spin while detecting" design). ONLY works if the base accepts raw
+#       cmd_vel — verify with `uv run python -m manual_tests.test_base_creep --raw-only`;
+#       this robot's run log showed cmd_vel moving the base 0 m (creep "no odom progress"),
+#       so this mode would stand still. Falls back to gotostep if the channel won't open.
+RESTAURANT_SCAN_ROTATE_MODE = "cmdvel"
+# cmdvel-mode only (ignored by gotostep): continuous angular rate (deg/s), cmd_vel publish
+# rate (Hz, mirrors WALKIE_CREEP_HZ), and min seconds between pose-detects during the spin.
+RESTAURANT_SCAN_RATE_DPS = "12"
+RESTAURANT_SCAN_PUBLISH_HZ = "15"
+RESTAURANT_SCAN_DETECT_SEC = "1.0"
+# Dedup callers seen across the live sweep by ABSOLUTE BEARING within this many degrees
+# (instead of by map distance — far depth is noisy). Keep > the per-rate bearing skew.
+RESTAURANT_HEADING_DEDUP_DEG = "8"
+# Live approach: re-detect cadence (s), velocity-stall threshold + window, lost window.
+RESTAURANT_APPROACH_DETECT_SEC = "1.0"
+RESTAURANT_APPROACH_LOW_SPEED_MPS = "0.08"   # base "barely moving"...
+RESTAURANT_APPROACH_LOW_SPEED_SEC = "5.0"    # ...for this long -> cancel nav + check in-view
+RESTAURANT_LOST_SEC = "5.0"                  # customer out of view this long -> cancel + re-scan
+# Overall safety timeout for one live approach (s) before bailing.
+RESTAURANT_APPROACH_TIMEOUT_SEC = "45"
+# Step length along the bearing ray (m) when the customer has no valid depth fix yet
+# (far / beyond reliable depth). Drive this far toward them, then re-detect to refine.
+RESTAURANT_FAR_STEP_M = "3.5"
+# Re-issue the drive only when a refined customer point moves more than this (avoid thrash).
+RESTAURANT_REFINE_MIN_DELTA_M = "0.4"
+# Narrow re-scan arc (deg) when re-finding a lost customer (overrides the full scan arc).
+RESTAURANT_RESCAN_ARC_DEG = "60"
+# Rounds of appearance caption to capture up close while approaching (kept: the best).
+RESTAURANT_CLOSE_APPEARANCE_ROUNDS = "3"
+# Assumed customer torso height (m) and max downward head tilt (rad) used when aiming
+# the head at the person — capped so a near/seated customer never tilts the camera into
+# the table/floor (the look_at_object 25°-down hazard). + = down.
+RESTAURANT_PERSON_TORSO_Z_M = "1.0"
+RESTAURANT_PERSON_MAX_DOWN_TILT_RAD = "0.2"
+
 # --- Phase 1: re-acquire on return (anti-drift, design §5.1) -----------------
 # When returning to a customer, accept a re-detected person within this distance
-# of the stored point as "the same customer" (else keep the stored point).
+# of the stored point as "the same customer" (else keep the stored point). This is the
+# APPROACH re-acquire (still closing in on a coarse far-lift) so it stays generous.
 RESTAURANT_REACQUIRE_RADIUS_M = "1.5"
+# SERVE-time re-acquire radius (return_to_customer). Tighter than the approach radius:
+# by now we've driven back to a refined seat point, so anyone beyond this is a NEIGHBOUR,
+# not our customer. MUST be < the table spacing (~1 m here) or the robot can lock onto
+# the person at the next table and serve them. Stored appearance breaks any remaining tie.
+RESTAURANT_SERVE_REACQUIRE_RADIUS_M = "0.7"
 # VISUALLY re-acquire the barman on return (return_to_bar). 1 (default) = after driving
 # to the bar and turning to face it (below), also look for the barman with the camera and
 # face them precisely before relaying. 0 = skip the vision search — just drive to the bar
@@ -93,10 +181,17 @@ RESTAURANT_HANDLED_RADIUS_M = "0.6"
 # attempt while a second waving customer is never reached. < this = transient retry.
 RESTAURANT_MAX_FAILS_PER_SPOT = "2"
 # Order-taking dialogue (HRI). On an empty/garbled parse, RE-ASK the SAME customer this
-# many extra times before giving up — without it one unclear reply made the serve loop
-# wander off to find a new customer. CONFIRM_RETRIES = extra re-takes on an explicit "no"
-# at the "is that right?" step (a silent/garbled reply still counts as acceptance).
-RESTAURANT_ORDER_RETRIES = "2"
+# many EXTRA times before giving up (9 => 10 listens total) — without persistence one
+# unclear reply made the serve loop wander off to find a new customer, and a poor accent
+# routinely makes STT mis-transcribe a real, spoken order. ORDER_MAX_SILENT bounds the
+# worst case WITHOUT cutting accented speakers off mid-sentence: a non-empty-but-unparseable
+# reply (the accent case) keeps the full retry budget, but this many CONSECUTIVE empty
+# (true-silence) replies means the seat is likely empty, so the robot stops re-asking
+# instead of burning all 10 listen timeouts on dead air. CONFIRM_RETRIES = extra re-takes
+# on an explicit "no" at the "is that right?" step (a silent/garbled reply still counts as
+# acceptance).
+RESTAURANT_ORDER_RETRIES = "9"
+RESTAURANT_ORDER_MAX_SILENT = "3"
 RESTAURANT_CONFIRM_RETRIES = "1"
 
 # 1 = speak a readiness go-signal once the robot is in position at the bar (after
@@ -112,11 +207,22 @@ RESTAURANT_SIGNAL_READY = "1"
 # 0 = the gripper pick/place pipeline (per-item round trips, gated by
 # RESTAURANT_ARM_CALIBRATED below). Default 1 — the robot has a tray fitted.
 RESTAURANT_TRAY_MODE = "1"
-# Tray handoff waits (seconds): after asking the barman to load / the customer to
-# unload, the robot waits for a spoken "ready" and, on silence, dwells this long so
-# the run never stalls on a quiet human. Raise if loading/unloading takes longer.
-RESTAURANT_TRAY_LOAD_WAIT_SEC = "5.0"
-RESTAURANT_TRAY_UNLOAD_WAIT_SEC = "5.0"
+# Tray handoff (load at the bar / unload at the table). The robot asks for a spoken
+# "ready" and waits for a POSITIVE go-ahead; an explicit "not yet" keeps it waiting, and
+# pure silence dwells WAIT_SEC before re-confirming, up to HANDOFF_TRIES times (so a slow
+# barman/customer is never abandoned, but the run never stalls forever). Only a confirmed
+# handoff scores the pickup/serve — an unconfirmed one still carries on but isn't claimed.
+# WAIT_SEC is the per-try silence dwell (was a flat 5 s one-shot; 8 s × 3 tries ≈ 24 s of
+# patience). Raise if loading/unloading genuinely takes longer.
+RESTAURANT_TRAY_LOAD_WAIT_SEC = "8.0"
+RESTAURANT_TRAY_UNLOAD_WAIT_SEC = "8.0"
+RESTAURANT_TRAY_HANDOFF_TRIES = "3"
+
+# 1 (default) = thank the barman the moment the order is in hand — the tray load is
+# CONFIRMED (tray mode) or an item has been picked off the bar (gripper mode). Courtesy
+# only; never scored, and never said for a handoff that wasn't confirmed (no thanks for
+# items we never received). 0 = stay silent at the bar (e.g. a noisy/time-pressed venue).
+RESTAURANT_THANK_BARMAN = "1"
 
 # --- Phase 2: manipulation (CALIBRATION-READY, NOT VALIDATED) ----------------
 # Only used when RESTAURANT_TRAY_MODE = 0 (the gripper path).
@@ -158,3 +264,13 @@ RESTAURANT_BATCH_SIZE = "2"
 # 1 = use an unattached tray to transport orders (optional bonus, 2x200 pts).
 # Bimanual + uncalibrated -> currently a logged no-move stub (transport_with_tray).
 RESTAURANT_USE_TRAY = "0"
+
+# --- Visualization ----------------------------------------------------------
+# Disable Rerun viz for competition runs. The shared viz service defaults to
+# "rerun" (services/viz/config.toml), and a TASK builds it synchronously on the
+# main thread (TaskContext.__post_init__ -> get_viz), where its native gRPC/web
+# serve can deadlock and freeze the whole run before the first step. Restaurant
+# doesn't need the viewer, so turn it off here (WALKIE_VIZ_INIT_TIMEOUT_S is a
+# backstop). Set "rerun" temporarily to debug geometry on the LAN viewer.
+[viz]
+WALKIE_VIZ = "none"
