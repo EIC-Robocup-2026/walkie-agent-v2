@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 
+from walkie_world import WalkieWorld
 from walkie_world.people.store import PeopleStore
 
 
@@ -104,3 +105,48 @@ def test_clear_drops_all_three_collections(store):
     assert store.count() == 0
     assert store.find_by_caption_embedding([1.0, 0.0]) is None
     assert store.appearance_vectors() == {}
+
+
+# --- facade: vector-first AND text caption queries via WalkieWorld -----------
+
+def _fake_embed_text(q: str):
+    """Tiny stand-in CLIP-text embedder: 'red' -> [1,0], else -> [0,1]."""
+    return [1.0, 0.0] if "red" in q.lower() else [0.0, 1.0]
+
+
+@pytest.fixture()
+def world(tmp_path, monkeypatch):
+    # Isolate the people ChromaDB to a tmp dir so the facade's from_env() store
+    # doesn't touch the repo's default chroma_db_people/.
+    monkeypatch.setenv("PEOPLE_CHROMA_DIR", str(tmp_path / "people"))
+    monkeypatch.setenv("PEOPLE_FRAMES_DIR", str(tmp_path / "frames"))
+    return WalkieWorld(
+        scene_dir=str(tmp_path / "scene"),
+        embed_text=_fake_embed_text,
+        enable_people=True,
+    )
+
+
+def test_facade_find_by_caption_embedding_is_vector_first(world):
+    """ctx.world.find_person_by_caption_embedding(vec) re-IDs by a precomputed vector,
+    mirroring recognize_person (no embed_text, no lexical fallback)."""
+    world.enroll_person(
+        "", "", [], person_id="customer-1",
+        appearance_caption="a person in a red shirt",
+        appearance_caption_embedding=[1.0, 0.0],
+    )
+    hit = world.find_person_by_caption_embedding([0.95, 0.05])
+    assert hit is not None and hit.id == "customer-1"
+    assert hit.matched_by == "appearance_caption"
+    # A far vector finds nobody within the gate.
+    assert world.find_person_by_caption_embedding([0.0, 1.0]) is None
+
+
+def test_facade_find_by_caption_text_still_works(world):
+    """The text convenience embeds via embed_text then delegates to the vector path."""
+    world.enroll_person(
+        "", "", [], person_id="customer-1",
+        appearance_caption="a person in a red shirt",
+        appearance_caption_embedding=[1.0, 0.0],
+    )
+    assert world.find_person_by_caption("a red shirt").id == "customer-1"

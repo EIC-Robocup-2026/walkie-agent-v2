@@ -290,8 +290,19 @@ class WalkieWorld:
     def fused_person_scores(self, face_embedding=None, app_embedding=None, **kwargs):
         return self.people.fused_scores(face_embedding, app_embedding, **kwargs)
 
+    def find_person_by_caption_embedding(self, embedding, *, max_distance: float | None = None):
+        """Vector-first attire re-ID: nearest stored caption embedding, or None.
+
+        The caption analogue of :meth:`recognize_person` — pass a precomputed CLIP-text
+        vector (no ``embed_text`` needed, no lexical fallback). ``max_distance`` defaults
+        to ``WORLD_PEOPLE_CAPTION_MATCH_THRESHOLD``.
+        """
+        return self.people.find_by_caption_embedding(embedding, max_distance=max_distance)
+
     def find_person_by_caption(self, query: str):
-        """Semantic attire re-ID: CLIP-text vector match, then lexical fallback."""
+        """Semantic attire re-ID from TEXT: embed via ``embed_text`` → vector match
+        (:meth:`find_person_by_caption_embedding`), then lexical fallback. Use the
+        ``_embedding`` variant directly when you already hold the caption vector."""
         people = self.people
         if self._embed_text is not None:
             try:
@@ -299,7 +310,7 @@ class WalkieWorld:
             except Exception:
                 vec = None
             if vec:
-                hit = people.find_by_caption_embedding(vec)
+                hit = self.find_person_by_caption_embedding(vec)
                 if hit is not None:
                     return hit
         return people.find_by_caption_lexical(query)
