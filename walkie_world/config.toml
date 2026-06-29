@@ -1,0 +1,41 @@
+# walkie_world module config — the DOMAIN MODEL's tuning knobs.
+# Loaded by walkie_config.load_config() (the loader globs walkie_world/config.toml
+# in addition to services/*/config.toml). Same setdefault walk, so precedence is:
+#   shell env > .env > root config.toml > THIS FILE > code default.
+# The keys ARE the exact env-var names; tables are just grouping.
+#
+# walkie_world owns: the static map (rooms/locations/doors/objects), object
+# vocabulary, the numpy SceneStore (objects + relations), and people memory. The
+# perception PRODUCER (services/realtime_explore) feeds observations in. People
+# knobs (PEOPLE_*, FACE/APPEARANCE thresholds) live in the root config.toml [people]
+# table; only the new caption-match gate is added here.
+
+[scene.store]
+# The lean scene store: nodes.json + embeddings.npy + edges.json (+ map.npz when the
+# producer's TSDF is on). Map-seeded objects (source="map") are authoritative — always
+# visible, never pruned — so the cap applies only to perception nodes.
+WALKIE_GRAPHS_STORE_DIR = "graph_scene"
+# Confirmation gate: hide perception objects seen fewer than MIN_OBS_CONFIRM times (a
+# build's n_obs is the cluster's member count, so a thing seen twice confirms instantly).
+WALKIE_GRAPHS_MIN_OBS_CONFIRM = "2"
+WALKIE_GRAPHS_REQUIRE_CONFIRMATION = "1"
+# Cap the persisted store; prune the oldest perception nodes by last_seen beyond this.
+WALKIE_GRAPHS_PRUNE_MAX_RECORDS = "500"
+# Centroid match radius when merging a build's objects into the persisted store (also
+# the hard cap on any single merge). Doubles as the scene-store merge_dist.
+WALKIE_GRAPHS_ASSOC_MAX_DIST_M = "0.5"
+
+[scene.relations]
+# Geometric near/on/above/inside edges derived from object AABBs each build (relations.py).
+WALKIE_GRAPHS_RELATION_MAX_DIST = "1.0"   # ignore pairs farther apart than this (m)
+WALKIE_GRAPHS_NEAR_M = "0.6"              # centroid distance for a "near" edge
+WALKIE_GRAPHS_XY_OVERLAP_MIN = "0.15"     # min footprint overlap for on/above
+WALKIE_GRAPHS_Z_TOL = "0.05"              # vertical slack
+WALKIE_GRAPHS_ON_GAP = "0.08"            # gap <= this => "on", else "above"
+WALKIE_GRAPHS_CONTAIN_TOL = "0.02"        # AABB-containment slack for "inside"
+
+[people]
+# Max cosine distance for a semantic attire-caption re-ID match (find_by_caption_embedding).
+# Smaller = stricter. The face (FACE_MATCH_THRESHOLD) and fused (APPEARANCE_MATCH_THRESHOLD)
+# gates live in the root config.toml [people] table.
+WORLD_PEOPLE_CAPTION_MATCH_THRESHOLD = "0.35"

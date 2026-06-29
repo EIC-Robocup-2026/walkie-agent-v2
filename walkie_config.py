@@ -77,6 +77,12 @@ def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> int:
     """
     p = Path(path)
     filled = _load_one(p)
-    for module_cfg in sorted(p.resolve().parent.glob("services/*/config.toml")):
+    root = p.resolve().parent
+    # Module configs: every services/*/config.toml plus the top-level walkie_world
+    # (the domain model is a top-level package, not under services/, so it needs an
+    # explicit entry — the glob below would otherwise miss it).
+    module_cfgs = sorted(root.glob("services/*/config.toml"))
+    module_cfgs.append(root / "walkie_world" / "config.toml")
+    for module_cfg in module_cfgs:
         filled += _load_one(module_cfg)
     return filled
