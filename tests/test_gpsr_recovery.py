@@ -41,7 +41,8 @@ class _Ctx:
         self.asked: list[str] = []
         self.ask_retries: list[int] = []
         self.scored: list[tuple[str, int]] = []  # (key, n) for each ctx.score()
-        self.data: dict = {"world": object()}  # non-None so run() proceeds
+        self.data: dict = {}
+        self.world = object()  # non-None so run() proceeds (parse_commands is stubbed)
         self.model = object()
         self.disable_listening = False  # answers come via ask() = the STT path
 
