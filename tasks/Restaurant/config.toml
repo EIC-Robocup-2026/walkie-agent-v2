@@ -93,6 +93,56 @@ RESTAURANT_APPROACH_MAX_STALLS = "1"
 # from the customer — a safe conversational distance.
 WALKIE_NAV_GOAL_TOLERANCE_M = "0.4"
 
+# --- Live scan + live approach (RESTAURANT_LIVE_SCAN) ------------------------
+# The new find+approach path: a bearing-first sweep (deduping callers by absolute BEARING,
+# depth unreliable far away) feeding a single non-blocking drive that re-detects/refines
+# the customer, faces+tilts the head at them, captures their appearance up close, and
+# aborts on a velocity stall or a lost customer.
+# 1 = use this live path; 0 (default) = the old discrete sweep + step-approach. Kept
+# opt-in for on-robot A/B until the live path is validated on the real robot.
+RESTAURANT_LIVE_SCAN = "1"
+# Approach after finding a caller (1, default) vs find-and-announce only (0).
+RESTAURANT_DO_APPROACH = "1"
+# HOW the scan rotates:
+#   gotostep (default) = discrete in-place go_to steps (RESTAURANT_SCAN_STEP_DEG +
+#       _SETTLE_SEC), detect at each STATIONARY stop. RELIABLE — go_to always moves the
+#       base, and bearings are skew-free.
+#   cmdvel = ONE continuous turn at RESTAURANT_SCAN_RATE_DPS, publishing a Twist to cmd_vel
+#       (the original "spin while detecting" design). ONLY works if the base accepts raw
+#       cmd_vel — verify with `uv run python -m manual_tests.test_base_creep --raw-only`;
+#       this robot's run log showed cmd_vel moving the base 0 m (creep "no odom progress"),
+#       so this mode would stand still. Falls back to gotostep if the channel won't open.
+RESTAURANT_SCAN_ROTATE_MODE = "cmdvel"
+# cmdvel-mode only (ignored by gotostep): continuous angular rate (deg/s), cmd_vel publish
+# rate (Hz, mirrors WALKIE_CREEP_HZ), and min seconds between pose-detects during the spin.
+RESTAURANT_SCAN_RATE_DPS = "12"
+RESTAURANT_SCAN_PUBLISH_HZ = "15"
+RESTAURANT_SCAN_DETECT_SEC = "1.0"
+# Dedup callers seen across the live sweep by ABSOLUTE BEARING within this many degrees
+# (instead of by map distance — far depth is noisy). Keep > the per-rate bearing skew.
+RESTAURANT_HEADING_DEDUP_DEG = "8"
+# Live approach: re-detect cadence (s), velocity-stall threshold + window, lost window.
+RESTAURANT_APPROACH_DETECT_SEC = "1.0"
+RESTAURANT_APPROACH_LOW_SPEED_MPS = "0.08"   # base "barely moving"...
+RESTAURANT_APPROACH_LOW_SPEED_SEC = "5.0"    # ...for this long -> cancel nav + check in-view
+RESTAURANT_LOST_SEC = "5.0"                  # customer out of view this long -> cancel + re-scan
+# Overall safety timeout for one live approach (s) before bailing.
+RESTAURANT_APPROACH_TIMEOUT_SEC = "45"
+# Step length along the bearing ray (m) when the customer has no valid depth fix yet
+# (far / beyond reliable depth). Drive this far toward them, then re-detect to refine.
+RESTAURANT_FAR_STEP_M = "3.5"
+# Re-issue the drive only when a refined customer point moves more than this (avoid thrash).
+RESTAURANT_REFINE_MIN_DELTA_M = "0.4"
+# Narrow re-scan arc (deg) when re-finding a lost customer (overrides the full scan arc).
+RESTAURANT_RESCAN_ARC_DEG = "60"
+# Rounds of appearance caption to capture up close while approaching (kept: the best).
+RESTAURANT_CLOSE_APPEARANCE_ROUNDS = "3"
+# Assumed customer torso height (m) and max downward head tilt (rad) used when aiming
+# the head at the person — capped so a near/seated customer never tilts the camera into
+# the table/floor (the look_at_object 25°-down hazard). + = down.
+RESTAURANT_PERSON_TORSO_Z_M = "1.0"
+RESTAURANT_PERSON_MAX_DOWN_TILT_RAD = "0.2"
+
 # --- Phase 1: re-acquire on return (anti-drift, design §5.1) -----------------
 # When returning to a customer, accept a re-detected person within this distance
 # of the stored point as "the same customer" (else keep the stored point). This is the
@@ -167,6 +217,12 @@ RESTAURANT_TRAY_MODE = "1"
 RESTAURANT_TRAY_LOAD_WAIT_SEC = "8.0"
 RESTAURANT_TRAY_UNLOAD_WAIT_SEC = "8.0"
 RESTAURANT_TRAY_HANDOFF_TRIES = "3"
+
+# 1 (default) = thank the barman the moment the order is in hand — the tray load is
+# CONFIRMED (tray mode) or an item has been picked off the bar (gripper mode). Courtesy
+# only; never scored, and never said for a handoff that wasn't confirmed (no thanks for
+# items we never received). 0 = stay silent at the bar (e.g. a noisy/time-pressed venue).
+RESTAURANT_THANK_BARMAN = "1"
 
 # --- Phase 2: manipulation (CALIBRATION-READY, NOT VALIDATED) ----------------
 # Only used when RESTAURANT_TRAY_MODE = 0 (the gripper path).

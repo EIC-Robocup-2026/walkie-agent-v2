@@ -9,9 +9,13 @@ Needs the robot reachable and on open floor with ~0.5 m clear all round (no tabl
 this bypasses the costmap, so nothing will stop the base but the code's own guards).
 Keep the e-stop handy.
 
-Run: uv run python -m manual_tests.test_base_creep            # raw check + fwd + strafe
-     uv run python -m manual_tests.test_base_creep --raw-only # just the cmd_vel probe
+Run: uv run python -m manual_tests.test_base_creep            # raw linear + rotate + creep
+     uv run python -m manual_tests.test_base_creep --raw-only # both raw probes, no creep
+     uv run python -m manual_tests.test_base_creep --rotate   # ONLY the angular spin probe
      uv run python -m manual_tests.test_base_creep --forward 0.15 --strafe -0.10
+
+The --rotate probe answers "will the Restaurant scan's RESTAURANT_SCAN_ROTATE_MODE=cmdvel
+(continuous spin) actually turn this base?" — it publishes angular.z and measures heading.
 """
 
 from __future__ import annotations
@@ -24,7 +28,6 @@ from types import SimpleNamespace
 
 from dotenv import load_dotenv
 from walkie_sdk import WalkieRobot
-from walkie_sdk.config.ros_topics import NAV_TOPICS
 
 from tasks.skills.navigation import creep_base_relative
 from walkie_config import load_config
@@ -53,37 +56,34 @@ def _displacement(p0, p1) -> float:
     return math.hypot(p1["x"] - p0["x"], p1["y"] - p0["y"])
 
 
+def _heading_delta(p0, p1) -> float:
+    """Absolute heading change (rad), wrap-safe."""
+    d = p1["heading"] - p0["heading"]
+    return abs(math.atan2(math.sin(d), math.cos(d)))
+
+
 def raw_cmd_vel_probe(robot, *, vx=0.05, secs=1.0, hz=15.0) -> bool:
     """THE load-bearing check: does publishing raw cmd_vel move the base?
 
-    Publishes linear.x=vx at hz for secs, then zero, and reports the odom
-    displacement. If the base creeps ~vx*secs forward, the topic reaches the base
-    and the whole fix is sound. If it doesn't move, the topic/mux is the real
-    blocker and creep_base_relative won't work until that's resolved.
+    Publishes linear.x=vx at hz for secs via ``nav.set_velocity`` (the SDK helper that
+    builds the correct geometry_msgs/msg/TwistStamped), then zero, and reports the odom
+    displacement. If the base creeps ~vx*secs forward, the channel reaches the base and the
+    whole fix is sound. If it doesn't move, the topic/mux is the real blocker.
     """
-    topic = robot.nav.cmd_vel_topic
-    transport = robot.nav._transport
-    msg_type = NAV_TOPICS["cmd_vel_type"]
     p0 = _pose(robot)
     if not p0:
         print("[probe] no odom fix; cannot measure — is the robot localised?")
         return False
-    print(f"[probe] publishing linear.x={vx} m/s for {secs}s on {topic!r} ...")
+    print(f"[probe] publishing linear.x={vx} m/s for {secs}s via nav.set_velocity ...")
     dt = 1.0 / hz
     try:
         t_end = time.monotonic() + secs
         while time.monotonic() < t_end:
-            transport.publish(topic, msg_type, {
-                "linear": {"x": float(vx), "y": 0.0, "z": 0.0},
-                "angular": {"x": 0.0, "y": 0.0, "z": 0.0},
-            })
+            robot.nav.set_velocity(float(vx), 0.0, 0.0)
             time.sleep(dt)
     finally:
         for _ in range(3):
-            transport.publish(topic, msg_type, {
-                "linear": {"x": 0.0, "y": 0.0, "z": 0.0},
-                "angular": {"x": 0.0, "y": 0.0, "z": 0.0},
-            })
+            robot.nav.set_velocity(0.0, 0.0, 0.0)
     time.sleep(0.3)
     p1 = _pose(robot)
     moved = _displacement(p0, p1)
@@ -92,6 +92,44 @@ def raw_cmd_vel_probe(robot, *, vx=0.05, secs=1.0, hz=15.0) -> bool:
     ok = moved > expected * 0.3  # generous: any clear motion proves the channel
     print("[probe] PASS — cmd_vel reaches the base, creep is sound" if ok
           else "[probe] FAIL — base did not move; check the cmd_vel topic / twist mux")
+    return ok
+
+
+def raw_cmd_vel_rotate_probe(robot, *, wz=0.3, secs=2.0, hz=15.0) -> bool:
+    """Does publishing raw ANGULAR cmd_vel ROTATE the base?
+
+    This is what the Restaurant live scan's ``RESTAURANT_SCAN_ROTATE_MODE=cmdvel`` needs —
+    that sweep publishes ``angular.z`` (a continuous spin), NOT the linear creep the probe
+    above tests, and a base can accept one but not the other. Publishes ``angular.z=wz`` at
+    hz for secs, then zero, and reports the odom HEADING change. PASS ⇒ the cmdvel scan
+    mode will actually turn the base; FAIL ⇒ it would stand still — use the default
+    ``gotostep`` mode (which rotates via ``nav.go_to``).
+    """
+    p0 = _pose(robot)
+    if not p0:
+        print("[rotate] no odom fix; cannot measure — is the robot localised?")
+        return False
+    print(f"[rotate] publishing angular.z={wz} rad/s ({math.degrees(wz):.0f} deg/s) "
+          f"for {secs}s via nav.set_velocity ...")
+    dt = 1.0 / hz
+    try:
+        t_end = time.monotonic() + secs
+        while time.monotonic() < t_end:
+            robot.nav.set_velocity(0.0, 0.0, float(wz))
+            time.sleep(dt)
+    finally:
+        for _ in range(3):
+            robot.nav.set_velocity(0.0, 0.0, 0.0)
+    time.sleep(0.3)
+    p1 = _pose(robot)
+    turned = _heading_delta(p0, p1)
+    expected = abs(wz) * secs
+    print(f"[rotate] odom heading changed {math.degrees(turned):.1f} deg "
+          f"(expected ~{math.degrees(expected):.0f} deg)")
+    ok = turned > expected * 0.3  # generous: any clear rotation proves the channel
+    print("[rotate] PASS — angular cmd_vel rotates the base; the scan's cmdvel mode will work" if ok
+          else "[rotate] FAIL — base did not rotate; the cmdvel scan mode would stand still "
+               "(keep RESTAURANT_SCAN_ROTATE_MODE=gotostep)")
     return ok
 
 
@@ -110,7 +148,10 @@ def creep_check(robot, forward_m: float, left_m: float) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--raw-only", action="store_true", help="just the cmd_vel probe")
+    ap.add_argument("--raw-only", action="store_true", help="both raw cmd_vel probes, no creep")
+    ap.add_argument("--rotate", action="store_true",
+                    help="ONLY the angular spin probe (what the scan's cmdvel mode uses)")
+    ap.add_argument("--wz", type=float, default=0.3, help="angular rate for the rotate probe (rad/s)")
     ap.add_argument("--forward", type=float, default=0.15, help="forward creep (m)")
     ap.add_argument("--strafe", type=float, default=-0.10, help="lateral creep, +left (m)")
     args = ap.parse_args()
@@ -122,9 +163,15 @@ def main() -> None:
     input("Clear ~0.5 m around the base, then press Enter to start... ")
 
     try:
-        if not raw_cmd_vel_probe(robot):
-            print("Raw probe failed — stopping before exercising the helper.")
+        # Rotate-only: just answer "does angular cmd_vel spin the base" (the scan's cmdvel mode).
+        if args.rotate:
+            raw_cmd_vel_rotate_probe(robot, wz=args.wz)
             return
+        if not raw_cmd_vel_probe(robot):
+            print("Raw linear probe failed — stopping before exercising the helper.")
+            return
+        # Also test ANGULAR cmd_vel — the scan's cmdvel mode spins, it doesn't translate.
+        raw_cmd_vel_rotate_probe(robot, wz=args.wz)
         if args.raw_only:
             return
         if args.forward:

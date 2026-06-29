@@ -119,21 +119,34 @@ def test_skips_waver_without_depth(monkeypatch):
 
 
 def test_next_caller_routes_on_the_flag(monkeypatch):
-    """_next_caller -> find_first_caller when APPROACH_FIRST=1, else scan+nearest."""
+    """_next_caller routing: LIVE_SCAN=1 -> live_scan; else APPROACH_FIRST picks the
+    old discrete path (find_first_caller vs scan+nearest)."""
     from tasks.Restaurant import subtasks
 
-    hits = {"first": 0, "scan": 0}
-    sentinel = object()
+    hits = {"live": 0, "first": 0, "scan": 0}
+    live_sentinel = object()
+    first_sentinel = object()
+    monkeypatch.setattr(subtasks, "live_scan_for_caller",
+                        lambda ctx, b, r: hits.__setitem__("live", hits["live"] + 1) or live_sentinel)
     monkeypatch.setattr(subtasks, "find_first_caller",
-                        lambda ctx, b, r: hits.__setitem__("first", hits["first"] + 1) or sentinel)
+                        lambda ctx, b, r: hits.__setitem__("first", hits["first"] + 1) or first_sentinel)
     monkeypatch.setattr(subtasks, "scan_for_callers",
                         lambda ctx: hits.__setitem__("scan", hits["scan"] + 1) or [])
     monkeypatch.setattr(subtasks, "nearest_caller", lambda ctx, callers: None)
+    monkeypatch.setattr(subtasks, "exclude_handled", lambda callers, b, r: callers)
 
+    # Live path is the default.
+    monkeypatch.setenv("RESTAURANT_LIVE_SCAN", "1")
+    assert subtasks._next_caller(object(), [], 0.6) is live_sentinel
+    assert hits == {"live": 1, "first": 0, "scan": 0}
+
+    # Old path, approach-on-first.
+    monkeypatch.setenv("RESTAURANT_LIVE_SCAN", "0")
     monkeypatch.setenv("RESTAURANT_APPROACH_FIRST", "1")
-    assert subtasks._next_caller(object(), [], 0.6) is sentinel
-    assert hits == {"first": 1, "scan": 0}
+    assert subtasks._next_caller(object(), [], 0.6) is first_sentinel
+    assert hits == {"live": 1, "first": 1, "scan": 0}
 
+    # Old path, full-sweep + nearest.
     monkeypatch.setenv("RESTAURANT_APPROACH_FIRST", "0")
     subtasks._next_caller(object(), [], 0.6)
-    assert hits == {"first": 1, "scan": 1}
+    assert hits == {"live": 1, "first": 1, "scan": 1}

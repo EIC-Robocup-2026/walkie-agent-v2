@@ -57,14 +57,32 @@ def _robot_pose(ctx: TaskContext) -> dict | None:
     return pose or None
 
 
+def _wrap(a: float) -> float:
+    """Wrap an angle (rad) to (-pi, pi]."""
+    return math.atan2(math.sin(a), math.cos(a))
+
+
+def _ray_point(pose: dict, bearing: float, dist: float) -> tuple[float, float]:
+    """A map point *dist* metres ahead of *pose* along *bearing* (rad)."""
+    return (pose["x"] + dist * math.cos(bearing), pose["y"] + dist * math.sin(bearing))
+
+
 # ---------------------------------------------------------------------------
 # Calling / waving detection (keypoints)
 # ---------------------------------------------------------------------------
 @dataclass
 class Caller:
-    """A customer detected calling/waving, anchored in the map for approach."""
+    """A customer detected calling/waving, anchored for approach.
 
-    world_xy: tuple[float, float]  # map-frame position (lifted from the person bbox)
+    ``world_xy`` is the lifted map point when depth was valid at capture; the live
+    bearing-first scan (``live_scan_for_caller``) leaves it ``None`` for a FAR caller
+    whose depth is out of the ZED's reliable range — ``bearing`` is always set, and the
+    live approach drives the bearing ray and refines the point once the customer is
+    close. The old discrete sweep always lifts a point (it skips callers it can't), so
+    its callers always carry a ``world_xy``.
+    """
+
+    world_xy: tuple[float, float] | None  # map-frame position, or None (far/no depth)
     bearing: float                 # map-frame heading from the robot toward them
     bbox_xyxy: BBox                # pixel box in the frame they were found
     confidence: float              # person-detection confidence
@@ -189,6 +207,69 @@ def _dedup_callers(callers: list[Caller], radius_m: float) -> list[Caller]:
         elif c.confidence > dup.confidence:  # keep the more confident sighting
             kept[kept.index(dup)] = c
     return kept
+
+
+# ---------------------------------------------------------------------------
+# Bearing-first scan helpers (pure / unit-testable — no ctx / network)
+# ---------------------------------------------------------------------------
+def _torso_center_u(person: PersonPose, *, kp_conf: float) -> float:
+    """Pixel COLUMN of the person's torso centre (RGB image coords).
+
+    Prefers the two-shoulder chest patch (:func:`_torso_bbox`) so a raised waving arm
+    doesn't drag the column sideways; falls back to the bbox centre ``cx`` (the pose
+    bbox is ``(cx, cy, w, h)``)."""
+    tb = _torso_bbox(person, kp_conf=kp_conf)
+    if tb is not None:
+        return (tb[0] + tb[2]) / 2.0
+    return float(person.bbox[0])
+
+
+def _bearing_from_pixel_u(u_rgb: float, snap, *,
+                          robot_heading: float | None = None) -> float | None:
+    """Absolute map-frame bearing toward a pixel column ``u_rgb``, from intrinsics.
+
+    Pinhole: the angle off the optical axis is ``atan2(u - cx, fx)`` (positive to the
+    RIGHT). This repo's heading sign (FaceTracker, tasks/skills/people.py): a column
+    LEFT of centre (``u < cx``) needs a LARGER, CCW heading to face it — so
+    ``bearing = heading - atan2(u - cx, fx)``. ``snap.intr`` is at DEPTH resolution while
+    keypoint columns are in the RGB image, so ``u`` is scaled by ``intr.width / rgb_w``
+    first (what ``CameraSnapshot.bbox_to_points`` does). Heading defaults to the
+    snapshot's OWN capture-time ``robot_pose["heading"]`` (tie the bearing to the frame,
+    not to where the base has since rotated). Returns ``None`` without intrinsics/heading.
+    """
+    intr = getattr(snap, "intr", None)
+    if intr is None:
+        return None
+    if robot_heading is None:
+        rp = getattr(snap, "robot_pose", None)
+        if not rp or rp.get("heading") is None:
+            return None
+        robot_heading = float(rp["heading"])
+    try:
+        rgb_w = float(snap.img.size[0])  # PIL .size = (w, h)
+    except Exception:  # noqa: BLE001 — synthetic snapshots: assume depth-res columns
+        rgb_w = float(intr.width)
+    u_depth = u_rgb * (intr.width / rgb_w) if rgb_w else u_rgb
+    off = math.atan2(u_depth - intr.cx, intr.fx)  # + = right of optical axis
+    return _wrap(robot_heading - off)
+
+
+def _bearing_is_dup(bearing: float, kept_bearings, dedup_deg: float) -> bool:
+    """True when *bearing* is within *dedup_deg* of any already-kept bearing."""
+    tol = math.radians(dedup_deg)
+    return any(abs(_wrap(bearing - b)) <= tol for b in kept_bearings)
+
+
+def _caller_is_close(world_xy: tuple[float, float] | None, pose: dict,
+                     reliable_m: float) -> bool:
+    """CLOSE = a valid depth fix within the reliable band (drive straight to it).
+
+    FAR (return False) = no ``world_xy`` (depth invalid / beyond reliable range) so the
+    approach must drive the bearing ray and re-detect. Keys off depth VALIDITY, not a
+    hard metre cut — a far customer whose depth reads as noise degrades correctly."""
+    if world_xy is None:
+        return False
+    return math.hypot(world_xy[0] - pose["x"], world_xy[1] - pose["y"]) <= reliable_m
 
 
 def _person_look_tilt() -> float:
@@ -568,6 +649,513 @@ def approach_customer(ctx: TaskContext, world_xy: tuple[float, float], *,
 
 
 # ---------------------------------------------------------------------------
+# Live continuous-rotation scan + live approach (RESTAURANT_LIVE_SCAN)
+# ---------------------------------------------------------------------------
+def _look_at_person(ctx: TaskContext, world_xy: tuple[float, float] | None,
+                    *, settle: float = 0.0) -> None:
+    """Aim the head at a person's map point — clamped so it NEVER points at the floor.
+
+    Unlike grasp's ``look_at_object`` (which floors the tilt ~25° DOWN for GraspNet, the
+    wrong way for a standing/seated person), this tilts toward an assumed torso height
+    (``RESTAURANT_PERSON_TORSO_Z_M``) and caps the DOWNWARD tilt at
+    ``RESTAURANT_PERSON_MAX_DOWN_TILT_RAD`` (and the servo's up limit), so a near customer
+    can't drive the camera into the table. With no camera pose / no point it just holds the
+    level person-look tilt. Best-effort; disables auto-tilt so the aim sticks."""
+    head = ctx.walkie.robot.head
+    tilt = _person_look_tilt()  # level fallback
+    if world_xy is not None:
+        try:
+            from interfaces.devices.camera import camera_pose  # lazy: pulls cv2/numpy
+            cam = camera_pose(ctx.walkie)
+            if cam is not None:
+                torso_z = _f("RESTAURANT_PERSON_TORSO_Z_M", "1.0")
+                horiz = math.hypot(world_xy[0] - cam.t[0], world_xy[1] - cam.t[1]) or 1e-3
+                raw = math.atan2(cam.t[2] - torso_z, horiz)  # + = down
+                down_cap = _f("RESTAURANT_PERSON_MAX_DOWN_TILT_RAD", "0.2")
+                tilt = max(HEAD_TILT_MIN, min(down_cap, raw))
+        except Exception as exc:  # noqa: BLE001 — never break the approach on a head fault
+            print(f"[restaurant.skills] _look_at_person: camera pose unavailable ({exc})")
+    try:
+        head.set_auto_tilt(False)
+        head.tilt(tilt)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[restaurant.skills] _look_at_person: head tilt failed ({exc})")
+    if settle > 0:
+        time.sleep(settle)
+
+
+def _greeting_from_caption(ctx: TaskContext, caption: str | None) -> str:
+    """LLM call-out from an appearance caption: name a feature + ask for the order.
+
+    Falls back to the generic greeting when there's no caption or the model errors."""
+    if not caption:
+        return prompts.GREET_CUSTOMER
+    try:
+        from langchain.messages import HumanMessage, SystemMessage
+        reply = ctx.model.invoke([
+            SystemMessage(content=prompts.GREETING_INSTRUCTIONS),
+            HumanMessage(content=caption),
+        ])
+        text = str(getattr(reply, "content", "") or "").strip()
+        return text or prompts.GREET_CUSTOMER
+    except Exception as exc:  # noqa: BLE001
+        print(f"[restaurant.skills] greeting generation failed ({exc})")
+        return prompts.GREET_CUSTOMER
+
+
+def _best_caption(captions: list[str]) -> str | None:
+    """Pick the most descriptive caption (longest non-empty) from the close-up rounds."""
+    usable = [c for c in captions if c and c.strip()]
+    return max(usable, key=len) if usable else None
+
+
+def _detect_caller_near(ctx: TaskContext, target: tuple[float, float] | None,
+                        bearing: float, *, radius_m: float):
+    """One head-aimed snapshot: return (Caller|None, snap, bbox) for the SAME customer.
+
+    Matches by map distance to *target* when a depth fix is available, else by absolute
+    bearing (within twice the dedup bucket) — so a far, depth-less customer is still
+    tracked by heading. Returns the snapshot + the matched person's xyxy box (for the
+    appearance crop). Best-effort; (None, snap, None) when nobody matches."""
+    _look_at_person(ctx, target, settle=_f("RESTAURANT_PERSON_LOOK_SETTLE_SEC", "0.4"))
+    snap = ctx.snapshot()
+    if snap is None:
+        return None, None, None
+    try:
+        persons = ctx.walkieAI.image.estimate_poses(snap.img)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[restaurant.skills] live re-detect pose estimation failed ({exc})")
+        return None, snap, None
+    rp = getattr(snap, "robot_pose", None)
+    kp_conf = _f("RESTAURANT_KP_CONF", "0.3")
+    bear_tol = math.radians(_f("RESTAURANT_HEADING_DEDUP_DEG", "8")) * 2.0
+    best = None  # (score, Caller, box)
+    for p in persons:
+        xyxy = _cxcywh_to_xyxy(p.bbox)
+        wxy = _person_world_xy(snap, p)
+        if target is not None and wxy is not None:
+            d = math.hypot(wxy[0] - target[0], wxy[1] - target[1])
+            if d > radius_m:
+                continue
+            score = -d
+            b = (math.atan2(wxy[1] - rp["y"], wxy[0] - rp["x"])
+                 if rp else _bearing_from_pixel_u(_torso_center_u(p, kp_conf=kp_conf), snap))
+        else:  # no depth on either side → match by bearing
+            b = _bearing_from_pixel_u(_torso_center_u(p, kp_conf=kp_conf), snap)
+            if b is None or abs(_wrap(b - bearing)) > bear_tol:
+                continue
+            score = -abs(_wrap(b - bearing))
+        cand = Caller(wxy, b if b is not None else bearing, xyxy, p.confidence or 0.0)
+        if best is None or score > best[0]:
+            best = (score, cand, xyxy)
+    if best is None:
+        return None, snap, None
+    return best[1], snap, best[2]
+
+
+def _scan_sweep_gotostep(ctx: TaskContext, center: float, arc: float, process) -> None:
+    """Rotate across *arc* in discrete in-place ``go_to`` steps; call ``process(snap)`` at
+    each STATIONARY stop. CENTRE-OUT (straight ahead first; ties: negative before positive)
+    so an approach-on-first sweep reacts to a customer dead ahead first. Stops early when
+    ``process`` returns True. This is the reliable default — ``go_to`` always moves the base.
+    """
+    step = max(5.0, _f("RESTAURANT_SCAN_STEP_DEG", "30"))
+    settle = _f("RESTAURANT_SCAN_SETTLE_SEC", "0.8")
+    half = arc / 2.0
+    offsets: list[float] = []
+    o = -half
+    while o <= half + 1e-6:
+        offsets.append(o)
+        o += step
+    offsets.sort(key=lambda a: (abs(a), a))
+    print(f"[restaurant.skills] live_scan: {arc:.0f}deg sweep in {len(offsets)} go_to steps")
+    for off in offsets:
+        ctx.rotate_to(center + math.radians(off))  # blocking in-place rotation (go_to)
+        _aim_head_for_people(ctx)  # rotate_to re-enables auto-tilt; re-raise before capture
+        if settle > 0:
+            time.sleep(settle)
+        if process(ctx.snapshot()):
+            return
+
+
+def _scan_sweep_cmdvel(ctx: TaskContext, center: float, arc: float, process) -> None:
+    """Rotate across *arc* in ONE continuous turn at ``RESTAURANT_SCAN_RATE_DPS`` deg/s via
+    ``nav.set_velocity``; call ``process(snap)`` ~every ``RESTAURANT_SCAN_DETECT_SEC`` DURING
+    the spin.
+
+    Uses the SDK's ``set_velocity`` (open-loop teleop drive) — it publishes the correct
+    ``geometry_msgs/msg/TwistStamped`` to cmd_vel. A raw plain-Twist publish is malformed
+    for this base (``cmd_vel_type`` is TwistStamped) and moves it 0 m. WARNING: bearings
+    carry the snapshot's capture-latency skew at speed. Falls back to the go_to-step sweep
+    if ``set_velocity`` isn't available. Guarantees a zero-velocity stop in ``finally``.
+    """
+    nav = getattr(ctx.walkie, "nav", None)
+    if nav is None or not hasattr(nav, "set_velocity"):
+        print("[restaurant.skills] live_scan: nav.set_velocity unavailable; using go_to steps")
+        return _scan_sweep_gotostep(ctx, center, arc, process)
+
+    rate = math.radians(max(1.0, _f("RESTAURANT_SCAN_RATE_DPS", "12")))
+    hz = max(1.0, _f("RESTAURANT_SCAN_PUBLISH_HZ", "15"))
+    dt = 1.0 / hz
+    detect_sec = _f("RESTAURANT_SCAN_DETECT_SEC", "1.0")
+    half = math.radians(arc) / 2.0
+
+    # Pre-rotate (blocking) to the arc start, then sweep one continuous turn to the far end.
+    ctx.rotate_to(center - half)
+    _aim_head_for_people(ctx)
+    target_sweep = math.radians(arc)
+    deadline = time.monotonic() + target_sweep / rate + 3.0
+    print(f"[restaurant.skills] live_scan: {arc:.0f}deg cmd_vel sweep @ {math.degrees(rate):.0f}deg/s "
+          "(nav.set_velocity)")
+    prev_h: float | None = None
+    swept = 0.0
+    last_detect = 0.0
+    try:
+        while time.monotonic() < deadline:
+            now = time.monotonic()
+            cur = _robot_pose(ctx)
+            if cur is None:
+                print("[restaurant.skills] live_scan: lost odom mid-sweep; stopping")
+                break
+            if prev_h is not None:
+                swept += abs(_wrap(cur["heading"] - prev_h))  # angle actually swept (wrap-safe)
+            prev_h = cur["heading"]
+            if swept >= target_sweep:
+                break
+            nav.set_velocity(0.0, 0.0, rate)  # yaw spin (TwistStamped via the SDK)
+            if now - last_detect < detect_sec:
+                time.sleep(dt)
+                continue
+            last_detect = now
+            if process(ctx.snapshot()):  # base coasts through the round-trip / announce
+                return
+    finally:
+        for _ in range(3):  # guaranteed stop
+            try:
+                nav.set_velocity(0.0, 0.0, 0.0)
+            except Exception:  # noqa: BLE001
+                break
+        try:
+            nav.stop()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def live_scan_for_caller(ctx: TaskContext,
+                         blocked: list[tuple[float, float]] | None = None,
+                         radius_m: float | None = None,
+                         *, arc_deg: float | None = None,
+                         center: float | None = None) -> Caller | None:
+    """Sweep the base across the dining area, pose-detecting waving customers.
+
+    Two rotation modes (``RESTAURANT_SCAN_ROTATE_MODE``) share the SAME bearing-first
+    detection: each waver's absolute BEARING is the torso-centre pixel + the snapshot's
+    capture heading (depth-independent); callers dedup by ``RESTAURANT_HEADING_DEDUP_DEG``;
+    ``world_xy`` is filled only when depth was valid (far caller = bearing-only, the live
+    approach refines it); the running count is announced; ``RESTAURANT_APPROACH_FIRST``
+    returns the first waver vs finishing the arc and picking the nearest.
+
+    - ``gotostep`` (default): discrete in-place ``nav.go_to`` (``ctx.rotate_to``) steps of
+      ``RESTAURANT_SCAN_STEP_DEG`` across ``RESTAURANT_SCAN_ARC_DEG``, CENTRE-OUT, detecting
+      at each STATIONARY stop. Reliable (go_to always moves the base) and skew-free.
+    - ``cmdvel``: ONE continuous in-place rotation at ``RESTAURANT_SCAN_RATE_DPS`` deg/s,
+      publishing a Twist to ``cmd_vel`` (the creep channel), detecting ~every
+      ``RESTAURANT_SCAN_DETECT_SEC`` DURING the turn. The original "spin while detecting"
+      design — but on a base that IGNORES raw cmd_vel it just stands still (verify with
+      ``uv run python -m manual_tests.test_base_creep --raw-only``), and bearings carry the
+      capture-latency skew. Falls back to ``gotostep`` if the cmd_vel channel won't open.
+
+    Returns None on no odom fix / none found.
+    """
+    if blocked is None:
+        blocked = []
+    if radius_m is None:
+        radius_m = _f("RESTAURANT_HANDLED_RADIUS_M", "0.6")
+    pose = _robot_pose(ctx)
+    if pose is None:
+        print("[restaurant.skills] live_scan: no odometry fix; skipping sweep")
+        return None
+
+    # The sweep centre defaults to the dining heading (bar anchor) — correct when scanning
+    # from the bar. A caller (e.g. lost-recovery mid-approach, where the robot has driven
+    # into the room and turned toward the customer) can override it with the robot's CURRENT
+    # heading so the re-scan looks where the customer actually was, not back at the bar.
+    if center is None:
+        bar = ctx.data.get("bar_anchor")
+        center = bar["heading"] if bar else pose["heading"]
+    arc = arc_deg if arc_deg is not None else _f("RESTAURANT_SCAN_ARC_DEG", "180")
+    dedup_deg = _f("RESTAURANT_HEADING_DEDUP_DEG", "8")
+    kp_conf = _f("RESTAURANT_KP_CONF", "0.3")
+    approach_first = _b("RESTAURANT_APPROACH_FIRST", "1")
+
+    callers: list[Caller] = []
+    stats: dict = {"selected": None, "persons": 0, "calling": 0}
+
+    def _process(snap) -> bool:
+        """Detect wavers in *snap*, append fresh callers + announce; True = stop the sweep.
+
+        Shared by both rotation modes — the only difference between them is HOW the base
+        turns and WHEN this runs (at each stop vs ~1 Hz during a continuous spin)."""
+        if snap is None:
+            return False
+        try:
+            persons = ctx.walkieAI.image.estimate_poses(snap.img)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[restaurant.skills] live_scan pose estimation failed ({exc})")
+            return False
+        stats["persons"] += len(persons)
+        for p in persons:
+            if not is_calling(p):
+                continue
+            stats["calling"] += 1
+            bearing = _bearing_from_pixel_u(_torso_center_u(p, kp_conf=kp_conf), snap)
+            if bearing is None:
+                continue
+            if _bearing_is_dup(bearing, [c.bearing for c in callers], dedup_deg):
+                continue
+            wxy = _person_world_xy(snap, p)
+            if wxy is not None and any(
+                    math.hypot(wxy[0] - bx, wxy[1] - by) <= radius_m for bx, by in blocked):
+                continue  # already handled / given up on this spot
+            caller = Caller(wxy, bearing, _cxcywh_to_xyxy(p.bbox), p.confidence or 0.0)
+            callers.append(caller)
+            n = len(callers)
+            ctx.say(prompts.SEE_N_CUSTOMERS.format(n=n, plural="" if n == 1 else "s"))
+            if approach_first:
+                stats["selected"] = caller
+                return True
+        return False
+
+    mode = os.getenv("RESTAURANT_SCAN_ROTATE_MODE", "gotostep").strip().lower()
+    try:
+        if mode == "cmdvel":
+            _scan_sweep_cmdvel(ctx, center, arc, _process)
+        else:
+            _scan_sweep_gotostep(ctx, center, arc, _process)
+    except Exception as exc:  # noqa: BLE001 — never let the scan raise mid-run
+        print(f"[restaurant.skills] live_scan: error ({exc}); stopping")
+    finally:
+        ctx.walkie.robot.head.set_auto_tilt(True)
+    print(f"[restaurant.skills] live_scan ({mode}): {len(callers)} caller(s) "
+          f"(saw {stats['persons']} person-detection(s), {stats['calling']} with a raised hand)")
+
+    selected = stats["selected"]
+    if selected is not None:
+        return selected
+    if not callers:
+        print("[restaurant.skills] live_scan: no callers across the sweep")
+        ctx.rotate_to(center)  # leave the base back at the dining centre
+        return None
+    # Finish-sweep selection: nearest by map point (those with depth), else most central.
+    rx, ry = pose["x"], pose["y"]
+    placed = [c for c in callers if c.world_xy is not None]
+    if placed:
+        return min(placed, key=lambda c: math.hypot(c.world_xy[0] - rx, c.world_xy[1] - ry))
+    return min(callers, key=lambda c: abs(_wrap(c.bearing - center)))
+
+
+def _lost_recover(ctx: TaskContext, caller: Caller) -> Caller | None:
+    """Re-find a customer the approach lost: a narrow live re-scan for any waver.
+
+    Centres the re-scan on the robot's CURRENT heading (it has driven into the room while
+    facing the customer), NOT the bar-anchored dining heading — the lost customer is in
+    front of the robot now, not back toward the bar."""
+    arc = _f("RESTAURANT_RESCAN_ARC_DEG", "60")
+    cur = _robot_pose(ctx)
+    center = cur["heading"] if cur else caller.bearing
+    return live_scan_for_caller(ctx, [], _f("RESTAURANT_HANDLED_RADIUS_M", "0.6"),
+                                arc_deg=arc, center=center)
+
+
+def live_approach_caller(ctx: TaskContext, caller: Caller
+                         ) -> tuple[bool, str | None, tuple[float, float] | None]:
+    """Drive to a (possibly bearing-only) caller in one non-blocking approach.
+
+    Models grasp's ``approach_object``: a single non-blocking ``go_to`` with a stand-off
+    and ``align_method="face_target"`` (the base faces the customer), re-aiming the HEAD
+    each tick (never a competing per-tick base rotate). On top of it:
+
+    - **Close/far** by depth validity — a valid fix within ``RESTAURANT_DEPTH_RELIABLE_M``
+      drives straight to the point; otherwise it drives a ``RESTAURANT_FAR_STEP_M`` step
+      along the bearing ray and re-detects to refine (cancel + re-issue only when the
+      refined point moved past ``RESTAURANT_REFINE_MIN_DELTA_M``).
+    - **Velocity stall**: base under ``RESTAURANT_APPROACH_LOW_SPEED_MPS`` for
+      ``RESTAURANT_APPROACH_LOW_SPEED_SEC`` → cancel; if the customer is still in view,
+      treat the spot as reached (serve from here); else recover.
+    - **Lost**: customer out of view for ``RESTAURANT_LOST_SEC`` → cancel and re-scan; if
+      no waver is re-found, announce the loss, return to the bar, and report failure.
+    - **Appearance**: up to ``RESTAURANT_CLOSE_APPEARANCE_ROUNDS`` clothing captions are
+      captured up close (interleaved in the loop — no threads) and the best is returned so
+      the order ask can be an appearance-aware call-out.
+
+    Returns ``(reached, best_caption, final_world_xy)``. On success ``final_world_xy`` is
+    a real refined point; on failure it is ``None``.
+    """
+    standoff = _f("RESTAURANT_STANDOFF_M", "0.8")
+    reliable = _f("RESTAURANT_DEPTH_RELIABLE_M", "3.5")
+    far_step = _f("RESTAURANT_FAR_STEP_M", str(reliable))
+    refine_delta = _f("RESTAURANT_REFINE_MIN_DELTA_M", "0.4")
+    low_mps = _f("RESTAURANT_APPROACH_LOW_SPEED_MPS", "0.08")
+    low_sec = _f("RESTAURANT_APPROACH_LOW_SPEED_SEC", "5.0")
+    lost_sec = _f("RESTAURANT_LOST_SEC", "5.0")
+    detect_sec = _f("RESTAURANT_APPROACH_DETECT_SEC", "1.0")
+    timeout = _f("RESTAURANT_APPROACH_TIMEOUT_SEC", "45")
+    rounds = int(_f("RESTAURANT_CLOSE_APPEARANCE_ROUNDS", "3"))
+    reacquire_r = _f("RESTAURANT_REACQUIRE_RADIUS_M", "1.5")
+    goal_tol = _f("WALKIE_NAV_GOAL_TOLERANCE_M", "0.0")
+
+    pose = _robot_pose(ctx)
+    if pose is None:
+        print("[restaurant.skills] live_approach: no odom fix; cannot navigate")
+        return False, None, None
+
+    ctx.say(prompts.FOUND_CUSTOMER)
+    try:
+        ctx.walkie.robot.head.set_auto_tilt(False)
+    except Exception:  # noqa: BLE001
+        pass
+
+    target = caller.world_xy if caller.world_xy is not None else _ray_point(pose, caller.bearing, far_step)
+    captions: list[str] = []
+
+    def _issue(tx: float, ty: float) -> bool:
+        try:
+            ctx.walkie.nav.go_to(x=tx, y=ty, blocking=False, standoff=standoff,
+                                 align_method="face_target")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            print(f"[restaurant.skills] live_approach: nav raised ({exc})")
+            return False
+
+    def _cancel() -> None:
+        try:
+            ctx.walkie.nav.cancel()
+        except Exception:  # noqa: BLE001
+            pass
+
+    _issue(*target)
+    now0 = time.monotonic()
+    last_seen = now0
+    low_start: float | None = None
+    last_detect = 0.0
+    deadline = now0 + timeout
+    reached = False
+
+    while time.monotonic() < deadline:
+        now = time.monotonic()
+        # --- cheap velocity poll (stall timer) ---
+        try:
+            v = ctx.walkie.status.get_velocity()
+        except Exception:  # noqa: BLE001
+            v = None
+        if v is not None:  # None = telemetry not up yet → don't trip the timer
+            if abs(v.get("linear", 0.0)) < low_mps:
+                low_start = low_start or now
+            else:
+                low_start = None
+        try:
+            navigating = ctx.walkie.nav.is_navigating
+        except Exception:  # noqa: BLE001
+            navigating = False
+
+        # --- ~1 Hz re-detect: refine target, hold head, grab appearance ---
+        if now - last_detect >= detect_sec:
+            last_detect = now
+            fresh, snap, box = _detect_caller_near(ctx, target, caller.bearing,
+                                                   radius_m=max(reacquire_r, 0.6 * far_step))
+            if fresh is not None:
+                last_seen = now
+                if fresh.world_xy is not None:
+                    moved = math.hypot(target[0] - fresh.world_xy[0], target[1] - fresh.world_xy[1])
+                    target = fresh.world_xy
+                    if moved > refine_delta:  # refined enough to be worth re-issuing
+                        _cancel()
+                        _issue(*target)
+                # appearance up close (interleaved; keep the best of N rounds)
+                cur = _robot_pose(ctx)
+                if (box is not None and snap is not None and fresh.world_xy is not None
+                        and cur is not None and len(captions) < rounds
+                        and _caller_is_close(fresh.world_xy, cur, reliable)):
+                    cap = describe_customer(ctx, snap, box)
+                    if cap:
+                        captions.append(cap)
+
+        # --- stall: low speed sustained ---
+        if low_start is not None and (now - low_start) >= low_sec:
+            print(f"[restaurant.skills] live_approach: base under {low_mps:.2f}m/s for "
+                  f"{low_sec:.0f}s — cancelling and checking the customer is in view")
+            _cancel()
+            if (now - last_seen) <= lost_sec:
+                print("[restaurant.skills] live_approach: customer in view — reachable, "
+                      "serving from here")
+                reached = True
+                break
+            recovered = _lost_recover(ctx, caller)
+            if recovered is None:
+                ctx.say(prompts.CUSTOMER_LOST)
+                return_to_bar(ctx, face_counter=False)
+                return False, None, None
+            caller = recovered
+            target = recovered.world_xy or _ray_point(_robot_pose(ctx) or pose, recovered.bearing, far_step)
+            last_seen = time.monotonic()
+            low_start = None
+            _issue(*target)
+            continue
+
+        # --- lost: out of view too long ---
+        if (now - last_seen) >= lost_sec:
+            print(f"[restaurant.skills] live_approach: customer out of view for "
+                  f"{lost_sec:.0f}s — cancelling and re-scanning")
+            _cancel()
+            recovered = _lost_recover(ctx, caller)
+            if recovered is None:
+                ctx.say(prompts.CUSTOMER_LOST)
+                return_to_bar(ctx, face_counter=False)
+                return False, None, None
+            caller = recovered
+            target = recovered.world_xy or _ray_point(_robot_pose(ctx) or pose, recovered.bearing, far_step)
+            last_seen = time.monotonic()
+            low_start = None
+            _issue(*target)
+            continue
+
+        # --- arrived? (nav settled) ---
+        if not navigating:
+            after = _robot_pose(ctx) or pose
+            end_d = math.hypot(target[0] - after["x"], target[1] - after["y"])
+            if end_d <= standoff + max(goal_tol, 0.4):
+                reached = True
+                break
+            # Nav stopped short (transient abort / unreachable standoff). Re-issue once
+            # more toward the best target; the loop's stall/lost timers bound the retries.
+            _issue(*target)
+
+        time.sleep(0.1)
+
+    if not reached:
+        print("[restaurant.skills] live_approach: timed out before reaching the customer")
+        _cancel()
+        # Took too long but if the customer is in view, serve from here rather than abandon.
+        if (time.monotonic() - last_seen) > lost_sec:
+            ctx.say(prompts.CUSTOMER_LOST)
+            return_to_bar(ctx, face_counter=False)
+            return False, None, None
+
+    # Final facing + a fresh fix so the recorded seat is accurate.
+    face_person(ctx, target)
+    fresh = find_person_near(ctx, target, radius_m=reacquire_r)
+    final_xy = fresh.world_xy if fresh is not None else target
+    best_caption = _best_caption(captions)
+    if best_caption is None:  # never got a close caption → one best-effort capture now
+        best_caption = capture_appearance(ctx, final_xy)
+    try:
+        ctx.walkie.robot.head.set_auto_tilt(True)
+    except Exception:  # noqa: BLE001
+        pass
+    return True, best_caption, final_xy
+
+
+# ---------------------------------------------------------------------------
 # Interaction (order taking is real; relay speaks the order)
 # ---------------------------------------------------------------------------
 def describe_customer(ctx: TaskContext, snap, bbox_xyxy: BBox) -> str | None:
@@ -752,7 +1340,8 @@ def _capture_order(ctx: TaskContext, recenter, first_prompt: str) -> list[str]:
     return []
 
 
-def take_order(ctx: TaskContext, world_xy: tuple[float, float] | None = None) -> list[str]:
+def take_order(ctx: TaskContext, world_xy: tuple[float, float] | None = None, *,
+               first_prompt: str | None = None) -> list[str]:
     """Greet the customer, capture and confirm their order. Real dialogue today.
 
     Gaze (rulebook-scored): if *world_xy* is given, the robot re-faces the customer before
@@ -762,12 +1351,16 @@ def take_order(ctx: TaskContext, world_xy: tuple[float, float] | None = None) ->
     to RESTAURANT_CONFIRM_RETRIES times — that step scores 2×160), while a silent/garbled
     reply counts as agreement so venue noise can't drop a good order. Returns [] only after
     the re-asks genuinely fail.
+
+    *first_prompt* overrides the opening line (default :data:`prompts.GREET_CUSTOMER`).
+    The live approach passes its appearance-aware call-out ("you in the red jacket — what
+    would you like to order?") here so the order ask isn't a second, generic greeting.
     """
     def recenter():
         if world_xy is not None:
             face_person(ctx, world_xy)
 
-    items = _capture_order(ctx, recenter, prompts.GREET_CUSTOMER)
+    items = _capture_order(ctx, recenter, first_prompt or prompts.GREET_CUSTOMER)
     print(f"[restaurant.skills] captured items: {items}")
     if not items:
         return []  # un-parseable even after re-asking; the caller decides what to do next

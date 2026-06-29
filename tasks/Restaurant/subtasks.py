@@ -40,12 +40,20 @@ from tasks.skills.geometry import parse_pose
 
 from . import prompts
 from .skills import (
+    _aim_for_person_capture,
     _arm_calibrated,
+    _cxcywh_to_xyxy,
+    _greeting_from_caption,
+    _person_world_xy,
     approach_customer,
     capture_appearance,
+    describe_customer,
     exclude_handled,
     find_first_caller,
     find_person_near,
+    is_calling,
+    live_approach_caller,
+    live_scan_for_caller,
     nearest_caller,
     relay_to_barman,
     return_to_bar,
@@ -105,11 +113,16 @@ def _b(env_key: str, default: str) -> bool:
 def _next_caller(ctx: TaskContext, blocked: list[tuple[float, float]], radius: float):
     """Pick the next customer to serve.
 
-    Default (``RESTAURANT_APPROACH_FIRST=1``): stop at the FIRST waver seen during the
-    sweep and head straight over (``find_first_caller`` — exclusion of handled/given-up
-    spots happens in-sweep). Set 0 for the original behaviour: finish the whole arc, drop
-    handled spots, then take the nearest. (Batched order-taking always does the full sweep.)
+    ``RESTAURANT_LIVE_SCAN=1``: ONE continuous cmd_vel rotation while pose detection runs,
+    deduping callers by bearing (``live_scan_for_caller``) — a far caller is returned
+    bearing-only (``world_xy is None``) and the matching ``live_approach_caller`` refines
+    it. ``=0`` (default — the live path is opt-in for on-robot A/B until validated) keepspose
+    the old discrete sweep: with ``RESTAURANT_APPROACH_FIRST=1`` stop at the FIRST waver
+    (``find_first_caller``); ``=0`` finishes the arc, drops handled spots, then takes the
+    nearest. (Batched order-taking always does the full sweep.)
     """
+    if _b("RESTAURANT_LIVE_SCAN", "0"):
+        return live_scan_for_caller(ctx, blocked, radius)
     if _b("RESTAURANT_APPROACH_FIRST", "1"):
         return find_first_caller(ctx, blocked, radius)
     return nearest_caller(ctx, exclude_handled(scan_for_callers(ctx), blocked, radius))
@@ -159,6 +172,18 @@ def _await_handoff(ctx: TaskContext, ask_prompt: str, wait_key: str) -> bool:
     return False
 
 
+def _thank_barman(ctx: TaskContext) -> None:
+    """Thank the barman once the order is actually in hand.
+
+    Courtesy only — never scored. Gated by ``RESTAURANT_THANK_BARMAN`` (default on) so it
+    can be silenced in a noisy/time-pressed venue. Both serve paths call this only on a
+    CONFIRMED handoff (tray load confirmed / item picked), so we never thank for items the
+    barman never gave us — the same honesty rule as the pickup scoring beside it.
+    """
+    if _b("RESTAURANT_THANK_BARMAN", "1"):
+        ctx.say(prompts.THANK_BARMAN)
+
+
 def _odom_fix(ctx: TaskContext) -> dict | None:
     """A genuine odometry fix, or None on failure (never the zeros fallback)."""
     try:
@@ -199,6 +224,7 @@ def _pick_and_serve(ctx: TaskContext, order: Order) -> None:
         order.status = OrderStatus.PICKED
         ctx.score("pickup_items")      # arm: picked an item from the bar
         ctx.score("first_pick_bonus")  # one-time (clamped to 1)
+        _thank_barman(ctx)             # courtesy: item picked off the bar, thank the barman
 
         # 2. Re-acquire the customer visually rather than trusting the stale point (§5.1);
         #    match on stored appearance so we don't serve a neighbour at the next table.
@@ -252,6 +278,7 @@ def _serve_with_tray(ctx: TaskContext, order: Order) -> None:
     if loaded:
         ctx.score("pickup_items", n)    # items received onto the tray (per item)
         ctx.score("first_pick_bonus")   # one-time (clamped to 1 by the sheet)
+        _thank_barman(ctx)              # courtesy: the tray is loaded, thank the barman
     else:
         print(f"[restaurant] order #{order.id}: tray load NOT confirmed — carrying anyway, "
               "not scoring pickup")
@@ -300,6 +327,32 @@ def _take_one_order(ctx: TaskContext, caller, orders: dict[int, Order]) -> Order
     order = Order(id=len(orders) + 1, world_xy=caller.world_xy, bearing=caller.bearing)
     orders[order.id] = order
     ctx.score("detect_customer")  # detected + selected a waving customer (claimed)
+    if _b("RESTAURANT_LIVE_SCAN", "0"):
+        # Live path: one non-blocking approach that re-detects/refines as it closes, faces
+        # + tilts the head at the customer, captures their appearance up close, and aborts
+        # on a velocity stall / lost customer. Returns the refined seat + the best clothing
+        # caption, so the order ask can be an appearance-aware call-out (no second greeting).
+        reached, caption, final_xy = live_approach_caller(ctx, caller)
+        if not reached:
+            order.status = OrderStatus.FAILED
+            return None
+        if final_xy is not None:
+            order.world_xy = final_xy
+        if caption:
+            order.appearance = caption
+        order.status = OrderStatus.APPROACHED
+        ctx.score("reach_table")
+        if order.appearance is None and order.world_xy is not None:
+            order.appearance = capture_appearance(ctx, order.world_xy)  # fallback re-ID
+        items = take_order(ctx, world_xy=order.world_xy,
+                           first_prompt=_greeting_from_caption(ctx, order.appearance))
+        if not items:
+            order.status = OrderStatus.FAILED
+            return None
+        order.items = items
+        order.status = OrderStatus.ORDERED
+        ctx.score("understand_order")  # captured + confirmed the order
+        return order
     if not approach_customer(ctx, caller.world_xy):
         order.status = OrderStatus.FAILED
         return None
@@ -423,6 +476,15 @@ class ScanAndApproach(SubTask):
             ctx.say(prompts.NO_CUSTOMER)
             return StepResult.RETRY
         ctx.data["target"] = target
+        # Find-and-announce only when approach is gated off (RESTAURANT_DO_APPROACH=0).
+        if not _b("RESTAURANT_DO_APPROACH", "1"):
+            return StepResult.DONE
+        # Live path: bearing-first caller -> live approach (re-detect/refine, stall/lost
+        # handling). A live caller may carry no world_xy, so it MUST NOT go to the old
+        # approach_customer (which dereferences world_xy) — route by the same flag.
+        if _b("RESTAURANT_LIVE_SCAN", "0"):
+            reached, _caption, _xy = live_approach_caller(ctx, target)
+            return StepResult.DONE if reached else StepResult.RETRY
         if approach_customer(ctx, target.world_xy):
             return StepResult.DONE
         # Reached no nav goal (no odom fix / nav refused) — re-sweep and retry.
@@ -458,7 +520,12 @@ class ServeCustomers(SubTask):
         giveups: list[list[float]] = []
         attempts = 0
 
-        def note_failure(xy: tuple[float, float]) -> None:
+        def note_failure(xy: tuple[float, float] | None) -> None:
+            # A live (bearing-first) caller can fail before it ever got a depth fix, so its
+            # world_xy is None — there's no map spot to mark given-up. Skip it; the
+            # max_attempts budget still bounds the loop so a far no-show can't spin forever.
+            if xy is None:
+                return
             for g in giveups:
                 if math.hypot(g[0] - xy[0], g[1] - xy[1]) <= radius:
                     g[2] += 1
@@ -484,8 +551,12 @@ class ServeCustomers(SubTask):
             # re-select them even if they keep waving. Anchor on the REFINED seat
             # (_take_one_order updated order.world_xy from up close) so the dedup radius
             # actually covers where they'll be re-detected — the coarse caller point
-            # could be a metre off and let the same person be served twice.
-            handled.append(order.world_xy or caller.world_xy)
+            # could be a metre off and let the same person be served twice. A successful
+            # order always carries a refined point (the live approach drove right up); the
+            # `is not None` guard only protects exclude_handled's math from a None slipping in.
+            handled_xy = order.world_xy or caller.world_xy
+            if handled_xy is not None:
+                handled.append(handled_xy)
 
             # 2. Relay at the bar, then pick + serve (Phase 2 — gated until calibrated).
             # _deliver_order already ends back at the bar (its serve paths return there),
@@ -643,6 +714,58 @@ class SurfaceScanTestTask(SubTask):
         return StepResult.DONE
 
 
+class PoseAppearanceTestTask(SubTask):
+    """Read-only demo of person detection (pose) + appearance captioning.
+
+    Raises the head, takes ONE snapshot, runs pose estimation, and for every detected
+    person prints their confidence, whether they're calling (a raised hand — the
+    Restaurant wave signal), their lifted map point (when depth is valid), and the
+    appearance caption used to re-identify them on return (``tasks.skills`` →
+    :func:`describe_customer`). This exercises the same pose → crop → caption chain
+    the serve flow relies on, but in isolation: no base/arm motion beyond the head-aim,
+    captioning straight off the RGB crop (so it runs on a webcam with no depth). Use it
+    during bring-up to eyeball pose detection and the appearance captioner together —
+    and to tune ``RESTAURANT_CALL_WRIST_MARGIN`` / ``RESTAURANT_KP_CONF`` from the
+    per-person ``calling=`` flags — before trusting the full customer flow.
+    """
+
+    critical = True
+
+    def run(self, ctx: TaskContext) -> StepResult:
+        _aim_for_person_capture(ctx)  # raise the head before framing people
+        snap = ctx.snapshot()
+        if snap is None:
+            print("[test] pose-appearance: no snapshot")
+            ctx.walkie.robot.head.set_auto_tilt(True)
+            return StepResult.RETRY
+        try:
+            persons = ctx.walkieAI.image.estimate_poses(snap.img)
+        except Exception as exc:
+            print(f"[test] pose-appearance: pose estimation failed ({exc})")
+            ctx.walkie.robot.head.set_auto_tilt(True)
+            return StepResult.RETRY
+
+        # Caption straight off the RGB crop (no depth needed); only the world_xy line
+        # needs geometry, so guard that alone instead of skipping the whole test.
+        has_geom = getattr(snap, "has_geometry", False)
+        n_calling = 0
+        for i, p in enumerate(persons):
+            xyxy = _cxcywh_to_xyxy(p.bbox)  # PersonPose.bbox is (cx,cy,w,h); crop wants xyxy
+            calling = is_calling(p)
+            n_calling += int(calling)
+            wxy = _person_world_xy(snap, p) if has_geom else None
+            where = f"({wxy[0]:+.2f},{wxy[1]:+.2f})m" if wxy else "n/a"
+            caption = describe_customer(ctx, snap, xyxy)
+            print(f"[test] person {i}: conf={p.confidence or 0.0:.2f} calling={calling} "
+                  f"world_xy={where} appearance={caption!r}")
+
+        ctx.walkie.robot.head.set_auto_tilt(True)  # _aim left it off; restore (like scan_for_callers)
+        print(f"[test] pose-appearance: saw {len(persons)} person-detection(s), "
+              f"{n_calling} with a raised hand"
+              + ("" if has_geom else " (no depth geometry — world_xy skipped)"))
+        return StepResult.DONE if persons else StepResult.RETRY
+
+
 class PickAndPlaceTestTask(SubTask):
     """Full pick -> place demo (grasp memory + surface placement).
 
@@ -711,6 +834,16 @@ def build_pick_demo(ctx: TaskContext) -> Task:
 def build_grasp_plan_demo(ctx: TaskContext) -> Task:
     """Plan-only grasp test (get_object_grasp_pos) — print the candidate, no motion."""
     return Task("Restaurant-GraspPlan", [GraspPlanTestTask()], ctx)
+
+
+def build_pose_appearance_demo(ctx: TaskContext) -> Task:
+    """Read-only person-detection + appearance-caption test (pose -> crop -> caption).
+
+    Detect every person in one snapshot and print their calling flag, map point, and
+    appearance caption. No motion beyond the head-aim; for on-robot bring-up of the
+    pose + appearance pipeline the serve flow re-identifies customers with.
+    """
+    return Task("Restaurant-PoseAppearance", [PoseAppearanceTestTask()], ctx)
 
 
 def build_place_demo(ctx: TaskContext) -> Task:

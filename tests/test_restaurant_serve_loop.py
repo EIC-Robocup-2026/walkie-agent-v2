@@ -60,6 +60,11 @@ def patched(monkeypatch):
     calls = {"scan": 0, "approach": [], "take_order": []}
 
     def install(*, scan, approach, take_order, nearest=None, find_near=None):
+        # These tests stub the OLD discrete sweep + step-approach to lock the loop
+        # bookkeeping (path-independent). Pin the old path so the now-default live
+        # scan/approach (RESTAURANT_LIVE_SCAN) doesn't bypass these stubs.
+        monkeypatch.setenv("RESTAURANT_LIVE_SCAN", "0")
+
         def _scan(ctx):
             calls["scan"] += 1
             return list(scan())
@@ -344,6 +349,52 @@ def test_serve_with_tray_unconfirmed_unload_is_not_scored(monkeypatch):
     assert ("serve_order", 2) not in ctx.scored
     assert not any(prompts.SERVE_ANNOUNCE.format(items="coke, chips") == s for s in ctx.said)
     assert bar["n"] == 1                               # still returned to the bar (no stall)
+
+
+# --- thank the barman on a confirmed handoff (RESTAURANT_THANK_BARMAN) ------
+
+def test_serve_with_tray_thanks_barman_on_confirmed_load(monkeypatch):
+    """Tray load confirmed -> the robot thanks the barman before carrying the order off."""
+    monkeypatch.setenv("RESTAURANT_THANK_BARMAN", "1")
+    monkeypatch.setattr(subtasks, "return_to_customer", lambda ctx, xy, **kw: xy)
+    monkeypatch.setattr(subtasks, "return_to_bar", lambda ctx, **kw: True)
+    ctx = _TrayCtx()                  # ask() always returns "ready" -> load confirmed
+    order = subtasks.Order(id=1, world_xy=(2.0, 3.0), bearing=0.0, items=["coke"])
+
+    subtasks._serve_with_tray(ctx, order)
+
+    assert prompts.THANK_BARMAN in ctx.said
+
+
+def test_serve_with_tray_no_thanks_when_load_unconfirmed(monkeypatch):
+    """No confirmed load -> no thanks (honest: never thank for items we never received)."""
+    monkeypatch.setenv("RESTAURANT_THANK_BARMAN", "1")
+    monkeypatch.setenv("RESTAURANT_TRAY_HANDOFF_TRIES", "1")
+    monkeypatch.setenv("RESTAURANT_TRAY_LOAD_WAIT_SEC", "0")
+    monkeypatch.setenv("RESTAURANT_TRAY_UNLOAD_WAIT_SEC", "0")
+    monkeypatch.setattr(subtasks, "return_to_customer", lambda ctx, xy, **kw: xy)
+    monkeypatch.setattr(subtasks, "return_to_bar", lambda ctx, **kw: True)
+    ctx = _ScriptedCtx([])           # pure silence -> load never confirmed
+    order = subtasks.Order(id=1, world_xy=(2.0, 3.0), bearing=0.0, items=["coke"])
+
+    subtasks._serve_with_tray(ctx, order)
+
+    assert ("pickup_items", 1) not in ctx.scored   # load unconfirmed -> not scored...
+    assert prompts.THANK_BARMAN not in ctx.said     # ...and not thanked
+
+
+def test_serve_with_tray_no_thanks_when_gate_off(monkeypatch):
+    """RESTAURANT_THANK_BARMAN=0 silences the courtesy line even on a confirmed load."""
+    monkeypatch.setenv("RESTAURANT_THANK_BARMAN", "0")
+    monkeypatch.setattr(subtasks, "return_to_customer", lambda ctx, xy, **kw: xy)
+    monkeypatch.setattr(subtasks, "return_to_bar", lambda ctx, **kw: True)
+    ctx = _TrayCtx()                  # load confirmed, but the gate is off
+    order = subtasks.Order(id=1, world_xy=(2.0, 3.0), bearing=0.0, items=["coke"])
+
+    subtasks._serve_with_tray(ctx, order)
+
+    assert ("pickup_items", 1) in ctx.scored        # load WAS confirmed (still scored)...
+    assert prompts.THANK_BARMAN not in ctx.said      # ...but the gate suppressed the thanks
 
 
 # --- readiness go-signal (SignalReady) -------------------------------------

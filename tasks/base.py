@@ -358,12 +358,32 @@ class TaskContext:
             _log("ctx", f"current_pose failed ({exc})")
         return {"x": 0.0, "y": 0.0, "heading": 0.0}
 
-    def rotate_to(self, heading_rad: float) -> bool:
-        """Rotate in place — one-shot 'look toward' for a static target."""
+    def rotate_to(self, heading_rad: float, *, blocking: bool = True) -> bool:
+        """Rotate in place — one-shot 'look toward' for a static target.
+
+        ``blocking=True`` (default, unchanged behaviour — every existing caller
+        passes a heading only): disable head auto-tilt, drive to the heading and
+        wait, then re-enable auto-tilt; returns whether the goal was reached.
+
+        ``blocking=False``: command the rotation and return immediately WITHOUT
+        re-enabling auto-tilt (the live-scan / live-approach own the head and keep
+        it aimed at people). The caller MUST ``nav.cancel()`` before issuing a
+        second non-blocking nav goal — ``nav.go_to(blocking=False)`` spawns a
+        *competing* async action thread, it does not preempt the in-flight one
+        (walkie_sdk navigation.py). Returns True once the goal was dispatched.
+        """
         self.walkie.robot.head.set_auto_tilt(False)
         pose = self.current_pose()
-        self.goto(pose["x"], pose["y"], heading_rad)
-        self.walkie.robot.head.set_auto_tilt(True)
+        if blocking:
+            reached = self.goto(pose["x"], pose["y"], heading_rad)
+            self.walkie.robot.head.set_auto_tilt(True)
+            return reached
+        try:
+            self.walkie.nav.go_to(pose["x"], pose["y"], heading_rad, blocking=False)
+        except Exception as exc:
+            _log("ctx", f"rotate_to(blocking=False) failed ({exc})")
+            return False
+        return True
 
     # --- scoring --------------------------------------------------------
 

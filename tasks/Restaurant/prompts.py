@@ -48,6 +48,11 @@ SERVE_ANNOUNCE = "Here is your order: {items}. Enjoy!"
 ALL_DONE = "I have served all the customers I could reach."
 
 GREET_BARMAN = "Hello! I have an order to place."
+# Spoken to the barman the moment the order is actually in hand — the tray load is
+# confirmed, or an item has been picked from the bar. Courtesy only; never scored,
+# and only said on a CONFIRMED handoff (no thanks for items we never received).
+# Gated by RESTAURANT_THANK_BARMAN.
+THANK_BARMAN = "Thank you very much! I'll take this to the customer now."
 SERVE_NO_CUSTOMER = "I could not find you again to serve the order, sorry."
 
 # Caption prompt to remember a customer's look, so we can re-find them on return.
@@ -55,6 +60,26 @@ CUSTOMER_APPEARANCE_PROMPT = (
     "Describe this seated restaurant customer's visible appearance in one short "
     "sentence for someone who must recognize them again: clothing and its colors, "
     "hair, glasses, and any other distinctive feature."
+)
+
+# Live continuous scan (RESTAURANT_LIVE_SCAN): spoken once the running count of distinct
+# waving customers ticks up, as the robot sweeps the room ({n} = callers seen so far).
+SEE_N_CUSTOMERS = "I can see {n} customer{plural} waving."
+# Spoken when the live approach loses the customer for good (no waver re-found) and the
+# robot heads back to the bar instead of driving blind.
+CUSTOMER_LOST = "I lost sight of the customer. I'll head back to the bar and try again."
+
+# LLM system prompt: turn a one-line appearance caption (captured up close during the
+# approach) into a single spoken call-out that names one distinctive visible feature and
+# asks to take the order. Keep it short, warm, and natural; no markdown, one sentence.
+GREETING_INSTRUCTIONS = (
+    "You are a friendly restaurant service robot greeting a customer you have just "
+    "walked up to. You are given a one-line description of the customer's visible "
+    "appearance. Write ONE short, polite spoken greeting that references a single "
+    "distinctive visible feature (e.g. the colour of their shirt) so they know you "
+    "mean them, then ask what they would like to order. Output only the sentence — "
+    "no quotes, no markdown, no preamble. Example: 'Hello! You in the red jacket — "
+    "what would you like to order?'"
 )
 
 NO_CUSTOMER = "I do not see anyone calling right now."
