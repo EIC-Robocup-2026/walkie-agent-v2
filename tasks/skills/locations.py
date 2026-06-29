@@ -21,6 +21,7 @@ its arena vocabulary is mandatory.
 from __future__ import annotations
 
 import difflib
+import math
 import os
 import re
 import tomllib
@@ -125,6 +126,22 @@ class Location:
     barrier: bool = False  # see Room.barrier
 
 
+@dataclass(frozen=True)
+class Door:
+    """A map-defined door/passage the robot may need a human to open.
+
+    Unlike a Room/Location this is **not** a navigation destination — it marks
+    *where a door physically is*, so the door-opening skill engages only when the
+    robot is within ``radius`` metres of one (precision over the reactive depth-only
+    check). ``pose`` is map-frame ``(x, y, heading_rad)``; ``heading`` is the passage
+    direction, kept for display only. ``radius=None`` → the caller's default
+    (env ``WALKIE_DOOR_NEAR_RADIUS_M``).
+    """
+    name: str
+    pose: Pose = (0.0, 0.0, 0.0)
+    radius: float | None = None
+
+
 def build_rooms_locations(data: dict, *, include_absent: bool = False):
     """Parse the ``[rooms]``/``[locations]`` tables of a world.toml-schema dict.
 
@@ -170,6 +187,28 @@ def build_rooms_locations(data: dict, *, include_absent: bool = False):
     return rooms, locations, room_alias, loc_alias
 
 
+def build_doors(data: dict, *, include_absent: bool = False) -> dict[str, Door]:
+    """Parse the ``[doors]`` table of a world.toml-schema dict into Door records.
+
+    Each entry carries a map-frame ``pose = [x, y, heading_rad]`` and an optional
+    ``radius`` (the proximity-trigger override). Drops ``present = false`` entries
+    unless *include_absent*. Returns an empty dict when the file has no ``[doors]``
+    table (the common case — doors are opt-in per arena).
+    """
+    doors: dict[str, Door] = {}
+    for name, raw in (data.get("doors") or {}).items():
+        if not include_absent and not raw.get("present", True):
+            continue
+        radius = raw.get("radius")
+        canonical = _norm(name)
+        doors[canonical] = Door(
+            name=canonical,
+            pose=_pose_of(raw),
+            radius=float(radius) if radius is not None else None,
+        )
+    return doors
+
+
 # --- the location book ------------------------------------------------------
 
 @dataclass
@@ -183,6 +222,7 @@ class LocationBook:
 
     rooms: dict[str, Room] = field(default_factory=dict)
     locations: dict[str, Location] = field(default_factory=dict)
+    doors: dict[str, Door] = field(default_factory=dict)
     _room_alias: dict[str, str] = field(default_factory=dict)
     _loc_alias: dict[str, str] = field(default_factory=dict)
 
@@ -216,6 +256,32 @@ class LocationBook:
     def names(self) -> list[str]:
         return sorted({*self.locations, *self.rooms})
 
+    # --- doors (proximity, not name lookup) -----------------------------
+
+    def has_doors(self) -> bool:
+        """True if the map defines any door — enables proximity-gated door asking."""
+        return bool(self.doors)
+
+    def nearest_door(self, x: float, y: float) -> tuple[Door, float] | None:
+        """The closest mapped door to (x, y) and its planar distance (m), or None."""
+        best: tuple[Door, float] | None = None
+        for d in self.doors.values():
+            dist = math.hypot(d.pose[0] - x, d.pose[1] - y)
+            if best is None or dist < best[1]:
+                best = (d, dist)
+        return best
+
+    def door_near(self, x: float, y: float, *, default_radius: float) -> Door | None:
+        """A mapped door whose trigger circle contains (x, y), else None.
+
+        Each door's own ``radius`` is used when set, otherwise *default_radius*.
+        """
+        for d in self.doors.values():
+            r = d.radius if d.radius is not None else default_radius
+            if math.hypot(d.pose[0] - x, d.pose[1] - y) <= r:
+                return d
+        return None
+
 
 def _default_map_path() -> Path:
     """$WALKIE_MAP_FILE -> $GPSR_WORLD_FILE -> the sibling GPSR world.toml.
@@ -246,7 +312,8 @@ def load_location_book(path: str | os.PathLike | None = None, *,
     rooms, locations, room_alias, loc_alias = build_rooms_locations(
         data, include_absent=include_absent
     )
-    return LocationBook(rooms=rooms, locations=locations,
+    doors = build_doors(data, include_absent=include_absent)
+    return LocationBook(rooms=rooms, locations=locations, doors=doors,
                         _room_alias=room_alias, _loc_alias=loc_alias)
 
 
