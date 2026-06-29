@@ -43,7 +43,7 @@ clip = [
 ]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# Put the repo root on sys.path so tests can `import services.walkie_graphs` / `client` etc.
+# Put the repo root on sys.path so tests can `import services.realtime_explore` / `client` etc.
 pythonpath = ["."]
 # On the robot the shell sources /opt/ros, which puts ROS's pytest plugins on the
 # path; some (launch_testing) need `lark` and crash collection. We use none of

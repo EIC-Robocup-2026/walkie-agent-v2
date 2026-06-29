@@ -26,23 +26,23 @@ uv run python -m manual_tests.test_robot_object_detection
 uv run python -m manual_tests.test_captioning
 uv run python -m manual_tests.test_pose_estimation
 uv run python -m manual_tests.test_object_segmentation
-uv run python -m manual_tests.test_graphs_live   # live walkie_graphs ingest + Rerun viz
+uv run python -m manual_tests.test_graphs_live   # live realtime_explore ingest + Rerun viz
 
 # The real pytest suite is under tests/ (pyproject testpaths=["tests"]).
 # The interactive demo scripts live in manual_tests/ (webcam/robot/live server,
 # guarded by __main__) — deliberately OUTSIDE testpaths so pytest never collects them.
 
-# Wipe the walkie_graphs store for a clean slate (run with the robot stopped).
+# Wipe the walkie_world scene store for a clean slate (run with the robot stopped).
 # Removes the scene store (graph_scene/) and the snapshot ring buffer (graph_buffer/).
-uv run python -m services.walkie_graphs.tools.reset      # asks for confirmation
-uv run python -m services.walkie_graphs.tools.reset -y   # no confirmation
+uv run python -m services.realtime_explore.tools.reset      # asks for confirmation
+uv run python -m services.realtime_explore.tools.reset -y   # no confirmation
 #   (or: ./run.sh reset  /  ./run.sh fresh)
 
 # Build a scene OFFLINE from a recorded snapshot buffer (deterministic; no robot):
-uv run python -m services.walkie_graphs.tools.replay graph_buffer [--pose-mode auto --tsdf --store graph_scene]
+uv run python -m services.realtime_explore.tools.replay graph_buffer [--pose-mode auto --tsdf --store graph_scene]
 
 # Check Open3D GPU support (for pose_mode=auto / TSDF):
-uv run python -m services.walkie_graphs.tools.check_gpu
+uv run python -m services.realtime_explore.tools.check_gpu
 ```
 
 To run without the microphone (typing prompts at a TTY), set `DISABLE_LISTENING=1`.
@@ -53,7 +53,7 @@ To run without the microphone (typing prompts at a TTY), set `DISABLE_LISTENING=
 
 `main.py` sets `RobotContext.stage = "ready"` and runs `run_ready_stage` directly — there is no separate explore/catalogue-building stage and no operator "drive around then press Enter" gate.
 
-In the **`ready`** stage a single background thread — the `walkie_graphs` perception loop (`services.walkie_graphs`, started by `graphs.start()`) — runs alongside the agent. Each tick (every `WALKIE_GRAPHS_INTERVAL_SEC`) it captures an RGB-D frame, runs one masked open-vocabulary detection scoped to `WALKIE_GRAPHS_INTERESTED_CLASSES`, lifts each mask to a 3D world point, fuses/captions/embeds it into the scene-graph object records, and writes the latest live snapshot to `perception.json`. The agent stack listens to mic input via STT, runs the Walkie agent on each utterance, and speaks back via TTS. So the scene graph fills itself in the background while the robot already takes commands. (Pose/people detection is **not** part of this loop — live pose lookups live only in the Vision agent's tools.)
+In the **`ready`** stage a single background thread — the `realtime_explore` perception loop (`services.realtime_explore`, started by `explore.start()`) — runs alongside the agent. Each tick (every `WALKIE_GRAPHS_INTERVAL_SEC`) it captures an RGB-D frame, runs one masked open-vocabulary detection scoped to `WALKIE_GRAPHS_INTERESTED_CLASSES`, lifts each mask to a 3D world point, fuses/captions/embeds it into the scene-graph object records, and writes the latest live snapshot to `perception.json`. The agent stack listens to mic input via STT, runs the Walkie agent on each utterance, and speaks back via TTS. So the scene graph fills itself in the background while the robot already takes commands. (Pose/people detection is **not** part of this loop — live pose lookups live only in the Vision agent's tools.)
 
 The legacy explore stage (`ExploreService`) and its object store (`WalkieVectorDB`/`chroma_db`) were removed; the `SceneStore` is the only long-term memory backend. `tools/reset_db --object` / `db_doctor --object` still operate on a leftover `chroma_db/` dir by path for cleanup, but nothing writes it anymore.
 
@@ -94,7 +94,7 @@ Convention: read-only inspection / DB lookup → parallelable. Anything that mov
 
 `agents/core/robot_context.py` is a thread-safe process-wide singleton (`RobotContext.init(...)` in `main.py`, then `RobotContext.get()` everywhere else). It holds:
 
-- `perception_path` — where the `walkie_graphs` perception loop writes the live snapshot.
+- `perception_path` — where the `realtime_explore` perception loop writes the live snapshot.
 - `stage` — currently always `"ready"` (set in `main.py`); the field is kept because perception middleware gates on it.
 - `speech_log` — bounded deque of `(agent_name, text, ts)` appended whenever any agent's `speak` tool fires. Read by `RobotContextMiddleware` to inject into prompts.
 
@@ -113,22 +113,36 @@ The two are passed side-by-side everywhere (typically as `walkie, walkieAI`).
 
 ### Configuration: `config.toml` + module configs + `.env`
 
-Tuning knobs live in **`config.toml`** (version-controlled) plus **module-local `services/*/config.toml`** files (e.g. `services/walkie_graphs/config.toml` holds every `WALKIE_GRAPHS_*` knob); secrets/endpoints/transport stay in **`.env`** (gitignored). `walkie_config.py::load_config()` reads the root `config.toml` first, then every `services/*/config.toml`, and `os.environ.setdefault`s every leaf — so the code still reads everything via `os.getenv(NAME, default)` unchanged, and precedence is **shell env > `.env` > root `config.toml` > module `config.toml` > code default** (first-set wins, so the root can override a module knob). Every entrypoint calls `load_dotenv()` then `load_config()`. The TOML keys *are* the exact env-var names; tables are just for grouping. When you add a new tunable, give it a sensible `os.getenv` default in code AND an entry in the owning module's `config.toml` (root `config.toml` for cross-cutting knobs) — don't put it back in `.env`.
+Tuning knobs live in **`config.toml`** (version-controlled) plus **module-local `services/*/config.toml`** files (e.g. `services/realtime_explore/config.toml` holds every `WALKIE_GRAPHS_*` knob); secrets/endpoints/transport stay in **`.env`** (gitignored). `walkie_config.py::load_config()` reads the root `config.toml` first, then every `services/*/config.toml`, and `os.environ.setdefault`s every leaf — so the code still reads everything via `os.getenv(NAME, default)` unchanged, and precedence is **shell env > `.env` > root `config.toml` > module `config.toml` > code default** (first-set wins, so the root can override a module knob). Every entrypoint calls `load_dotenv()` then `load_config()`. The TOML keys *are* the exact env-var names; tables are just for grouping. When you add a new tunable, give it a sensible `os.getenv` default in code AND an entry in the owning module's `config.toml` (root `config.toml` for cross-cutting knobs) — don't put it back in `.env`.
 
-### Scene memory specifics (`services/walkie_graphs/`)
+### World model (`walkie_world`) + perception producer (`services/realtime_explore`)
 
-The long-term spatial memory is the **batch-snapshot** pipeline (`buffer / scene / associate / relations / builder / service / poses / tsdf.py`). `services/walkie_graphs/__init__.py` is a lazy (PEP 562) facade exposing `WalkieGraphs` with the query contract consumers depend on (`query_text/query_near/recently_seen/all_objects/get/relations_of/to_text_description` + `start/stop/observe`) and `ObjectNode` fields (`centroid/best_caption/class_name/n_obs/last_seen_ts/captions/id`). Importing the package — or any submodule — is import-light (no eager ChromaDB/Open3D/camera). Full pipeline + every knob: [`docs/WALKIE_GRAPHS.md`](docs/WALKIE_GRAPHS.md). The load-bearing facts:
+> **Refactor note (walkie_world):** the old `services/walkie_graphs` package was split into
+> two. **`walkie_world`** is the import-light DOMAIN MODEL + query engine reached as
+> **`ctx.world`** — it owns the static map (rooms/locations/doors/object shapes + the
+> grounding vocabulary, `walkie_world/map/`), the numpy object scene graph
+> (`walkie_world/scene/`: `store.py` = the old `scene.py`, `relations.py`, `ingest.py`),
+> and PEOPLE memory (`walkie_world/people/`: face + appearance re-ID, the old
+> `perception/people_store.py`). **`services/realtime_explore`** is the PERCEPTION PRODUCER
+> (the old capture/build half: `service.py` = renamed `RealtimeExplore`, `buffer/builder/
+> associate/poses/tsdf/viz`) that feeds the model via `world.observe_objects(...)`. Exactly
+> ONE `WalkieWorld` is built per process (run.py / main.py) and injected into the producer,
+> the agents, and `TaskContext.world`. The map editor's object shapes (XY bbox + Z height)
+> seed `source="map"` placeholder nodes that perception promotes to point clouds; rooms get
+> boundary polygons (`room_at(x,y)`, `is_near_door(x,y)`).
+
+The long-term spatial memory is the **batch-snapshot** pipeline. `walkie_world/__init__.py` is a lazy (PEP 562) facade exposing `WalkieWorld` with the query contract consumers depend on (`query_text/query_near/recently_seen/all_objects/get/relations_of/to_text_description` + `observe_objects`; map: `room/location/obj/.../is_near_door/room_at`; people: `enroll_person/recognize_person*/find_person_by_caption`) and `ObjectNode` fields (`centroid/best_caption/class_name/n_obs/last_seen_ts/captions/id/source/footprint_polygon`). Importing `walkie_world` is import-light (no eager ChromaDB/Open3D/camera; chromadb loads only on first people use). Full pipeline + every knob: [`docs/WALKIE_GRAPHS.md`](docs/WALKIE_GRAPHS.md) (still under the old name — being updated). The load-bearing facts:
 
 - **Two decoupled loops, not a real-time fold.** A cheap **capture thread** (`service.py`) grabs 1 RGB-D frame + 1 detect/caption/embed round-trip per `INTERVAL_SEC`, writes the live `perception.json` straight from the detections, and appends a compact `Snapshot` to an on-disk ring buffer (`graph_buffer/`) — no ICP, no fusion, no maintenance. An occasional single-flight **batch build worker** (every `REBUILD_EVERY_N` snapshots) refines poses → lifts every mask with its optimized pose (`geometry.deproject_mask`) → **batch constrained-agglomerative association** (`associate.py`) → **merges into the persisted `SceneStore`, never shrinking** → derives relations → atomically installs the new scene. Queries read the last installed scene.
-- **No ChromaDB for the scene.** The store (`scene.py`, `graph_scene/`) is a numpy L2-normalized `(N,D)` embedding matrix + `nodes.json` + `edges.json` (+ `map.npz` when TSDF is on). `query_text` is one brute-force cosine matmul over ≤`PRUNE_MAX_RECORDS` (default 500) objects, with a keyword fallback when the embed server is down; a single `RLock` and an immutable-pointer `install()` mean rebuilds never block queries. Survives restart and accretes (builds merge, never shrink). (ChromaDB is still a dep — `perception/people_store.py` uses it for faces.)
+- **No ChromaDB for the scene.** The store (`walkie_world/scene/store.py`, `graph_scene/`) is a numpy L2-normalized `(N,D)` embedding matrix + `nodes.json` + `edges.json` (+ `map.npz` when TSDF is on). `query_text` is one brute-force cosine matmul over ≤`PRUNE_MAX_RECORDS` (default 500) objects, with a keyword fallback when the embed server is down; a single `RLock` and an immutable-pointer `install()` mean rebuilds never block queries. Survives restart and accretes (builds merge, never shrink). (ChromaDB is still a dep — `walkie_world/people/store.py` uses it for faces + appearance + caption re-ID.)
 - **Association is where the precision lives** (`associate.py`): a hard centroid cap kills twin fusion; **mutual-min** cloud overlap kills flat-object→table absorption; same-class CLIP + a stricter **cross-class** CLIP gate (`ASSOC_CROSS_CLASS_CLIP_MIN`) recovers detector label flip-flop (cup↔mug) without fusing distinct objects; complete-linkage + a per-class AABB-extent veto prevents chaining a row of chairs into one blob. `n_obs` is the cluster member count, so the confirmation gate (`MIN_OBS_CONFIRM`, default 2) clears in one build — no multi-sighting lag.
 - **Embeddings/detection/captions are remote.** All from walkie-ai-server (`walkieAI.image.process` for masks+caption+embed in one round-trip; `image.embed_text` for queries). Detection is scoped to `WALKIE_GRAPHS_INTERESTED_CLASSES`; `EXCLUDE_CLASSES` (default `person`) never become nodes; only `CAPTION_CLASSES` get captioned. The searchable document is the caption (the detector class is frequently wrong).
 - **Pose & volumetric map are staged.** `POSE_MODE=baseline` (trust nav pose, no Open3D) + `TSDF=0` is the default object-recall path. `POSE_MODE=auto` (Open3D RGB-D odometry + pose-graph, seeded/sanity-bounded by nav so it can't do worse) + `TSDF=1` (VoxelBlockGrid volumetric map) is **off until validated on a replayed buffer** — a pose graph can make poses worse than settled nav. Both Open3D paths are import-guarded and degrade to baseline/None.
-- **Offline replay is the dev loop.** Record one run on the robot, then iterate deterministically with no robot: `uv run python -m services.walkie_graphs.tools.replay graph_buffer [--pose-mode auto --tsdf --store graph_scene]`. Wipe with `uv run python -m services.walkie_graphs.tools.reset` (clears `graph_scene/` + `graph_buffer/`). Knobs live in `services/walkie_graphs/config.toml` (~46, grouped). **When changing this package, run the bare-numpy tests: `pytest tests/graphs/`.**
+- **Offline replay is the dev loop.** Record one run on the robot, then iterate deterministically with no robot: `uv run python -m services.realtime_explore.tools.replay graph_buffer [--pose-mode auto --tsdf --store graph_scene]`. Wipe with `uv run python -m services.realtime_explore.tools.reset` (clears `graph_scene/` + `graph_buffer/`). Knobs live in `services/realtime_explore/config.toml` (~46, grouped). **When changing this package, run the bare-numpy tests: `pytest tests/graphs/`.**
 
 ## Conventions worth knowing
 
 - **Adding a tool to an agent**: write it in that agent's `tools.py`, decorate with `@parallelable_tool` or `@sequential_tool` *outside* the `@tool` decorator (the wrapper sets the `_walkie_parallelable` attribute on the `BaseTool` instance), and document via Google-style docstring with `parse_docstring=True` if the tool takes args.
 - **Adding a new sub-agent**: copy the shape of `agents/vision_agent/` (a `__init__.py` exporting a `create_*_agent` factory, a `prompts.py`, a `tools.py`). Wire it into `main.py:run_ready_stage` and add a `delegate_to_*` tool in `agents/walkie_agent/tools.py`.
-- **Atomic perception writes**: `services.walkie_graphs.snapshot.write_atomic` writes `perception.json.tmp` then `os.replace` — readers in `PerceptionContextMiddleware` are tolerant of read-during-write but never read a half-written file. Preserve this if you add new on-disk shared state.
-- **Bbox conventions**: `walkie-ai-server` returns object bboxes in `xyxy` (used directly in the snapshot JSON and as crop/heading bounds). The `walkie_graphs` path lifts each detection's *mask* to 3D via depth deprojection (`interfaces/perception/geometry.py`), not the legacy `bboxes_to_positions` ROS lift, so no `xyxy`→`cxcywh` conversion is involved.
+- **Atomic perception writes**: `services.realtime_explore.snapshot.write_atomic` writes `perception.json.tmp` then `os.replace` — readers in `PerceptionContextMiddleware` are tolerant of read-during-write but never read a half-written file. Preserve this if you add new on-disk shared state.
+- **Bbox conventions**: `walkie-ai-server` returns object bboxes in `xyxy` (used directly in the snapshot JSON and as crop/heading bounds). The `realtime_explore` path lifts each detection's *mask* to 3D via depth deprojection (`interfaces/perception/geometry.py`), not the legacy `bboxes_to_positions` ROS lift, so no `xyxy`→`cxcywh` conversion is involved.

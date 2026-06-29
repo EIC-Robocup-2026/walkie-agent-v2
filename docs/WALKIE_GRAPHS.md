@@ -142,15 +142,15 @@ without Open3D (or CUDA) still maps via Stage 1.
 ```bash
 # Record a run on the robot (the capture thread fills graph_buffer/), then build OFFLINE — no robot,
 # fully deterministic — to tune association/poses/TSDF or to A/B baseline vs auto on the SAME buffer:
-uv run python -m services.walkie_graphs.tools.replay graph_buffer
-uv run python -m services.walkie_graphs.tools.replay graph_buffer --pose-mode auto --tsdf
-uv run python -m services.walkie_graphs.tools.replay graph_buffer --store graph_scene   # also persist + print
+uv run python -m services.realtime_explore.tools.replay graph_buffer
+uv run python -m services.realtime_explore.tools.replay graph_buffer --pose-mode auto --tsdf
+uv run python -m services.realtime_explore.tools.replay graph_buffer --store graph_scene   # also persist + print
 
 # Wipe the store + buffer for a clean slate (robot stopped):
-uv run python -m services.walkie_graphs.tools.reset -y
+uv run python -m services.realtime_explore.tools.reset -y
 
 # Probe Open3D GPU support:
-uv run python -m services.walkie_graphs.tools.check_gpu
+uv run python -m services.realtime_explore.tools.check_gpu
 
 # Unit tests (bare numpy/scipy/sklearn — no robot, no Open3D):
 uv run pytest tests/graphs/
@@ -158,7 +158,7 @@ uv run pytest tests/graphs/
 
 ## Config
 
-All knobs are `WALKIE_GRAPHS_*` in `services/walkie_graphs/config.toml` (~46, grouped under
+All knobs are `WALKIE_GRAPHS_*` in `services/realtime_explore/config.toml` (~46, grouped under
 `[graphs] / [graphs.camera] / [graphs.lift] / [graphs.capture] / [graphs.build] / [graphs.assoc] /
 [graphs.store] / [graphs.relations]`). The keys *are* the env-var names; precedence is
 `shell env > .env > root config.toml > this file > code default`. The load-bearing ones: `INTERVAL_SEC`,

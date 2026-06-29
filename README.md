@@ -116,7 +116,7 @@ Tuning knobs live in **TOML** (version-controlled); secrets/endpoints in **`.env
 | File | Scope |
 |------|-------|
 | `config.toml` | App-wide: LLM (`WALKIE_MODEL`), transport, `WALKIE_AI_BASE_URL`, runtime toggles. |
-| `services/walkie_graphs/config.toml` | The perception pipeline: detection classes, ICP/fusion thresholds, maintenance cadences, storage paths, Rerun viz. |
+| `services/realtime_explore/config.toml` | The perception pipeline: detection classes, ICP/fusion thresholds, maintenance cadences, storage paths, Rerun viz. |
 | `tasks/<Challenge>/config.toml` | Per-task tuning: waypoints, gating flags (`*_ARM_CALIBRATED`), detector classes, slice/runner knobs. Loaded **before** the app config so task values win. |
 
 **Precedence:** shell env **>** `.env` **>** task `config.toml` **>** app `config.toml` **>** module `config.toml` **>** code default. `walkie_config.py::load_config()` `setdefault`s every key, so the code keeps reading everything via `os.getenv(NAME, default)`.
@@ -128,11 +128,11 @@ Tuning knobs live in **TOML** (version-controlled); secrets/endpoints in **`.env
 ```bash
 # Wipe the walkie_graphs store (chroma + point clouds + captures + background + thumbs).
 # Run with the robot stopped — ChromaDB's persistent client is single-process.
-uv run python -m services.walkie_graphs.tools.reset       # asks for confirmation
-uv run python -m services.walkie_graphs.tools.reset -y     # no confirmation   (or: ./run.sh reset)
+uv run python -m services.realtime_explore.tools.reset       # asks for confirmation
+uv run python -m services.realtime_explore.tools.reset -y     # no confirmation   (or: ./run.sh reset)
 
 # Check Open3D GPU / ICP support.
-uv run python -m services.walkie_graphs.tools.check_gpu
+uv run python -m services.realtime_explore.tools.check_gpu
 ```
 
 ---

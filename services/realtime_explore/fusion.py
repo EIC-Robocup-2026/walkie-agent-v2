@@ -16,7 +16,7 @@ They are combined additively, ``phi = w_geo·phi_geo + w_sem·phi_sem`` (the pap
 the detection merges into the highest-scoring object above ``δ_sim`` (default 1.1).
 
 Kept in its own module so the math is unit-testable on bare arrays (``nn_ratio`` is
-reused by :mod:`walkie_graphs.associate` and :mod:`walkie_graphs.scene`).
+reused by :mod:`services.realtime_explore.associate` and :mod:`walkie_world.scene.store`).
 """
 
 from __future__ import annotations
