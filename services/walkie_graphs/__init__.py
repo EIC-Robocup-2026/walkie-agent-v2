@@ -1,198 +1,49 @@
-"""walkie_graphs — small open-vocabulary 3D scene-graph spatial memory for Walkie.
+"""walkie_graphs — Walkie's 3D scene-graph spatial memory (batch-snapshot backend).
 
-Capture-centric (ConceptGraphs-style): each frame becomes one **Capture** —
-detected segmentations lifted to per-detection world-point segments plus the
-classless background remainder (walls/floor) — registered against the map with
-ONE rigid ICP correction (pose error is per-capture, not per-object), then
-fused across views into object nodes whose clouds derive from their captures'
-segments. The map is **self-correcting**: periodic maintenance rescues ghost
-duplicates (ICP-aligned re-merge), refines each object's shape (co-registering
-its segments), and carves free space (removing geometry a trusted later view
-sees straight through — moved-object ghosts, edge-shadow trails). Distance-based
-relations are derived on a cadence; everything is stored (ChromaDB + .npz point
-clouds/segments + NetworkX edges), visualized (Rerun, background included), and
-exportable to text for the LLM.
+Cheap continuous **capture** into an on-disk snapshot ring buffer (`graph_buffer/`) +
+occasional offline **batch builds** with globally-consistent poses → a lean numpy
+:class:`~services.walkie_graphs.scene.SceneStore` (`graph_scene/`, no ChromaDB for the
+scene) populated by batch constrained-agglomerative association. The full pipeline and
+every tuning knob are documented in ``docs/WALKIE_GRAPHS.md``.
 
-Typical use (constructed with a LangChain model, the AI client, and the hardware
-interface — the same trio the agents take)::
+Public surface (what the Database agent + GPSR depend on)::
 
-    from walkie_graphs import WalkieGraphs
+    from services.walkie_graphs import WalkieGraphs
 
-    graphs = WalkieGraphs(model=model, walkieAI=walkieAI, walkie=walkie)
-    graphs.start()                       # background observer thread
-    ...
+    graphs = WalkieGraphs(model=model, walkieAI=walkieAI, walkie=walkie, snapshot_path=...)
+    graphs.start()                       # capture thread + batch build worker
     hits = graphs.query_text("where is the mug?")
     print(graphs.to_text_description())
     graphs.stop()
 
-The heavy lifting lives in :mod:`interfaces.perception.geometry` (camera math,
-re-exported here as ``walkie_graphs.geometry`` for back-compat),
-:mod:`walkie_graphs.memory` (the node/edge store), :mod:`walkie_graphs.service`
-(the background thread), and :mod:`walkie_graphs.viz` (optional Rerun).
+This module is intentionally **import-light** (PEP 562 lazy attributes): importing the
+package — or any submodule — must not eagerly pull Open3D or the camera/SDK stack.
 """
 
 from __future__ import annotations
 
-from typing import Optional
+import importlib
+from typing import TYPE_CHECKING
 
-from interfaces.devices.camera import CameraSnapshot
-from interfaces.perception import geometry  # back-compat: ``walkie_graphs.geometry``
+__all__ = ["WalkieGraphs", "ObjectNode", "Relation", "CameraSnapshot", "geometry"]
 
-from .capture import Capture, CaptureStore, Segment
-from .memory import Detection3D, GraphMemory, ObjectNode, Relation
-from .service import WalkieGraphsService
-
-__all__ = [
-    "WalkieGraphs",
-    "CameraSnapshot",
-    "Capture",
-    "CaptureStore",
-    "Segment",
-    "GraphMemory",
-    "WalkieGraphsService",
-    "ObjectNode",
-    "Relation",
-    "Detection3D",
-    "geometry",
-]
+_LAZY = {
+    "WalkieGraphs": ("services.walkie_graphs.service", "WalkieGraphs"),
+    "ObjectNode": ("services.walkie_graphs.scene", "ObjectNode"),
+    "Relation": ("services.walkie_graphs.scene", "Relation"),
+    "CameraSnapshot": ("interfaces.devices.camera", "CameraSnapshot"),
+    "geometry": ("interfaces.perception", "geometry"),
+}
 
 
-def _build_viz():
-    """Build the scene-graph renderer over the shared viz session, or None if disabled.
-
-    Returns ``None`` when viz is off so the service skips all viz work (preserving the
-    ``self.viz is None`` fast path); otherwise wraps the process-wide
-    :mod:`services.viz` session in a :class:`~services.walkie_graphs.viz.SceneGraphViz`.
-    """
-    try:
-        from services.viz import NoOpViz, get_viz
-
-        viz = get_viz()
-        if isinstance(viz, NoOpViz):
-            return None
-        from .viz import SceneGraphViz
-
-        return SceneGraphViz(viz)
-    except Exception as e:  # noqa: BLE001 — viz is best-effort
-        print(f"[graphs] visualizer unavailable: {e}")
-        return None
+def __getattr__(name: str):  # PEP 562 — resolve public names lazily
+    if name in _LAZY:
+        mod_name, attr = _LAZY[name]
+        return getattr(importlib.import_module(mod_name), attr)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-class WalkieGraphs:
-    """Facade tying the store + observer + visualizer together.
-
-    Args:
-        model: A LangChain chat model (accepted for forward-compat; the current
-            server-caption + geometric-edge pipeline does not use an LLM).
-        walkieAI: :class:`client.WalkieAIClient` for detection/caption/embedding.
-        walkie: :class:`interfaces.walkie_interface.WalkieInterface` for the camera,
-            pose, lift, and head tilt.
-        memory: Override the store (mainly for tests); built from env otherwise.
-        viz: Override the scene-graph renderer; otherwise a
-            :class:`~services.walkie_graphs.viz.SceneGraphViz` over the shared
-            :mod:`services.viz` session (``None`` when ``WALKIE_VIZ`` is disabled).
-        snapshot_path: Where the observer loop writes the live ``perception.json`` snapshot
-            the agents read each turn. ``None`` (default) writes no snapshot.
-    """
-
-    def __init__(
-        self,
-        model=None,
-        walkieAI=None,
-        walkie=None,
-        *,
-        memory: Optional[GraphMemory] = None,
-        viz=None,
-        snapshot_path=None,
-    ) -> None:
-        self.model = model
-        self.walkieAI = walkieAI
-        self.walkie = walkie
-        self.snapshot_path = snapshot_path
-
-        embed_text = None
-        if walkieAI is not None:
-            def embed_text(query: str, _ai=walkieAI):
-                return _ai.image.embed_text(query)
-
-        self.memory = memory if memory is not None else GraphMemory.from_env(embed_text=embed_text)
-        self.viz = viz if viz is not None else _build_viz()
-        self._service: Optional[WalkieGraphsService] = None
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-    def _ensure_service(self) -> WalkieGraphsService:
-        if self._service is None:
-            self._service = WalkieGraphsService(
-                self.walkieAI,
-                self.walkie,
-                self.memory,
-                model=self.model,
-                viz=self.viz,
-                snapshot_path=self.snapshot_path,
-            )
-        return self._service
-
-    def start(self) -> None:
-        """Start the background observer thread (no-op if already running)."""
-        svc = self._ensure_service()
-        if not svc.is_alive():
-            svc.start()
-
-    def stop(self) -> None:
-        """Stop the background observer thread."""
-        if self._service is not None:
-            self._service.stop_and_join(timeout=5)
-            self._service = None
-
-    def observe(self) -> list[ObjectNode]:
-        """Process a single live RGB-D frame (manual path; use instead of start())."""
-        touched = self._ensure_service()._observe_once()
-        self.memory.derive_relations()
-        return touched
-
-    # ------------------------------------------------------------------
-    # Query passthroughs (used by the database agent)
-    # ------------------------------------------------------------------
-    def query_text(self, query: str, k: int = 5, *, near=None, radius=None) -> list[ObjectNode]:
-        return self.memory.query_text(query, k, near=near, radius=radius)
-
-    def query_near(self, center, radius: float) -> list[ObjectNode]:
-        return self.memory.query_near(center, radius)
-
-    def recently_seen(self, limit: int = 5) -> list[ObjectNode]:
-        return self.memory.recently_seen(limit)
-
-    def all_objects(self) -> list[ObjectNode]:
-        return self.memory.all_objects()
-
-    def get(self, node_id: str) -> Optional[ObjectNode]:
-        return self.memory.get(node_id)
-
-    def relations_of(self, node_id: str) -> list[Relation]:
-        return self.memory.relations_of(node_id)
-
-    def to_text_description(self) -> str:
-        return self.memory.to_text_description()
-
-    # ------------------------------------------------------------------
-    # Optional LLM refinement (Tier 3) — on-demand triggers using the wired model
-    # ------------------------------------------------------------------
-    def refine_captions(self, *, limit: Optional[int] = None, use_images: bool = False) -> int:
-        """Condense each object's view captions into one coherent caption (needs ``model``)."""
-        return self.memory.refine_captions(self.model, limit=limit, use_images=use_images)
-
-    def infer_edges(self, *, max_pairs: Optional[int] = None) -> int:
-        """Label spatial relations between nearby objects with the LLM (needs ``model``)."""
-        return self.memory.infer_edges_llm(self.model, max_pairs=max_pairs)
-
-    def visualize(self) -> None:
-        if self.viz is not None:
-            pose = None
-            if self.walkie is not None:
-                try:
-                    pose = self.walkie.status.get_position()
-                except Exception:  # noqa: BLE001
-                    pose = None
-            self.viz.update(self.memory, robot_pose=pose)
+if TYPE_CHECKING:  # static type hints only — never imported at runtime
+    from interfaces.devices.camera import CameraSnapshot
+    from .scene import ObjectNode, Relation
+    from .service import WalkieGraphs

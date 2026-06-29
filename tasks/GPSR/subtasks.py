@@ -26,6 +26,7 @@ Still attempted/claimed, NOT referee-awarded (see tasks/scoring.py).
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 
 from tasks.base import StepResult, SubTask, Task, TaskContext
@@ -61,6 +62,46 @@ def _interleave_enabled() -> bool:
     return os.getenv("GPSR_INTERLEAVE", "0").lower() in ("1", "true", "yes")
 
 
+def _confirm_plan_enabled() -> bool:
+    """Whether to ask a human to approve each plan before executing it (off by
+    default — the rulebook GPSR run is autonomous; on for supervised demos)."""
+    return os.getenv("GPSR_CONFIRM_PLAN", "0").lower() in ("1", "true", "yes")
+
+
+def _confirm_default_proceed() -> bool:
+    """On an UNCLEAR/silent confirmation answer, proceed (default) or skip? Keeps an
+    STT mishear from silently forfeiting (or wrongly running) a command. Set
+    GPSR_CONFIRM_DEFAULT="skip" to require a clear yes."""
+    return os.getenv("GPSR_CONFIRM_DEFAULT", "proceed").strip().lower() != "skip"
+
+
+_AFFIRM_WORDS = {
+    "yes", "yeah", "yep", "yup", "ok", "okay", "sure", "correct", "right",
+    "proceed", "affirmative", "confirm", "confirmed", "alright", "fine", "perfect",
+    "approved", "approve",
+}
+_AFFIRM_PHRASES = ("go ahead", "do it", "sounds good", "please do", "carry on", "go for it")
+_NEGATE_WORDS = {
+    "no", "nope", "nah", "dont", "stop", "cancel", "skip", "negative", "wrong",
+    "incorrect", "abort",
+}
+_NEGATE_PHRASES = ("do not", "don't", "never mind", "nevermind", "not now")
+
+
+def _tokens(text: str) -> set[str]:
+    return set(re.findall(r"[a-z']+", (text or "").lower()))
+
+
+def _is_negative(text: str) -> bool:
+    t = (text or "").lower()
+    return bool(_tokens(t) & _NEGATE_WORDS) or any(p in t for p in _NEGATE_PHRASES)
+
+
+def _is_affirmative(text: str) -> bool:
+    t = (text or "").lower()
+    return bool(_tokens(t) & _AFFIRM_WORDS) or any(p in t for p in _AFFIRM_PHRASES)
+
+
 @dataclass
 class Command:
     """One operator command + its parsed plan + progress (docs/GPSR_DESIGN.md §6)."""
@@ -70,6 +111,10 @@ class Command:
     plan: Plan
     status: CmdStatus = CmdStatus.RECEIVED
     result_note: str | None = None
+    # Operator approval of the plan (the GPSR_CONFIRM_PLAN gate). Defaults True so
+    # that with the gate OFF every command runs exactly as before; set False only
+    # when a human declines the spoken plan, and ExecuteCommands then skips it.
+    confirmed: bool = True
 
 
 class GoToInstructionPoint(SubTask):
@@ -187,13 +232,37 @@ class ReceiveAndPlanCommands(SubTask):
                 if _speak_plan_enabled():
                     ctx.say(render_plan_speech(plan, preamble=prompts.PLAN_PREAMBLE.format(n=i)))
                     ctx.score("speak_plan")  # demonstrated a generated plan (100 each)
+                # Optional human approval gate: "plan is this — okay to do it?"
+                if _confirm_plan_enabled():
+                    cmd.confirmed = self._confirm_plan(ctx, i)
                 if not plan.is_complete:
                     print(f"[gpsr] command {i} plan has ungrounded steps: {plan.source!r}")
             else:
                 ctx.say(prompts.PLAN_NOT_UNDERSTOOD)
             commands.append(cmd)
-            print(f"[gpsr] command {i}: {text!r} -> {[s.primitive.value for s in plan.steps]}")
+            print(f"[gpsr] command {i}: {text!r} -> {[s.primitive.value for s in plan.steps]}"
+                  f"{'' if cmd.confirmed else ' (declined)'}")
         return commands
+
+    def _confirm_plan(self, ctx: TaskContext, n: int) -> bool:
+        """Ask the human to approve command *n*'s spoken plan before it executes.
+
+        A clear "no" skips the command; a clear "yes" runs it. An unclear/silent
+        answer (even after ctx.ask's one re-prompt) falls back to GPSR_CONFIRM_DEFAULT
+        so an STT mishear doesn't silently forfeit (or wrongly run) the command.
+        """
+        answer = ctx.ask(prompts.ASK_CONFIRM_PLAN.format(n=n), retries=1)
+        if _is_negative(answer):
+            ctx.say(prompts.PLAN_REJECTED)
+            return False
+        if _is_affirmative(answer):
+            ctx.say(prompts.PLAN_CONFIRMED)
+            return True
+        proceed = _confirm_default_proceed()
+        print(f"[gpsr] command {n}: unclear confirmation {answer!r} -> "
+              f"{'proceed' if proceed else 'skip'} (GPSR_CONFIRM_DEFAULT)")
+        ctx.say(prompts.PLAN_CONFIRMED if proceed else prompts.PLAN_REJECTED)
+        return proceed
 
 
 class ExecuteCommands(SubTask):
@@ -220,7 +289,9 @@ class ExecuteCommands(SubTask):
             print("[gpsr] no world model on ctx.data['world'] — cannot execute")
             return StepResult.DONE
         manip = _manip_enabled()
-        planned = [c for c in commands if c.plan]
+        # Only confirmed, planned commands are eligible to run (the GPSR_CONFIRM_PLAN
+        # gate; confirmed is always True when the gate is off).
+        planned = [c for c in commands if c.plan and c.confirmed]
         ran_interleaved = False
         if _interleave_enabled() and not _one_by_one() and len(planned) >= 2:
             ran_interleaved = self._run_interleaved(ctx, commands, world, brain, manip)
@@ -241,6 +312,11 @@ class ExecuteCommands(SubTask):
 
     def _run_serial(self, ctx, commands: list[Command], world, brain, manip: bool) -> None:
         for cmd in commands:
+            if cmd.plan and not cmd.confirmed:  # operator declined the plan -> skip
+                cmd.result_note = "skipped: plan not approved"
+                ctx.say(prompts.COMMAND_SKIPPED.format(n=cmd.id))
+                print(f"[gpsr] command {cmd.id} skipped (plan not approved)")
+                continue
             cmd.status = CmdStatus.IN_PROGRESS
             ctx.say(prompts.COMMAND_ANNOUNCE.format(n=cmd.id, command=cmd.utterance))
             try:
@@ -258,15 +334,21 @@ class ExecuteCommands(SubTask):
         False — with NO side effects yet — only if scheduling fails, so the caller
         can fall back to serial cleanly; once execution starts it never falls back
         (which would double-drive the robot)."""
-        indexed = [(c.id, c.plan) for c in commands if c.plan]
+        indexed = [(c.id, c.plan) for c in commands if c.plan and c.confirmed]
         try:
             order = interleave(indexed, world)  # pure; the only pre-side-effect failure point
         except Exception as exc:
             print(f"[gpsr] interleave scheduling failed ({exc}); falling back to serial")
             return False
         ctx.say(prompts.INTERLEAVE_ANNOUNCE)
+        scheduled = {cid for cid, _ in indexed}
         for c in commands:
-            c.status = CmdStatus.IN_PROGRESS if c.plan else CmdStatus.FAILED
+            if c.id in scheduled:
+                c.status = CmdStatus.IN_PROGRESS
+            elif c.plan and not c.confirmed:
+                c.result_note = "skipped: plan not approved"  # declined -> stays PLANNED, not run
+            else:
+                c.status = CmdStatus.FAILED  # had no usable plan
         statuses = execute_interleaved(ctx, indexed, world, brain, manip_enabled=manip, order=order)
         for c in commands:
             if c.id in statuses:

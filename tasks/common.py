@@ -81,13 +81,16 @@ class WalkieBrain:
         self.disable_listening = disable_listening
         
         self.graphs = WalkieGraphs(model=model, walkieAI=walkieAI, walkie=walkie_interface)
-        actuator = create_actuator_agent(model, walkieAI, walkie_interface)
-        vision = create_vision_agent(model, walkieAI, walkie_interface)
-        database = create_database_agent(
+        # Kept as attributes (not locals) so callers can invoke a SINGLE sub-agent
+        # directly — the GPSR executor's scoped Tier-2 fallback routes a failed step
+        # to just brain.actuator / brain.vision, not the full orchestrator.
+        self.actuator = create_actuator_agent(model, walkieAI, walkie_interface)
+        self.vision = create_vision_agent(model, walkieAI, walkie_interface)
+        self.database = create_database_agent(
             model, walkieAI, walkie_interface, graphs=self.graphs
         )
         self.walkie_agent = create_walkie_main_agent(
-            model, walkieAI, walkie_interface, actuator, vision, database
+            model, walkieAI, walkie_interface, self.actuator, self.vision, self.database
         )
 
     def listen_and_act(self, retry: bool = True, max_retries: int = 3) -> None:

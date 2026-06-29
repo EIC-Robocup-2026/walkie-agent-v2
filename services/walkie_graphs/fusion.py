@@ -15,7 +15,8 @@ They are combined additively, ``phi = w_geo·phi_geo + w_sem·phi_sem`` (the pap
 ``(1+phys_bias)`` / ``(1-phys_bias)`` weighting with ``phys_bias = 0`` → both 1), and
 the detection merges into the highest-scoring object above ``δ_sim`` (default 1.1).
 
-Kept out of :mod:`walkie_graphs.memory` so the math is unit-testable on bare arrays.
+Kept in its own module so the math is unit-testable on bare arrays (``nn_ratio`` is
+reused by :mod:`walkie_graphs.associate` and :mod:`walkie_graphs.scene`).
 """
 
 from __future__ import annotations

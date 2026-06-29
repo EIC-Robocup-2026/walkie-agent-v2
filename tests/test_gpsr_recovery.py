@@ -15,7 +15,7 @@ import pytest
 from tasks.base import StepResult
 from tasks.GPSR import prompts
 from tasks.GPSR.plan import Plan, PlanStep, Primitive
-from tasks.GPSR.subtasks import ReceiveAndPlanCommands
+from tasks.GPSR.subtasks import ReceiveAndPlanCommands, _is_affirmative, _is_negative
 
 
 def _ok_plan() -> Plan:
@@ -121,3 +121,54 @@ def test_custom_operator_can_be_disabled(monkeypatch):
     assert prompts.GIVE_UP_ON_COMMANDS in ctx.saids
     assert ctx.data["commands"] == []
     assert len(ctx.asked) == 2                                # 1 initial + 1 rephrase, then give up
+
+
+# --- plan-confirmation gate (GPSR_CONFIRM_PLAN) -----------------------------
+
+def test_confirm_gate_off_by_default_does_not_ask():
+    """Gate off (default): no extra ask, and the command is confirmed implicitly."""
+    ctx = _Ctx(["go to the kitchen"])
+    _run(ctx)
+    assert len(ctx.asked) == 1                       # only the command ask, no confirm
+    assert ctx.data["commands"][0].confirmed is True
+    assert prompts.ASK_CONFIRM_PLAN.format(n=1) not in ctx.asked
+
+
+def test_confirm_gate_yes_approves(monkeypatch):
+    monkeypatch.setenv("GPSR_CONFIRM_PLAN", "1")
+    ctx = _Ctx(["go to the kitchen", "yes please"])
+    _run(ctx)
+    assert prompts.ASK_CONFIRM_PLAN.format(n=1) in ctx.asked
+    assert ctx.data["commands"][0].confirmed is True
+    assert prompts.PLAN_CONFIRMED in ctx.saids
+
+
+def test_confirm_gate_no_declines(monkeypatch):
+    monkeypatch.setenv("GPSR_CONFIRM_PLAN", "1")
+    ctx = _Ctx(["go to the kitchen", "no, don't do that"])
+    _run(ctx)
+    assert ctx.data["commands"][0].confirmed is False
+    assert prompts.PLAN_REJECTED in ctx.saids
+
+
+def test_confirm_gate_unclear_proceeds_by_default(monkeypatch):
+    monkeypatch.setenv("GPSR_CONFIRM_PLAN", "1")
+    ctx = _Ctx(["go to the kitchen", "hmm what was that"])   # neither yes nor no
+    _run(ctx)
+    assert ctx.data["commands"][0].confirmed is True         # GPSR_CONFIRM_DEFAULT=proceed
+
+
+def test_confirm_gate_unclear_skips_when_configured(monkeypatch):
+    monkeypatch.setenv("GPSR_CONFIRM_PLAN", "1")
+    monkeypatch.setenv("GPSR_CONFIRM_DEFAULT", "skip")
+    ctx = _Ctx(["go to the kitchen", ""])                    # silence, even after re-ask
+    _run(ctx)
+    assert ctx.data["commands"][0].confirmed is False
+
+
+def test_affirmative_negative_word_matching():
+    assert _is_affirmative("yes") and _is_affirmative("ok go ahead")
+    assert _is_negative("no") and _is_negative("please don't")
+    # "no" must not be triggered by substrings like "now"/"know"
+    assert not _is_negative("do it now")
+    assert not _is_affirmative("") and not _is_negative("")
