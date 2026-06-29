@@ -155,7 +155,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     print("\nVerdict:")
     print("  - walkie_graphs' capture registration (pcd_ops.icp) uses the tensor API")
-    print("    on CUDA when WALKIE_GRAPHS_O3D_DEVICE resolves to cuda, with a legacy")
+    print("    on CUDA when WALKIE_EXPLORE_O3D_DEVICE resolves to cuda, with a legacy")
     print("    CPU fallback — the timings above show what each engine costs here.")
     if gpu_works:
         print("  - This machine CAN run Open3D tensor ops on the GPU — compare the CUDA")

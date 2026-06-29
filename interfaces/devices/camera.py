@@ -182,7 +182,7 @@ class Camera:
 #
 # Lifting reuses the exact ``interfaces.perception.geometry.deproject_mask``
 # pipeline the scene graph runs (depth-edge filter, mask erode, SOR, voxel),
-# parameterized by the same ``WALKIE_GRAPHS_*`` env vars by default. Those
+# parameterized by the same ``WALKIE_EXPLORE_*`` env vars by default. Those
 # geometry helpers live in ``interfaces.perception`` (a pure-leaf package, not the
 # ``walkie_graphs`` service), so they're imported at module top level — there is no
 # cycle to dodge: walkie_graphs imports this module, never the other way around.
@@ -265,11 +265,11 @@ def camera_pose(
     *tilt_offset* matrix) is composed in as ``R @ R_offset`` — rotating points in
     the optical frame before the TF rotation maps them to the map.
     """
-    map_frame = map_frame or os.getenv("WALKIE_GRAPHS_TF_MAP_FRAME", "map")
+    map_frame = map_frame or os.getenv("WALKIE_EXPLORE_TF_MAP_FRAME", "map")
     cam_frame = cam_frame or os.getenv(
-        "WALKIE_GRAPHS_TF_CAMERA_FRAME", "zed_head_left_camera_frame_optical"
+        "WALKIE_EXPLORE_TF_CAMERA_FRAME", "zed_head_left_camera_frame_optical"
     )
-    timeout = timeout if timeout is not None else _envf("WALKIE_GRAPHS_TF_TIMEOUT_SEC", "1.0")
+    timeout = timeout if timeout is not None else _envf("WALKIE_EXPLORE_TF_TIMEOUT_SEC", "1.0")
     try:
         tf = walkie.robot.transform.lookup(map_frame, cam_frame, timeout=timeout)
     except Exception as e:  # noqa: BLE001
@@ -407,8 +407,8 @@ class CameraSnapshot:
         if not self._edge_mask_done:
             self._edge_mask = depth_discontinuity_mask(
                 self.depth,
-                _envf("WALKIE_GRAPHS_DEPTH_EDGE_THRESH_M", "0.05"),
-                rel_thresh=_envf("WALKIE_GRAPHS_DEPTH_EDGE_REL", "0.0"),
+                _envf("WALKIE_EXPLORE_DEPTH_EDGE_THRESH_M", "0.05"),
+                rel_thresh=_envf("WALKIE_EXPLORE_DEPTH_EDGE_REL", "0.0"),
             )
             self._edge_mask_done = True
         return self._edge_mask
@@ -430,7 +430,7 @@ class CameraSnapshot:
 
         Runs :func:`deproject_mask` against the *snapshot's* depth/pose/intrinsics
         with the same flying-pixel cleanup the scene graph uses. ``None`` params
-        default from the corresponding ``WALKIE_GRAPHS_*`` env vars. Returns an
+        default from the corresponding ``WALKIE_EXPLORE_*`` env vars. Returns an
         empty ``(0, 3)`` array when the snapshot has no geometry.
 
         ``frame`` selects the output frame:
@@ -458,19 +458,19 @@ class CameraSnapshot:
             self.depth,
             self.intr,
             pose,
-            voxel=voxel if voxel is not None else _envf("WALKIE_GRAPHS_VOXEL_M", "0.02"),
+            voxel=voxel if voxel is not None else _envf("WALKIE_EXPLORE_VOXEL_M", "0.02"),
             max_points=max_points
             if max_points is not None
-            else _envi("WALKIE_GRAPHS_MAX_POINTS_PER_OBJ", "2000"),
-            erode_px=erode_px if erode_px is not None else _envi("WALKIE_GRAPHS_MASK_ERODE_PX", "2"),
+            else _envi("WALKIE_EXPLORE_MAX_POINTS_PER_OBJ", "2000"),
+            erode_px=erode_px if erode_px is not None else _envi("WALKIE_EXPLORE_MASK_ERODE_PX", "2"),
             edge_mask=self._edges() if use_edge_filter else None,
             max_depth=max_depth
             if max_depth is not None
-            else _envf("WALKIE_GRAPHS_MAX_DEPTH_M", "0"),
-            sor_k=sor_k if sor_k is not None else _envi("WALKIE_GRAPHS_SOR_K", "0"),
+            else _envf("WALKIE_EXPLORE_MAX_DEPTH_M", "0"),
+            sor_k=sor_k if sor_k is not None else _envi("WALKIE_EXPLORE_SOR_K", "0"),
             sor_std_ratio=sor_std_ratio
             if sor_std_ratio is not None
-            else _envf("WALKIE_GRAPHS_SOR_STD_RATIO", "2.0"),
+            else _envf("WALKIE_EXPLORE_SOR_STD_RATIO", "2.0"),
         )
 
     def bbox_to_points(self, bbox_xyxy, *, shrink: float = 1.0, **kw) -> np.ndarray:

@@ -7,7 +7,7 @@ sin). Two modes:
 - ``"baseline"`` (default) — trust the robot's nav/TF pose as captured. Returns each
   snapshot's ``(R, t)`` untouched. No Open3D, no risk. This is the permanent default
   until a replayed-buffer measurement proves ``"auto"`` actually wins (a bad pose-graph
-  can make poses *worse* than settled nav — see ``docs/WALKIE_GRAPHS.md``).
+  can make poses *worse* than settled nav — see ``docs/WALKIE_WORLD.md``).
 - ``"auto"`` — Open3D multiway registration: pairwise RGB-D odometry between nearby
   frames + sparse loop closures → one ``PoseGraph`` → ``global_optimization``
   (Levenberg–Marquardt), anchored at frame 0's nav pose so the result stays in the
@@ -15,7 +15,7 @@ sin). Two modes:
   against the nav delta; **any** failure falls back to that frame's nav pose, so
   ``auto`` can never disconnect the graph or drift past the nav prior.
 
-``auto`` needs per-frame RGB (``WALKIE_GRAPHS_KEEP_RGB=1``); without it, it degrades to
+``auto`` needs per-frame RGB (``WALKIE_EXPLORE_KEEP_RGB=1``); without it, it degrades to
 ``baseline``.
 """
 
@@ -74,7 +74,7 @@ def refine_poses(
         log("[poses] open3d unavailable — using nav poses (baseline)")
         return nav
     if any(getattr(s, "rgb", None) is None for s in snapshots):
-        log("[poses] auto mode needs per-frame RGB (WALKIE_GRAPHS_KEEP_RGB=1) — using nav poses")
+        log("[poses] auto mode needs per-frame RGB (WALKIE_EXPLORE_KEEP_RGB=1) — using nav poses")
         return nav
     try:
         return _refine_auto(

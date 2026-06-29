@@ -96,7 +96,7 @@ def _full_scene_cloud(
     """Lift the whole frame to a map-frame cloud.
 
     Passes an all-ones mask with **explicit** ``voxel``/``max_points`` so the
-    ``WALKIE_GRAPHS_*`` defaults baked into ``mask_to_points`` (voxel 0.02, cap
+    ``WALKIE_EXPLORE_*`` defaults baked into ``mask_to_points`` (voxel 0.02, cap
     2000) don't decimate a whole-scene lift. ``max_depth`` bounds the cloud (stereo
     error grows ~quadratically, so far points are noise anyway).
     """

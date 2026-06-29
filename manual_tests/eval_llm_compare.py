@@ -239,7 +239,7 @@ def build_stub_stack(chat):
     import types
 
     os.environ["WALKIE_STUB_TOOLS"] = "1"
-    os.environ["WALKIE_GRAPHS_ENABLED"] = "0"
+    os.environ["WALKIE_EXPLORE_ENABLED"] = "0"
     os.environ["DISABLE_LISTENING"] = "1"
 
     from agents.actuator_agent import create_actuator_agent

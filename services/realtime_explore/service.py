@@ -89,49 +89,49 @@ class RealtimeExplore:
         self._last_structural = None  # last TSDF cloud (for the viz background)
         self._last_cam = None         # last capture's CameraPose (for the camera marker)
 
-        # --- config (all WALKIE_GRAPHS_* env, defaulted in config.toml) ---
-        self.interval = _envf("WALKIE_GRAPHS_INTERVAL_SEC", "3.0")
-        self.interested = _classes("WALKIE_GRAPHS_INTERESTED_CLASSES")
-        self.exclude = _classes("WALKIE_GRAPHS_EXCLUDE_CLASSES") or {"person"}
-        self.caption_classes = _classes("WALKIE_GRAPHS_CAPTION_CLASSES")
-        self.min_confidence = _envf("WALKIE_GRAPHS_CONFIDENCE_THRESHOLD", "0.3")
-        self.crop_margin_px = _envi("WALKIE_GRAPHS_CROP_MARGIN_PX", "20")
-        self.voxel_m = _envf("WALKIE_GRAPHS_VOXEL_M", "0.02")
-        self.max_depth = _envf("WALKIE_GRAPHS_MAX_DEPTH_M", "4.0")
-        self.min_points = _envi("WALKIE_GRAPHS_MIN_POINTS", "50")
-        self.keep_rgb = _envb("WALKIE_GRAPHS_KEEP_RGB", "0")
-        self.pose_mode = os.getenv("WALKIE_GRAPHS_POSE_MODE", "baseline").strip().lower()
-        self.do_tsdf = _envb("WALKIE_GRAPHS_TSDF", "0")
-        self.rebuild_every_n = _envi("WALKIE_GRAPHS_REBUILD_EVERY_N", "30")
-        self.rebuild_min_interval = _envf("WALKIE_GRAPHS_REBUILD_MIN_INTERVAL_SEC", "20")
-        self.build_window = _envi("WALKIE_GRAPHS_BUILD_WINDOW", "0")  # 0 = whole buffer
+        # --- config (all WALKIE_EXPLORE_* env, defaulted in config.toml) ---
+        self.interval = _envf("WALKIE_EXPLORE_INTERVAL_SEC", "3.0")
+        self.interested = _classes("WALKIE_EXPLORE_INTERESTED_CLASSES")
+        self.exclude = _classes("WALKIE_EXPLORE_EXCLUDE_CLASSES") or {"person"}
+        self.caption_classes = _classes("WALKIE_EXPLORE_CAPTION_CLASSES")
+        self.min_confidence = _envf("WALKIE_EXPLORE_CONFIDENCE_THRESHOLD", "0.3")
+        self.crop_margin_px = _envi("WALKIE_EXPLORE_CROP_MARGIN_PX", "20")
+        self.voxel_m = _envf("WALKIE_EXPLORE_VOXEL_M", "0.02")
+        self.max_depth = _envf("WALKIE_EXPLORE_MAX_DEPTH_M", "4.0")
+        self.min_points = _envi("WALKIE_EXPLORE_MIN_POINTS", "50")
+        self.keep_rgb = _envb("WALKIE_EXPLORE_KEEP_RGB", "0")
+        self.pose_mode = os.getenv("WALKIE_EXPLORE_POSE_MODE", "baseline").strip().lower()
+        self.do_tsdf = _envb("WALKIE_EXPLORE_TSDF", "0")
+        self.rebuild_every_n = _envi("WALKIE_EXPLORE_REBUILD_EVERY_N", "30")
+        self.rebuild_min_interval = _envf("WALKIE_EXPLORE_REBUILD_MIN_INTERVAL_SEC", "20")
+        self.build_window = _envi("WALKIE_EXPLORE_BUILD_WINDOW", "0")  # 0 = whole buffer
         self.assoc = dict(
-            overlap_min=_envf("WALKIE_GRAPHS_ASSOC_OVERLAP_MIN", "0.2"),
-            clip_min=_envf("WALKIE_GRAPHS_ASSOC_CLIP_MIN", "0.85"),
-            cross_class_clip_min=_envf("WALKIE_GRAPHS_ASSOC_CROSS_CLASS_CLIP_MIN", "0.95"),
-            max_dist_m=_envf("WALKIE_GRAPHS_ASSOC_MAX_DIST_M", "0.5"),
+            overlap_min=_envf("WALKIE_EXPLORE_ASSOC_OVERLAP_MIN", "0.2"),
+            clip_min=_envf("WALKIE_EXPLORE_ASSOC_CLIP_MIN", "0.85"),
+            cross_class_clip_min=_envf("WALKIE_EXPLORE_ASSOC_CROSS_CLASS_CLIP_MIN", "0.95"),
+            max_dist_m=_envf("WALKIE_EXPLORE_ASSOC_MAX_DIST_M", "0.5"),
         )
         # Lift cleanup (forwarded to deproject_mask in the builder).
         self.lift = dict(
-            erode_px=_envi("WALKIE_GRAPHS_MASK_ERODE_PX", "2"),
-            edge_thresh=_envf("WALKIE_GRAPHS_DEPTH_EDGE_THRESH_M", "0.05"),
-            edge_rel=_envf("WALKIE_GRAPHS_DEPTH_EDGE_REL", "0.0"),
-            max_points=_envi("WALKIE_GRAPHS_MAX_POINTS_PER_OBJ", "2000"),
-            sor_k=_envi("WALKIE_GRAPHS_SOR_K", "0"),
-            sor_std_ratio=_envf("WALKIE_GRAPHS_SOR_STD_RATIO", "2.0"),
+            erode_px=_envi("WALKIE_EXPLORE_MASK_ERODE_PX", "2"),
+            edge_thresh=_envf("WALKIE_EXPLORE_DEPTH_EDGE_THRESH_M", "0.05"),
+            edge_rel=_envf("WALKIE_EXPLORE_DEPTH_EDGE_REL", "0.0"),
+            max_points=_envi("WALKIE_EXPLORE_MAX_POINTS_PER_OBJ", "2000"),
+            sor_k=_envi("WALKIE_EXPLORE_SOR_K", "0"),
+            sor_std_ratio=_envf("WALKIE_EXPLORE_SOR_STD_RATIO", "2.0"),
         )
         # Live scene feed: draw EACH captured frame's lifted detections to Rerun under
         # world/live (before the batch build), so you can watch the scene fill in live.
-        self.viz_live = _envb("WALKIE_GRAPHS_VIZ_LIVE", "0")
+        self.viz_live = _envb("WALKIE_EXPLORE_VIZ_LIVE", "0")
         # On a cold start (empty store) build sooner so the Database agent isn't blind
         # for a full REBUILD_EVERY_N window; afterwards the normal cadence applies.
         self.first_build_n = max(1, min(self.rebuild_every_n,
-                                        _envi("WALKIE_GRAPHS_FIRST_BUILD_N", "10")))
+                                        _envi("WALKIE_EXPLORE_FIRST_BUILD_N", "10")))
         # detection prompts: interested classes drive the open-vocab detector.
         self.detect_prompts = sorted(self.interested)
 
-        buffer_dir = os.getenv("WALKIE_GRAPHS_BUFFER_DIR", "graph_buffer")
-        snap_cap = _envi("WALKIE_GRAPHS_SNAPSHOT_CAP", "400")
+        buffer_dir = os.getenv("WALKIE_EXPLORE_BUFFER_DIR", "graph_buffer")
+        snap_cap = _envi("WALKIE_EXPLORE_SNAPSHOT_CAP", "400")
 
         # The world model owns the scene store + relations + queries. Build one (objects
         # only) if none was injected, binding embed_text to the AI server for CLIP search.
@@ -156,7 +156,7 @@ class RealtimeExplore:
 
     # ------------------------------------------------------------------ logging
     def _log(self, msg: str) -> None:
-        if _envb("WALKIE_GRAPHS_DEBUG_INGEST", "0") or _envb("WALKIE_GRAPHS_PERF", "0"):
+        if _envb("WALKIE_EXPLORE_DEBUG_INGEST", "0") or _envb("WALKIE_EXPLORE_PERF", "0"):
             print(f"[explore] {msg}")
 
     # ------------------------------------------------------------------ lifecycle

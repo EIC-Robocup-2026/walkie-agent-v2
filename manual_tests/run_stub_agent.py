@@ -55,7 +55,7 @@ def main() -> None:
     # agent-creation time, and we want the boot to stay fully offline.
     os.environ["WALKIE_STUB_TOOLS"] = "1"
     os.environ["WALKIE_TRACE"] = "1"
-    os.environ["WALKIE_GRAPHS_ENABLED"] = "0"  # no perception loop (needs camera)
+    os.environ["WALKIE_EXPLORE_ENABLED"] = "0"  # no perception loop (needs camera)
     os.environ["DISABLE_LISTENING"] = "1"  # type prompts, no mic
 
     logging.basicConfig(

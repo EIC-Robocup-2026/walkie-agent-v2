@@ -81,7 +81,7 @@ def run_ready_stage(walkieAI: WalkieAIClient, walkie: WalkieInterface, model: Ch
     # feeds it. The producer's background thread is the per-frame pipeline: detect (scoped
     # to the interested classes) → lift/caption/embed → world.observe_objects, plus the
     # live perception.json snapshot the agents read each turn. The world is built
-    # regardless so the Database agent can read existing memory; WALKIE_GRAPHS_ENABLED
+    # regardless so the Database agent can read existing memory; WALKIE_EXPLORE_ENABLED
     # gates whether the producer loop runs (and thus whether new objects are produced).
     world = WalkieWorld(
         embed_text=(lambda q: walkieAI.image.embed_text(q)),
@@ -94,7 +94,7 @@ def run_ready_stage(walkieAI: WalkieAIClient, walkie: WalkieInterface, model: Ch
         world=world,
         snapshot_path=RobotContext.get().perception_path,
     )
-    graphs_enabled = os.getenv("WALKIE_GRAPHS_ENABLED", "1").lower() in ("1", "true", "yes")
+    graphs_enabled = os.getenv("WALKIE_EXPLORE_ENABLED", "1").lower() in ("1", "true", "yes")
     if graphs_enabled:
         explore.start()  # background perception loop: detect → observe_objects → perception.json
 

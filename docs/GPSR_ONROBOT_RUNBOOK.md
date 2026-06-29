@@ -174,12 +174,12 @@ GPSR_INTERLEAVE=1 GPSR_ISSUE_MODE=consecutive uv run python -m tasks.GPSR.run
 
 ## 9. viz / debug for the competition run
 
-- [ ] `WALKIE_GRAPHS_VIZ=rerun` is **on by default** (`services/walkie_graphs/config.toml`)
+- [ ] `WALKIE_EXPLORE_VIZ=rerun` is **on by default** (`services/walkie_graphs/config.toml`)
       — it streams the scene graph to Rerun and serves a web viewer
-      (`WALKIE_GRAPHS_RERUN_WEB_PORT=8008`, gRPC `9876`). Useful for debugging,
+      (`WALKIE_EXPLORE_RERUN_WEB_PORT=8008`, gRPC `9876`). Useful for debugging,
       but it costs CPU/GPU + a network server on the robot.
 - [ ] **Decide for the scored run**: keep it for eyes-on debugging, or set
-      `WALKIE_GRAPHS_VIZ=none` to free resources. (This is a perception-loop knob,
+      `WALKIE_EXPLORE_VIZ=none` to free resources. (This is a perception-loop knob,
       independent of GPSR logic.)
 
 ---
@@ -220,5 +220,5 @@ The parser + speak-a-plan path has no flags to disable — it's the safe core.
 | `GPSR_ENABLE_MANIPULATION` | `0` | §6 |
 | `GPSR_MAX_REPHRASINGS` | `2` | §7, §8 |
 | `GPSR_USE_CUSTOM_OPERATOR` / `_CUSTOM_OPERATOR_ATTEMPTS` | `1` / `3` | §8 |
-| `WALKIE_GRAPHS_VIZ` | `rerun` | §9 |
+| `WALKIE_EXPLORE_VIZ` | `rerun` | §9 |
 | `DISABLE_LISTENING` | `0` | §2 |

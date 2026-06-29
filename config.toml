@@ -349,7 +349,7 @@ WALKIE_DOOR_NEAR_RADIUS_M = "1.5"    # a mapped door within this of the robot = 
 # interfaces/perception/surfaces.py). The map frame is gravity-aligned (+Z up), so a
 # horizontal surface is a constant-Z band — these knobs tune the height-clustering and
 # the empty-space search. CALIBRATE the reach/footprint values on the real arm.
-# Full-scene cloud lift (override the per-detection WALKIE_GRAPHS_* defaults).
+# Full-scene cloud lift (override the per-detection WALKIE_EXPLORE_* defaults).
 WALKIE_PLACE_SCENE_VOXEL_M = "0.015"   # voxel size for the whole-scene cloud
 # Depth limit on the raw camera ray (m): drops everything past the workspace right in
 # front, so far walls/people never reach surface detection. ~1 m covers a table within

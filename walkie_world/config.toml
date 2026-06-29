@@ -14,25 +14,25 @@
 # The lean scene store: nodes.json + embeddings.npy + edges.json (+ map.npz when the
 # producer's TSDF is on). Map-seeded objects (source="map") are authoritative — always
 # visible, never pruned — so the cap applies only to perception nodes.
-WALKIE_GRAPHS_STORE_DIR = "graph_scene"
+WALKIE_EXPLORE_STORE_DIR = "graph_scene"
 # Confirmation gate: hide perception objects seen fewer than MIN_OBS_CONFIRM times (a
 # build's n_obs is the cluster's member count, so a thing seen twice confirms instantly).
-WALKIE_GRAPHS_MIN_OBS_CONFIRM = "2"
-WALKIE_GRAPHS_REQUIRE_CONFIRMATION = "1"
+WALKIE_EXPLORE_MIN_OBS_CONFIRM = "2"
+WALKIE_EXPLORE_REQUIRE_CONFIRMATION = "1"
 # Cap the persisted store; prune the oldest perception nodes by last_seen beyond this.
-WALKIE_GRAPHS_PRUNE_MAX_RECORDS = "500"
+WALKIE_EXPLORE_PRUNE_MAX_RECORDS = "500"
 # Centroid match radius when merging a build's objects into the persisted store (also
 # the hard cap on any single merge). Doubles as the scene-store merge_dist.
-WALKIE_GRAPHS_ASSOC_MAX_DIST_M = "0.5"
+WALKIE_EXPLORE_ASSOC_MAX_DIST_M = "0.5"
 
 [scene.relations]
 # Geometric near/on/above/inside edges derived from object AABBs each build (relations.py).
-WALKIE_GRAPHS_RELATION_MAX_DIST = "1.0"   # ignore pairs farther apart than this (m)
-WALKIE_GRAPHS_NEAR_M = "0.6"              # centroid distance for a "near" edge
-WALKIE_GRAPHS_XY_OVERLAP_MIN = "0.15"     # min footprint overlap for on/above
-WALKIE_GRAPHS_Z_TOL = "0.05"              # vertical slack
-WALKIE_GRAPHS_ON_GAP = "0.08"            # gap <= this => "on", else "above"
-WALKIE_GRAPHS_CONTAIN_TOL = "0.02"        # AABB-containment slack for "inside"
+WALKIE_EXPLORE_RELATION_MAX_DIST = "1.0"   # ignore pairs farther apart than this (m)
+WALKIE_EXPLORE_NEAR_M = "0.6"              # centroid distance for a "near" edge
+WALKIE_EXPLORE_XY_OVERLAP_MIN = "0.15"     # min footprint overlap for on/above
+WALKIE_EXPLORE_Z_TOL = "0.05"              # vertical slack
+WALKIE_EXPLORE_ON_GAP = "0.08"            # gap <= this => "on", else "above"
+WALKIE_EXPLORE_CONTAIN_TOL = "0.02"        # AABB-containment slack for "inside"
 
 [people]
 # Max cosine distance for a semantic attire-caption re-ID match (find_by_caption_embedding).

@@ -1,8 +1,8 @@
-"""Wipe the walkie_graphs store for a clean slate.
+"""Wipe the walkie_world scene store for a clean slate.
 
 Removes the lean scene store (`graph_scene/` — nodes.json + embeddings.npy + edges.json
 + map.npz) and the snapshot ring buffer (`graph_buffer/`). Paths come from the
-WALKIE_GRAPHS_* config. Run with the robot stopped so the capture/build threads aren't
+WALKIE_EXPLORE_* config. Run with the robot stopped so the capture/build threads aren't
 writing concurrently.
 
     uv run python -m services.realtime_explore.tools.reset       # asks for confirmation
@@ -25,19 +25,19 @@ def main() -> None:
     load_dotenv()
     load_config()
 
-    ap = argparse.ArgumentParser(description="Wipe the walkie_graphs store.")
+    ap = argparse.ArgumentParser(description="Wipe the walkie_world scene store.")
     ap.add_argument("-y", "--yes", action="store_true", help="skip the confirmation prompt")
     args = ap.parse_args()
 
     dirs = [
-        Path(os.getenv("WALKIE_GRAPHS_STORE_DIR", "graph_scene")),    # nodes/embeddings/edges/map
-        Path(os.getenv("WALKIE_GRAPHS_BUFFER_DIR", "graph_buffer")),  # snapshot ring buffer
+        Path(os.getenv("WALKIE_EXPLORE_STORE_DIR", "graph_scene")),    # nodes/embeddings/edges/map
+        Path(os.getenv("WALKIE_EXPLORE_BUFFER_DIR", "graph_buffer")),  # snapshot ring buffer
     ]
     files: list[Path] = []
 
     targets = [d for d in dirs if d.exists()] + [f for f in files if f.exists()]
     if not targets:
-        print("Nothing to remove — the walkie_graphs store is already empty.")
+        print("Nothing to remove — the walkie_world scene store is already empty.")
         return
 
     print("Will remove:")

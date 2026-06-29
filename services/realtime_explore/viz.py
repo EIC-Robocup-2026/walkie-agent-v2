@@ -8,14 +8,14 @@ visualization (e.g. a grasp triad under ``grasp/...``) in one viewer.
 
 :meth:`SceneGraphViz.update` logs, in the ``world`` space:
 - one colored point cloud per confirmed object (colored by class),
-- one AABB per object (``WALKIE_GRAPHS_VIZ_BOXES``), labelled with the class name
-  (``WALKIE_GRAPHS_VIZ_LABELS``); when boxes are off but labels on, the class name is
+- one AABB per object (``WALKIE_EXPLORE_VIZ_BOXES``), labelled with the class name
+  (``WALKIE_EXPLORE_VIZ_LABELS``); when boxes are off but labels on, the class name is
   anchored to the object centroid as a standalone marker instead,
 - the geometric relations as labelled line segments between object centroids,
 - the robot position + heading and the camera 3D position + look direction (reusable
   markers from the session, gated by ``WALKIE_VIZ_ROBOT`` / ``WALKIE_VIZ_CAMERA``),
 - optionally the TSDF structural cloud as a faint "background"
-  (``WALKIE_GRAPHS_VIZ_BACKGROUND``), passed in by the build.
+  (``WALKIE_EXPLORE_VIZ_BACKGROUND``), passed in by the build.
 
 :meth:`update_markers` is the cheap subset (just robot + camera) the capture thread
 calls every tick so those markers stay live between the occasional batch builds.
@@ -43,9 +43,9 @@ class SceneGraphViz:
 
     def __init__(self, viz) -> None:
         self._viz = viz  # a services.viz session (RerunSession or NoOpViz)
-        self._show_boxes = _flag("WALKIE_GRAPHS_VIZ_BOXES")
-        self._show_labels = _flag("WALKIE_GRAPHS_VIZ_LABELS")
-        self._show_background = _flag("WALKIE_GRAPHS_VIZ_BACKGROUND")
+        self._show_boxes = _flag("WALKIE_EXPLORE_VIZ_BOXES")
+        self._show_labels = _flag("WALKIE_EXPLORE_VIZ_LABELS")
+        self._show_background = _flag("WALKIE_EXPLORE_VIZ_BACKGROUND")
 
     def update(self, store, *, robot_pose=None, cam_pose=None, structural=None, rooms=None) -> None:
         """Redraw the whole scene from the current ``store`` (called after each build).
@@ -123,7 +123,7 @@ class SceneGraphViz:
     def update_live(self, frame, detections, *, exclude=()) -> None:
         """Live feed: draw the CURRENT frame's lifted detections under ``world/live``.
 
-        Refreshed every capture tick (when ``WALKIE_GRAPHS_VIZ_LIVE=1``) so you can watch
+        Refreshed every capture tick (when ``WALKIE_EXPLORE_VIZ_LIVE=1``) so you can watch
         the scene fill in as walkie_graphs takes each snapshot — independent of the slower
         batch build that produces the persistent ``world/objects``. Lifts via the canonical
         :meth:`CameraSnapshot.mask_to_points`, so the live clouds sit exactly where the

@@ -87,7 +87,7 @@ def test_mask_to_points_max_depth_env_default(monkeypatch):
     snap = _snap(depth, cam=_identity_pose(), intr=_intr())
     mask = np.zeros((480, 640), dtype=np.uint8)
     mask[200:280, 280:360] = 1  # straddles the near/far split
-    monkeypatch.setenv("WALKIE_GRAPHS_MAX_DEPTH_M", "4.0")
+    monkeypatch.setenv("WALKIE_EXPLORE_MAX_DEPTH_M", "4.0")
     gated = snap.mask_to_points(mask, voxel=0, max_points=10**9, erode_px=0)
     assert gated[:, 2].max() < 4.0
     # explicit override beats the env default

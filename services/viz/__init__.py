@@ -6,7 +6,7 @@ perception loop and any competition task both draw into the *same* Rerun recordi
 by entity-path namespace. When viz is disabled it returns a :class:`NoOpViz` so
 callers never null-check.
 
-Enable with ``WALKIE_VIZ=rerun`` (legacy ``WALKIE_GRAPHS_VIZ`` is honored as a
+Enable with ``WALKIE_VIZ=rerun`` (legacy ``WALKIE_EXPLORE_VIZ`` is honored as a
 fallback). Disabled (``none``) by default — walkie_graphs and tasks run fine without
 it. See :mod:`services.viz.session` for the drawing primitives and the env knobs.
 
@@ -28,7 +28,7 @@ _INSTANCE: VizSession | None = None
 
 
 def _resolve_backend() -> str:
-    return _env("WALKIE_VIZ", "WALKIE_GRAPHS_VIZ", "none").strip().lower()
+    return _env("WALKIE_VIZ", "WALKIE_EXPLORE_VIZ", "none").strip().lower()
 
 
 def _build_rerun() -> VizSession:

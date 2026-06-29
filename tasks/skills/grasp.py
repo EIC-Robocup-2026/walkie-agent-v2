@@ -65,7 +65,7 @@ def _b(name: str, default: str) -> bool:
 # descriptors — it is (a) the few-shot examples that steer the LLM and (b) the fallback
 # used when the LLM is disabled (WALKIE_GRASP_LLM_DESCRIPTORS=0) or the call fails. Keys
 # are lowercased item names matching the known set (services/walkie_graphs/config.toml
-# WALKIE_GRAPHS_INTERESTED_CLASSES); the wording is a starting point, tuned on-robot
+# WALKIE_EXPLORE_INTERESTED_CLASSES); the wording is a starting point, tuned on-robot
 # against YOLOE's vocab, and doubles as the demonstration the LLM imitates.
 _GRASP_DESCRIPTORS: dict[str, list[str]] = {
     "cola": ["can", "red can", "soda can"],
