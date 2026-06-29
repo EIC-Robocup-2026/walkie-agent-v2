@@ -64,10 +64,13 @@ GPSR_WORLD_FILE = ""
 # above. resolve_pose order: $WALKIE_MAP_FILE -> $GPSR_WORLD_FILE -> sibling. Each
 # challenge still falls back to its own *_POSE env var when the map lacks a name, so
 # a box with no map file keeps working. See docs/MAP_LOCATIONS.md.
-# Wired to the walkie-map-editor export for the active nav arena (22_…AirBnbHouse_4,
-# the default map in walkie-navigation's localization launch). Re-export from the
-# editor (and update the path/timestamp here) when the arena map or its [doors] change.
-WALKIE_MAP_FILE = "/home/walkie/robocup2026/ros2_ws/src/walkie-ros/navigation/walkie-navigation/map/22_27062026_AirBnbHouse_4/map_20260627_0212__map_world.toml"
+# Wired to a STABLE symlink (world.toml) in the active nav arena's map dir
+# (22_…AirBnbHouse_4, the default map in walkie-navigation's localization launch).
+# The symlink points at the latest walkie-map-editor export, so on re-export you only
+# overwrite that file (or re-point: `ln -sf <new>_world.toml world.toml`) and restart
+# the agent — no need to edit this path again. The [doors] gate activates once the
+# export has a [doors] table.
+WALKIE_MAP_FILE = "/home/walkie/robocup2026/ros2_ws/src/walkie-ros/navigation/walkie-navigation/map/22_27062026_AirBnbHouse_4/world.toml"
 
 [runtime]
 # 1 = type instructions at a TTY instead of speaking (no mic).
