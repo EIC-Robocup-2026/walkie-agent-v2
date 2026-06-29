@@ -52,6 +52,9 @@ office       = { pose = [0.0, 0.0, 0.0], present = false }   # absent -> dropped
 [locations]
 dining_table = { room = "kitchen", pose = [1.5, 2.5, 3.14], aliases = ["dinner table"] }
 kitchen_bar  = { room = "kitchen", pose = [0.2, 0.3, -1.0] }
+
+[doors]
+entrance     = { pose = [0.0, 0.0, 1.57], radius = 1.5 }   # a physical door
 ```
 
 - `pose = [x, y, heading_rad]` in the **map frame**. `[0,0,0]` = "not yet surveyed".
@@ -61,6 +64,24 @@ kitchen_bar  = { room = "kitchen", pose = [0.2, 0.3, -1.0] }
   GPSR's barrier-aware nav today; available to other challenges as a follow-up).
 - `present = false` — in the template but **not** in the running arena; the entry is
   dropped, and any location whose room was dropped cascades out too.
+
+### `[doors]` — physical door locations (proximity-gated asking)
+
+Optional. Each entry is a door's geographic position, drawn with the map editor's
+**Door** tool. When the map defines *any* door, the shared door-opening skill
+([`tasks/skills/door.py`](../tasks/skills/door.py) `go_to_through_door`) asks for a
+door **only where one is mapped** — a mapped door within `WALKIE_DOOR_NEAR_RADIUS_M`
+(default 1.5 m) of the robot — instead of on every nav block, so it won't pester a
+human at a cabinet/wall that merely reads "closed". With no `[doors]` (or
+`WALKIE_DOOR_MAP_GATE=0`) the gate is inert and the depth check decides alone — the
+original behaviour, so map-less arenas are unchanged.
+
+- `pose = [x, y, heading_rad]` — `heading` is the passage direction (display-only).
+- `radius` — optional per-door trigger radius (m); overrides `WALKIE_DOOR_NEAR_RADIUS_M`.
+- `present = false` — drop a door not in the running arena (like rooms/locations).
+- Read via `LocationBook.doors` / `door_near()` / `nearest_door()`; doors are matched
+  by **proximity**, never by name (they are not navigation destinations). This is
+  distinct from `barrier` (above), which gates per *destination* rather than by geometry.
 
 ## Name-resolution contract per challenge
 

@@ -20,6 +20,12 @@
 # barrier = true  → a human-operated door/partition/screen blocks the route here.
 # Navigation (go_to_named) asks a human to open it on a nav block even when the
 # depth check reads the doorway "open" (it can't see a too-narrow gap). Default off.
+#
+# [doors] (optional, see the commented block at the end) → the physical locations of
+# doors, drawn in walkie-map-editor. When present, go_to_through_door asks for a door
+# only where one is actually mapped (within WALKIE_DOOR_NEAR_RADIUS_M of the robot),
+# not on every nav block. `barrier` (above) gates per-destination; `[doors]` gate by
+# geometry — use whichever fits, or both.
 
 # Person names the operator may reference (meet / greet / guide / deliver-to).
 # MUST stay above the first [table] header — a bare key after a table header
@@ -89,3 +95,15 @@ pointing_right     = { aliases = ["pointing to the right", "person pointing to t
 sitting            = { aliases = ["sitting person", "seated person", "person sitting"] }
 standing           = { aliases = ["standing person", "person standing"] }
 lying_down         = { aliases = ["lying person", "person lying down", "lying down"] }
+
+# Doors — physical door/passage locations (drawn in walkie-map-editor with the Door
+# tool). Optional: omit the whole table for an arena with no doors on any route. When
+# present, the door-opening skill (go_to_through_door) engages only when the robot is
+# within `radius` m of one (env WALKIE_DOOR_NEAR_RADIUS_M, default 1.5), so it asks
+# for a door exactly where there is one — not at a cabinet/wall that reads "closed".
+#   pose   = [x, y, heading_rad]  (heading = passage direction; display-only)
+#   radius = trigger radius in m  (optional; overrides WALKIE_DOOR_NEAR_RADIUS_M)
+# Uncomment + survey for an arena whose route crosses a human-operated door:
+# [doors.entrance]
+# pose = [0.0, 0.0, 0.0]
+# radius = 1.5

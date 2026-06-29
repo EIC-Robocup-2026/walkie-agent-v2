@@ -335,6 +335,14 @@ WALKIE_DOOR_PROGRESS_EPS_M = "0.3"   # if the robot got >this much closer to goa
 WALKIE_DOOR_AT_GOAL_M = "0.5"        # nav FAILED but robot is within this of the goal -> treat as
                                      # reached, not a door (placement poses sit right at furniture,
                                      # which fails the goal checker + fills the depth box). <=0 = off
+# Map-defined doors (walkie-map-editor [doors] table → tasks/skills/locations.py). When
+# the arena map defines any door, go_to_through_door asks for a door only where one is
+# actually mapped (a mapped door within NEAR_RADIUS of the robot), instead of on every
+# nav block — and treats a block there as a (possibly partly-open) door. No doors mapped
+# -> this gate is inert and the depth check above decides alone (unchanged behaviour).
+WALKIE_DOOR_MAP_GATE = "1"           # 0 = ignore mapped doors (pure depth behaviour)
+WALKIE_DOOR_NEAR_RADIUS_M = "1.5"    # a mapped door within this of the robot = "at a door"
+                                     # (a per-door `radius` in world.toml overrides this)
 
 [placement]
 # Surface detection + object placement (tasks/skills/place.py, surface geometry in

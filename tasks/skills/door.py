@@ -266,6 +266,54 @@ def _dist_to(ctx: "TaskContext", x: float, y: float) -> "float | None":
         return None
 
 
+def mapped_door_near(
+    ctx: "TaskContext",
+    *,
+    radius: Optional[float] = None,
+    x: Optional[float] = None,
+    y: Optional[float] = None,
+) -> "bool | None":
+    """Is a *map-defined* door within trigger range of (x, y) [default: robot pose]?
+
+    The precision layer over the depth-only check. The arena map (``world.toml``,
+    drawn in walkie-map-editor) may define a ``[doors]`` table — the physical door
+    locations. When it does, the door-ask should fire only where a door actually is,
+    not at every nav block (a cabinet/wall reads "closed" too). Tri-state:
+
+    * ``True``  — a mapped door is within range here → engage the door flow.
+    * ``False`` — doors ARE mapped but none is near → this block is not a door.
+    * ``None``  — no doors mapped (or the gate is off, or the robot pose is unknown)
+      → the caller keeps its legacy depth-based behaviour, so a map-less arena and
+      every existing test are unchanged.
+
+    Reads ``WALKIE_DOOR_MAP_GATE`` (default on) and ``WALKIE_DOOR_NEAR_RADIUS_M``
+    (default 1.5 m; a per-door ``radius`` in world.toml overrides it). Never raises.
+    """
+    if os.getenv("WALKIE_DOOR_MAP_GATE", "1").lower() not in ("1", "true", "yes"):
+        return None
+    try:
+        from tasks.skills.locations import get_location_book
+        book = get_location_book()
+    except Exception as exc:  # pragma: no cover - import / map-load failure
+        print(f"[skills.door] location book unavailable ({exc})")
+        return None
+    if not book.has_doors():
+        return None
+    if x is None or y is None:
+        pose = getattr(ctx, "current_pose", None)
+        if not callable(pose):
+            return None  # mock/no-pose ctx — can't gate, fall back to depth
+        try:
+            p = pose()
+            x, y = float(p["x"]), float(p["y"])
+        except Exception:
+            return None
+    default_r = (
+        float(os.getenv("WALKIE_DOOR_NEAR_RADIUS_M", "1.5")) if radius is None else radius
+    )
+    return book.door_near(x, y, default_radius=default_r) is not None
+
+
 def go_to_through_door(
     ctx: "TaskContext",
     x: float,
@@ -315,6 +363,15 @@ def go_to_through_door(
     taken as reached. A genuinely blocking door leaves the robot far from the goal,
     so this never suppresses the real arena-door ask.
 
+    **Map-gated precision.** When the arena map (``world.toml``) defines a ``[doors]``
+    table, the door-ask is gated on :func:`mapped_door_near`: it fires only where a
+    door is actually mapped (a mapped door within ``WALKIE_DOOR_NEAR_RADIUS_M`` of the
+    robot), and a block away from any mapped door is taken as "not a door" — no ask.
+    A mapped door near is treated as ``ask_even_if_open`` regardless of the argument
+    (we *know* it's a door, so a "reads open but blocked" is a partly-open one). With
+    no doors mapped (or ``WALKIE_DOOR_MAP_GATE=0``) the gate is inert and the depth
+    check below decides alone — the original behaviour.
+
     Returns True if the destination was reached, False otherwise. ``request_kwargs``
     pass through to :func:`request_open_door` (prompt, max_wait, …). ``retry_pause``
     defaults to env ``WALKIE_DOOR_RETRY_PAUSE_SEC`` (3 s); ``progress_eps`` to env
@@ -338,8 +395,16 @@ def go_to_through_door(
             print(f"[skills.door] nav FAILED but robot is {cur_dist:.2f} m from the goal "
                   f"(<= {at_goal_m:.2f} m) — treating as reached, not a door")
             return True
+        # Map gate (None when no doors mapped → legacy behaviour preserved):
+        #   False → doors mapped but none near here → this block is not a door, give up.
+        #   True  → a mapped door is right here → engage even if depth reads "open".
+        gate = mapped_door_near(ctx)
+        if gate is False:
+            print("[skills.door] nav blocked but no mapped door is nearby — not a door")
+            break
+        ask_here = ask_even_if_open or (gate is True)
         door = is_door_open(ctx)  # True (open) / False (closed) / None (can't tell)
-        if door is True and not ask_even_if_open:
+        if door is True and not ask_here:
             break  # positively open and not door-gated — nav failed for another reason
 
         moved_through = (

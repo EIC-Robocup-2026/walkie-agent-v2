@@ -23,6 +23,11 @@ office      = { pose = [9.0, 9.0, 0.0], present = false }
 dining_table   = { room = "kitchen", pose = [1.5, 2.5, 3.14], aliases = ["dinner table"] }
 kitchen_bar    = { room = "kitchen", pose = [0.2, 0.3, -1.0] }
 absent_shelf   = { room = "office", pose = [9.1, 9.1, 0.0] }
+
+[doors]
+entrance   = { pose = [0.0, 0.0, 1.57], radius = 2.0 }
+hall_door  = { pose = [4.0, 4.0, 0.0] }
+old_door   = { pose = [9.0, 9.0, 0.0], present = false }
 """
 
 
@@ -75,6 +80,35 @@ def test_missing_file_returns_empty_book(tmp_path):
     assert isinstance(empty, LocationBook)
     assert empty.names() == []
     assert empty.pose("anything") is None
+    assert empty.has_doors() is False
+    assert empty.door_near(0.0, 0.0, default_radius=1.5) is None
+
+
+# --- doors (proximity, not name lookup) -------------------------------------
+
+def test_doors_parsed_with_present_drop(book):
+    assert book.has_doors() is True
+    assert set(book.doors) == {"entrance", "hall_door"}   # present=false old_door dropped
+    assert book.doors["entrance"].pose == (0.0, 0.0, 1.57)
+    assert book.doors["entrance"].radius == 2.0
+    assert book.doors["hall_door"].radius is None          # no per-door radius
+
+
+def test_door_near_uses_per_door_then_default_radius(book):
+    # entrance has radius=2.0: a point 1.5 m away is inside its own circle...
+    assert book.door_near(1.5, 0.0, default_radius=0.5).name == "entrance"
+    # ...but hall_door (no radius) only triggers within the default radius (0.9 m
+    # away: outside a 0.5 m default, inside a 1.5 m one).
+    assert book.door_near(4.9, 4.0, default_radius=0.5) is None
+    assert book.door_near(4.9, 4.0, default_radius=1.5).name == "hall_door"
+    # far from every door -> nothing.
+    assert book.door_near(100.0, 100.0, default_radius=1.5) is None
+
+
+def test_nearest_door_returns_closest_with_distance(book):
+    door, dist = book.nearest_door(4.0, 3.0)
+    assert door.name == "hall_door" and dist == pytest.approx(1.0)
+    assert book.nearest_door(0.1, 0.0)[0].name == "entrance"
 
 
 # --- resolve_pose fallback chain --------------------------------------------
