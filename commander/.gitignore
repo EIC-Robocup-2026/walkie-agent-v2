@@ -1,0 +1,8 @@
+# Self-contained sub-project artifacts
+.venv/
+__pycache__/
+*.pyc
+
+# Runtime data: scorecards the challenges write, written here so they never dirty
+# the parent repo root.
+walkie-runner-data/

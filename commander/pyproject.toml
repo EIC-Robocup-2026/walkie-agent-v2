@@ -1,0 +1,15 @@
+# Self-contained sub-project: its OWN venv and lockfile, depending only on NiceGUI.
+# Kept deliberately separate from the parent walkie-agent-v2 project so it never
+# touches the root pyproject.toml / uv.lock (which `main` keeps updating). The
+# parent has no [tool.uv.workspace], so this is NOT pulled in as a workspace member.
+#
+#   cd commander && uv run python main.py
+[project]
+name = "walkie-task-commander"
+version = "0.1.0"
+description = "LAN web UI to launch, monitor, and score walkie-agent-v2 RoboCup@Home challenges"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "nicegui>=2.7",
+]
