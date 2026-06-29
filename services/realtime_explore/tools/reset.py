@@ -5,8 +5,8 @@ Removes the lean scene store (`graph_scene/` — nodes.json + embeddings.npy + e
 WALKIE_GRAPHS_* config. Run with the robot stopped so the capture/build threads aren't
 writing concurrently.
 
-    uv run python -m services.walkie_graphs.tools.reset       # asks for confirmation
-    uv run python -m services.walkie_graphs.tools.reset -y     # no confirmation
+    uv run python -m services.realtime_explore.tools.reset       # asks for confirmation
+    uv run python -m services.realtime_explore.tools.reset -y     # no confirmation
 """
 
 from __future__ import annotations

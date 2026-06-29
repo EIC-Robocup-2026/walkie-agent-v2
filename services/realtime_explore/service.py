@@ -1,22 +1,26 @@
-"""walkie_graphs facade + the two decoupled loops (capture + batch build).
+"""realtime_explore — the perception PRODUCER (capture + batch build).
 
-The Database agent (``agents/database_agent/tools.py``) and GPSR (``tasks/GPSR/skills.py``)
-construct ``WalkieGraphs(model=, walkieAI=, walkie=, snapshot_path=)`` and call
-``start/stop/observe`` + ``query_text/query_near/recently_seen/all_objects/get/
-relations_of/to_text_description``.
+Renamed from ``walkie_graphs`` and split from the world model: this package only
+*produces* observations and pushes them into a :class:`~walkie_world.world.WalkieWorld`
+(the model now owns the scene store, relations and queries). Callers construct
+``RealtimeExplore(model=, walkieAI=, walkie=, world=, snapshot_path=)`` and call
+``start/stop/observe``. Query passthroughs delegate to the injected world (kept for
+back-compat with the Database agent until it queries ``ctx.world`` directly).
 
 Two loops, decoupled:
 
 - **Capture thread** (cheap, ~real-time): every ``INTERVAL_SEC`` grab one synchronized
   RGB-D frame + one fused detect/caption/embed round-trip, write the live
-  ``perception.json`` straight from the detections (so "what's in front of me now"
-  never lags the graph), and append a compact :class:`~.buffer.Snapshot` to the on-disk
-  ring buffer. No ICP, no fusion, no maintenance.
+  ``perception.json`` straight from the detections, and append a compact
+  :class:`~.buffer.Snapshot` to the on-disk ring buffer. No ICP, no fusion.
 - **Build worker** (batch, occasional, single-flight): every ``REBUILD_EVERY_N`` new
-  snapshots (and ``REBUILD_MIN_INTERVAL_SEC``, and on-demand) build object observations
-  over the recent window (:func:`~.builder.build_scene`), **merge** them into the
-  persisted :class:`~.scene.SceneStore` (never shrink), derive relations, and atomically
-  install the new scene. Queries always read the last installed scene.
+  snapshots build object observations over the recent window
+  (:func:`~.builder.build_scene`) and hand them to ``world.observe_objects`` (merge →
+  derive relations → install). Queries read the last installed scene.
+
+If no ``world`` is injected the producer builds its own (objects only,
+``enable_people=False``) — a transitional default; in the migrated pipeline exactly
+one shared :class:`WalkieWorld` is constructed in run.py/main.py and passed in.
 """
 
 from __future__ import annotations
@@ -30,10 +34,11 @@ from typing import Optional
 
 import numpy as np
 
+from walkie_world import WalkieWorld
+from walkie_world.scene.store import ObjectNode, Relation
+
 from .buffer import Detection, Snapshot, SnapshotBuffer
 from .builder import build_scene
-from .relations import derive_relations
-from .scene import ObjectNode, Relation, SceneStore
 from .viz import build_scene_viz
 
 
@@ -59,8 +64,9 @@ def _classes(name):
     return {c.strip().lower() for c in os.getenv(name, "").split(",") if c.strip()}
 
 
-class WalkieGraphs:
-    """v2 facade: cheap capture into a ring buffer + occasional offline batch builds."""
+class RealtimeExplore:
+    """Perception producer: cheap capture into a ring buffer + occasional batch builds
+    that feed a shared :class:`~walkie_world.world.WalkieWorld`."""
 
     def __init__(
         self,
@@ -68,7 +74,7 @@ class WalkieGraphs:
         walkieAI=None,
         walkie=None,
         *,
-        store: Optional[SceneStore] = None,
+        world: Optional[WalkieWorld] = None,
         viz=None,
         snapshot_path=None,
     ) -> None:
@@ -76,14 +82,14 @@ class WalkieGraphs:
         self.walkieAI = walkieAI
         self.walkie = walkie
         # Build (and thereby START) the shared Rerun session unless one is injected or
-        # viz is disabled — constructing WalkieGraphs is what kicks Rerun off in the
-        # main agent flow, exactly as the v1 facade did.
+        # viz is disabled — constructing the producer is what kicks Rerun off in the
+        # main agent flow, exactly as the old facade did.
         self.viz = viz if viz is not None else build_scene_viz()
         self.snapshot_path = snapshot_path
         self._last_structural = None  # last TSDF cloud (for the viz background)
         self._last_cam = None         # last capture's CameraPose (for the camera marker)
 
-        # --- config (all WALKIE_GRAPHS_* env, defaulted in services/.../config.toml) ---
+        # --- config (all WALKIE_GRAPHS_* env, defaulted in config.toml) ---
         self.interval = _envf("WALKIE_GRAPHS_INTERVAL_SEC", "3.0")
         self.interested = _classes("WALKIE_GRAPHS_INTERESTED_CLASSES")
         self.exclude = _classes("WALKIE_GRAPHS_EXCLUDE_CLASSES") or {"person"}
@@ -105,8 +111,7 @@ class WalkieGraphs:
             cross_class_clip_min=_envf("WALKIE_GRAPHS_ASSOC_CROSS_CLASS_CLIP_MIN", "0.95"),
             max_dist_m=_envf("WALKIE_GRAPHS_ASSOC_MAX_DIST_M", "0.5"),
         )
-        # Lift cleanup (forwarded to deproject_mask in the builder) — reuses the shared
-        # v1 knobs so tuning them takes effect on v2 too.
+        # Lift cleanup (forwarded to deproject_mask in the builder).
         self.lift = dict(
             erode_px=_envi("WALKIE_GRAPHS_MASK_ERODE_PX", "2"),
             edge_thresh=_envf("WALKIE_GRAPHS_DEPTH_EDGE_THRESH_M", "0.05"),
@@ -118,54 +123,41 @@ class WalkieGraphs:
         # Live scene feed: draw EACH captured frame's lifted detections to Rerun under
         # world/live (before the batch build), so you can watch the scene fill in live.
         self.viz_live = _envb("WALKIE_GRAPHS_VIZ_LIVE", "0")
-        # Relation-derivation thresholds (forwarded to relations.derive_relations).
-        self.relations = dict(
-            relation_max_dist=_envf("WALKIE_GRAPHS_RELATION_MAX_DIST", "1.0"),
-            near_m=_envf("WALKIE_GRAPHS_NEAR_M", "0.6"),
-            xy_overlap_min=_envf("WALKIE_GRAPHS_XY_OVERLAP_MIN", "0.15"),
-            z_tol=_envf("WALKIE_GRAPHS_Z_TOL", "0.05"),
-            on_gap=_envf("WALKIE_GRAPHS_ON_GAP", "0.08"),
-            contain_tol=_envf("WALKIE_GRAPHS_CONTAIN_TOL", "0.02"),
-        )
         # On a cold start (empty store) build sooner so the Database agent isn't blind
         # for a full REBUILD_EVERY_N window; afterwards the normal cadence applies.
         self.first_build_n = max(1, min(self.rebuild_every_n,
                                         _envi("WALKIE_GRAPHS_FIRST_BUILD_N", "10")))
-        # detection prompts: interested classes drive the open-vocab detector. (No
-        # masking-only excluded classes — v2 has no background carve to feed.)
+        # detection prompts: interested classes drive the open-vocab detector.
         self.detect_prompts = sorted(self.interested)
 
-        store_dir = os.getenv("WALKIE_GRAPHS_STORE_DIR", "graph_scene")
         buffer_dir = os.getenv("WALKIE_GRAPHS_BUFFER_DIR", "graph_buffer")
         snap_cap = _envi("WALKIE_GRAPHS_SNAPSHOT_CAP", "400")
 
-        embed_text = None
-        if walkieAI is not None:
-            def embed_text(q, _ai=walkieAI):
-                return _ai.image.embed_text(q)
+        # The world model owns the scene store + relations + queries. Build one (objects
+        # only) if none was injected, binding embed_text to the AI server for CLIP search.
+        if world is None:
+            embed_text = None
+            if walkieAI is not None:
+                def embed_text(q, _ai=walkieAI):
+                    return _ai.image.embed_text(q)
+            world = WalkieWorld(embed_text=embed_text, enable_people=False)
+        self.world = world
+        # Where to drop the TSDF map.npz (alongside the scene store's json/npy files).
+        self._scene_dir = self.world.scene.store_dir
 
-        self.store = store if store is not None else SceneStore(
-            store_dir=store_dir,
-            embed_text=embed_text,
-            min_obs_confirm=_envi("WALKIE_GRAPHS_MIN_OBS_CONFIRM", "2"),
-            require_confirmation=_envb("WALKIE_GRAPHS_REQUIRE_CONFIRMATION", "1"),
-            prune_max_records=_envi("WALKIE_GRAPHS_PRUNE_MAX_RECORDS", "500"),
-            merge_dist=self.assoc["max_dist_m"],
-        )
         self.buffer = SnapshotBuffer(buffer_dir, cap=snap_cap, keep_rgb=self.keep_rgb)
 
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
-        self._build_exec = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wg2-build")
+        self._build_exec = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rtx-build")
         self._build_future = None
-        self._build_lock = threading.Lock()  # serializes merge→install (worker vs observe())
         self._since_build = 0
         self._last_build_ts = 0.0
 
     # ------------------------------------------------------------------ logging
     def _log(self, msg: str) -> None:
         if _envb("WALKIE_GRAPHS_DEBUG_INGEST", "0") or _envb("WALKIE_GRAPHS_PERF", "0"):
-            print(f"[graphs2] {msg}")
+            print(f"[explore] {msg}")
 
     # ------------------------------------------------------------------ lifecycle
     def start(self) -> None:
@@ -173,18 +165,18 @@ class WalkieGraphs:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="WalkieGraphsV2", daemon=True)
+        self._thread = threading.Thread(target=self._run, name="RealtimeExplore", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
-        """Stop the capture thread, drain the build worker, persist."""
+        """Stop the capture thread, drain the build worker, persist the world."""
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=5)
             self._thread = None
         self._build_exec.shutdown(wait=True, cancel_futures=False)
         try:
-            self.store._persist()
+            self.world.persist()
         except Exception:  # noqa: BLE001
             pass
 
@@ -192,7 +184,7 @@ class WalkieGraphs:
         """Manual path: capture one frame, build now (blocking), return the objects."""
         self._capture_once()
         self._build_once()
-        return self.store.all_objects()
+        return self.world.all_objects()
 
     # ------------------------------------------------------------------ capture loop
     def _run(self) -> None:
@@ -315,7 +307,7 @@ class WalkieGraphs:
     # ------------------------------------------------------------------ build worker
     def _maybe_build(self) -> None:
         # Build sooner on a cold start (empty store) so queries work within ~20 s.
-        threshold = self.first_build_n if self.store.count() == 0 else self.rebuild_every_n
+        threshold = self.first_build_n if self.world.count() == 0 else self.rebuild_every_n
         if self._since_build < threshold:
             return
         if (time.monotonic() - self._last_build_ts) < self.rebuild_min_interval:
@@ -344,12 +336,9 @@ class WalkieGraphs:
             voxel_m=self.voxel_m, max_depth=self.max_depth, min_points=self.min_points,
             **self.lift, **self.assoc, log=self._log,
         )
-        # Serialize merge→derive→install so a background build and an observe() call
-        # can't interleave and lose one's merged nodes (each merges off the latest scene).
-        with self._build_lock:
-            nodes = self.store.merge(result.observations, now=time.time())
-            rels = derive_relations(nodes, **self.relations)
-            self.store.install(nodes, rels)
+        # The world owns the merge -> derive relations -> install sequence (and its lock),
+        # so a background build and a query caller can't tear the scene.
+        self.world.observe_objects(result.observations)
         if result.structural_cloud is not None:
             self._last_structural = result.structural_cloud
             self._save_structural(result.structural_cloud)
@@ -357,15 +346,14 @@ class WalkieGraphs:
 
     def _save_structural(self, cloud) -> None:
         try:
-            store_dir = self.store.store_dir
-            if store_dir is not None:
-                Path(store_dir).mkdir(parents=True, exist_ok=True)
-                np.savez_compressed(Path(store_dir) / "map.npz", points=np.asarray(cloud, np.float32))
+            if self._scene_dir is not None:
+                Path(self._scene_dir).mkdir(parents=True, exist_ok=True)
+                np.savez_compressed(Path(self._scene_dir) / "map.npz", points=np.asarray(cloud, np.float32))
         except Exception as e:  # noqa: BLE001
             self._log(f"map save failed: {e}")
 
     def _update_viz(self) -> None:
-        """Redraw the whole scene graph after a build (objects + relations + markers)."""
+        """Redraw the whole scene graph after a build (rooms + objects + relations + markers)."""
         if self.viz is None:
             return
         try:
@@ -375,34 +363,37 @@ class WalkieGraphs:
                     robot_pose = self.walkie.status.get_position()
                 except Exception:  # noqa: BLE001
                     robot_pose = None
-            self.viz.update(self.store, robot_pose=robot_pose,
-                            cam_pose=self._last_cam, structural=self._last_structural)
+            self.viz.update(self.world.scene, robot_pose=robot_pose,
+                            cam_pose=self._last_cam, structural=self._last_structural,
+                            rooms=self.world.rooms)
         except Exception:  # noqa: BLE001 — viz is best-effort
             pass
 
     # ------------------------------------------------------------------ query passthroughs
+    # Delegate to the shared world so the Database agent (which still holds a producer
+    # reference during migration) keeps working; removed once it queries ctx.world.
     def query_text(self, query, k=5, *, near=None, radius=None) -> list[ObjectNode]:
-        return self.store.query_text(query, k, near=near, radius=radius)
+        return self.world.query_text(query, k, near=near, radius=radius)
 
     def query_near(self, center, radius) -> list[ObjectNode]:
-        return self.store.query_near(center, radius)
+        return self.world.query_near(center, radius)
 
     def recently_seen(self, limit=5) -> list[ObjectNode]:
-        return self.store.recently_seen(limit)
+        return self.world.recently_seen(limit)
 
     def all_objects(self) -> list[ObjectNode]:
-        return self.store.all_objects()
+        return self.world.all_objects()
 
     def get(self, node_id) -> Optional[ObjectNode]:
-        return self.store.get(node_id)
+        return self.world.get(node_id)
 
     def relations_of(self, node_id) -> list[Relation]:
-        return self.store.relations_of(node_id)
+        return self.world.relations_of(node_id)
 
     def to_text_description(self) -> str:
-        return self.store.to_text_description()
+        return self.world.to_text_description()
 
-    # API-compat no-ops (v1 exposed optional LLM refinement; v2 doesn't use it).
+    # API-compat no-ops (the v1 facade exposed optional LLM refinement; unused here).
     def refine_captions(self, **_kw) -> int:
         return 0
 

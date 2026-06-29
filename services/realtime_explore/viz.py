@@ -47,9 +47,18 @@ class SceneGraphViz:
         self._show_labels = _flag("WALKIE_GRAPHS_VIZ_LABELS")
         self._show_background = _flag("WALKIE_GRAPHS_VIZ_BACKGROUND")
 
-    def update(self, store, *, robot_pose=None, cam_pose=None, structural=None) -> None:
-        """Redraw the whole scene from the current ``store`` (called after each build)."""
+    def update(self, store, *, robot_pose=None, cam_pose=None, structural=None, rooms=None) -> None:
+        """Redraw the whole scene from the current ``store`` (called after each build).
+
+        ``rooms`` (an optional ``{name: Room}`` from the world map) draws each room's
+        boundary polygon as walls. Object point clouds + AABB boxes come from ``store``:
+        a map-seeded object (no cloud yet) shows as its bounding box, and once perception
+        promotes it to a real cloud the cloud is drawn — the bbox->point-cloud swap.
+        """
         viz = self._viz
+
+        # Room boundary polygons as walls (closed line strips on the floor plane).
+        self._draw_rooms(rooms)
 
         # Faint structural cloud (TSDF map) as background, when present.
         if self._show_background and structural is not None and len(structural):
@@ -89,6 +98,22 @@ class SceneGraphViz:
             viz.lines("world/relations", strips, labels=labels)
         else:
             viz.clear("world/relations", recursive=True)
+
+    def _draw_rooms(self, rooms) -> None:
+        """Draw each room's boundary polygon as a closed wall line strip (z=0 floor)."""
+        if not rooms:
+            return
+        strips = []
+        for room in rooms.values():
+            poly = getattr(room, "polygon", ()) or ()
+            if len(poly) >= 2:
+                ring = [[float(x), float(y), 0.0] for (x, y) in poly]
+                ring.append(ring[0])  # close the loop back to the first vertex
+                strips.append(ring)
+        if strips:
+            self._viz.lines("world/rooms", strips)
+        else:
+            self._viz.clear("world/rooms", recursive=True)
 
     def update_markers(self, *, robot_pose=None, cam_pose=None) -> None:
         """Cheap live markers — robot position/heading + camera position/look direction."""

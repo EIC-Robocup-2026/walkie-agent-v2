@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from services.walkie_graphs.fusion import (
+from services.realtime_explore.fusion import (
     aabb_overlap,
     additive_similarity,
     nn_ratio,

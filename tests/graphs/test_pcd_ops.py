@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from services.walkie_graphs import pcd_ops
+from services.realtime_explore import pcd_ops
 from interfaces.perception.geometry import voxel_downsample as voxel_np
 
 try:

@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import numpy as np
 
-from services.walkie_graphs.builder import build_scene
-from services.walkie_graphs.buffer import Detection, Snapshot, SnapshotBuffer
-from services.walkie_graphs.relations import derive_relations
-from services.walkie_graphs.scene import SceneStore
+from services.realtime_explore.builder import build_scene
+from services.realtime_explore.buffer import Detection, Snapshot, SnapshotBuffer
+from walkie_world.scene.relations import derive_relations
+from walkie_world.scene.store import SceneStore
 
 H = W = 64
 FX = FY = 500.0

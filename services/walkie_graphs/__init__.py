@@ -1,23 +1,12 @@
-"""walkie_graphs — Walkie's 3D scene-graph spatial memory (batch-snapshot backend).
+"""Compatibility shim — walkie_graphs was split into walkie_world (the model) +
+services.realtime_explore (the producer).
 
-Cheap continuous **capture** into an on-disk snapshot ring buffer (`graph_buffer/`) +
-occasional offline **batch builds** with globally-consistent poses → a lean numpy
-:class:`~services.walkie_graphs.scene.SceneStore` (`graph_scene/`, no ChromaDB for the
-scene) populated by batch constrained-agglomerative association. The full pipeline and
-every tuning knob are documented in ``docs/WALKIE_GRAPHS.md``.
-
-Public surface (what the Database agent + GPSR depend on)::
-
-    from services.walkie_graphs import WalkieGraphs
-
-    graphs = WalkieGraphs(model=model, walkieAI=walkieAI, walkie=walkie, snapshot_path=...)
-    graphs.start()                       # capture thread + batch build worker
-    hits = graphs.query_text("where is the mug?")
-    print(graphs.to_text_description())
-    graphs.stop()
-
-This module is intentionally **import-light** (PEP 562 lazy attributes): importing the
-package — or any submodule — must not eagerly pull Open3D or the camera/SDK stack.
+Kept during the migration so existing imports keep working:
+``from services.walkie_graphs import WalkieGraphs`` resolves to the renamed
+:class:`~services.realtime_explore.service.RealtimeExplore`; ``ObjectNode`` /
+``Relation`` resolve to :mod:`walkie_world.scene.store`. The submodule shims
+``services/walkie_graphs/scene.py`` and ``relations.py`` alias the walkie_world
+homes. Removed in the final migration phase.
 """
 
 from __future__ import annotations
@@ -25,14 +14,16 @@ from __future__ import annotations
 import importlib
 from typing import TYPE_CHECKING
 
-__all__ = ["WalkieGraphs", "ObjectNode", "Relation", "CameraSnapshot", "geometry"]
+__all__ = ["WalkieGraphs", "ObjectNode", "Relation", "CameraSnapshot", "geometry", "pcd_ops"]
 
 _LAZY = {
-    "WalkieGraphs": ("services.walkie_graphs.service", "WalkieGraphs"),
-    "ObjectNode": ("services.walkie_graphs.scene", "ObjectNode"),
-    "Relation": ("services.walkie_graphs.scene", "Relation"),
+    # WalkieGraphs is the old name for the producer (RealtimeExplore).
+    "WalkieGraphs": ("services.realtime_explore.service", "RealtimeExplore"),
+    "ObjectNode": ("walkie_world.scene.store", "ObjectNode"),
+    "Relation": ("walkie_world.scene.store", "Relation"),
     "CameraSnapshot": ("interfaces.devices.camera", "CameraSnapshot"),
     "geometry": ("interfaces.perception", "geometry"),
+    "pcd_ops": ("services.realtime_explore", "pcd_ops"),
 }
 
 
@@ -45,5 +36,5 @@ def __getattr__(name: str):  # PEP 562 — resolve public names lazily
 
 if TYPE_CHECKING:  # static type hints only — never imported at runtime
     from interfaces.devices.camera import CameraSnapshot
-    from .scene import ObjectNode, Relation
-    from .service import WalkieGraphs
+    from services.realtime_explore.service import RealtimeExplore as WalkieGraphs
+    from walkie_world.scene.store import ObjectNode, Relation
