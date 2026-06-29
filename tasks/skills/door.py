@@ -291,8 +291,10 @@ def mapped_door_near(
     """
     if os.getenv("WALKIE_DOOR_MAP_GATE", "1").lower() not in ("1", "true", "yes"):
         return None
+    # The map is the same book ctx.world.map composes (ctx.world.is_near_door is the
+    # public equivalent); read it directly so this stays usable on a mock/no-world ctx.
     try:
-        from tasks.skills.locations import get_location_book
+        from walkie_world.map.locations import get_location_book
         book = get_location_book()
     except Exception as exc:  # pragma: no cover - import / map-load failure
         print(f"[skills.door] location book unavailable ({exc})")
@@ -311,7 +313,8 @@ def mapped_door_near(
     default_r = (
         float(os.getenv("WALKIE_DOOR_NEAR_RADIUS_M", "1.5")) if radius is None else radius
     )
-    return book.door_near(x, y, default_radius=default_r) is not None
+    # is_near_door fires on a surveyed doorway POLYGON region or the trigger radius.
+    return book.is_near_door(x, y, default_radius=default_r)
 
 
 def go_to_through_door(

@@ -255,9 +255,19 @@ class PeopleStore:
         """
         if person_id is None and not (name and name.strip()):
             raise ValueError("name must be non-empty when no person_id is given")
-        emb = [float(x) for x in embedding]
+        emb = [float(x) for x in (embedding or [])]
         if not emb:
-            raise ValueError("embedding must be non-empty")
+            # Attire-only enrollment (e.g. Restaurant re-identifies by clothing, not
+            # face): register the id with a zero placeholder face sized to an available
+            # modality. The fusion path already treats a zero-norm stored face as
+            # "no face", so recognize() won't false-match it; re-ID goes via appearance.
+            dim = len(appearance_caption_embedding or []) or len(app_embedding or [])
+            if dim == 0:
+                raise ValueError(
+                    "enroll needs a face embedding, or an appearance/caption vector for "
+                    "attire-only enrollment"
+                )
+            emb = [0.0] * dim
         now = time.time() if ts is None else float(ts)
         rid = _slug(person_id) if person_id else _slug(name)
 

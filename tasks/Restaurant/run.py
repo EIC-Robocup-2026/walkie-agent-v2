@@ -17,7 +17,8 @@ Step-by-step on-robot bring-up — pick an isolated slice with RESTAURANT_SLICE
 
 Phase 0 (scan -> detect waving customer -> approach to stand-off) is implemented;
 order-taking + relay are real; pick/serve are Phase-2 stubs. Person handling is
-gesture detection, not face re-ID, so no PeopleStore is wired (ctx.people=None).
+gesture detection (no faces), but the unified world people store IS wired now so
+customer appearance is embedded + re-identified semantically (ctx.world / ctx.people).
 """
 
 import os
@@ -40,6 +41,7 @@ from .subtasks import (
     build_surface_demo,
 )
 from client import WalkieAIClient
+from walkie_world import WalkieWorld
 
 
 def _truthy(name: str, default: str = "0") -> bool:
@@ -134,11 +136,21 @@ def main() -> None:
         return
 
     scorecard = ScoreTracker(RESTAURANT_SHEET, path=os.getenv("RESTAURANT_SCORECARD_PATH", "restaurant_scorecard.json"))
+    # Unified world model with people memory so a customer's appearance is embedded
+    # into the shared store (attire-only — no face) and re-identified semantically on
+    # return, replacing the old lexical caption-overlap. embed_text enables the CLIP
+    # text matching used for both object and appearance search.
+    world = WalkieWorld(
+        embed_text=(lambda q: walkie_ai.image.embed_text(q)),
+        enable_people=True,
+    )
     ctx = TaskContext(
         walkie=walkie_interface,
         walkieAI=walkie_ai,
         model=model,
         disable_listening=_truthy("DISABLE_LISTENING"),
+        world=world,
+        people=world.people,
         scorer=scorecard,  # live tally of attempted/claimed points (ctx.score)
     )
 

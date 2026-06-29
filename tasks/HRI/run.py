@@ -35,7 +35,7 @@ from .subtasks import (
     prepare_run,
 )
 from client import WalkieAIClient
-from perception import PeopleStore
+from walkie_world import WalkieWorld
 
 
 def _truthy(name: str, default: str = "0") -> bool:
@@ -127,12 +127,21 @@ def main() -> None:
         return
 
     scorecard = ScoreTracker(HRI_SHEET, path=os.getenv("HRI_SCORECARD_PATH", "hri_scorecard.json"))
+    # Unified world model with people memory (face + attire re-ID) for the
+    # Receptionist's guest enroll / recognize / follow. ctx.people is the world's
+    # store, so existing identity.py code (ctx.people.enroll/recognize_fused) is
+    # unchanged while sharing one store with ctx.world.find_person_by_caption.
+    world = WalkieWorld(
+        embed_text=(lambda q: walkie_ai.image.embed_text(q)),
+        enable_people=True,
+    )
     ctx = TaskContext(
         walkie=walkie_interface,
         walkieAI=walkie_ai,
         model=model,
         disable_listening=_truthy("DISABLE_LISTENING"),
-        people=PeopleStore.from_env(),
+        world=world,
+        people=world.people,
         scorer=scorecard,  # live tally of attempted/claimed points (ctx.score)
     )
 

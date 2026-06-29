@@ -70,6 +70,30 @@ def test_fields_carried_forward_on_reenroll(store):
     assert rec.enrollments == 2
 
 
+def test_attire_only_enrollment_no_face(store):
+    """Restaurant has no face: enroll by attire alone (empty face embedding) and still
+    re-identify by caption. A zero placeholder face is stored, so recognize() won't
+    false-match it."""
+    rec = store.enroll(
+        "", "", [], person_id="customer-1",
+        appearance_caption="a person in a red shirt",
+        appearance_caption_embedding=[1.0, 0.0],
+        last_seen_pose=(2.0, 3.0, 0.0),
+    )
+    assert rec.id == "customer-1"
+    assert store.count() == 1
+    hit = store.find_by_caption_embedding([0.95, 0.05])
+    assert hit is not None and hit.id == "customer-1"
+    assert hit.last_seen_pose == (2.0, 3.0, 0.0)
+    # A zero-norm placeholder face must not be returned by face recognition.
+    assert store.recognize([0.0, 1.0]) is None
+
+
+def test_attire_only_requires_some_vector(store):
+    with pytest.raises(ValueError):
+        store.enroll("", "", [], person_id="nobody")  # no face, no appearance vectors
+
+
 def test_clear_drops_all_three_collections(store):
     store.enroll("alice", "cola", [1.0, 0.0],
                  app_embedding=[0.5, 0.5],
