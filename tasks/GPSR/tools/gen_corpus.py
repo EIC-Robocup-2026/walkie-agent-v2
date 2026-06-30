@@ -142,7 +142,7 @@ def _main() -> None:
     ap.add_argument("-n", type=int, default=100, help="number of commands to sample")
     ap.add_argument("--seed", type=int, default=0, help="RNG seed (reproducible)")
     ap.add_argument("--category", choices=CATEGORIES, default=None, help="pin one bucket")
-    ap.add_argument("--world", default=None, help="world.toml path (default: GPSR_WORLD_FILE / bundled)")
+    ap.add_argument("--world", default=None, help="world.toml path (default: the global map — $WALKIE_MAP_FILE or repo-root world.toml)")
     args = ap.parse_args()
 
     world = load_world(args.world, include_absent=True)

@@ -7,33 +7,28 @@ book** instead of a hand-set per-challenge env var. The **map editor**
 a separate web app) writes the location file as a `world.toml`; this repo only
 *reads* it.
 
-- **Reader:** [`tasks/skills/locations.py`](../tasks/skills/locations.py) —
+- **Reader:** [`walkie_world/map/locations.py`](../walkie_world/map/locations.py) —
   `LocationBook`, `load_location_book`, `get_location_book`, `resolve_pose`.
-- **Schema:** the existing GPSR `world.toml` rooms/locations schema (below).
-- **GPSR** is built on this layer too: `tasks/GPSR/world.py`'s `WorldModel` loads
-  its rooms/locations via the same code (and adds object/name/gesture vocabulary
-  on top).
+- **Schema:** the `world.toml` rooms/locations/doors/objects schema (below).
+- **GPSR** is built on this layer too: [`walkie_world/map/vocab.py`](../walkie_world/map/vocab.py)'s
+  `WorldModel` loads its rooms/locations via the same code (and adds object/name/gesture
+  vocabulary on top). Both reach `ctx.world`.
 
 ## The file
 
-There are **two readers** with slightly different resolution chains:
+There is **ONE global map** shared by every challenge — no per-task map. Both readers
+(the `LocationBook` and the GPSR `WorldModel`) resolve through the *same* chain:
 
-- **`LocationBook`** (`resolve_pose`, used by PnP / Restaurant / HRI / Laundry) reads:
-  explicit path → `$WALKIE_MAP_FILE` → `$GPSR_WORLD_FILE` → sibling `tasks/GPSR/world.toml`.
-- **GPSR `WorldModel`** (`tasks/GPSR/world.py::load_world`, called with no arg in
-  `parse.py`/`run.py`) reads: `$GPSR_WORLD_FILE` → sibling. **It does *not* read
-  `$WALKIE_MAP_FILE`.**
+> **explicit path → `$WALKIE_MAP_FILE` → the repo-root `world.toml`.**
 
-> ⚠️ **Use `GPSR_WORLD_FILE` (root `config.toml`, `[map]`) — it's the one var both
-> readers honour, so it covers all five challenges.** Setting `WALKIE_MAP_FILE`
-> alone points the four location challenges at a new map but leaves GPSR reading the
-> stale sibling file — treat `WALKIE_MAP_FILE` as a 4-challenge-only override.
+`WALKIE_MAP_FILE` (root `config.toml`, `[map]`) is the **one canonical knob**: because
+both readers honour it, the map and the GPSR vocabulary can never read different files.
+(The legacy `GPSR_WORLD_FILE` var was removed — set `WALKIE_MAP_FILE` instead.)
 
-**Zero-config alternative:** drop the editor's output in as `tasks/GPSR/world.toml`
-(the sibling fallback both readers land on) and set no env var at all. Defaulting to
-that one file means **one arena file serves every challenge**, and the existing
-`tasks/GPSR/tools/teach_poses.py` (drive the robot, record its current pose) already
-feeds them all.
+**Zero-config:** drop the editor's output in as the repo-root `world.toml` and set no
+env var at all. One arena file serves every challenge, and
+`tasks/GPSR/tools/teach_poses.py` (drive the robot, record its current pose) edits that
+same file.
 
 If the file is **missing**, the book is empty (never raises) — each challenge then
 falls back to its own `*_POSE` env var, so a dev box with no map keeps running.

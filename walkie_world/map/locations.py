@@ -428,26 +428,28 @@ class LocationBook:
 
 
 def _default_map_path() -> Path:
-    """$WALKIE_MAP_FILE -> $GPSR_WORLD_FILE -> the repo's GPSR world.toml.
+    """The single global arena map: ``$WALKIE_MAP_FILE``, else the repo-root ``world.toml``.
 
-    Defaulting to GPSR's file means one arena file serves every challenge and the
-    existing teach_poses tool already feeds them all; point WALKIE_MAP_FILE
-    elsewhere to swap in the map editor's output. walkie_world/map/locations.py ->
-    parents[2] is the repo root; the arena file stays at tasks/GPSR/world.toml.
+    One map serves every challenge — there is no per-task map. ``WALKIE_MAP_FILE`` is
+    the one canonical override (point it at the map editor's output / the deployed nav
+    arena); with it unset, the in-repo fallback is the top-level ``world.toml``
+    (``walkie_world/map/locations.py`` -> ``parents[2]`` is the repo root). Both the map
+    layer and the GPSR vocab (:func:`walkie_world.map.vocab.load_world`) resolve through
+    here, so they can never read different files.
     """
-    explicit = os.getenv("WALKIE_MAP_FILE") or os.getenv("GPSR_WORLD_FILE")
+    explicit = os.getenv("WALKIE_MAP_FILE")
     if explicit:
         return Path(explicit)
-    return Path(__file__).resolve().parents[2] / "tasks" / "GPSR" / "world.toml"
+    return Path(__file__).resolve().parents[2] / "world.toml"
 
 
 def load_location_book(path: str | os.PathLike | None = None, *,
                        include_absent: bool = False) -> LocationBook:
     """Load a LocationBook from a world.toml-schema file.
 
-    Resolution: explicit *path* -> $WALKIE_MAP_FILE -> $GPSR_WORLD_FILE -> the
-    sibling GPSR ``world.toml``. **Returns an empty book (never raises) when the
-    file is missing** so a box with no map still runs on env-var fallbacks.
+    Resolution: explicit *path* -> ``$WALKIE_MAP_FILE`` -> the repo-root ``world.toml``
+    (the single global map). **Returns an empty book (never raises) when the file is
+    missing** so a box with no map still runs on the env-var fallback.
     """
     p = Path(path) if path is not None else _default_map_path()
     if not p.exists():

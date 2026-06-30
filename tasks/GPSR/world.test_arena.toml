@@ -1,9 +1,9 @@
 # GPSR world model — the arena nouns (rooms, locations, objects, names, gestures).
 #
 # This is the per-competition CompetitionTemplate data, NOT tuning knobs, so it
-# lives in its own file loaded directly by world.py (tomllib) rather than going
-# through config.toml's env-var flattening. Point GPSR_WORLD_FILE at a different
-# file to swap arenas.
+# lives in its own file loaded directly (tomllib) rather than going through
+# config.toml's env-var flattening. Point WALKIE_MAP_FILE at a different file to
+# swap arenas (the global map default is the repo-root world.toml).
 #
 # Defaults below are the official RoboCupAtHome CompetitionTemplate example arena
 # (https://github.com/RoboCupAtHome/CompetitionTemplate). REPLACE the poses with

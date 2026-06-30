@@ -1,9 +1,11 @@
-# GPSR world model — the arena nouns (rooms, locations, objects, names, gestures).
+# The global arena map + vocabulary (rooms, locations, doors, object shapes/vocab,
+# names, gestures) — the SINGLE world.toml every challenge uses. There is no per-task
+# map; the walkie-map-editor exports this file.
 #
-# This is the per-competition CompetitionTemplate data, NOT tuning knobs, so it
-# lives in its own file loaded directly by world.py (tomllib) rather than going
-# through config.toml's env-var flattening. Point GPSR_WORLD_FILE at a different
-# file to swap arenas.
+# This is per-competition CompetitionTemplate data, NOT tuning knobs, so it lives in
+# its own file loaded directly (tomllib) rather than through config.toml's env-var
+# flattening. This repo-root world.toml is the default; point $WALKIE_MAP_FILE at a
+# different file to swap arenas (e.g. the deployed nav-arena export).
 #
 # Defaults below are the official RoboCupAtHome CompetitionTemplate example arena
 # (https://github.com/RoboCupAtHome/CompetitionTemplate). REPLACE the poses with

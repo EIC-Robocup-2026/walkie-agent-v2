@@ -82,10 +82,9 @@ GPSR_USE_CUSTOM_OPERATOR = "1"
 # Listening attempts with the custom operator before giving up (the rulebook gives
 # the custom operator three attempts).
 GPSR_CUSTOM_OPERATOR_ATTEMPTS = "3"
-# Path to the world-model file (arena nouns the parser grounds against). The rich
-# data lives in its own TOML loaded directly (NOT flattened to env vars); only
-# the path is a knob. Relative to the repo root. Override to swap arenas.
-GPSR_WORLD_FILE = "tasks/GPSR/world.toml"
+# NOTE: the arena map/vocab is the SINGLE global file (repo-root world.toml, or
+# $WALKIE_MAP_FILE) shared by every challenge — there is no per-task GPSR map knob
+# anymore. Set WALKIE_MAP_FILE in the root config.toml [map] to swap arenas.
 # Manipulation gate (mirrors RESTAURANT_ARM_CALIBRATED). 0 = pick/place steps fall
 # through to the Tier-2 agent. 1 = the Tier-1 pick/place skills (tasks/GPSR/skills.py
 # -> the shared grasp system) handle them deterministically. `deliver` always stays

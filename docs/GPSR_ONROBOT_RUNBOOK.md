@@ -30,7 +30,7 @@
 
 ## 1. Arena survey (the ~2-hour pre-competition window)
 
-The arena nouns ship as defaults in `tasks/GPSR/world.toml`; the **poses are
+The arena nouns ship as defaults in the repo-root `world.toml`; the **poses are
 placeholders** (`[0,0,0]`) until surveyed. Nav is a no-op until this is done.
 
 1. [ ] **Update the vocabulary** if the announced CompetitionTemplate differs from
