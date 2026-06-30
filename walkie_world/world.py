@@ -198,6 +198,43 @@ class WalkieWorld:
         """The world-editor's surveyed object shapes (XY footprint + Z height)."""
         return list(self.map.map_objects)
 
+    def default_location_for(self, name: str | None) -> tuple[str, Pose | None] | None:
+        """The canonical placement (name, pose) where an object/category belongs.
+
+        Resolves object -> category -> the location whose ``category`` matches it
+        (the map's "the drinks live in the cabinet" encoding). Accepts either an
+        object name ("cola") or a category ("drinks"). Returns ``(location_name,
+        pose)`` — ``pose`` may be ``None`` for an unsurveyed location — or ``None``
+        when nothing grounds. This is the lookup the Finals "return a misplaced
+        object to its default location" problem (and the Database agent's
+        ``get_default_location`` tool) is built on.
+        """
+        obj = self.obj(name)
+        cat = self.objects.get(obj) if obj else self.category(name)
+        if cat is None:
+            return None
+        for loc_name, loc in self.locations.items():
+            if getattr(loc, "category", None) == cat:
+                return loc_name, self.location_pose(loc_name)
+        return None
+
+    def objects_in_room(self, room: str | None) -> list[ObjectNode]:
+        """Confirmed scene objects whose centroid falls inside *room*'s polygon.
+
+        Grounds *room* to a canonical name, then filters ``all_objects()`` by
+        ``room_at`` of each centroid. Empty when the room is unknown, has no
+        boundary polygon, or nothing has been catalogued there.
+        """
+        canon = self.room(room)
+        if canon is None:
+            return []
+        out: list[ObjectNode] = []
+        for n in self.all_objects():
+            cx, cy = float(n.centroid[0]), float(n.centroid[1])
+            if self.room_at(cx, cy) == canon:
+                out.append(n)
+        return out
+
     # ==================================================================
     # Objects / scene graph
     # ==================================================================

@@ -7,8 +7,10 @@ from .prompts import VISION_AGENT_SYSTEM_PROMPT
 from .tools import make_vision_tools
 
 
-def create_vision_agent(model, walkieAI, walkie: WalkieInterface):
-    tools = make_vision_tools(walkie, walkieAI, agent_name="vision")
+def create_vision_agent(model, walkieAI, walkie: WalkieInterface, *, ctx=None):
+    """``ctx`` (a TaskContext) lets capture use geometry-true snapshots; the tool set
+    is the same with or without it."""
+    tools = make_vision_tools(walkie, walkieAI, agent_name="vision", ctx=ctx)
     return create_walkie_agent(
         name="vision_agent",
         model=model,

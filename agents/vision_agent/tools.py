@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from langchain_core.tools import tool
 
@@ -10,10 +10,27 @@ from agents.core.robot_context import RobotContext
 from agents.vision_agent.detect import find_object_in_image
 from interfaces.walkie_interface import WalkieInterface
 
+if TYPE_CHECKING:  # annotation only — never import tasks.* at agent import time
+    from tasks.base import TaskContext
+
 
 # COCO keypoint indices used to summarize "arm raised"
 _LEFT_SHOULDER, _RIGHT_SHOULDER = 5, 6
 _LEFT_WRIST, _RIGHT_WRIST = 9, 10
+
+
+def _arm_raised(pose) -> bool:
+    """True if either wrist is above the same-side shoulder (a hand-raise / call).
+
+    Image y grows downward, so "raised" is ``wrist.y < shoulder.y``. Self-contained
+    (mirrors tasks.skills.people.is_calling_gesture) to keep vision import-light.
+    """
+    kpts = {kp.index: kp for kp in pose.keypoints}
+    ls, lw = kpts.get(_LEFT_SHOULDER), kpts.get(_LEFT_WRIST)
+    rs, rw = kpts.get(_RIGHT_SHOULDER), kpts.get(_RIGHT_WRIST)
+    left = ls and lw and lw.confidence > 0.3 and ls.confidence > 0.3 and lw.y < ls.y
+    right = rs and rw and rw.confidence > 0.3 and rs.confidence > 0.3 and rw.y < rs.y
+    return bool(left or right)
 
 
 def _summarize_pose(pose) -> str:
@@ -34,6 +51,7 @@ def make_vision_tools(
     walkieAI,
     *,
     agent_name: str = "vision",
+    ctx: "TaskContext | None" = None,
 ):
     """Build the vision sub-agent's tool list.
 
@@ -41,9 +59,14 @@ def make_vision_tools(
 
     Vision is about the **live camera** only. Long-term "where have I seen X?"
     lookups belong to the Walkie Database sub-agent, so they are not exposed here.
+    ``ctx`` (a TaskContext), when given, lets capture use a geometry-true snapshot.
     """
 
     def _capture():
+        if ctx is not None:
+            snap = ctx.snapshot()
+            if snap is not None:
+                return snap.img
         return walkie.camera.capture_pil()
 
     @parallelable_tool
@@ -171,6 +194,55 @@ def make_vision_tools(
             parts.append("People: none")
         return "\n".join(parts)
 
+    @parallelable_tool
+    @tool
+    def find_person_raising_hand() -> str:
+        """Check whether anyone visible is raising a hand (calling for help).
+
+        Use to detect a person who needs assistance — the Finals cue is that a person
+        raises their hand when the robot is in their room. Reports how many people are
+        visible and how many are raising a hand.
+        """
+        img = _capture()
+        people = walkieAI.image.estimate_poses(img)
+        if not people:
+            return "No people visible."
+        raisers = [p for p in people if _arm_raised(p)]
+        if not raisers:
+            return f"{len(people)} person(s) visible, none raising a hand."
+        return (
+            f"{len(raisers)} of {len(people)} visible person(s) raising a hand "
+            f"(calling for help)."
+        )
+
+    @parallelable_tool
+    @tool(parse_docstring=True)
+    def find_person(descriptor: Optional[str] = None) -> str:
+        """Report whether a person is visible (optionally matching a description).
+
+        Use for "is anyone here?" or "find the person in red". Returns the number of
+        visible people and the nearest person's bbox; with a descriptor, also captions
+        the scene so the parent can judge the match.
+
+        Args:
+            descriptor: Optional appearance/pose hint, e.g. "person in a red shirt".
+
+        Returns:
+            A short report of who is visible.
+        """
+        img = _capture()
+        people = walkieAI.image.estimate_poses(img)
+        if not people:
+            return "No people visible."
+        nearest = max(people, key=lambda p: p.bbox[2] * p.bbox[3])
+        line = f"{len(people)} person(s) visible; nearest bbox={tuple(nearest.bbox)}."
+        if descriptor:
+            cap = walkieAI.image.caption(
+                img, prompt=f"Describe the people you see, focusing on whether any matches: {descriptor}."
+            )
+            line += f" Scene: {cap}"
+        return line
+
     @sequential_tool
     @tool(parse_docstring=True)
     def speak(text: str) -> str:
@@ -198,5 +270,7 @@ def make_vision_tools(
         image_caption,
         detect_people_poses,
         get_camera_view_description,
+        find_person_raising_hand,
+        find_person,
         speak,
     ]

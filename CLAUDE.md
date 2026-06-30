@@ -20,6 +20,10 @@ cp .env.example .env                   # then fill OPENROUTER_API_KEY
 # Run the robot
 uv run python main.py                  # full pipeline (Ready stage by default)
 
+# Run a competition task directly (each builds its own WalkieBrain + scorecard)
+uv run python -m tasks.GPSR.run        # GPSR (rulebook 5.3)
+uv run python -m tasks.Final.run       # RoboCup@Home Finals (chapter 6); DISABLE_LISTENING=1 to type
+
 # Standalone client/robot demos (need walkie-ai-server running; some need the robot or a webcam).
 # Run as modules so repo root is on sys.path for `from client import ...`.
 uv run python -m manual_tests.test_robot_object_detection
@@ -61,14 +65,24 @@ The legacy explore stage (`ExploreService`) and its object store (`WalkieVectorD
 
 All four agents are built by the same factory: `agents/core/agent.py::create_walkie_agent`, which wraps `langchain.agents.create_agent` with a fixed middleware stack.
 
-- **Walkie main** (`agents/walkie_agent/`) — user-facing orchestrator. Owns the conversation thread (`thread_id="main"`). Delegates with `delegate_to_actuator` / `delegate_to_vision` / `delegate_to_database` (sequential tools that invoke the sub-agent graphs synchronously), plus `speak`. All long-term spatial-memory lookups go through `delegate_to_database`.
-- **Actuator** (`agents/actuator_agent/`) — `move_absolute`, `move_relative`, `get_current_pose`, `command_arm`, `speak`. `move_relative` does the local→global frame conversion in-process before calling `walkie.nav.go_to`.
-- **Vision** (`agents/vision_agent/`) — **live camera only**: `detect_objects_from_view`, `image_caption`, `detect_people_poses`, `get_camera_view_description`, `speak`. (Long-term memory lookups were moved out to the Database agent.)
-- **Database** (`agents/database_agent/`) — long-term spatial-memory specialist over the `SceneStore`: `find_object` (caption-first), `objects_near`, `recently_seen`, `list_known_objects`, `speak`. Use for "where have I seen X / what's near here / what did I just see".
+The sub-agents' tool factories take an optional `ctx` (a `tasks.base.TaskContext`). When a `ctx` is wired (via `WalkieBrain(ctx)` — used by `main.py`'s ready stage, GPSR, and the Final task), each agent gains **skill-backed tools** that call the robot-tested `tasks/` skills against the shared world/blackboard; without a `ctx` only the primitive tools are present. `TaskContext` is imported under `TYPE_CHECKING` and every `tasks.*` import lives **inside** the tool body (lazy), so `import agents…` stays light and pulls the heavy grasp/Open3D stack only when a manipulation tool actually runs.
 
-Division of labour: "what's in front of me now" → Vision; "where have I seen it / what's stored" → Database.
+- **Walkie main** (`agents/walkie_agent/`) — user-facing orchestrator. Owns the conversation thread (`thread_id="main"`). Delegates with `delegate_to_actuator` / `delegate_to_vision` / `delegate_to_database` (sequential tools that invoke the sub-agent graphs synchronously), `speak`, and — with `ctx` — `handle_person_request` (runs the GPSR parse→repeat→`execute_plan` pipeline for a person's spoken request). All long-term spatial-memory lookups go through `delegate_to_database`.
+- **Actuator** (`agents/actuator_agent/`) — primitives `move_absolute`, `move_relative`, `get_current_pose`, `command_arm`, `speak`; with `ctx` also `go_to_location` (map name → `go_to_through_door`), `go_through_door` (open + pass, for the exit door), `pick_up_object` / `place_object_down` (the shared grasp/place skills). Arm tools are gated by `FINAL_ARM_CALIBRATED` (announce-only when off). `move_relative` does the local→global frame conversion in-process before calling `walkie.nav.go_to`.
+- **Vision** (`agents/vision_agent/`) — **live camera only**: `detect_objects_from_view`, `look_for_object`, `image_caption`, `detect_people_poses`, `find_person_raising_hand` (hand-raise / call-for-help cue), `find_person`, `get_camera_view_description`, `speak`. (Long-term memory lookups were moved out to the Database agent.)
+- **Database** (`agents/database_agent/`) — long-term spatial-memory specialist over the `SceneStore` + the map + people: `find_object` (caption-first), `objects_near`, `recently_seen`, `list_known_objects`, `describe_known_scene`, `get_default_location` (object→category→placement, for returning a misplaced object), `objects_in_room`, `recall_person`, `speak`. Use for "where have I seen X / where does X belong / what's near here / who have I met".
+
+Division of labour: "what's in front of me now" → Vision; "where have I seen it / where does it belong / what's stored" → Database; "someone is asking me to do something" → Walkie main's `handle_person_request`.
 
 Sub-agents are invoked as plain tools — there's no streaming or interleaving; the parent blocks until the sub-agent returns its last AIMessage content.
+
+### `WalkieBrain` — the agents↔tasks bridge
+
+`tasks/common.py::WalkieBrain(ctx)` builds the whole agent stack (the four agents above + the `realtime_explore` producer) bound to ONE shared `TaskContext`, so the agents' skill-backed tools act on the same world/people/scorer/blackboard the task uses. It is GPSR's **Tier-2 scoped fallback** (`tasks/GPSR/dispatch.py` routes a failed step to a single sub-agent), and the orchestrator for `main.py`'s ready stage and the Final task. Build `ctx` first, then `brain = WalkieBrain(ctx)`, then `ctx.data["brain"] = brain` (so `handle_person_request` / dispatch can reach it).
+
+### Final task (RoboCup@Home 2026 Finals) — `tasks/Final/`
+
+The integration task (`uv run python -m tasks.Final.run`): the robot autonomously *finds problems and solves them* under a 10-min cap. **Hybrid scaffold + agent** (`subtasks.py`): deterministic handlers (`skills.py`) score the fixed, position-known, high-value problems — welcome a guest through the exit door (`go_to_through_door`), move the laundry basket to the washing machine, close the dishwasher — then `PatrolAndSolve` drives each room and hands it to `brain.walkie_agent` to find + solve one open-ended problem (trash → bin, misplaced object → `get_default_location`, hand-raise → `handle_person_request`). Manipulation is gated by `FINAL_ARM_CALIBRATED`; knobs live in `tasks/Final/config.toml`; the scoresheet is `tasks/Final/scoring.py::FINAL_SHEET`.
 
 ### "No plain text output" contract
 

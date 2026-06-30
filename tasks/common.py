@@ -75,33 +75,50 @@ def initialize_llm_model():
     )
 
 class WalkieBrain:
-    def __init__(self, walkieAI: WalkieAIClient, walkie_interface: WalkieInterface, model: ChatOpenAI, *, world=None, disable_listening: bool = False):
-        self.walkieAI = walkieAI
-        self.walkie_interface = walkie_interface
+    """The full Walkie agent stack + perception producer, bound to ONE shared ``ctx``.
+
+    Built from an already-constructed :class:`~tasks.base.TaskContext` so the agents'
+    skill-wrapping tools act on the SAME world / people / scorer / blackboard the task
+    uses (the agents' tools call the ``ctx``-based skills — nav, grasp, door, people).
+    The sub-agents are kept as attributes so a caller can invoke a SINGLE one directly:
+    GPSR's scoped Tier-2 fallback (dispatch.py) routes a failed step to just
+    ``brain.actuator`` / ``brain.vision``, never the full orchestrator; the Finals task
+    and main.py's ready stage drive ``brain.walkie_agent`` as the orchestrator.
+    """
+
+    def __init__(self, ctx, *, disable_listening: bool = False):
+        self.ctx = ctx
+        # Convenience handles (several callers/listen_and_act read these).
+        self.walkieAI = ctx.walkieAI
+        self.walkie_interface = ctx.walkie
+        self.world = ctx.world
         self.disable_listening = disable_listening
 
-        # The world model (rooms/objects/people) is the single source of truth; build a
-        # default if the caller didn't inject the shared ctx.world. The perception
-        # producer feeds it; the Database agent queries it.
-        if world is None:
-            from walkie_world import WalkieWorld
+        # Perception producer: the background loop that feeds ctx.world and writes the
+        # live perception.json the agents read each turn (start it with explore.start()).
+        # Point it at RobotContext's perception path when one is initialized so the
+        # agents' PerceptionContextMiddleware sees the live snapshot; tasks that never
+        # init RobotContext (GPSR/HRI) just get no live snapshot file (as before).
+        snapshot_path = None
+        try:
+            from agents.core.robot_context import RobotContext
 
-            embed_text = (lambda q: walkieAI.image.embed_text(q)) if walkieAI is not None else None
-            world = WalkieWorld(embed_text=embed_text)
-        self.world = world
-        self.explore = RealtimeExplore(model=model, walkieAI=walkieAI, walkie=walkie_interface, world=world)
-        # Kept as attributes (not locals) so callers can invoke a SINGLE sub-agent
-        # directly — the GPSR executor's scoped Tier-2 fallback routes a failed step
-        # to just brain.actuator / brain.vision, not the full orchestrator.
-        self.actuator = create_actuator_agent(model, walkieAI, walkie_interface)
-        self.vision = create_vision_agent(model, walkieAI, walkie_interface)
-        # The Database agent queries the world directly (it exposes the same
-        # query_text/query_near/... API the old graphs facade did).
+            snapshot_path = RobotContext.get().perception_path
+        except Exception:  # noqa: BLE001 — RobotContext not initialized: no live file
+            pass
+        self.explore = RealtimeExplore(
+            model=ctx.model, walkieAI=ctx.walkieAI, walkie=ctx.walkie, world=ctx.world,
+            snapshot_path=snapshot_path,
+        )
+        # All four agents share `ctx`, so their new tools reach the ctx-based skills.
+        self.actuator = create_actuator_agent(ctx.model, ctx.walkieAI, ctx.walkie, ctx=ctx)
+        self.vision = create_vision_agent(ctx.model, ctx.walkieAI, ctx.walkie, ctx=ctx)
         self.database = create_database_agent(
-            model, walkieAI, walkie_interface, graphs=world
+            ctx.model, ctx.walkieAI, ctx.walkie, world=ctx.world, ctx=ctx
         )
         self.walkie_agent = create_walkie_main_agent(
-            model, walkieAI, walkie_interface, self.actuator, self.vision, self.database
+            ctx.model, ctx.walkieAI, ctx.walkie,
+            self.actuator, self.vision, self.database, ctx=ctx,
         )
 
     def listen_and_act(self, retry: bool = True, max_retries: int = 3) -> None:

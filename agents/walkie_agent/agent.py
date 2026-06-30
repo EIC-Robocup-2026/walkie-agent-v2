@@ -14,8 +14,14 @@ def create_walkie_main_agent(
     actuator_agent,
     vision_agent,
     database_agent,
+    *,
+    ctx=None,
 ):
-    """Build the main Walkie agent (orchestrator over actuator + vision + database)."""
+    """Build the main Walkie agent (orchestrator over actuator + vision + database).
+
+    ``ctx`` (a TaskContext) unlocks `handle_person_request`, which runs the GPSR
+    command pipeline (parse → repeat → execute) for a person's spoken request.
+    """
     tools = make_walkie_main_tools(
         walkie,
         walkieAI,
@@ -23,6 +29,7 @@ def create_walkie_main_agent(
         vision_agent,
         database_agent,
         agent_name="walkie",
+        ctx=ctx,
     )
     return create_walkie_agent(
         name="walkie_agent",

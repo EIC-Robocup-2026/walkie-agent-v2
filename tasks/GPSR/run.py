@@ -50,16 +50,6 @@ def main() -> None:
         enable_people=True,
     )
 
-    # The agent stack is the Tier-2 execution fallback (see subtasks.ExecuteCommands);
-    # it shares the same world (its perception producer feeds it, its Database agent
-    # queries it).
-    brain = WalkieBrain(walkie_ai, walkie_interface, model, world=world, disable_listening=disable_listening)
-    if os.getenv("GPSR_START_PERCEPTION", "1").lower() in ("1", "true", "yes"):
-        try:
-            brain.explore.start()
-        except Exception as exc:
-            print(f"[gpsr] perception loop failed to start ({exc}); continuing without it")
-
     scorecard = ScoreTracker(GPSR_SHEET, path=os.getenv("GPSR_SCORECARD_PATH", "gpsr_scorecard.json"))
     ctx = TaskContext(
         walkie=walkie_interface,
@@ -70,7 +60,17 @@ def main() -> None:
         people=world.people,  # back-compat: ctx.people is the world's people store
         scorer=scorecard,  # live tally of attempted/claimed points (ctx.score)
     )
+
+    # The agent stack is the Tier-2 execution fallback (see subtasks.ExecuteCommands);
+    # it binds to the SAME ctx (shared world/people/scorer/blackboard) so its tools act
+    # on the same robot state. Built after ctx so the agents can reach the ctx-based skills.
+    brain = WalkieBrain(ctx, disable_listening=disable_listening)
     ctx.data["brain"] = brain
+    if os.getenv("GPSR_START_PERCEPTION", "1").lower() in ("1", "true", "yes"):
+        try:
+            brain.explore.start()
+        except Exception as exc:
+            print(f"[gpsr] perception loop failed to start ({exc}); continuing without it")
 
     try:
         build_gpsr_task(ctx).run()

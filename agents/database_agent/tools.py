@@ -149,6 +149,88 @@ def make_database_tools(
             return _NO_MEM
         return world.to_text_description()
 
+    @parallelable_tool
+    @tool(parse_docstring=True)
+    def get_default_location(item: str) -> str:
+        """Where an object or category BELONGS by default (its home placement).
+
+        Use to decide where a misplaced object should be returned — e.g. "where does
+        the cola go?" → the cabinet. Resolves object→category→the placement assigned
+        that category in the arena map.
+
+        Args:
+            item: An object or category name, e.g. "cola", "drinks", "cup".
+
+        Returns:
+            The default placement name and its map pose, or a not-found note.
+        """
+        if world is None:
+            return _NO_MEM
+        res = world.default_location_for(item)
+        if res is None:
+            return f"I don't know a default place for {item!r}."
+        name, pose = res
+        place = name.replace("_", " ")
+        if pose is None:
+            return f"The {item} belongs at the {place} (pose not surveyed yet)."
+        x, y, h = pose
+        return (
+            f"The {item} belongs at the {place} "
+            f"(pose x={x:.2f}, y={y:.2f}, heading={h:.2f} rad)."
+        )
+
+    @parallelable_tool
+    @tool(parse_docstring=True)
+    def objects_in_room(room: str) -> str:
+        """List stored objects catalogued in a given room.
+
+        Use for "what have you seen in the kitchen?". Needs the map to define the
+        room's boundary; returns objects whose 3D position falls inside it.
+
+        Args:
+            room: A room name, e.g. "kitchen", "living room".
+
+        Returns:
+            Objects in that room with coordinates, or a not-found note.
+        """
+        if world is None:
+            return _NO_MEM
+        hits = world.objects_in_room(room)
+        if not hits:
+            return f"No stored objects in {room!r} (or the room has no mapped boundary)."
+        return f"{len(hits)} object(s) in {room}:\n" + "\n".join(
+            f"- {_fmt_node(n)}" for n in hits
+        )
+
+    @parallelable_tool
+    @tool(parse_docstring=True)
+    def recall_person(description: str) -> str:
+        """Recall a person the robot has met, by name or appearance description.
+
+        Use for "have we met someone in a red shirt?" / "who did I see?". Searches the
+        people memory (faces + attire captions).
+
+        Args:
+            description: A name or appearance phrase, e.g. "Alice", "person in a red shirt".
+
+        Returns:
+            The best-matching enrolled person, or a not-found note.
+        """
+        if world is None:
+            return _NO_MEM
+        try:
+            rec = world.find_person_by_caption(description)
+        except Exception as exc:  # noqa: BLE001 — people store may be disabled/offline
+            return f"People memory lookup failed: {exc}"
+        if rec is None:
+            return f"I don't recall anyone matching {description!r}."
+        bits = [f"name={rec.name}"]
+        if getattr(rec, "appearance_caption", None):
+            bits.append(f"appearance={rec.appearance_caption!r}")
+        if getattr(rec, "last_seen_room", None):
+            bits.append(f"last seen in {rec.last_seen_room}")
+        return "Recalled person: " + ", ".join(bits) + "."
+
     @sequential_tool
     @tool(parse_docstring=True)
     def speak(text: str) -> str:
@@ -176,5 +258,8 @@ def make_database_tools(
         recently_seen,
         list_known_objects,
         describe_known_scene,
+        get_default_location,
+        objects_in_room,
+        recall_person,
         speak,
     ]

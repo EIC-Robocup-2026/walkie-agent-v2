@@ -72,8 +72,12 @@ def create_walkie_agent(
     #     middleware.append(TodoListMiddleware())
     middleware.extend(
         [
-            # PerceptionContextMiddleware(),
-            # RobotContextMiddleware(),
+            # Both no-op when RobotContext isn't initialized (they catch the
+            # RuntimeError from RobotContext.get()), so tasks that never call
+            # RobotContext.init() (GPSR/HRI/...) are unaffected; the ready stack and
+            # the Finals task opt in by initializing it with stage="ready".
+            PerceptionContextMiddleware(),
+            RobotContextMiddleware(),
             grouping,
             *extra_middleware,
         ]

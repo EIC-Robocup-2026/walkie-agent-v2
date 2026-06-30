@@ -261,7 +261,7 @@ def build_stub_stack(chat):
     walkieAI = types.SimpleNamespace()
     actuator = create_actuator_agent(chat, walkieAI, walkie)
     vision = create_vision_agent(chat, walkieAI, walkie)
-    database = create_database_agent(chat, walkieAI, walkie, graphs=None)
+    database = create_database_agent(chat, walkieAI, walkie, world=None)
     return create_walkie_main_agent(chat, walkieAI, walkie, actuator, vision, database)
 
 
