@@ -243,6 +243,33 @@ def test_keyword_no_match_returns_empty():
 
 
 # ---------------------------------------------------------------------------
+# Hybrid: embedding path STILL surfaces un-embedded (map-seeded) nodes by keyword
+# ---------------------------------------------------------------------------
+def test_embedding_path_unions_unembedded_keyword_matches():
+    # Embedding path is ACTIVE (embed_text returns a usable vector), but a placeholder
+    # carries no embedding (a zero row). It must still surface via keyword, ranked
+    # AFTER the embedded (perceived) hit.
+    store = SceneStore(embed_dim=8, embed_text=_fake_embed({"table mug": _RED}))
+    red = _node("red-1", "mug", clip_emb=_RED, centroid=(0, 0, 0))
+    table = _node("map:table", "table", centroid=(5, 0, 0))  # clip_emb=[] → zero row
+    store.install([red, table], [])
+    ids = [h.id for h in store.query_text("table mug", k=5)]
+    assert "map:table" in ids                       # un-embedded node found by keyword
+    assert ids.index("red-1") < ids.index("map:table")  # embedded (perceived) ranks first
+
+
+def test_embedding_path_excludes_unnamed_unembedded_node():
+    # The discriminating case: a zero-embedding node sitting RIGHT AT the query point
+    # must NOT be pulled in by proximity when the query never names it.
+    store = SceneStore(embed_dim=8, embed_text=_fake_embed({"red mug": _RED}))
+    red = _node("red-1", "mug", clip_emb=_RED, centroid=(0, 0, 0))
+    table = _node("map:table", "table", centroid=(0, 0, 0))  # near, but unnamed by query
+    store.install([red, table], [])
+    ids = [h.id for h in store.query_text("red mug", k=5, near=(0, 0), radius=1.0)]
+    assert ids == ["red-1"]  # the un-embedded table is not surfaced by proximity alone
+
+
+# ---------------------------------------------------------------------------
 # Confirmation gate on every query method
 # ---------------------------------------------------------------------------
 def _store_with_provisional():

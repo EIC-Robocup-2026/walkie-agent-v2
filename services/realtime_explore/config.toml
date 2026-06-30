@@ -18,7 +18,7 @@
 WALKIE_EXPLORE_ENABLED = "1"
 # Per-tick / per-build timing + per-detection ingest diagnostics (off in normal operation).
 WALKIE_EXPLORE_PERF = "0"
-WALKIE_EXPLORE_DEBUG_INGEST = "0"
+WALKIE_EXPLORE_DEBUG_INGEST = "1"
 # Capture-thread cadence (seconds): one frame + one detect/caption/embed round-trip per tick.
 WALKIE_EXPLORE_INTERVAL_SEC = "2.0"
 # Compute device for Open3D tensor ops (pose-graph / TSDF): "auto" picks CUDA iff available,

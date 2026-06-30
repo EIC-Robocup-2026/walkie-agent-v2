@@ -98,7 +98,7 @@ class WalkieBrain:
         # The Database agent queries the world directly (it exposes the same
         # query_text/query_near/... API the old graphs facade did).
         self.database = create_database_agent(
-            model, walkieAI, walkie_interface, graphs=world
+            model, walkieAI, walkie_interface, world=world
         )
         self.walkie_agent = create_walkie_main_agent(
             model, walkieAI, walkie_interface, self.actuator, self.vision, self.database

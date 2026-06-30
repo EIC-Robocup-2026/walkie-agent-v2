@@ -116,13 +116,50 @@ def _full_scene_cloud(
     )
 
 
+def _drop_near_base(ctx: TaskContext, cloud: np.ndarray) -> np.ndarray:
+    """Drop cloud points within ``WALKIE_PLACE_MIN_BASE_DIST_M`` (planar) of the base.
+
+    The held object and the (tucked) gripper sit right in front of the robot, close to
+    the base, and lift into the scene cloud as their own near-constant-Z blob that
+    :func:`detect_horizontal_surfaces` happily mistakes for a tabletop. A real support
+    surface is at standoff range (~0.5 m+), so a small base-centred exclusion radius
+    removes the robot's own hand without touching the table — and cleans it out of the
+    :func:`find_free_placement` obstacle grid for free.
+
+    Gated by ``WALKIE_PLACE_MIN_BASE_DIST_M`` (default 0.27 m; set ``0``/``""`` to
+    disable). No-op on an empty cloud or an unknown (``0,0,0`` sentinel) pose so a pose
+    lookup failure can't carve a hole out of a real surface near the map origin. Never raises.
+    """
+    if cloud is None or len(cloud) == 0:
+        return cloud
+    raw = os.getenv("WALKIE_PLACE_MIN_BASE_DIST_M", "0.27").strip()
+    if not raw:
+        return cloud
+    try:
+        min_dist_m = float(raw)
+    except ValueError:
+        return cloud
+    if min_dist_m <= 0:
+        return cloud
+    p = ctx.current_pose()
+    if p["x"] == 0.0 and p["y"] == 0.0 and p["heading"] == 0.0:
+        return cloud  # unknown pose (sentinel) — don't exclude a circle around the origin
+    cloud = np.asarray(cloud)
+    d2 = (cloud[:, 0] - p["x"]) ** 2 + (cloud[:, 1] - p["y"]) ** 2
+    keep = d2 >= (min_dist_m * min_dist_m)
+    dropped = int(cloud.shape[0] - int(keep.sum()))
+    if dropped:
+        print(f"[place] hand guard: dropped {dropped} pts within {min_dist_m:.2f}m of base")
+    return cloud[keep]
+
+
 def _scan(
     ctx: TaskContext, snap=None, *, max_depth_m: float | None = None
 ) -> tuple[object, np.ndarray, list[SurfacePlane]]:
     """Snapshot -> full-scene cloud -> horizontal surfaces. Returns all three."""
     if snap is None:
         snap = ctx.snapshot()
-    cloud = _full_scene_cloud(snap, max_depth=max_depth_m)
+    cloud = _drop_near_base(ctx, _full_scene_cloud(snap, max_depth=max_depth_m))
     surfaces = detect_horizontal_surfaces(cloud, **_surface_kwargs())
     return snap, cloud, surfaces
 
@@ -175,6 +212,7 @@ def _scan_multi_tilt(
     else:
         merged = voxel_downsample(np.vstack(clouds), merge_voxel)
         print(f"[place] multi-tilt scan: fused {len(clouds)} views -> {merged.shape[0]} pts")
+    merged = _drop_near_base(ctx, merged)
     surfaces = detect_horizontal_surfaces(merged, **_surface_kwargs())
     return last_snap, merged, surfaces
 

@@ -6,9 +6,11 @@
 # Precedence: shell env > .env > this file > root config.toml > code default.
 
 [hri]
-# Waypoints are map-frame poses "x,y,heading_rad" (set after mapping the arena).
-HRI_DOOR_POSE = "1.77,0.0,-3.12"
-HRI_LIVING_ROOM_POSE = "6.3,-1.29,-1.79"   # scan pose facing the seating area
+# Nav waypoints now come from the shared arena map (world.toml) via ctx.world:
+# GoToDoor reads the `entrance` door pose; GuideToLivingRoom reads the `living_room`
+# room pose. HRI_DOOR_POSE / HRI_LIVING_ROOM_POSE were removed — the map is the single
+# source of truth. (HRI_DOOR_POSE still works as an optional env override on a box with
+# no map; set it in .env if needed.)
 # Host's name and favorite drink (given in the competition briefing). Used in
 # the seat-offer wording ("next to our host James"); "" = unknown.
 HRI_HOST_NAME = "Armmy"

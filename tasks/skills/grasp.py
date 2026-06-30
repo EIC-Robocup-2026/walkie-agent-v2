@@ -74,7 +74,8 @@ _GRASP_DESCRIPTORS: dict[str, list[str]] = {
     "ice tea": ["bottle", "carton", "drink bottle"],
     "orange juice": ["carton", "bottle", "juice carton"],
     "milk": ["carton", "bottle", "milk carton"],
-    "water bottle": ["bottle", "clear bottle", "plastic bottle"],
+    "bottle": ["bottle", "water bottle"],
+    "water bottle": ["bottle", "water bottle"],
     "pringles": ["can", "tube", "cylindrical can", "chips can"],
     "chips": ["bag", "snack bag", "chip bag"],
     "cookies": ["box", "package", "snack box"],
@@ -166,7 +167,7 @@ def _llm_descriptors(ctx, target: str) -> list[str]:
     instructions = (
         "You name an object the way an open-vocabulary object detector (YOLOE) can find it. "
         "Given a specific item — often a brand name the detector cannot recognise — output "
-        "2-4 SHORT, GENERIC visual descriptors in lowercase: the object's container/shape "
+        "1-4 SHORT, GENERIC visual descriptors in lowercase: the object's container/shape "
         "type (can, bottle, box, carton, bag, tube, jar, cup, ...) optionally qualified by a "
         "distinctive colour or size word. NEVER include the brand name itself, and never "
         "invent a shape you are unsure of. Order them from most generic to most specific.\n\n"
@@ -1631,7 +1632,9 @@ def execute_grasp(
     motion_group, home_group, gripper_group = _arm_sides(arm)
 
     side = motion_group.split("_")[0]
-    hand = getattr(ctx.walkie.arm, side)
+    hand = ctx.walkie.arm.left if side == "left" else ctx.walkie.arm.right
+
+    grasp_effort_threshold = float(os.getenv("GRASP_EFFORT_THRESHOLD", "0.5").strip())
 
     try:
         roll, pitch, yaw = Rotation.from_matrix(candidate.rotation).as_euler("xyz")
@@ -1674,19 +1677,24 @@ def execute_grasp(
 
         hand.gripper(0.0, blocking=True)  # close on the object
         ctx.walkie.arm.go_to_home(group_name=motion_group, pose_name=home_pose, blocking=True)
-        succeeded = True
         print(f"[grasp] execute_grasp[{side}]: success")
+        _, _, effort = hand.get_gripper_states()
+        print(f"[grasp]: current gripper effort {effort}")
+        if effort < grasp_effort_threshold:
+            # Grasp failed
+            return False
+        succeeded = True
         return True
     except Exception as exc:  # noqa: BLE001
         print(f"[grasp] execute_grasp[{side}]: hardware error ({exc})")
         return False
     finally:
-        # if tuck_on_abort and not succeeded:
-        #     try:
-        #         result = ctx.walkie.arm.go_to_home(group_name=home_group, pose_name=home_pose, blocking=True)
-        #         print(f"[grasp] execute_grasp[{side}]: tuck-on-abort home -> {result}")
-        #     except Exception as exc:  # noqa: BLE001
-        #         print(f"[grasp] execute_grasp[{side}]: tuck-on-abort home failed ({exc})")
+        if tuck_on_abort and not succeeded:
+            try:
+                result = ctx.walkie.arm.go_to_home(group_name=home_group, pose_name=home_pose, blocking=True)
+                print(f"[grasp] execute_grasp[{side}]: tuck-on-abort home -> {result}")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[grasp] execute_grasp[{side}]: tuck-on-abort home failed ({exc})")
         # ctx.walkie.robot.arm.set_param_result(name="planner_id", value=original_planner)
         if collision_disabled:
             try:
@@ -1762,7 +1770,7 @@ def pick_object(
     approach_trigger_m: float = 0.60,
     grasp_distance_m: float = 0.60,
     max_reach_xy_m: float = 0.70,
-    min_grasp_z_m: float = 0.80,
+    min_grasp_z_m: float = 0.70,
     deadzone_half_m: float = 0.20,
     default_arm: str = "left",
     point_at_object: bool = True,

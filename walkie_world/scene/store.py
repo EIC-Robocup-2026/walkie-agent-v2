@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -94,6 +95,19 @@ _voxel = voxel_downsample
 # ---------------------------------------------------------------------------
 # Canonical shared types
 # ---------------------------------------------------------------------------
+def _map_name_to_text(name: str) -> str:
+    """Natural-language text for a map location's name embedding.
+
+    Drops the instance index (``table_2`` -> ``table``, ``shelf_2`` -> ``shelf``) and
+    turns underscores into spaces (``washing_machine`` -> ``washing machine``). The
+    de-numbered phrase is what a user actually says, so it embeds closer to natural
+    ``query_text`` queries than the raw world.toml key would.
+    """
+    s = re.sub(r"_?\d+", " ", str(name))  # strip index digits (with any leading "_")
+    s = s.replace("_", " ")
+    return re.sub(r"\s+", " ", s).strip()
+
+
 @dataclass
 class ObjectNode:
     """One fused 3D object (a scene-graph node)."""
@@ -287,19 +301,53 @@ class SceneStore:
         nodes: list[ObjectNode] = [self._copy_node(n) for n in scene.nodes]
         by_id = {n.id: i for i, n in enumerate(nodes)}
         for mo in map_objects:
-            fresh = self._map_node(mo, now)
-            j = by_id.get(fresh.id)
+            node_id = f"map:{mo.name}"
+            j = by_id.get(node_id)
+            if j is not None and nodes[j].n_obs > 0:
+                continue  # promoted by perception → keep its real cloud + image embedding
+            fresh = self._map_node(mo, now)  # rebuilds bbox + re-embeds the (de-numbered) name
+            # Idempotent re-seed: if the embed server is unavailable this run, keep the
+            # previously cached name embedding (same de-numbered text) instead of wiping it.
+            if (
+                not fresh.clip_emb
+                and j is not None
+                and nodes[j].clip_emb
+                and nodes[j].best_caption == fresh.best_caption
+            ):
+                fresh.clip_emb = list(nodes[j].clip_emb)
             if j is None:
                 nodes.append(fresh)
-                by_id[fresh.id] = len(nodes) - 1
-            elif nodes[j].n_obs == 0:
+                by_id[node_id] = len(nodes) - 1
+            else:
                 nodes[j] = fresh  # never perceived → adopt the latest surveyed shape
-            # else: promoted (has a real cloud) → leave perceived geometry intact
         return nodes
 
-    @staticmethod
-    def _map_node(mo, now: float) -> ObjectNode:
-        """Build a placeholder :class:`ObjectNode` (bbox geometry, no cloud) from a MapObject."""
+    def _embed_name(self, text: str) -> list[float]:
+        """CLIP **text** embedding of *text*, or ``[]`` when unavailable.
+
+        Map placeholders carry no image, so they embed their (de-numbered) name instead.
+        CLIP shares one space across text and images, so this vector lives in the same
+        space as perceived nodes' image embeddings — ``query_text`` cosine-matches both.
+        Degrades to ``[]`` (the old no-embedding behaviour) when no ``embed_text`` is
+        wired or the embed call fails, so seeding never raises or blocks on the server.
+        """
+        if not text or self.embed_text is None:
+            return []
+        try:
+            vec = self.embed_text(text)
+        except Exception:  # noqa: BLE001 — embed server down / not wired: degrade to keyword
+            return []
+        return [float(x) for x in vec] if vec else []
+
+    def _map_node(self, mo, now: float) -> ObjectNode:
+        """Build a placeholder :class:`ObjectNode` (bbox geometry, no cloud) from a MapObject.
+
+        Seeds a CLIP text embedding of the de-numbered name (:func:`_map_name_to_text`),
+        so an unperceived map placeholder ranks in the cosine ``query_text`` path instead
+        of relying on the keyword fallback (where embedded perception hits bury it). The
+        same de-numbered phrase is stored as ``best_caption`` so the node reads cleanly
+        (``table``, not ``table_2``) in dumps and keyword recall.
+        """
         poly = [list(p) for p in (mo.footprint_polygon or [])]
         if poly:
             xs = [p[0] for p in poly]
@@ -314,6 +362,7 @@ class SceneStore:
         aabb_max = (x_max, y_max, z_max)
         centroid = ((x_min + x_max) / 2, (y_min + y_max) / 2, (z_min + z_max) / 2)
         extent = (x_max - x_min, y_max - y_min, z_max - z_min)
+        text = _map_name_to_text(mo.name)
         return ObjectNode(
             id=f"map:{mo.name}",
             class_name=mo.class_name,
@@ -322,9 +371,9 @@ class SceneStore:
             extent=extent,
             aabb_min=aabb_min,
             aabb_max=aabb_max,
-            clip_emb=[],
+            clip_emb=self._embed_name(text),
             captions=[],
-            best_caption="",
+            best_caption=text,
             n_obs=0,
             conf=0.0,
             first_seen_ts=now,
@@ -452,9 +501,17 @@ class SceneStore:
     ) -> list[ObjectNode]:
         """Find objects by text. CLIP cross-modal search; falls back to keyword.
 
-        Four fallback triggers, each routing to :meth:`_keyword`: ``embed_text`` is
-        None, it raises, it returns a falsy/empty vector, or the vector search itself
-        fails for any reason.
+        Four fallback triggers, each routing to :meth:`_keyword` over ALL nodes:
+        ``embed_text`` is None, it raises, it returns a falsy/empty vector, or the
+        vector search itself fails for any reason.
+
+        Even on the embedding path, nodes that carry NO embedding — e.g. map-seeded
+        ``source="map"`` placeholders from world.toml — can't match via cosine (they
+        sit as zero rows in ``emb``), so their KEYWORD matches are unioned in *after*
+        the embedded cosine hits. That keeps perception (real CLIP image vectors)
+        ranked first while still surfacing surveyed world.toml entries through
+        ``query_text`` — without letting bare proximity rank a placeholder the query
+        never named.
         """
         scene = self._snapshot()
         vec = None
@@ -463,7 +520,7 @@ class SceneStore:
                 vec = self.embed_text(query)
             except Exception:
                 vec = None
-        if not vec:  # embed None / empty / failed
+        if not vec:  # embed None / empty / failed → keyword over every node
             return self._keyword(scene, query, k, near=near, radius=radius)
         try:
             qv = np.asarray(vec, dtype=np.float32)
@@ -474,22 +531,45 @@ class SceneStore:
             scores = scene.emb @ qv  # (N,) cosine over L2-normalized rows
             top_n = max(k * 3, k)
             order = np.argsort(scores)[::-1][:top_n]
-            hits = [scene.nodes[int(i)] for i in order]
+            # Embedded nodes only — a zero-emb row scores 0 and carries no signal, so
+            # don't let it ride the cosine ranking on proximity alone.
+            emb_hits = [
+                scene.nodes[int(i)] for i in order if scene.nodes[int(i)].clip_emb
+            ]
         except Exception:
             return self._keyword(scene, query, k, near=near, radius=radius)
-        hits = self._confirmed(self._spatial_filter(hits, near, radius))
+        # Fold in keyword matches among the un-embedded nodes (map placeholders), so
+        # surveyed world.toml objects are findable here too. Disjoint from emb_hits by
+        # the clip_emb partition; embedded (perceived) hits stay first.
+        kw_hits = self._keyword_hits(scene, query, only_unembedded=True)
+        hits = self._confirmed(self._spatial_filter(emb_hits + kw_hits, near, radius))
         return hits[:k]
 
-    def _keyword(self, scene: BuiltScene, query: str, k: int, *, near=None, radius=None):
+    def _keyword_hits(
+        self, scene: BuiltScene, query: str, *, only_unembedded: bool = False
+    ) -> list[ObjectNode]:
+        """Nodes whose class/caption text contains query terms, best-match first.
+
+        No spatial/confirmation filtering — callers apply those. ``only_unembedded``
+        restricts to nodes with no CLIP embedding (the map placeholders), so the
+        embedding path can union these in without re-ranking the embedded nodes.
+        """
         terms = {w for w in query.lower().split() if w}
+        if not terms:
+            return []
         scored = []
         for n in scene.nodes:
+            if only_unembedded and n.clip_emb:
+                continue
             text = f"{n.class_name} {n.best_caption} {' '.join(n.captions)}".lower()
             score = sum(1 for t in terms if t in text)
             if score:
                 scored.append((score, n))
         scored.sort(key=lambda s: s[0], reverse=True)
-        hits = [n for _, n in scored]
+        return [n for _, n in scored]
+
+    def _keyword(self, scene: BuiltScene, query: str, k: int, *, near=None, radius=None):
+        hits = self._keyword_hits(scene, query)
         hits = self._confirmed(self._spatial_filter(hits, near, radius))
         return hits[:k]
 

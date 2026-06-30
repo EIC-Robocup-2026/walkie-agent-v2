@@ -72,6 +72,9 @@ def main() -> None:
     )
     ctx.data["brain"] = brain
 
+    while True:
+        pass
+
     try:
         build_gpsr_task(ctx).run()
     finally:

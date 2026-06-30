@@ -32,19 +32,27 @@ def _resolve_backend() -> str:
 
 
 def _build_rerun() -> VizSession:
-    """Build a RerunSession, but never let it HANG the caller.
+    """Build a RerunSession in a daemon thread, falling back to :class:`NoOpViz`.
 
     ``RerunSession.__init__`` stands up rerun's gRPC sink + web viewer in native
     code. In a busy multi-threaded robot process that native setup can *deadlock*
-    rather than raise — observed on-robot during a task: ``serve_grpc`` binds its
-    port but ``serve_web_viewer`` never returns and the calling thread parks in a
-    futex, freezing the whole task before its first step (it builds on the MAIN
-    thread via ``TaskContext.__post_init__``). A plain ``try/except`` can't catch a
-    hang. Since viz is best-effort, build it in a daemon thread and fall back to
-    :class:`NoOpViz` if it doesn't come up within ``WALKIE_VIZ_INIT_TIMEOUT_S``
-    (default 10s; 0 = wait forever, the old behavior) — so a viz deadlock degrades
-    to no-viz instead of hanging the run. When the build is fast (the normal case)
-    ``join`` returns the instant it finishes, adding no startup latency.
+    rather than raise (observed on-robot: ``rr.serve_grpc`` never returns; the
+    thread parks in a futex). A plain ``try/except`` can't catch a hang, so we build
+    in a daemon thread and ``join`` with ``WALKIE_VIZ_INIT_TIMEOUT_S`` (default 10s;
+    0 = wait forever).
+
+    IMPORTANT — this watchdog only recovers an init that RAISES or that blocks with
+    the GIL *released*. It does NOT protect against a native deadlock that holds the
+    GIL: the ``join`` below needs the GIL to wake from its timed wait, and a GIL-
+    holding hang in the worker thread never lets it run, so ``join`` parks forever and
+    SIGINT (Ctrl+C) is dead too. That is exactly what in-process ``rr.serve_grpc`` does
+    inside the full agent process (Zenoh + rosbridge/twisted + tokio). The serve path in
+    ``session.py`` therefore no longer hosts a server in-process — it spawns a SEPARATE
+    ``rerun --serve-web`` process and ``rr.connect_grpc``-es to it as a client, which
+    does NOT hold the GIL. So this path is now expected to be fast; this watchdog stays
+    only as a backstop for the cheap cases it CAN catch (a backend that raises, an init
+    that's merely slow). Do not reintroduce in-process ``serve_grpc`` trusting this guard
+    to tame it — it cannot.
     """
     timeout = float(_env("WALKIE_VIZ_INIT_TIMEOUT_S", None, "10"))
     box: dict[str, object] = {}

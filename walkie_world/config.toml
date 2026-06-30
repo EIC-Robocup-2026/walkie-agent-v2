@@ -25,6 +25,14 @@ WALKIE_EXPLORE_PRUNE_MAX_RECORDS = "500"
 # the hard cap on any single merge). Doubles as the scene-store merge_dist.
 WALKIE_EXPLORE_ASSOC_MAX_DIST_M = "0.5"
 
+[scene.seed]
+# Also seed the static map's [locations] (furniture: table/sofa/sink/…) as
+# source="map" scene nodes, so query_text / query_near can return world.toml entries,
+# not just perception-observed objects. Default OFF: when ON these furniture nodes
+# ALSO surface in all_objects() / recently_seen() / the Database agent's scene dumps
+# and GPSR's scene reads. ([object_instances] are always seeded, flag or not.)
+WALKIE_EXPLORE_SEED_LOCATIONS = "1"
+
 [scene.relations]
 # Geometric near/on/above/inside edges derived from object AABBs each build (relations.py).
 WALKIE_EXPLORE_RELATION_MAX_DIST = "1.0"   # ignore pairs farther apart than this (m)

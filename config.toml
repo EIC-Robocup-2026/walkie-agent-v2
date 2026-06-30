@@ -22,17 +22,17 @@
 [llm]
 # 1 = use a local OpenAI-compatible LLM (LOCAL_BASE_URL/LOCAL_MODEL) instead of
 # OpenRouter. The OpenRouter API key + base URL are the only things left in .env.
-LLM_USE_LOCAL = "1"
+LLM_USE_LOCAL = "0"
 WALKIE_MODEL = "google/gemini-3-flash-preview:nitro"
 WALKIE_TEMPERATURE = "0.5"
 # Local LLM endpoint (OpenAI-compatible), used when LLM_USE_LOCAL=1.
-LOCAL_BASE_URL = "http://10.30.0.202:8000/v1"
+LOCAL_BASE_URL = "http://10.0.0.202:8000/v1"
 LOCAL_MODEL = "qwen3.5-9b"
 
 [services]
 # Remote AI inference server (walkie-ai-server): STT, TTS, object detection,
 # image captioning, pose estimation, CLIP image-embed.
-WALKIE_AI_BASE_URL = "http://10.30.0.202:5000"
+WALKIE_AI_BASE_URL = "http://10.0.0.202:5000"
 
 [transport]
 # walkie-sdk robot transport. ROS services over rosbridge (default), camera over
@@ -59,13 +59,14 @@ WALKIE_ROBOT_IP = "127.0.0.1"
 # zero-config). resolve order: $WALKIE_MAP_FILE -> repo-root world.toml. Each challenge
 # still falls back to its own *_POSE env var when the map lacks a name, so a box with no
 # map file keeps working. See docs/MAP_LOCATIONS.md.
-# Wired to a STABLE symlink (world.toml) in the active nav arena's map dir
-# (22_…AirBnbHouse_4, the default map in walkie-navigation's localization launch).
-# The symlink points at the latest walkie-map-editor export, so on re-export you only
-# overwrite that file (or re-point: `ln -sf <new>_world.toml world.toml`) and restart
-# the agent — no need to edit this path again. The [doors] gate activates once the
-# export has a [doors] table.
-WALKIE_MAP_FILE = "/home/walkie/robocup2026/ros2_ws/src/walkie-ros/navigation/walkie-navigation/map/22_27062026_AirBnbHouse_4/world.toml"
+#
+# Intentionally EMPTY so every challenge uses the in-repo, version-controlled
+# world.toml at the repo root (edit that file directly; no re-export/symlink dance).
+# IMPORTANT: the repo-root world.toml's location poses/polygons must be in the SAME map
+# frame as the nav stack's localization map, or the robot will navigate to wrong spots.
+# To go back to the deployed nav-arena export, point this at its world.toml symlink, e.g.
+#   ".../walkie-navigation/map/22_27062026_AirBnbHouse_4/world.toml"
+WALKIE_MAP_FILE = ""
 
 [runtime]
 # 1 = type instructions at a TTY instead of speaking (no mic).
@@ -405,3 +406,4 @@ WALKIE_PLACE_LOWER_M = "0.1"          # hover height above the surface; lift low
 WALKIE_PLACE_SETTLE_SEC = "0.6"        # wait after a lift move to let it settle
 WALKIE_PLACE_MIN_Z_M = "0.60"          # don't place below this height (arm can't reach). 0.60 not 0.70: the practice-arena cabinet top is 0.71m, so a 0.70 floor left ~1cm margin and depth-scan noise dropped the surface below it -> "no reachable surface". 0.60 gives ~11cm headroom while still rejecting chairs/low tables.
 WALKIE_PLACE_MAX_REACH_XY_M = "0.75"   # abort if the spot is farther than this (planar)
+WALKIE_PLACE_MIN_BASE_DIST_M = "0.27"  # drop scene-cloud points within this planar radius of the base before surface detection, so the held object / tucked gripper isn't mistaken for a tabletop. Set 0/"" to disable.

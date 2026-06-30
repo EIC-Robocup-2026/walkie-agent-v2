@@ -93,7 +93,15 @@ class GoToDoor(SubTask):
 
     def run(self, ctx: TaskContext) -> StepResult:
         ctx.walkie.robot.arm.go_to_home(group_name="both_arms_lift", blocking=False)  # reset the arm for better nav
-        x, y, heading = resolve_pose("entrance_door", env_fallback="HRI_DOOR_POSE", default="0.0,0.0,0")
+        # Greeting waypoint = the mapped `entrance` door (world.toml). Its heading is
+        # the passage direction (faces into the arena); GreetAndLearn re-centers on the
+        # guest via face-tracking, so the initial heading is not critical. Falls back to
+        # an optional HRI_DOOR_POSE env override, then origin, on a box with no map.
+        door = ctx.world.doors.get("entrance") if ctx.world else None
+        if door is not None:
+            x, y, heading = door.pose
+        else:
+            x, y, heading = resolve_pose(None, env_fallback="HRI_DOOR_POSE", default="0.0,0.0,0")
         if not ctx.goto(x, y, heading):
             return StepResult.RETRY
         # Wait for the guest to come stand in front before greeting. Look
@@ -225,7 +233,7 @@ class GuideToLivingRoom(SubTask):
 
     def run(self, ctx: TaskContext) -> StepResult:
         ctx.say(prompts.FOLLOW_ME)
-        x, y, heading = resolve_pose("living_room", env_fallback="HRI_LIVING_ROOM_POSE", default="0.0,0.0,0")
+        x, y, heading = resolve_pose("living_room", default="0.0,0.0,0")
         if not ctx.goto(x, y, heading):
             return StepResult.RETRY
         ctx.score("gaze_navigation")  # guided the guest, facing the navigation goal

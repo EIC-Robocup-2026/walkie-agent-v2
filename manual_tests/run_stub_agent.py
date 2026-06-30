@@ -83,7 +83,7 @@ def main() -> None:
 
     actuator = create_actuator_agent(model, walkieAI, walkie)
     vision = create_vision_agent(model, walkieAI, walkie)
-    database = create_database_agent(model, walkieAI, walkie, graphs=None)
+    database = create_database_agent(model, walkieAI, walkie, world=None)
     walkie_agent = create_walkie_main_agent(model, walkieAI, walkie, actuator, vision, database)
 
     print("=" * 70)

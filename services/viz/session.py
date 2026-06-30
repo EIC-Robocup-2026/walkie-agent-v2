@@ -1,7 +1,8 @@
 """Rerun-backed visualization session + a no-op stub, behind one small interface.
 
 This is the *generic* drawing layer. It owns the process-global Rerun recording
-(``rr.init`` + ``rr.spawn``/``rr.serve_grpc``) and exposes a menu of primitives —
+(``rr.init`` + ``rr.spawn`` or a client ``rr.connect_grpc`` to a separate server)
+and exposes a menu of primitives —
 ``axes`` (an XYZ triad), ``points``, ``box``, ``arrow``, ``lines``, ``clear``, plus
 the reusable ``robot``/``camera`` markers. It knows nothing about scene graphs or
 tasks; callers compose these primitives under their own entity-path namespaces
@@ -27,7 +28,11 @@ from __future__ import annotations
 
 import math
 import os
+import shutil
 import socket
+import subprocess
+import sys
+import time
 import urllib.parse
 from typing import Protocol, runtime_checkable
 
@@ -65,6 +70,75 @@ def _lan_ip() -> str:
         s.close()
 
 
+def _port_listening(port: int, host: str = "127.0.0.1", timeout: float = 0.3) -> bool:
+    """True if something is already accepting TCP connections on ``host:port``."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _rerun_cli() -> list[str]:
+    """Argv prefix to launch the standalone rerun CLI (the viewer/server binary).
+
+    Prefer the binary installed next to this interpreter (the uv/venv ``bin/rerun``),
+    then anything named ``rerun`` on PATH, finally ``python -m rerun``.
+    """
+    cand = os.path.join(os.path.dirname(sys.executable), "rerun")
+    if os.path.exists(cand):
+        return [cand]
+    found = shutil.which("rerun")
+    if found:
+        return [found]
+    return [sys.executable, "-m", "rerun"]
+
+
+def _ensure_rerun_server(grpc_port: int, web_port: int, cors: list[str]) -> bool:
+    """Make sure a standalone ``rerun --serve-web`` server is up on ``grpc_port``.
+
+    Hosting the server IN-PROCESS via ``rr.serve_grpc`` deadlocks (holding the GIL)
+    inside the busy robot process and freezes the whole run; running it as a SEPARATE
+    process and connecting as a client does not (see ``services.viz._build_rerun``).
+    If a server is already listening (a prior run, or a hand-started ``rerun``), reuse
+    it. Best-effort: returns True iff a server is listening by the time we give up.
+    """
+    if _port_listening(grpc_port):
+        return True
+    cmd = _rerun_cli() + [
+        "--serve-web",
+        "--port", str(grpc_port),
+        "--web-viewer-port", str(web_port),
+        "--bind", "0.0.0.0",
+    ]
+    for pat in cors:
+        cmd += ["--cors-allow-origin", pat]
+    try:
+        # Detached (its own session) so the agent's Ctrl+C / SIGTERM doesn't tear the
+        # viewer down mid-run; it persists across agent restarts and the next run
+        # reuses it via the _port_listening check above.
+        subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception as e:  # noqa: BLE001 — viz is best-effort, never crash a caller
+        print(f"[viz] could not spawn rerun server ({e}); visualization unavailable")
+        return False
+    wait_s = float(_env("WALKIE_VIZ_SERVER_WAIT_S", None, "8"))
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < wait_s:
+        if _port_listening(grpc_port):
+            return True
+        time.sleep(0.2)
+    return _port_listening(grpc_port)
+
+
 @runtime_checkable
 class VizSession(Protocol):
     """Structural interface satisfied by both :class:`RerunSession` and :class:`NoOpViz`."""
@@ -86,9 +160,12 @@ class RerunSession:
 
     - ``0``: ``rr.spawn()`` — a native viewer window on the robot. Needs a display
       and is **only visible on the robot itself**.
-    - ``1`` (default): serve a browser viewer over HTTP + a gRPC data stream, both
-      bound to ``0.0.0.0``, so **any computer on the LAN** can watch via a browser
-      (no install) or a native viewer. The printed URL uses the robot's LAN IP.
+    - ``1`` (default): a SEPARATE ``rerun --serve-web`` process hosts a browser viewer
+      over HTTP + a gRPC proxy (both bound ``0.0.0.0``), and this SDK connects to it as
+      a client via ``rr.connect_grpc`` — so **any computer on the LAN** can watch via a
+      browser (no install) or a native viewer. The printed URL uses the robot's LAN IP.
+      (In-process ``rr.serve_grpc`` is deliberately NOT used: it deadlocks holding the
+      GIL in the busy robot process — see ``services.viz._build_rerun``.)
     """
 
     def __init__(self) -> None:
@@ -119,20 +196,28 @@ class RerunSession:
         host = _env("WALKIE_VIZ_HOST", "WALKIE_EXPLORE_RERUN_HOST", "").strip() or _lan_ip()
         cors = [o.strip() for o in _env("WALKIE_VIZ_CORS", "WALKIE_EXPLORE_RERUN_CORS", "*").split(",") if o.strip()]
 
-        # gRPC data sink + HTTP browser app (both already bind 0.0.0.0). serve_grpc
-        # advertises 127.0.0.1, but a REMOTE browser must reach the robot's LAN IP,
-        # so build the connect URI with `host`. CORS must allow the page's origin
-        # (the browser app at :web_port talks cross-port to the gRPC at :grpc_port).
-        rr.serve_grpc(grpc_port=grpc_port, cors_allow_origin=cors)
-        grpc_uri = f"rerun+http://{host}:{grpc_port}/proxy"
-        rr.serve_web_viewer(web_port=web_port, open_browser=False, connect_to=grpc_uri)
+        # Host the gRPC + web-viewer server in a SEPARATE PROCESS, then connect to it as
+        # a CLIENT. Calling rr.serve_grpc() in-process deadlocks holding the GIL in the
+        # busy robot process (Zenoh + rosbridge/twisted + tokio) and freezes the whole
+        # run — Ctrl+C included; a client connect_grpc() does not (verified). The
+        # standalone `rerun --serve-web` hosts both ports (bound 0.0.0.0) and proxies the
+        # SDK's stream to any attached viewer; it persists across agent restarts (reused
+        # via the port check) so we never re-bind a held port.
+        served = _ensure_rerun_server(grpc_port, web_port, cors)
+        # Stream to the LOCAL server regardless of the advertised host (the URL below
+        # uses `host` so REMOTE browsers reach the robot's LAN IP, not 127.0.0.1).
+        rr.connect_grpc(f"rerun+http://127.0.0.1:{grpc_port}/proxy")
 
+        grpc_uri = f"rerun+http://{host}:{grpc_port}/proxy"
         viewer_url = f"http://{host}:{web_port}/?url={urllib.parse.quote(grpc_uri, safe='')}"
+        if not served:
+            print(f"[viz] rerun server not confirmed on :{grpc_port}; streaming anyway "
+                  "(a viewer can still attach later)")
         print(
             "[viz] Rerun viewer live on the LAN — open from any computer:\n"
             f"          browser: {viewer_url}\n"
             f"          native : rerun {grpc_uri}\n"
-            "          Can't connect from another machine? The servers bind 0.0.0.0,\n"
+            "          Can't connect from another machine? The server binds 0.0.0.0,\n"
             "          so it's the robot's host firewall dropping the ports. Open BOTH\n"
             f"          (web page + data stream): "
             f"sudo ufw allow {web_port}/tcp && sudo ufw allow {grpc_port}/tcp"
