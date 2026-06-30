@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 from . import prompts
 from .plan import Plan, PlanStep, Primitive
 from .prompts import RawPlan, RawStep
-from .world import WorldModel, load_world
+from walkie_world.map.vocab import WorldModel, load_world
 
 if TYPE_CHECKING:  # type-only; importing these at runtime would pull no hardware,
     from pydantic import BaseModel  # but keep the pure core import-light regardless.

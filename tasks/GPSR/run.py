@@ -23,9 +23,8 @@ from ..common import WalkieBrain, initialize_llm_model, initialize_robot, load_t
 from ..scoring import ScoreTracker
 from .scoring import GPSR_SHEET
 from .subtasks import build_gpsr_task
-from .world import load_world
 from client import WalkieAIClient
-from perception import PeopleStore
+from walkie_world import WalkieWorld
 
 import open3d as o3d
 
@@ -42,11 +41,22 @@ def main() -> None:
     walkie_ai = WalkieAIClient()
     disable_listening = os.getenv("DISABLE_LISTENING", "0").lower() in ("1", "true", "yes")
 
-    # The agent stack is the Tier-2 execution fallback (see subtasks.ExecuteCommands).
-    brain = WalkieBrain(walkie_ai, walkie_interface, model, disable_listening=disable_listening)
+    # One shared world model for the whole task: arena nouns the parser grounds
+    # against (rooms/locations/objects/names/gestures), the spatial scene memory the
+    # find/bring commands recall from (CLIP search via embed_text), and the face+attire
+    # people store GPSR's person commands (meet/greet/guide/follow, §5.4) reuse.
+    world = WalkieWorld(
+        embed_text=(lambda q: walkie_ai.image.embed_text(q)),
+        enable_people=True,
+    )
+
+    # The agent stack is the Tier-2 execution fallback (see subtasks.ExecuteCommands);
+    # it shares the same world (its perception producer feeds it, its Database agent
+    # queries it).
+    brain = WalkieBrain(walkie_ai, walkie_interface, model, world=world, disable_listening=disable_listening)
     if os.getenv("GPSR_START_PERCEPTION", "1").lower() in ("1", "true", "yes"):
         try:
-            brain.graphs.start()
+            brain.explore.start()
         except Exception as exc:
             print(f"[gpsr] perception loop failed to start ({exc}); continuing without it")
 
@@ -56,13 +66,11 @@ def main() -> None:
         walkieAI=walkie_ai,
         model=model,
         disable_listening=disable_listening,
-        # GPSR is thick with person commands (meet/greet/guide/follow) — reuse
-        # HRI's face+attire re-ID people store (§5.4), unlike Restaurant.
-        people=PeopleStore.from_env(),
+        world=world,
+        people=world.people,  # back-compat: ctx.people is the world's people store
         scorer=scorecard,  # live tally of attempted/claimed points (ctx.score)
     )
     ctx.data["brain"] = brain
-    ctx.data["world"] = load_world()  # arena nouns the parser grounds against
 
     try:
         build_gpsr_task(ctx).run()

@@ -1199,7 +1199,89 @@ def capture_appearance(ctx: TaskContext, world_xy: tuple[float, float]) -> str |
         d = math.hypot(wxy[0] - world_xy[0], wxy[1] - world_xy[1])
         if d < best_d:
             best_box, best_d = xyxy, d
-    return describe_customer(ctx, snap, best_box) if best_box is not None else None
+    if best_box is None:
+        return None
+    caption = describe_customer(ctx, snap, best_box)
+    if caption:
+        _remember_appearance(ctx, world_xy, caption, snap, best_box)
+    return caption
+
+
+def _cos_sim(a, b) -> float:
+    """Cosine similarity of two vectors (norm-guarded)."""
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(x * x for x in b) ** 0.5
+    return dot / (na * nb + 1e-8)
+
+
+def _remember_appearance(ctx: TaskContext, world_xy, caption: str, snap=None, bbox=None) -> None:
+    """Embed + store the customer's appearance in the unified people store (attire-only).
+
+    Best-effort: no-op on a ctx without a people-enabled world. The stable id is the
+    rounded map point, so re-captures of the same seat update one record. Stores the
+    CLIP-text embedding of the caption (for semantic re-ID) and, when a crop is given,
+    the OSNet attire vector — the same store HRI uses for guests.
+    """
+    world = getattr(ctx, "world", None)
+    if world is None:
+        return
+    try:
+        cap_emb = ctx.walkieAI.image.embed_text(caption)
+    except Exception:
+        cap_emb = None
+    app_emb = None
+    if snap is not None and bbox is not None:
+        img = getattr(snap, "img", None)
+        if img is not None:
+            try:
+                x1, y1, x2, y2 = (int(v) for v in bbox)
+                app_emb = ctx.walkieAI.image.appearance(
+                    img.crop((max(0, x1), max(0, y1), min(img.width, x2), min(img.height, y2)))
+                )
+            except Exception:
+                app_emb = None
+    pid = f"customer-{round(float(world_xy[0]), 1)}-{round(float(world_xy[1]), 1)}"
+    try:
+        world.enroll_person(
+            name="", drink="", face_embedding=[], person_id=pid,
+            appearance_caption=caption, appearance_caption_embedding=cap_emb,
+            app_embedding=app_emb,
+            last_seen_pose=(float(world_xy[0]), float(world_xy[1]), 0.0),
+            pose_label="seated",
+        )
+    except Exception as exc:  # noqa: BLE001 — re-ID memory must never break order-taking
+        print(f"[restaurant.skills] appearance enroll skipped ({exc})")
+
+
+def _match_appearance_candidate(ctx: TaskContext, snap, stored: str, cands):
+    """Pick the in-range candidate whose attire caption best matches *stored*.
+
+    Semantic CLIP-text similarity when an embed server is reachable (the unified re-ID
+    signal — same embedding the people store uses), else the lexical word-overlap
+    fallback. Returns the chosen candidate tuple, or None when nothing is a confident
+    match (the caller then falls through to the nearest / calling pick)."""
+    caps = [describe_customer(ctx, snap, c[2]) or "" for c in cands]
+    try:
+        embed = ctx.walkieAI.image.embed_text
+        sv = embed(stored)
+        if sv:
+            min_sim = _f("RESTAURANT_APPEARANCE_MATCH_MIN", "0.6")
+            best = None  # (sim, nearer_key, cand)
+            for cap, c in zip(caps, cands):
+                cv = embed(cap) if cap else None
+                sim = _cos_sim(sv, cv) if cv else -1.0
+                key = (sim, -c[0])
+                if best is None or key > best[0]:
+                    best = (key, c)
+            if best is not None and best[0][0] >= min_sim:
+                return best[1]
+            return None
+    except Exception:  # noqa: BLE001 — degrade to the lexical fallback below
+        pass
+    scored = [(_appearance_overlap(stored, cap), -c[0], c) for cap, c in zip(caps, cands)]
+    scored.sort(key=lambda s: (s[0], s[1]), reverse=True)
+    return scored[0][2] if scored[0][0] > 0 else None
 
 
 _APPEARANCE_STOPWORDS = {
@@ -1262,19 +1344,16 @@ def find_person_near(ctx: TaskContext, world_xy: tuple[float, float], *,
     if not cands:
         return None
     # Appearance re-ID first (only worth the per-candidate caption calls when there's an
-    # actual ambiguity to resolve): pick the candidate whose crop caption best matches
-    # the stored appearance; ignore it on a zero-overlap tie and fall through.
+    # actual ambiguity to resolve): pick the candidate whose attire best matches the
+    # stored appearance — semantic CLIP-text similarity (unified re-ID), lexical fallback.
+    # None on no confident match → fall through to the spatial/calling pick.
     if appearance and len(cands) > 1:
-        scored = [
-            (_appearance_overlap(appearance, describe_customer(ctx, snap, c[2]) or ""), -c[0], c)
-            for c in cands
-        ]
-        scored.sort(key=lambda s: (s[0], s[1]), reverse=True)
-        if scored[0][0] > 0:
-            _, _, (d, wxy, xyxy, conf, _calling) = scored[0]
+        chosen = _match_appearance_candidate(ctx, snap, appearance, cands)
+        if chosen is not None:
+            d, wxy, xyxy, conf, _calling = chosen
             bearing = math.atan2(wxy[1] - pose["y"], wxy[0] - pose["x"]) if pose else 0.0
-            print(f"[restaurant.skills] re-acquire: appearance-matched customer "
-                  f"(overlap={scored[0][0]}) at ({wxy[0]:.2f},{wxy[1]:.2f})")
+            print(f"[restaurant.skills] re-acquire: appearance-matched customer at "
+                  f"({wxy[0]:.2f},{wxy[1]:.2f})")
             return Caller(wxy, bearing, xyxy, conf)
     pool = [c for c in cands if c[4]] if prefer_calling else []
     pool = pool or cands

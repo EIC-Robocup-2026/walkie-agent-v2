@@ -6,13 +6,13 @@ whole window at once, so pose error and instance identity are each resolved **on
 1. ``refine_poses`` → one clean camera→map pose per snapshot (``baseline`` = nav).
 2. lift every detection's mask with its frame's optimized pose
    (:func:`interfaces.perception.geometry.deproject_mask`, the same flying-pixel cleanup
-   v1 uses) → a world-frame :class:`~services.walkie_graphs.associate.Observation`.
+   v1 uses) → a world-frame :class:`~services.realtime_explore.associate.Observation`.
 3. ``associate`` → constrained-agglomerative object clusters
-   (:class:`~services.walkie_graphs.associate.ObjectObservation`).
+   (:class:`~services.realtime_explore.associate.ObjectObservation`).
 4. (optional) ``tsdf.fuse`` → one clean volumetric structural cloud.
 
-The caller (the build worker in :mod:`~services.walkie_graphs.service`) merges the
-observations into the persisted :class:`~services.walkie_graphs.scene.SceneStore`.
+The caller (the build worker in :mod:`~services.realtime_explore.service`) merges the
+observations into the persisted :class:`~walkie_world.scene.store.SceneStore`.
 """
 
 from __future__ import annotations

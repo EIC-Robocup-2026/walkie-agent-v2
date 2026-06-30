@@ -26,7 +26,7 @@ from tasks.GPSR.dispatch import execute_plan
 from tasks.GPSR.parse import ground_step
 from tasks.GPSR.plan import CmdStatus, Plan
 from tasks.GPSR.prompts import RawStep
-from tasks.GPSR.world import load_world
+from walkie_world.map.vocab import load_world
 
 # --- fixtures: a small arena with DISTINCT poses (so "which place" is provable) -
 
@@ -168,7 +168,8 @@ class _FakeCtx:
         self.asked: list[str] = []
         self.scored: list[tuple[str, int]] = []  # (key, n) for each ctx.score()
         self.disable_listening = False  # answers come via ask() = the STT path
-        self.data: dict = {}  # ctx.data["brain"].graphs is the scene memory (run.py)
+        self.data: dict = {}  # ctx.data["brain"] is the Tier-2 agent stack (run.py)
+        self.world = None     # scene memory + grounding; tests set it where needed
 
     def goto(self, x, y, h):
         self.gotos.append((x, y, h))
@@ -316,7 +317,7 @@ def test_find_object_no_location_recalls_from_scene_memory(world, monkeypatch):
                         lambda ctx, x, y, **kw: (approached.append((x, y)), state.__setitem__("arrived", True), True)[-1])
     graphs = _RecallGraphs((3.0, 4.0, 0.5))
     ctx = _FakeCtx(ai=type("AI", (), {"image": _ArriveThenSeeImage(state)})())
-    ctx.data["brain"] = type("B", (), {"graphs": graphs})()
+    ctx.world = graphs  # scene memory is ctx.world now (exposes query_text)
     _, status = _run(ctx, world, RawStep(primitive="find_object", object="cola", raw="find the cola"))
     assert status is CmdStatus.DONE
     assert graphs.queries == ["cola"]        # consulted the scene memory
@@ -330,7 +331,7 @@ def test_find_object_at_named_place_does_not_touch_memory(world, monkeypatch):
     monkeypatch.setenv("GPSR_FIND_USE_MEMORY", "1")
     graphs = _RecallGraphs()
     ctx = _FakeCtx(ai=_FakeAI(dets=[_det(name="cola")]))
-    ctx.data["brain"] = type("B", (), {"graphs": graphs})()
+    ctx.world = graphs  # scene memory is ctx.world now
     _, status = _run(ctx, world, RawStep(
         primitive="find_object", object="cola", room="living_room",
         raw="find the cola in the living room"))
@@ -349,7 +350,7 @@ def test_find_object_falls_back_to_memory_when_named_place_empty(world, monkeypa
                         lambda ctx, x, y, **kw: (approached.append((x, y)), state.__setitem__("arrived", True), True)[-1])
     graphs = _RecallGraphs((7.0, 1.0, 0.3))
     ctx = _FakeCtx(ai=type("AI", (), {"image": _ArriveThenSeeImage(state)})())
-    ctx.data["brain"] = type("B", (), {"graphs": graphs})()
+    ctx.world = graphs  # scene memory is ctx.world now
     _, status = _run(ctx, world, RawStep(
         primitive="find_object", object="cola", room="living_room",
         raw="find the cola in the living room"))
@@ -820,7 +821,8 @@ def test_execute_commands_uses_interleave_when_enabled(world, monkeypatch):
     p1 = _kitchen_plan(world, "c1", RawStep(primitive="find_object", object="cola", room="kitchen", raw="find the cola"))
     p2 = _kitchen_plan(world, "c2", RawStep(primitive="find_object", object="cola", room="kitchen", raw="find the cola"))
     cmds = [Command(1, "c1", p1), Command(2, "c2", p2)]
-    ctx.data = {"world": world, "brain": None, "commands": cmds}
+    ctx.world = world
+    ctx.data = {"brain": None, "commands": cmds}
     ExecuteCommands().run(ctx)
     assert any("interleav" in s.lower() for s in ctx.saids)   # announced the interleave
     assert ctx.gotos == [(1.0, 2.0, 0.0)]                     # kitchen once, not per-command

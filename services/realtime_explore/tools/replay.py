@@ -5,9 +5,9 @@ here as many times as you like to tune association / poses / TSDF **deterministi
 without the robot**. This is also the Stage-2 go/no-go measurement: compare
 ``--pose-mode baseline`` vs ``--pose-mode auto`` (and ``--tsdf``) on the *same* buffer.
 
-    uv run python -m services.walkie_graphs.tools.replay graph_buffer
-    uv run python -m services.walkie_graphs.tools.replay graph_buffer --pose-mode auto --tsdf
-    uv run python -m services.walkie_graphs.tools.replay graph_buffer --store graph_scene  # also persist
+    uv run python -m services.realtime_explore.tools.replay graph_buffer
+    uv run python -m services.realtime_explore.tools.replay graph_buffer --pose-mode auto --tsdf
+    uv run python -m services.realtime_explore.tools.replay graph_buffer --store graph_scene  # also persist
 
 Builds object observations over the window and prints them; with ``--store`` it merges
 into a real SceneStore (no embed server → keyword-only) and prints to_text_description.
@@ -21,10 +21,9 @@ import time
 from dotenv import load_dotenv
 
 from walkie_config import load_config
+from walkie_world import WalkieWorld
 from ..buffer import SnapshotBuffer
 from ..builder import build_scene
-from ..relations import derive_relations
-from ..scene import SceneStore
 
 
 def main(argv=None) -> int:
@@ -66,11 +65,11 @@ def main(argv=None) -> int:
         print(f"  structural cloud: {len(res.structural_cloud)} points")
 
     if args.store:
-        store = SceneStore(store_dir=args.store)  # no embed_text → keyword search only
-        nodes = store.merge(res.observations, now=time.time())
-        store.install(nodes, derive_relations(nodes))
-        print(f"\nMerged into {args.store!r} ({store.count()} total nodes):")
-        print(store.to_text_description())
+        # No embed server offline → keyword search only; objects-only world (no people).
+        world = WalkieWorld(scene_dir=args.store, embed_text=None, enable_people=False)
+        world.observe_objects(res.observations)
+        print(f"\nMerged into {args.store!r} ({world.count()} total nodes):")
+        print(world.to_text_description())
     return 0
 
 

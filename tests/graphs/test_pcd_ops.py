@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from services.walkie_graphs import pcd_ops
+from services.realtime_explore import pcd_ops
 from interfaces.perception.geometry import voxel_downsample as voxel_np
 
 try:
@@ -36,7 +36,7 @@ def _corner_cloud(n=400, seed=3):
 # resolve_device
 # ---------------------------------------------------------------------------
 def test_resolve_device_cpu_override(monkeypatch):
-    monkeypatch.setenv("WALKIE_GRAPHS_O3D_DEVICE", "cpu")
+    monkeypatch.setenv("WALKIE_EXPLORE_O3D_DEVICE", "cpu")
     assert pcd_ops.resolve_device() == "cpu"
 
 
@@ -44,17 +44,17 @@ def test_resolve_device_without_open3d_is_cpu(monkeypatch):
     import interfaces.perception.dbscan as dbscan_mod
 
     monkeypatch.setattr(dbscan_mod, "_O3D", False)
-    monkeypatch.setenv("WALKIE_GRAPHS_O3D_DEVICE", "auto")
+    monkeypatch.setenv("WALKIE_EXPLORE_O3D_DEVICE", "auto")
     assert pcd_ops.resolve_device() == "cpu"
     # An explicit cuda request degrades to cpu instead of raising.
     pcd_ops._DEVICE_CACHE.clear()
-    monkeypatch.setenv("WALKIE_GRAPHS_O3D_DEVICE", "cuda")
+    monkeypatch.setenv("WALKIE_EXPLORE_O3D_DEVICE", "cuda")
     assert pcd_ops.resolve_device() == "cpu"
 
 
 def test_resolve_device_auto_matches_build(monkeypatch):
     pytest.importorskip("open3d")
-    monkeypatch.setenv("WALKIE_GRAPHS_O3D_DEVICE", "auto")
+    monkeypatch.setenv("WALKIE_EXPLORE_O3D_DEVICE", "auto")
     assert pcd_ops.resolve_device() == ("cuda" if _CUDA else "cpu")
 
 

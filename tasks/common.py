@@ -14,7 +14,7 @@ from agents.vision_agent import create_vision_agent
 from agents.walkie_agent import create_walkie_main_agent
 from client import WalkieAIClient
 from interfaces.walkie_interface import WalkieInterface
-from services.walkie_graphs import WalkieGraphs
+from services.realtime_explore import RealtimeExplore
 from walkie_config import load_config  # noqa: F401 — re-exported for task entrypoints
 
 
@@ -75,19 +75,30 @@ def initialize_llm_model():
     )
 
 class WalkieBrain:
-    def __init__(self, walkieAI: WalkieAIClient, walkie_interface: WalkieInterface, model: ChatOpenAI, disable_listening: bool = False):
+    def __init__(self, walkieAI: WalkieAIClient, walkie_interface: WalkieInterface, model: ChatOpenAI, *, world=None, disable_listening: bool = False):
         self.walkieAI = walkieAI
         self.walkie_interface = walkie_interface
         self.disable_listening = disable_listening
-        
-        self.graphs = WalkieGraphs(model=model, walkieAI=walkieAI, walkie=walkie_interface)
+
+        # The world model (rooms/objects/people) is the single source of truth; build a
+        # default if the caller didn't inject the shared ctx.world. The perception
+        # producer feeds it; the Database agent queries it.
+        if world is None:
+            from walkie_world import WalkieWorld
+
+            embed_text = (lambda q: walkieAI.image.embed_text(q)) if walkieAI is not None else None
+            world = WalkieWorld(embed_text=embed_text)
+        self.world = world
+        self.explore = RealtimeExplore(model=model, walkieAI=walkieAI, walkie=walkie_interface, world=world)
         # Kept as attributes (not locals) so callers can invoke a SINGLE sub-agent
         # directly — the GPSR executor's scoped Tier-2 fallback routes a failed step
         # to just brain.actuator / brain.vision, not the full orchestrator.
         self.actuator = create_actuator_agent(model, walkieAI, walkie_interface)
         self.vision = create_vision_agent(model, walkieAI, walkie_interface)
+        # The Database agent queries the world directly (it exposes the same
+        # query_text/query_near/... API the old graphs facade did).
         self.database = create_database_agent(
-            model, walkieAI, walkie_interface, graphs=self.graphs
+            model, walkieAI, walkie_interface, graphs=world
         )
         self.walkie_agent = create_walkie_main_agent(
             model, walkieAI, walkie_interface, self.actuator, self.vision, self.database

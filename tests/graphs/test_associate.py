@@ -18,7 +18,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from services.walkie_graphs.associate import (
+from services.realtime_explore.associate import (
     Observation,
     ObjectObservation,
     associate,

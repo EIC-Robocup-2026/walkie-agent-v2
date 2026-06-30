@@ -6,7 +6,7 @@ for the host↔device transfer (per ``tools/check_gpu.py``, small clouds don't).
 This module is the single place that decision lives:
 
 - ``resolve_device()`` picks ``"cuda"`` or ``"cpu"`` from
-  ``WALKIE_GRAPHS_O3D_DEVICE`` (``auto`` | ``cpu`` | ``cuda``); ``auto`` takes
+  ``WALKIE_EXPLORE_O3D_DEVICE`` (``auto`` | ``cpu`` | ``cuda``); ``auto`` takes
   the GPU iff the installed Open3D build actually sees a CUDA device.
 - Every op degrades: tensor-CUDA → legacy/numpy CPU → identity. A machine
   without open3d (or without a GPU) runs the same code with the same
@@ -26,7 +26,7 @@ from interfaces.perception.dbscan import _open3d
 from interfaces.perception.geometry import voxel_downsample as _voxel_downsample_np
 
 # Resolved device per requested mode ("auto"/"cpu"/"cuda" -> "cpu"/"cuda").
-# Keyed by the env value so tests that flip WALKIE_GRAPHS_O3D_DEVICE re-resolve.
+# Keyed by the env value so tests that flip WALKIE_EXPLORE_O3D_DEVICE re-resolve.
 _DEVICE_CACHE: dict[str, str] = {}
 
 # Below this size the host->GPU transfer outweighs the voxelization win.
@@ -36,12 +36,12 @@ _GPU_VOXEL_MIN_POINTS = 50_000
 def resolve_device() -> str:
     """The compute device for tensor ops: ``"cuda"`` or ``"cpu"``.
 
-    ``WALKIE_GRAPHS_O3D_DEVICE=auto`` (default) picks CUDA iff the installed
+    ``WALKIE_EXPLORE_O3D_DEVICE=auto`` (default) picks CUDA iff the installed
     Open3D build reports an available device; ``cuda`` degrades silently to
     ``cpu`` when unavailable (a robot whose GPU is busy/absent must still map).
     Never raises.
     """
-    want = os.getenv("WALKIE_GRAPHS_O3D_DEVICE", "auto").strip().lower()
+    want = os.getenv("WALKIE_EXPLORE_O3D_DEVICE", "auto").strip().lower()
     cached = _DEVICE_CACHE.get(want)
     if cached is not None:
         return cached

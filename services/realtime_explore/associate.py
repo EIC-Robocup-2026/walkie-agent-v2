@@ -46,8 +46,10 @@ from interfaces.perception.dbscan import (
     statistical_outlier_removal,
 )
 from interfaces.perception.geometry import voxel_downsample
-from services.walkie_graphs.fusion import nn_ratio
-from services.walkie_graphs.scene import aabb_of, cosine
+from walkie_world.scene.ingest import ObjectObservation
+from walkie_world.scene.store import aabb_of, cosine
+
+from .fusion import nn_ratio
 
 # Cap on the per-observation point count used as the *query* side of the overlap
 # nearest-neighbour ratio. The ratio is statistically stable on a uniform-stride
@@ -82,28 +84,10 @@ class Observation:
         return np.asarray(self.points, dtype=np.float64).mean(axis=0)
 
 
-@dataclass
-class ObjectObservation:
-    """One associated object cluster — duck-compatible with ``SceneStore.merge``'s input.
-
-    The denoised fused cloud and its AABB summary, a union of member captions, the
-    L2-normalised mean CLIP embedding, and the provenance counters merged from the
-    member :class:`Observation` s.
-    """
-
-    class_name: str
-    class_id: Optional[int]
-    conf: float
-    captions: list[str]
-    clip_emb: list[float]
-    ts_first: float
-    ts_last: float
-    n_obs: int
-    points: np.ndarray
-    centroid: tuple[float, float, float]
-    extent: tuple[float, float, float]
-    aabb_min: tuple[float, float, float]
-    aabb_max: tuple[float, float, float]
+# ``ObjectObservation`` (the produced cluster handed to ``world.observe_objects``) is
+# defined once in :mod:`walkie_world.scene.ingest` and imported above — the producer
+# depends on the model's contract so the two can't drift. Re-exported here for callers
+# (e.g. the builder) that import it from this module.
 
 
 # ---------------------------------------------------------------------------

@@ -36,12 +36,12 @@ def make_database_tools(
     walkieAI,
     *,
     agent_name: str = "database",
-    graphs=None,
+    world=None,
 ):
-    """Build the Database sub-agent's tools over the walkie_graphs 3D memory.
+    """Build the Database sub-agent's tools over the walkie_world 3D scene memory.
 
-    Lookups are read-only (parallelable); speak is sequential. ``graphs`` is a
-    :class:`walkie_graphs.WalkieGraphs`; when None the tools report memory is off.
+    Lookups are read-only (parallelable); speak is sequential. ``world`` is a
+    :class:`walkie_world.WalkieWorld`; when None the tools report memory is off.
     """
 
     @parallelable_tool
@@ -58,9 +58,9 @@ def make_database_tools(
         Returns:
             Matching objects with their 3D map coordinates, or a not-found note.
         """
-        if graphs is None:
+        if world is None:
             return _NO_MEM
-        hits = graphs.query_text(query, k=5)
+        hits = world.query_text(query, k=5)
         if not hits:
             return f"No stored object matches {query!r}."
         return f"Found {len(hits)} match(es) for {query!r}:\n" + "\n".join(
@@ -80,13 +80,13 @@ def make_database_tools(
         Returns:
             Nearby stored objects with coordinates, nearest first.
         """
-        if graphs is None:
+        if world is None:
             return _NO_MEM
         pose = walkie.status.get_position()
         if not pose:
             return "I don't know my current position yet."
         center = (float(pose["x"]), float(pose["y"]))
-        hits = graphs.query_near(center, radius_m)
+        hits = world.query_near(center, radius_m)
         if not hits:
             return f"No stored objects within {radius_m:.1f} m of me."
         return f"{len(hits)} object(s) within {radius_m:.1f} m:\n" + "\n".join(
@@ -106,9 +106,9 @@ def make_database_tools(
         Returns:
             The most recently seen objects, newest first.
         """
-        if graphs is None:
+        if world is None:
             return _NO_MEM
-        hits = graphs.recently_seen(limit)
+        hits = world.recently_seen(limit)
         if not hits:
             return "I haven't catalogued any objects yet."
         return "Recently seen:\n" + "\n".join(f"- {_fmt_node(n)}" for n in hits)
@@ -120,9 +120,9 @@ def make_database_tools(
 
         Use for "what objects do you know about?", "how many chairs have you seen?".
         """
-        if graphs is None:
+        if world is None:
             return _NO_MEM
-        objs = graphs.all_objects()
+        objs = world.all_objects()
         if not objs:
             return "I haven't catalogued any objects yet."
         counts: dict[str, int] = {}
@@ -145,9 +145,9 @@ def make_database_tools(
         Use for "what's on the table?", "describe what you've mapped", or any
         question needing relations (on / above / inside / near) between objects.
         """
-        if graphs is None:
+        if world is None:
             return _NO_MEM
-        return graphs.to_text_description()
+        return world.to_text_description()
 
     @sequential_tool
     @tool(parse_docstring=True)

@@ -113,6 +113,8 @@ class ObjectNode:
     first_seen_ts: float
     last_seen_ts: float
     points: Optional[np.ndarray] = None  # RAM-only fused cloud (NOT persisted to nodes.json)
+    source: str = "perception"  # "map" = seeded from world.toml (authoritative; bbox placeholder)
+    footprint_polygon: Optional[list] = None  # map object's XY footprint [[x,y],...] (for viz/overlap)
 
 
 @dataclass(frozen=True)
@@ -228,6 +230,7 @@ class SceneStore:
             oc = obs.centroid
             best_i = -1
             best_d = self.merge_dist
+            box_i = -1  # fallback: a map placeholder whose AABB contains the detection
             for i, n in enumerate(nodes):
                 if n.class_name != cls:
                     continue
@@ -235,17 +238,101 @@ class SceneStore:
                 if d <= best_d:
                     best_d = d
                     best_i = i
-            if best_i >= 0:
-                self._update_node(nodes[best_i], obs)
+                if box_i < 0 and n.source == "map" and self._xy_in_box(oc, n):
+                    box_i = i
+            use = best_i if best_i >= 0 else box_i
+            if use >= 0:
+                # Promotion: when `use` is a map placeholder, _update_node replaces its
+                # synthetic bbox geometry with the detection's real cloud (n_obs > 0).
+                self._update_node(nodes[use], obs)
             else:
                 nodes.append(self._node_from_obs(obs, now))
 
-        # Prune by recency to the cap (oldest dropped); a no-op below the cap.
+        # Prune by recency to the cap (oldest dropped). Map nodes are authoritative —
+        # never pruned — so the cap applies only to perception nodes.
         cap = self.prune_max_records
         if cap > 0 and len(nodes) > cap:
-            nodes.sort(key=lambda n: n.last_seen_ts, reverse=True)
-            nodes = nodes[:cap]
+            map_nodes = [n for n in nodes if n.source == "map"]
+            others = sorted(
+                (n for n in nodes if n.source != "map"),
+                key=lambda n: n.last_seen_ts,
+                reverse=True,
+            )
+            nodes = map_nodes + others[: max(0, cap - len(map_nodes))]
         return nodes
+
+    @staticmethod
+    def _xy_in_box(point, node: ObjectNode) -> bool:
+        """True if (x, y) of *point* falls within *node*'s AABB footprint (XY only)."""
+        p = np.asarray(point, dtype=float)
+        if p.shape[0] < 2:
+            return False
+        return (
+            node.aabb_min[0] <= p[0] <= node.aabb_max[0]
+            and node.aabb_min[1] <= p[1] <= node.aabb_max[1]
+        )
+
+    def merge_map_objects(self, map_objects, now: float) -> list[ObjectNode]:
+        """Upsert world-editor object shapes as ``source="map"`` placeholder nodes.
+
+        Each :class:`~walkie_world.map.locations.MapObject` becomes (or refreshes) a
+        node with the stable id ``map:<name>`` — so re-seeding on every startup is
+        idempotent (a re-survey updates geometry) instead of duplicating. A node that
+        has already been **promoted** by perception (``n_obs > 0``, carries a real
+        cloud) keeps its perceived geometry; only never-perceived placeholders
+        (``n_obs == 0``) are refreshed from the (possibly updated) map. Returns the
+        merged node list — the caller derives relations and calls :meth:`install`.
+        """
+        scene = self._snapshot()
+        nodes: list[ObjectNode] = [self._copy_node(n) for n in scene.nodes]
+        by_id = {n.id: i for i, n in enumerate(nodes)}
+        for mo in map_objects:
+            fresh = self._map_node(mo, now)
+            j = by_id.get(fresh.id)
+            if j is None:
+                nodes.append(fresh)
+                by_id[fresh.id] = len(nodes) - 1
+            elif nodes[j].n_obs == 0:
+                nodes[j] = fresh  # never perceived → adopt the latest surveyed shape
+            # else: promoted (has a real cloud) → leave perceived geometry intact
+        return nodes
+
+    @staticmethod
+    def _map_node(mo, now: float) -> ObjectNode:
+        """Build a placeholder :class:`ObjectNode` (bbox geometry, no cloud) from a MapObject."""
+        poly = [list(p) for p in (mo.footprint_polygon or [])]
+        if poly:
+            xs = [p[0] for p in poly]
+            ys = [p[1] for p in poly]
+            x_min, x_max = float(min(xs)), float(max(xs))
+            y_min, y_max = float(min(ys)), float(max(ys))
+        else:  # no footprint → a zero-extent point box at the survey pose
+            x_min = x_max = float(mo.pose[0])
+            y_min = y_max = float(mo.pose[1])
+        z_min, z_max = float(mo.z_min), float(mo.z_max)
+        aabb_min = (x_min, y_min, z_min)
+        aabb_max = (x_max, y_max, z_max)
+        centroid = ((x_min + x_max) / 2, (y_min + y_max) / 2, (z_min + z_max) / 2)
+        extent = (x_max - x_min, y_max - y_min, z_max - z_min)
+        return ObjectNode(
+            id=f"map:{mo.name}",
+            class_name=mo.class_name,
+            class_id=None,
+            centroid=centroid,
+            extent=extent,
+            aabb_min=aabb_min,
+            aabb_max=aabb_max,
+            clip_emb=[],
+            captions=[],
+            best_caption="",
+            n_obs=0,
+            conf=0.0,
+            first_seen_ts=now,
+            last_seen_ts=now,
+            points=None,
+            source="map",
+            footprint_polygon=poly or None,
+        )
 
     @staticmethod
     def _copy_node(n: ObjectNode) -> ObjectNode:
@@ -265,6 +352,8 @@ class SceneStore:
             first_seen_ts=n.first_seen_ts,
             last_seen_ts=n.last_seen_ts,
             points=n.points,
+            source=n.source,
+            footprint_polygon=n.footprint_polygon,
         )
 
     def _node_from_obs(self, obs, now: float) -> ObjectNode:
@@ -405,10 +494,14 @@ class SceneStore:
         return hits[:k]
 
     def _confirmed(self, nodes: list[ObjectNode]) -> list[ObjectNode]:
-        """Drop provisional nodes (``n_obs < min_obs_confirm``) when confirmation is on."""
+        """Drop provisional nodes (``n_obs < min_obs_confirm``) when confirmation is on.
+
+        Map-seeded nodes (``source == "map"``) are authoritative and always pass —
+        a surveyed object is visible/queryable immediately, before any sighting.
+        """
         if not self.require_confirmation:
             return nodes
-        return [n for n in nodes if n.n_obs >= self.min_obs_confirm]
+        return [n for n in nodes if n.source == "map" or n.n_obs >= self.min_obs_confirm]
 
     @staticmethod
     def _spatial_filter(nodes, near, radius):
@@ -508,6 +601,8 @@ class SceneStore:
             "conf": float(n.conf),
             "first_seen_ts": float(n.first_seen_ts),
             "last_seen_ts": float(n.last_seen_ts),
+            "source": n.source,
+            "footprint_polygon": n.footprint_polygon,
         }
 
     @staticmethod
@@ -532,6 +627,8 @@ class SceneStore:
             first_seen_ts=float(d.get("first_seen_ts", 0.0)),
             last_seen_ts=float(d.get("last_seen_ts", 0.0)),
             points=None,  # clouds are RAM-only, never persisted to nodes.json
+            source=str(d.get("source", "perception")),
+            footprint_polygon=d.get("footprint_polygon"),
         )
 
     def _persist(self) -> None:

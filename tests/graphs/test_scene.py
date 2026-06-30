@@ -14,7 +14,7 @@ from typing import Optional
 import numpy as np
 import pytest
 
-from services.walkie_graphs.scene import (
+from walkie_world.scene.store import (
     BuiltScene,
     ObjectNode,
     Relation,

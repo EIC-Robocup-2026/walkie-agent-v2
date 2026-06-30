@@ -1,7 +1,7 @@
 """Unit tests for the shared visualization service (services.viz).
 
 These stay rerun-free: they exercise the singleton, the no-op stub, backend
-resolution (incl. the legacy WALKIE_GRAPHS_VIZ fallback), the NoOpViz/RerunSession
+resolution (incl. the legacy WALKIE_EXPLORE_VIZ fallback), the NoOpViz/RerunSession
 signature parity that lets call sites skip null checks, and the axes() triad math.
 The real Rerun draw calls are covered by the manual_tests / on-robot path.
 """
@@ -22,7 +22,7 @@ PRIMITIVES = ("axes", "points", "box", "arrow", "lines", "clear", "robot", "came
 @pytest.fixture(autouse=True)
 def _clean_singleton(monkeypatch):
     """Each test gets a fresh singleton and no inherited WALKIE_VIZ* env."""
-    for k in ("WALKIE_VIZ", "WALKIE_GRAPHS_VIZ"):
+    for k in ("WALKIE_VIZ", "WALKIE_EXPLORE_VIZ"):
         monkeypatch.delenv(k, raising=False)
     reset_viz()
     yield
@@ -60,7 +60,7 @@ def test_get_viz_is_a_singleton():
 
 def test_backend_resolution_and_legacy_fallback(monkeypatch):
     assert viz_pkg._resolve_backend() == "none"
-    monkeypatch.setenv("WALKIE_GRAPHS_VIZ", "rerun")  # legacy name still honored
+    monkeypatch.setenv("WALKIE_EXPLORE_VIZ", "rerun")  # legacy name still honored
     assert viz_pkg._resolve_backend() == "rerun"
     monkeypatch.setenv("WALKIE_VIZ", "none")  # new name takes precedence
     assert viz_pkg._resolve_backend() == "none"

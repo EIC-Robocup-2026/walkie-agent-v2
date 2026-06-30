@@ -188,7 +188,7 @@ class CoverageResult:
 def run_coverage(chat, corpus: list[str]) -> CoverageResult:
     from tasks.GPSR.parse import parse_command
     from tasks.GPSR.plan import render_plan_speech
-    from tasks.GPSR.world import load_world
+    from walkie_world.map.vocab import load_world
 
     world = load_world(include_absent=True)
     res = CoverageResult(total=len(corpus))
@@ -239,7 +239,7 @@ def build_stub_stack(chat):
     import types
 
     os.environ["WALKIE_STUB_TOOLS"] = "1"
-    os.environ["WALKIE_GRAPHS_ENABLED"] = "0"
+    os.environ["WALKIE_EXPLORE_ENABLED"] = "0"
     os.environ["DISABLE_LISTENING"] = "1"
 
     from agents.actuator_agent import create_actuator_agent

@@ -55,7 +55,7 @@ def test_real_config_loads_graphs_keys():
     before = set(os.environ)
     try:
         load_config()
-        assert "WALKIE_GRAPHS_INTERVAL_SEC" in os.environ  # from the module file
+        assert "WALKIE_EXPLORE_INTERVAL_SEC" in os.environ  # from the module file
         assert "WALKIE_MODEL" in os.environ  # from the root file
     finally:
         for key in set(os.environ) - before:

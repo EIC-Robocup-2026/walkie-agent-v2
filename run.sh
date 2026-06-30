@@ -2,9 +2,10 @@
 # Unified launcher for walkie-agent-v2.
 #
 # 'start' brings the robot up ready to take commands immediately — there is no
-# explore stage and nothing to press Enter for. The walkie_graphs scene memory
-# builds and updates itself in the background while you talk to the robot, so it
-# can see, remember, and act from the first second.
+# explore stage and nothing to press Enter for. The walkie_world scene memory
+# (fed by the services.realtime_explore perception loop) builds and updates itself
+# in the background while you talk to the robot, so it can see, remember, and act
+# from the first second.
 #
 # Usage:
 #   ./run.sh                # start the agent
@@ -18,9 +19,9 @@
 # Each task lives under tasks/<NAME>/run.py and is launched as a module
 # (uv run python -m tasks.<NAME>.run) so its relative imports resolve.
 #
-# The walkie_graphs store is the only long-term memory backend; 'reset' wipes it
-# (graph_scene/ + graph_buffer/) via services/walkie_graphs/tools/reset.py. Run reset
-# with the robot stopped so the capture/build threads aren't writing concurrently.
+# The walkie_world scene store is the only long-term object memory backend; 'reset'
+# wipes it (graph_scene/ + graph_buffer/) via services/realtime_explore/tools/reset.py.
+# Run reset with the robot stopped so the capture/build threads aren't writing.
 
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
@@ -28,7 +29,7 @@ cd "$(dirname "$(readlink -f "$0")")"
 cmd="${1:-start}"
 
 reset_store() {
-    uv run python -m services.walkie_graphs.tools.reset -y
+    uv run python -m services.realtime_explore.tools.reset -y
 }
 
 list_tasks() {

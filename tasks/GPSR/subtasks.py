@@ -161,9 +161,9 @@ class ReceiveAndPlanCommands(SubTask):
     max_retries = 0  # recovery is handled in-loop by _receive_commands
 
     def run(self, ctx: TaskContext) -> StepResult:
-        world = ctx.data.get("world")
+        world = getattr(ctx, "world", None)
         if world is None:
-            print("[gpsr] no world model on ctx.data['world'] — cannot plan")
+            print("[gpsr] no world model on ctx.world — cannot plan")
             ctx.say(prompts.PLAN_NOT_UNDERSTOOD)
             return StepResult.ABORT
         ctx.say(prompts.GREET_OPERATOR)
@@ -283,10 +283,10 @@ class ExecuteCommands(SubTask):
 
     def run(self, ctx: TaskContext) -> StepResult:
         brain = ctx.data.get("brain")
-        world = ctx.data.get("world")
+        world = getattr(ctx, "world", None)
         commands: list[Command] = ctx.data.get("commands", [])
         if world is None:
-            print("[gpsr] no world model on ctx.data['world'] — cannot execute")
+            print("[gpsr] no world model on ctx.world — cannot execute")
             return StepResult.DONE
         manip = _manip_enabled()
         # Only confirmed, planned commands are eligible to run (the GPSR_CONFIRM_PLAN

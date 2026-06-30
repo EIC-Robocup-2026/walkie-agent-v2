@@ -12,7 +12,7 @@ tasks; callers compose these primitives under their own entity-path namespaces
 GPU-/display-less box. When viz is disabled, callers get a :class:`NoOpViz` whose
 methods all do nothing, so no call site ever needs a null check.
 
-Env knobs (canonical ``WALKIE_VIZ*`` names, with the old ``WALKIE_GRAPHS_*`` names
+Env knobs (canonical ``WALKIE_VIZ*`` names, with the old ``WALKIE_EXPLORE_*`` names
 honored as fallbacks when the new one is unset):
 
 - ``WALKIE_VIZ_RECORDING``      recording name shown in the viewer (default ``walkie``)
@@ -107,17 +107,17 @@ class RerunSession:
         except Exception:  # noqa: BLE001 — never let a viz convention call break startup
             pass
 
-        self._show_robot = _flag("WALKIE_VIZ_ROBOT", "WALKIE_GRAPHS_VIZ_ROBOT", "1")
-        self._show_camera = _flag("WALKIE_VIZ_CAMERA", "WALKIE_GRAPHS_VIZ_CAMERA", "1")
+        self._show_robot = _flag("WALKIE_VIZ_ROBOT", "WALKIE_EXPLORE_VIZ_ROBOT", "1")
+        self._show_camera = _flag("WALKIE_VIZ_CAMERA", "WALKIE_EXPLORE_VIZ_CAMERA", "1")
 
-        if not _flag("WALKIE_VIZ_SERVE", "WALKIE_GRAPHS_RERUN_SERVE", "1"):
+        if not _flag("WALKIE_VIZ_SERVE", "WALKIE_EXPLORE_RERUN_SERVE", "1"):
             rr.spawn()  # local native window on the robot
             return
 
-        grpc_port = int(_env("WALKIE_VIZ_GRPC_PORT", "WALKIE_GRAPHS_RERUN_GRPC_PORT", "9876"))
-        web_port = int(_env("WALKIE_VIZ_WEB_PORT", "WALKIE_GRAPHS_RERUN_WEB_PORT", "9090"))
-        host = _env("WALKIE_VIZ_HOST", "WALKIE_GRAPHS_RERUN_HOST", "").strip() or _lan_ip()
-        cors = [o.strip() for o in _env("WALKIE_VIZ_CORS", "WALKIE_GRAPHS_RERUN_CORS", "*").split(",") if o.strip()]
+        grpc_port = int(_env("WALKIE_VIZ_GRPC_PORT", "WALKIE_EXPLORE_RERUN_GRPC_PORT", "9876"))
+        web_port = int(_env("WALKIE_VIZ_WEB_PORT", "WALKIE_EXPLORE_RERUN_WEB_PORT", "9090"))
+        host = _env("WALKIE_VIZ_HOST", "WALKIE_EXPLORE_RERUN_HOST", "").strip() or _lan_ip()
+        cors = [o.strip() for o in _env("WALKIE_VIZ_CORS", "WALKIE_EXPLORE_RERUN_CORS", "*").split(",") if o.strip()]
 
         # gRPC data sink + HTTP browser app (both already bind 0.0.0.0). serve_grpc
         # advertises 127.0.0.1, but a REMOTE browser must reach the robot's LAN IP,

@@ -90,7 +90,7 @@ def main() -> None:
     # Leg 2 (optional): continue to a named room after stopping at the instruction point.
     room_pose: tuple[float, float, float] | None = None
     if args.goto_room:
-        from tasks.GPSR.world import load_world
+        from walkie_world.map.vocab import load_world
         world = load_world()
         room_pose = world.location_pose(args.goto_room)
         if room_pose is None:

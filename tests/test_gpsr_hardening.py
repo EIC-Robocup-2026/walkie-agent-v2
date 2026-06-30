@@ -25,7 +25,7 @@ from tasks.GPSR.skills import (
     _pick_by_size,
     _superlative_dir,
 )
-from tasks.GPSR.world import _fuzzy_match, load_world
+from walkie_world.map.vocab import _fuzzy_match, load_world
 
 
 @pytest.fixture(scope="module")

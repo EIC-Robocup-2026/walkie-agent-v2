@@ -39,6 +39,7 @@ if TYPE_CHECKING:  # import-time decoupling — these are type-only (annotations
     from perception import PeopleStore
     from services.viz import VizSession
     from tasks.scoring import ScoreTracker
+    from walkie_world import WalkieWorld
 
 
 class StepResult(Enum):
@@ -195,6 +196,7 @@ class TaskContext:
     people: "PeopleStore | None" = None  # face/appearance person memory (optional)
     viz: "VizSession | None" = None  # shared 3D viz session; auto-filled below
     scorer: "ScoreTracker | None" = None  # optional live score tally (see ctx.score)
+    world: "WalkieWorld | None" = None  # unified world model (rooms/objects/people); auto-filled
 
     def __post_init__(self) -> None:
         # Wire the shared viz session so every subtask can draw via ctx.viz (e.g.
@@ -205,6 +207,15 @@ class TaskContext:
             from services.viz import get_viz
 
             self.viz = get_viz()
+        # Every task gets a world model (rooms/objects/people query engine) reachable
+        # as ctx.world. Tasks that need richer wiring (people memory, a CLIP embed_text,
+        # a specific map/scene dir) build their own and pass it in; the default here is
+        # objects-only (no chromadb until a people method is used). Import is lazy so
+        # tasks/base.py stays importable on a GPU-less box.
+        if self.world is None:
+            from walkie_world import WalkieWorld
+
+            self.world = WalkieWorld(enable_people=False)
 
     # --- conversation ---------------------------------------------------
 

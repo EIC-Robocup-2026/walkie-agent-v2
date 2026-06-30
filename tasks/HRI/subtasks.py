@@ -73,7 +73,7 @@ from tasks.skills import (
     tilt_head,
     wait_for_person,
 )
-from tasks.skills.locations import resolve_pose
+from walkie_world.map.locations import resolve_pose
 
 
 def _guest(ctx: TaskContext, n: int) -> dict:

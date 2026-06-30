@@ -16,7 +16,7 @@ import pytest
 from dotenv import load_dotenv
 
 from tasks.GPSR.parse import parse_commands
-from tasks.GPSR.world import load_world
+from walkie_world.map.vocab import load_world
 
 load_dotenv()
 

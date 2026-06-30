@@ -23,7 +23,7 @@ from __future__ import annotations
 import os
 
 from tasks.base import StepResult, SubTask, Task, TaskContext
-from tasks.skills.locations import get_location_book, resolve_pose
+from walkie_world.map.locations import get_location_book, resolve_pose
 
 from . import prompts
 from .skills import (

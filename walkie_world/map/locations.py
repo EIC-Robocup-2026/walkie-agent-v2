@@ -28,9 +28,25 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from tasks.skills.geometry import parse_pose
+from walkie_world.map.polygon import point_in_polygon
 
 Pose = tuple[float, float, float]
+# An ordered XY polygon (CCW, implicitly closed) as a tuple of (x, y) vertices.
+Polygon = tuple[tuple[float, float], ...]
+
+
+def parse_pose(s: str) -> tuple[float, float, float]:
+    """Parse a waypoint string "x,y,heading_rad" -> (x, y, heading_rad).
+
+    Inlined (not imported from ``tasks.skills.geometry``) so the world model has
+    no back-edge into the ``tasks`` layer — ``tasks`` depends on ``walkie_world``,
+    never the reverse. ``tasks.skills.geometry`` keeps its own copy for its callers.
+    """
+    parts = [p.strip() for p in s.split(",")]
+    if len(parts) != 3:
+        raise ValueError(f"expected 'x,y,heading_rad', got {s!r}")
+    x, y, heading_rad = (float(p) for p in parts)
+    return x, y, heading_rad
 
 
 # --- pure text matching (shared by LocationBook and GPSR's WorldModel) ------
@@ -91,6 +107,40 @@ def _pose_of(raw: dict) -> Pose:
     return (float(p[0]), float(p[1]), float(p[2]))
 
 
+def _polygon_of(raw: dict) -> Polygon:
+    """Parse an optional ``polygon = [[x, y], ...]`` into a tuple of (x, y) tuples.
+
+    Missing / empty / malformed → ``()`` (entries without a surveyed shape just fall
+    back to pose/radius — polygon support is additive and back-compatible).
+    """
+    poly = raw.get("polygon") or []
+    out: list[tuple[float, float]] = []
+    for v in poly:
+        try:
+            out.append((float(v[0]), float(v[1])))
+        except (TypeError, ValueError, IndexError):
+            continue
+    return tuple(out)
+
+
+def _zrange_of(raw: dict) -> tuple[float, float]:
+    """Parse an object's Z extent, tolerant of several editor encodings.
+
+    Accepts ``z = [z_min, z_max]``, explicit ``z_min``/``z_max``, or a ``height``
+    (with ``z_min`` defaulting to 0). Returns ``(z_min, z_max)``.
+    """
+    z = raw.get("z")
+    if isinstance(z, (list, tuple)) and len(z) >= 2:
+        return float(z[0]), float(z[1])
+    z_min = float(raw.get("z_min", 0.0) or 0.0)
+    if raw.get("z_max") is not None:
+        return z_min, float(raw["z_max"])
+    height = raw.get("height")
+    if height is None and isinstance(z, (int, float)):
+        height = z  # a bare scalar `z` reads as a height
+    return z_min, z_min + float(height or 0.0)
+
+
 def _lookup(table: dict[str, str], text: str | None) -> str | None:
     """Alias + article + fuzzy tolerant lookup: free text -> canonical name."""
     if not text:
@@ -114,6 +164,9 @@ class Room:
     # depth check reads it as "open" (it can't see a too-narrow gap), so barrier
     # navigation asks for it to be opened on a block.
     barrier: bool = False
+    # The room BOUNDARY (walls) as an XY polygon; () when not surveyed. Drives
+    # point-in-polygon "which room am I in" (LocationBook.room_at) and the wall viz.
+    polygon: Polygon = ()
 
 
 @dataclass(frozen=True)
@@ -124,6 +177,8 @@ class Location:
     category: str | None = None
     pose: Pose = (0.0, 0.0, 0.0)
     barrier: bool = False  # see Room.barrier
+    # The furniture's 2D FOOTPRINT as an XY polygon; () when not surveyed.
+    polygon: Polygon = ()
 
 
 @dataclass(frozen=True)
@@ -140,6 +195,30 @@ class Door:
     name: str
     pose: Pose = (0.0, 0.0, 0.0)
     radius: float | None = None
+    # Optional doorway REGION as an XY polygon; () when not surveyed. When set, the
+    # door-opening skill can trigger by point-in-polygon (am I in the doorway?)
+    # alongside / instead of `radius`.
+    polygon: Polygon = ()
+
+
+@dataclass(frozen=True)
+class MapObject:
+    """A known object instance surveyed by the world editor: an XY footprint +
+    Z height (a 3D box) the perception loop later promotes to a real point cloud.
+
+    ``footprint_polygon`` is the object's 2D outline (CCW, closed); ``z_min``/``z_max``
+    its vertical extent. Together they form an axis-aligned 3D box. ``class_name`` is
+    the detector class (the key's prefix before ``.`` — ``pringles.0`` → ``pringles``)
+    used to match a detection to this placeholder. ``on`` is the supporting furniture.
+    """
+
+    name: str
+    class_name: str
+    footprint_polygon: Polygon = ()
+    z_min: float = 0.0
+    z_max: float = 0.0
+    pose: Pose = (0.0, 0.0, 0.0)
+    on: str | None = None
 
 
 def build_rooms_locations(data: dict, *, include_absent: bool = False):
@@ -161,7 +240,10 @@ def build_rooms_locations(data: dict, *, include_absent: bool = False):
             continue
         canonical = _norm(name)
         rooms[canonical] = Room(
-            name=canonical, pose=_pose_of(raw), barrier=bool(raw.get("barrier", False))
+            name=canonical,
+            pose=_pose_of(raw),
+            barrier=bool(raw.get("barrier", False)),
+            polygon=_polygon_of(raw),
         )
         for k in _alias_keys(canonical, raw.get("aliases")):
             room_alias[k] = canonical
@@ -180,6 +262,7 @@ def build_rooms_locations(data: dict, *, include_absent: bool = False):
             category=_norm(raw["category"]) if raw.get("category") else None,
             pose=_pose_of(raw),
             barrier=bool(raw.get("barrier", False)),
+            polygon=_polygon_of(raw),
         )
         for k in _alias_keys(canonical, raw.get("aliases")):
             loc_alias[k] = canonical
@@ -205,8 +288,43 @@ def build_doors(data: dict, *, include_absent: bool = False) -> dict[str, Door]:
             name=canonical,
             pose=_pose_of(raw),
             radius=float(radius) if radius is not None else None,
+            polygon=_polygon_of(raw),
         )
     return doors
+
+
+def build_map_objects(data: dict, *, include_absent: bool = False) -> list[MapObject]:
+    """Parse the ``[object_instances]`` table into :class:`MapObject` records.
+
+    Each entry is keyed ``<class>.<index>`` (e.g. ``pringles.0``) and carries an XY
+    ``polygon`` (footprint) + a Z extent (``z``/``height``/``z_min``/``z_max``), an
+    optional grasp ``pose`` and the ``on`` surface. The class name is the key prefix
+    before the first ``.``. Drops ``present = false`` unless *include_absent*. Returns
+    ``[]`` when the file has no ``[object_instances]`` table (the common case — these
+    are populated by the world editor / perception cache, not hand-surveyed).
+    """
+    objs: list[MapObject] = []
+    for name, raw in (data.get("object_instances") or {}).items():
+        if not isinstance(raw, dict):
+            continue
+        if not include_absent and not raw.get("present", True):
+            continue
+        z_min, z_max = _zrange_of(raw)
+        # Keep the raw instance key as the name (e.g. "pringles.0") so the seeded
+        # node id is stable + readable; only the class prefix is normalized.
+        class_name = _norm(str(name).split(".", 1)[0])
+        objs.append(
+            MapObject(
+                name=str(name).strip(),
+                class_name=class_name,
+                footprint_polygon=_polygon_of(raw),
+                z_min=z_min,
+                z_max=z_max,
+                pose=_pose_of(raw),
+                on=_norm(raw["on"]) if raw.get("on") else None,
+            )
+        )
+    return objs
 
 
 # --- the location book ------------------------------------------------------
@@ -223,6 +341,7 @@ class LocationBook:
     rooms: dict[str, Room] = field(default_factory=dict)
     locations: dict[str, Location] = field(default_factory=dict)
     doors: dict[str, Door] = field(default_factory=dict)
+    map_objects: list[MapObject] = field(default_factory=list)
     _room_alias: dict[str, str] = field(default_factory=dict)
     _loc_alias: dict[str, str] = field(default_factory=dict)
 
@@ -256,6 +375,20 @@ class LocationBook:
     def names(self) -> list[str]:
         return sorted({*self.locations, *self.rooms})
 
+    # --- polygons (point-in-polygon "which room am I in") ---------------
+
+    def room_at(self, x: float, y: float) -> str | None:
+        """Canonical name of the room whose boundary polygon contains (x, y).
+
+        Iterates rooms that have a surveyed ``polygon`` and returns the first match
+        (rooms shouldn't overlap). Rooms without a polygon are skipped, so this is a
+        no-op until the map editor traces boundaries — back-compatible.
+        """
+        for name, room in self.rooms.items():
+            if room.polygon and point_in_polygon(x, y, room.polygon):
+                return name
+        return None
+
     # --- doors (proximity, not name lookup) -----------------------------
 
     def has_doors(self) -> bool:
@@ -282,27 +415,41 @@ class LocationBook:
                 return d
         return None
 
+    def is_near_door(self, x: float, y: float, *, default_radius: float) -> bool:
+        """True if (x, y) is inside any door's polygon REGION or its trigger circle.
+
+        Combines the two door-trigger mechanisms: a surveyed doorway ``polygon``
+        (point-in-polygon, handles wide/angled openings) OR the ``radius`` circle.
+        """
+        for d in self.doors.values():
+            if d.polygon and point_in_polygon(x, y, d.polygon):
+                return True
+        return self.door_near(x, y, default_radius=default_radius) is not None
+
 
 def _default_map_path() -> Path:
-    """$WALKIE_MAP_FILE -> $GPSR_WORLD_FILE -> the sibling GPSR world.toml.
+    """The single global arena map: ``$WALKIE_MAP_FILE``, else the repo-root ``world.toml``.
 
-    Defaulting to GPSR's file means one arena file serves every challenge and the
-    existing teach_poses tool already feeds them all; point WALKIE_MAP_FILE
-    elsewhere to swap in the map editor's output.
+    One map serves every challenge — there is no per-task map. ``WALKIE_MAP_FILE`` is
+    the one canonical override (point it at the map editor's output / the deployed nav
+    arena); with it unset, the in-repo fallback is the top-level ``world.toml``
+    (``walkie_world/map/locations.py`` -> ``parents[2]`` is the repo root). Both the map
+    layer and the GPSR vocab (:func:`walkie_world.map.vocab.load_world`) resolve through
+    here, so they can never read different files.
     """
-    explicit = os.getenv("WALKIE_MAP_FILE") or os.getenv("GPSR_WORLD_FILE")
+    explicit = os.getenv("WALKIE_MAP_FILE")
     if explicit:
         return Path(explicit)
-    return Path(__file__).resolve().parents[1] / "GPSR" / "world.toml"
+    return Path(__file__).resolve().parents[2] / "world.toml"
 
 
 def load_location_book(path: str | os.PathLike | None = None, *,
                        include_absent: bool = False) -> LocationBook:
     """Load a LocationBook from a world.toml-schema file.
 
-    Resolution: explicit *path* -> $WALKIE_MAP_FILE -> $GPSR_WORLD_FILE -> the
-    sibling GPSR ``world.toml``. **Returns an empty book (never raises) when the
-    file is missing** so a box with no map still runs on env-var fallbacks.
+    Resolution: explicit *path* -> ``$WALKIE_MAP_FILE`` -> the repo-root ``world.toml``
+    (the single global map). **Returns an empty book (never raises) when the file is
+    missing** so a box with no map still runs on the env-var fallback.
     """
     p = Path(path) if path is not None else _default_map_path()
     if not p.exists():
@@ -313,7 +460,9 @@ def load_location_book(path: str | os.PathLike | None = None, *,
         data, include_absent=include_absent
     )
     doors = build_doors(data, include_absent=include_absent)
+    map_objects = build_map_objects(data, include_absent=include_absent)
     return LocationBook(rooms=rooms, locations=locations, doors=doors,
+                        map_objects=map_objects,
                         _room_alias=room_alias, _loc_alias=loc_alias)
 
 

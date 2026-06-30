@@ -18,7 +18,7 @@ the serial path it falls back to.
 from __future__ import annotations
 
 from .plan import Plan, step_location
-from .world import WorldModel
+from walkie_world.map.vocab import WorldModel
 
 
 def _region(world: WorldModel, location: str | None) -> str | None:

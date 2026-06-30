@@ -54,7 +54,7 @@ from tasks.skills import (
 from . import gestures
 from .plan import PlanStep, _person_phrase
 from .tracking import ArrivalStopper, companion_present, heading_between, segment_route
-from .world import WorldModel
+from walkie_world.map.vocab import WorldModel
 
 
 # --- low-level helpers ------------------------------------------------------
@@ -260,14 +260,14 @@ def navigate(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -
 
 
 def _memory_graphs(ctx: TaskContext):
-    """The walkie_graphs CLIP scene memory for object recall, or None when
-    GPSR_FIND_USE_MEMORY is off / perception isn't running. Object *positions* come
-    from this scene graph — world.toml holds only fixed places, and objects move /
-    vary, so a static world lookup can't locate them."""
+    """The CLIP scene memory (``ctx.world``) for object recall, or None when
+    GPSR_FIND_USE_MEMORY is off / no world is wired. Object *positions* come from the
+    scene graph — world.toml holds only fixed places, and objects move / vary, so a
+    static lookup can't locate them. ``ctx.world`` exposes the same ``query_text`` the
+    old graphs facade did."""
     if os.getenv("GPSR_FIND_USE_MEMORY", "1") != "1":
         return None
-    brain = getattr(ctx, "data", {}).get("brain")
-    return getattr(brain, "graphs", None) if brain is not None else None
+    return getattr(ctx, "world", None)
 
 
 def _detect_here(ctx: TaskContext, obj, category, world: WorldModel):

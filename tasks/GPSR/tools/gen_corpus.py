@@ -20,7 +20,7 @@ stdlib-only) is imported, located at runtime:
 If it can't be found, :func:`load_generator_cls` raises ImportError with the fix —
 callers (the coverage test) skip rather than fail.
 
-Vocabulary comes from OUR :class:`~tasks.GPSR.world.WorldModel` (loaded with
+Vocabulary comes from OUR :class:`~walkie_world.map.vocab.WorldModel` (loaded with
 ``include_absent=True`` for the full arena), so every generated noun is one the
 parser is meant to ground — a coverage miss is a real parser/grounding gap, not a
 vocabulary mismatch.
@@ -39,7 +39,7 @@ import random
 import sys
 from pathlib import Path
 
-from ..world import WorldModel, _singulars, load_world
+from walkie_world.map.vocab import WorldModel, _singulars, load_world
 
 # The generator's two top-level buckets (gpsr_commands.generate_command_start).
 CATEGORIES = ("people", "objects")
@@ -142,7 +142,7 @@ def _main() -> None:
     ap.add_argument("-n", type=int, default=100, help="number of commands to sample")
     ap.add_argument("--seed", type=int, default=0, help="RNG seed (reproducible)")
     ap.add_argument("--category", choices=CATEGORIES, default=None, help="pin one bucket")
-    ap.add_argument("--world", default=None, help="world.toml path (default: GPSR_WORLD_FILE / bundled)")
+    ap.add_argument("--world", default=None, help="world.toml path (default: the global map — $WALKIE_MAP_FILE or repo-root world.toml)")
     args = ap.parse_args()
 
     world = load_world(args.world, include_absent=True)

@@ -8,15 +8,15 @@ from .tools import make_database_tools
 
 
 def create_database_agent(
-    model, walkieAI, walkie: WalkieInterface, *, graphs=None
+    model, walkieAI, walkie: WalkieInterface, *, world=None
 ):
     """Build the Walkie Database sub-agent (long-term 3D spatial-memory specialist).
 
-    ``graphs`` is a :class:`walkie_graphs.WalkieGraphs` instance whose store the
-    tools query; when None the tools report that memory is unavailable.
+    ``world`` is a :class:`walkie_world.WalkieWorld` whose scene graph the tools
+    query (query_text/query_near/...); when None the tools report memory is off.
     """
     tools = make_database_tools(
-        walkie, walkieAI, agent_name="database", graphs=graphs
+        walkie, walkieAI, agent_name="database", world=world
     )
     return create_walkie_agent(
         name="database_agent",

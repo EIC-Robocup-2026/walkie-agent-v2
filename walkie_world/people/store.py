@@ -21,7 +21,7 @@ The two-modality fusion design is by **Chalk (EIC team)** — adopted from the
 ``eic-human`` subproject (``eic_human/core.py::_fuse_score`` and
 ``pipeline/store.py``); this file is a port of his ``PeopleStore`` from the
 ``feat/appearance-reid-chalk`` branch, re-homed onto the shared
-:mod:`perception.vector_db` ChromaDB layer and extended with caller-chosen
+:mod:`walkie_world.people.vector_db` ChromaDB layer and extended with caller-chosen
 record ids (``person_id``) so a guest whose name was never understood can
 still be enrolled under a stable key ("guest-1").
 
@@ -66,6 +66,23 @@ class PersonRecord:
     matched_by: Optional[str] = None
     """Which modality produced a :meth:`recognize_fused` match —
     ``"face+appearance"``, ``"face"`` or ``"appearance"``. ``None`` otherwise."""
+    appearance_embedding: tuple[float, ...] = field(default_factory=tuple)
+    """The OSNet attire/body embedding, surfaced on the record (also stored in the
+    ``people_appearance`` collection). Empty unless explicitly populated."""
+    appearance_caption: Optional[str] = None
+    """Free-text attire caption (e.g. "a person in a red shirt and glasses"),
+    produced by the caller from ``walkieAI.image.caption`` on the person crop."""
+    appearance_caption_embedding: tuple[float, ...] = field(default_factory=tuple)
+    """CLIP TEXT embedding of :attr:`appearance_caption` — enables semantic re-ID
+    ("the person in a red shirt") via the ``people_appearance_caption`` collection."""
+    last_seen_pose: Optional[tuple[float, float, float]] = None
+    """Map-frame (x, y, heading) of the last sighting (for re-acquisition)."""
+    last_seen_room: Optional[str] = None
+    """Canonical room the person was last seen in (from ``world.room_at``)."""
+    pose_label: Optional[str] = None
+    """Last observed body state, e.g. "waving" / "sitting" / "pointing"."""
+    seat: Optional[str] = None
+    """Assigned seat / location (HRI Receptionist), if any."""
 
     @property
     def similarity(self) -> Optional[float]:
@@ -85,6 +102,21 @@ def _cosine_sim(a: Sequence[float], b: Sequence[float]) -> float:
     na = sum(x * x for x in a) ** 0.5
     nb = sum(x * x for x in b) ** 0.5
     return dot / (na * nb + 1e-8)
+
+
+# Stopwords stripped before token-overlap of attire captions (the lexical re-ID
+# fallback). Generic filler that carries no attire signal.
+_CAPTION_STOPWORDS = frozenset(
+    {"a", "an", "the", "with", "and", "of", "in", "on", "wearing", "wears", "person",
+     "who", "is", "are", "has", "have", "this", "that", "it", "they", "their", "man",
+     "woman", "guy", "someone", "people"}
+)
+
+
+def _caption_tokens(s: str) -> set[str]:
+    """Stopword-filtered alphanumeric tokens of an attire caption (for lexical re-ID)."""
+    cleaned = re.sub(r"[^a-z0-9 ]", " ", (s or "").lower())
+    return {w for w in cleaned.split() if w and w not in _CAPTION_STOPWORDS}
 
 
 # Adaptive face↔appearance fusion weights — design by Chalk (EIC team), from
@@ -122,6 +154,7 @@ class PeopleStore:
 
     COLLECTION = "people"
     APP_COLLECTION = "people_appearance"
+    CAP_COLLECTION = "people_appearance_caption"
 
     def __init__(
         self,
@@ -137,6 +170,11 @@ class PeopleStore:
         )
         self._app_collection = get_collection(
             self._client, self.APP_COLLECTION, unique_if_ephemeral=True
+        )
+        # CLIP TEXT embeddings of attire captions, same id space — powers semantic
+        # re-ID ("the person in a red shirt"). Latest-wins like the attire vector.
+        self._cap_collection = get_collection(
+            self._client, self.CAP_COLLECTION, unique_if_ephemeral=True
         )
         self._embedding_model = embedding_model
         # When set, enroll archives the guest's face crop here so the DB viewer
@@ -165,6 +203,11 @@ class PeopleStore:
         """Configured minimum fused similarity for :meth:`recognize_fused`."""
         return float(os.getenv("APPEARANCE_MATCH_THRESHOLD", "0.5"))
 
+    @staticmethod
+    def caption_match_max_distance() -> float:
+        """Configured cosine-distance gate for :meth:`find_by_caption_embedding`."""
+        return float(os.getenv("WORLD_PEOPLE_CAPTION_MATCH_THRESHOLD", "0.35"))
+
     @property
     def client(self):
         """Underlying chromadb client (so an in-process viewer can read live)."""
@@ -183,6 +226,12 @@ class PeopleStore:
         person_id: Optional[str] = None,
         attributes: str = "",
         app_embedding: Optional[Sequence[float]] = None,
+        appearance_caption: Optional[str] = None,
+        appearance_caption_embedding: Optional[Sequence[float]] = None,
+        last_seen_pose: Optional[Sequence[float]] = None,
+        last_seen_room: Optional[str] = None,
+        pose_label: Optional[str] = None,
+        seat: Optional[str] = None,
         frame: Optional[Image.Image] = None,
         face_bbox_xyxy: Optional[Sequence[int]] = None,
         ts: Optional[float] = None,
@@ -196,16 +245,29 @@ class PeopleStore:
         the new face vector into a running centroid (more robust recognition
         across lighting/pose), bumping the enrollment count. ``app_embedding``
         (the OSNet attire/body vector) is stored latest-wins — clothing changes
-        between sessions, so averaging it would blur identities. When ``frame``
+        between sessions, so averaging it would blur identities. The optional
+        ``appearance_caption`` (attire description) + ``appearance_caption_embedding``
+        (its CLIP text vector) power semantic re-ID; ``last_seen_pose``/``_room``,
+        ``pose_label`` and ``seat`` record where/how the person was last seen. All of
+        these are carried forward on re-enroll when not re-supplied. When ``frame``
         (and a ``face_bbox_xyxy``) are given and a frames dir is configured, the
-        guest's face crop is archived for the DB viewer. Returns the stored
-        record.
+        guest's face crop is archived for the DB viewer. Returns the stored record.
         """
         if person_id is None and not (name and name.strip()):
             raise ValueError("name must be non-empty when no person_id is given")
-        emb = [float(x) for x in embedding]
+        emb = [float(x) for x in (embedding or [])]
         if not emb:
-            raise ValueError("embedding must be non-empty")
+            # Attire-only enrollment (e.g. Restaurant re-identifies by clothing, not
+            # face): register the id with a zero placeholder face sized to an available
+            # modality. The fusion path already treats a zero-norm stored face as
+            # "no face", so recognize() won't false-match it; re-ID goes via appearance.
+            dim = len(appearance_caption_embedding or []) or len(app_embedding or [])
+            if dim == 0:
+                raise ValueError(
+                    "enroll needs a face embedding, or an appearance/caption vector for "
+                    "attire-only enrollment"
+                )
+            emb = [0.0] * dim
         now = time.time() if ts is None else float(ts)
         rid = _slug(person_id) if person_id else _slug(name)
 
@@ -240,6 +302,25 @@ class PeopleStore:
         ref = self._archive_face(rid, frame, face_bbox_xyxy)
         if ref is not None:
             metadata["frame_ref"] = ref
+        # Optional attire caption + last-seen context. ChromaDB metadata must be
+        # scalars, so the pose is stored as three floats. Carry prior values forward
+        # on re-enroll when a field isn't re-supplied (clothing/seat persist).
+        prev = meta if existing is not None else {}
+        cap_text = appearance_caption if appearance_caption is not None else prev.get("appearance_caption")
+        if cap_text is not None:
+            metadata["appearance_caption"] = str(cap_text)
+        for key, val in (("last_seen_room", last_seen_room), ("pose_label", pose_label), ("seat", seat)):
+            v = val if val is not None else prev.get(key)
+            if v not in (None, ""):
+                metadata[key] = str(v)
+        if last_seen_pose is not None:
+            metadata["last_seen_x"] = float(last_seen_pose[0])
+            metadata["last_seen_y"] = float(last_seen_pose[1])
+            metadata["last_seen_heading"] = float(last_seen_pose[2])
+        elif existing is not None:
+            for k in ("last_seen_x", "last_seen_y", "last_seen_heading"):
+                if k in prev:
+                    metadata[k] = float(prev[k])
         document = f"{metadata['name']} — likes {metadata['drink']}".strip(" —")
         self._collection.upsert(
             ids=[rid], embeddings=[new_emb], metadatas=[metadata], documents=[document or rid]
@@ -249,6 +330,12 @@ class PeopleStore:
             if app:
                 self._app_collection.upsert(
                     ids=[rid], embeddings=[app], documents=[document or rid]
+                )
+        if appearance_caption_embedding is not None:
+            cap = [float(x) for x in appearance_caption_embedding]
+            if cap:
+                self._cap_collection.upsert(
+                    ids=[rid], embeddings=[cap], documents=[str(cap_text) if cap_text else (document or rid)]
                 )
         return self._to_record(rid, new_emb, metadata)
 
@@ -276,8 +363,8 @@ class PeopleStore:
             return None
 
     def clear(self) -> None:
-        """Forget everyone (e.g. between Receptionist runs) — both collections."""
-        for attr in ("_collection", "_app_collection"):
+        """Forget everyone (e.g. between Receptionist runs) — all three collections."""
+        for attr in ("_collection", "_app_collection", "_cap_collection"):
             col = getattr(self, attr)
             name = col.name  # actual name (may carry an ephemeral suffix)
             drop_collection(self._client, name)
@@ -310,6 +397,59 @@ class PeopleStore:
         if dist is None or dist > max_distance:
             return None
         return self._to_record(rid, stored_emb, meta, distance=dist)
+
+    def find_by_caption_embedding(
+        self, embedding: Sequence[float], *, max_distance: Optional[float] = None
+    ) -> Optional[PersonRecord]:
+        """Closest enrolled person by attire-caption CLIP text vector, or ``None``.
+
+        Vector-search the ``people_appearance_caption`` collection (the caller embeds
+        the query with ``walkieAI.image.embed_text``), then resolve the winning id to
+        a full record. ``max_distance`` defaults to ``WORLD_PEOPLE_CAPTION_MATCH_THRESHOLD``.
+        This is the semantic re-ID path (e.g. "the person in a red shirt").
+        """
+        vec = [float(x) for x in (embedding or [])]
+        if not vec or self._cap_collection.count() == 0:
+            return None
+        md = self.caption_match_max_distance() if max_distance is None else float(max_distance)
+        res = self._cap_collection.query(
+            query_embeddings=[vec], n_results=1, include=["distances"]
+        )
+        rows = query_rows(res)
+        if not rows:
+            return None
+        rid, _emb, _meta, dist = rows[0]
+        if dist is None or dist > md:
+            return None
+        raw = self._raw_get(rid)
+        if raw is None:
+            return None
+        emb, meta = raw
+        return self._to_record(rid, emb, meta, distance=dist, matched_by="appearance_caption")
+
+    def find_by_caption_lexical(
+        self, text: str, *, min_overlap: int = 1
+    ) -> Optional[PersonRecord]:
+        """Best enrolled person by token overlap of *text* with stored attire captions.
+
+        The offline fallback for :meth:`find_by_caption_embedding` when no text-embed
+        is available (mirrors the scene store's keyword fallback). Returns the record
+        with the most overlapping (stopword-filtered) caption tokens, or ``None``.
+        """
+        q = _caption_tokens(text)
+        if not q:
+            return None
+        best: Optional[tuple[int, str, list | None, dict]] = None
+        for rid, emb, meta in get_rows(
+            self._collection.get(include=["embeddings", "metadatas"])
+        ):
+            ov = len(q & _caption_tokens(str(meta.get("appearance_caption", ""))))
+            if ov >= min_overlap and (best is None or ov > best[0]):
+                best = (ov, rid, emb, meta)
+        if best is None:
+            return None
+        _ov, rid, emb, meta = best
+        return self._to_record(rid, emb, meta, matched_by="appearance_caption")
 
     def recognize_fused(
         self,
@@ -511,6 +651,14 @@ class PeopleStore:
     ) -> PersonRecord:
         emb = tuple(float(x) for x in embedding) if embedding is not None else tuple()
         ref = meta.get("frame_ref")
+        cap = meta.get("appearance_caption")
+        pose = None
+        if "last_seen_x" in meta and "last_seen_y" in meta:
+            pose = (
+                float(meta.get("last_seen_x", 0.0)),
+                float(meta.get("last_seen_y", 0.0)),
+                float(meta.get("last_seen_heading", 0.0)),
+            )
         return PersonRecord(
             id=rid,
             name=str(meta.get("name", "")),
@@ -524,4 +672,9 @@ class PeopleStore:
             embedding=emb,
             distance=distance,
             matched_by=matched_by,
+            appearance_caption=str(cap) if cap else None,
+            last_seen_pose=pose,
+            last_seen_room=(str(meta["last_seen_room"]) if meta.get("last_seen_room") else None),
+            pose_label=(str(meta["pose_label"]) if meta.get("pose_label") else None),
+            seat=(str(meta["seat"]) if meta.get("seat") else None),
         )

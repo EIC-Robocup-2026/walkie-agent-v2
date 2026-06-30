@@ -92,7 +92,7 @@ def main() -> None:
         kw["extra_body"] = extra
     chat = ChatOpenAI(base_url=base, api_key=key, model=model, temperature=0, **kw)
     from tasks.GPSR.parse import parse_command
-    from tasks.GPSR.world import load_world
+    from walkie_world.map.vocab import load_world
     world = load_world(include_absent=True)
     print("\n--- REAL parse_command path (structured) ---")
     for cmd in PROBES:

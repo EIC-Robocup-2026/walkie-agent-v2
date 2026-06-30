@@ -6,7 +6,7 @@ Run on the robot (or a dev PC with WALKIE_ROBOT_IP set) with walkie-ai-server up
 
 A Rerun viewer shows the accumulating point clouds, per-object boxes, and relation
 edges; the console prints the text description each tick. Set
-WALKIE_GRAPHS_INTERESTED_CLASSES (e.g. "bottle,cup,chair") to scope what's mapped.
+WALKIE_EXPLORE_INTERESTED_CLASSES (e.g. "bottle,cup,chair") to scope what's mapped.
 Ctrl+C to stop. This is a manual test (no robot in CI) — guarded by __main__.
 
 To watch from ANOTHER computer on the LAN, add WALKIE_VIZ_SERVE=1 (the
@@ -24,7 +24,7 @@ from walkie_sdk import WalkieRobot
 from client import WalkieAIClient
 from interfaces.walkie_interface import WalkieInterface
 from walkie_config import load_config
-from services.walkie_graphs import WalkieGraphs
+from services.realtime_explore import RealtimeExplore
 
 ZENOH_PORT = 7447
 
@@ -43,13 +43,13 @@ def test_graphs_live() -> None:
     walkieAI = WalkieAIClient(
         base_url=os.getenv("WALKIE_AI_BASE_URL", "http://localhost:5000"),
     )
-    graphs = WalkieGraphs(walkieAI=walkieAI, walkie=walkie)
+    graphs = RealtimeExplore(walkieAI=walkieAI, walkie=walkie)
     print("[graphs-live] starting observer — Ctrl+C to stop.")
 
     try:
         graphs.start()
         while True:
-            time.sleep(float(os.getenv("WALKIE_GRAPHS_INTERVAL_SEC", "3.0")) + 0.5)
+            time.sleep(float(os.getenv("WALKIE_EXPLORE_INTERVAL_SEC", "3.0")) + 0.5)
             print("\n" + graphs.to_text_description())
     except KeyboardInterrupt:
         print("\n[graphs-live] stopping.")

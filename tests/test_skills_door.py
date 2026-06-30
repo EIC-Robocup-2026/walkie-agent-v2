@@ -15,7 +15,7 @@ from tasks.skills import (
     mapped_door_near,
     request_open_door,
 )
-from tasks.skills.locations import _reset_cache
+from walkie_world.map.locations import _reset_cache
 
 
 @pytest.fixture(autouse=True)
@@ -24,7 +24,7 @@ def _fresh_location_book():
 
     The map gate reads ``get_location_book()`` (cached). Resetting before AND after
     each test keeps the doors a map-gate test installs from leaking into the depth-only
-    tests (which must see the real, door-less sibling world.toml → gate None → legacy).
+    tests (which must see the real, door-less repo-root world.toml → gate None → legacy).
     """
     _reset_cache()
     yield

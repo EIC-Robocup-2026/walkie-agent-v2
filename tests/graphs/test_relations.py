@@ -7,8 +7,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from services.walkie_graphs.relations import derive_relations
-from services.walkie_graphs.scene import ObjectNode, Relation
+from walkie_world.scene.relations import derive_relations
+from walkie_world.scene.store import ObjectNode, Relation
 
 
 # ---------------------------------------------------------------------------

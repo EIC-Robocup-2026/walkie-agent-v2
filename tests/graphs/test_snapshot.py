@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from services.walkie_graphs.snapshot import build_object_records, write_atomic
+from services.realtime_explore.snapshot import build_object_records, write_atomic
 
 
 def _det(class_name, bbox, conf=0.9):

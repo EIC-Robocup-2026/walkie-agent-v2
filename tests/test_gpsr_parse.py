@@ -15,7 +15,7 @@ import pytest
 from tasks.GPSR.parse import ground_plan, ground_step
 from tasks.GPSR.plan import Plan, PlanStep, Primitive, render_plan_speech
 from tasks.GPSR.prompts import RawPlan, RawStep
-from tasks.GPSR.world import load_world
+from walkie_world.map.vocab import load_world
 
 
 @pytest.fixture(scope="module")

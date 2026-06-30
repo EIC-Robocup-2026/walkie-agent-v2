@@ -62,7 +62,7 @@ The agent stack is **four agents** built from one factory (`agents/core/agent.py
 
 > The agent only "talks" by calling the `speak` tool. A plain-text model reply with no tool call ends the turn **silently** — by design.
 
-See **[`CLAUDE.md`](./CLAUDE.md)** for the authoritative architecture (middleware stack, tool parallelism, cross-agent state, the full tool list per agent) and **[`docs/WALKIE_GRAPHS.md`](./docs/WALKIE_GRAPHS.md)** for the perception-pipeline deep-dive.
+See **[`CLAUDE.md`](./CLAUDE.md)** for the authoritative architecture (middleware stack, tool parallelism, cross-agent state, the full tool list per agent) and **[`docs/WALKIE_WORLD.md`](./docs/WALKIE_WORLD.md)** for the perception-pipeline deep-dive.
 
 ---
 
@@ -116,7 +116,7 @@ Tuning knobs live in **TOML** (version-controlled); secrets/endpoints in **`.env
 | File | Scope |
 |------|-------|
 | `config.toml` | App-wide: LLM (`WALKIE_MODEL`), transport, `WALKIE_AI_BASE_URL`, runtime toggles. |
-| `services/walkie_graphs/config.toml` | The perception pipeline: detection classes, ICP/fusion thresholds, maintenance cadences, storage paths, Rerun viz. |
+| `services/realtime_explore/config.toml` | The perception pipeline: detection classes, ICP/fusion thresholds, maintenance cadences, storage paths, Rerun viz. |
 | `tasks/<Challenge>/config.toml` | Per-task tuning: waypoints, gating flags (`*_ARM_CALIBRATED`), detector classes, slice/runner knobs. Loaded **before** the app config so task values win. |
 
 **Precedence:** shell env **>** `.env` **>** task `config.toml` **>** app `config.toml` **>** module `config.toml` **>** code default. `walkie_config.py::load_config()` `setdefault`s every key, so the code keeps reading everything via `os.getenv(NAME, default)`.
@@ -128,11 +128,11 @@ Tuning knobs live in **TOML** (version-controlled); secrets/endpoints in **`.env
 ```bash
 # Wipe the walkie_graphs store (chroma + point clouds + captures + background + thumbs).
 # Run with the robot stopped — ChromaDB's persistent client is single-process.
-uv run python -m services.walkie_graphs.tools.reset       # asks for confirmation
-uv run python -m services.walkie_graphs.tools.reset -y     # no confirmation   (or: ./run.sh reset)
+uv run python -m services.realtime_explore.tools.reset       # asks for confirmation
+uv run python -m services.realtime_explore.tools.reset -y     # no confirmation   (or: ./run.sh reset)
 
 # Check Open3D GPU / ICP support.
-uv run python -m services.walkie_graphs.tools.check_gpu
+uv run python -m services.realtime_explore.tools.check_gpu
 ```
 
 ---
@@ -178,7 +178,7 @@ perception/              Stores layer: shared ChromaDB plumbing (vector_db) + Pe
 tasks/                   Scripted RoboCup challenges: base/common, manipulation, scoring + GPSR/HRI/PickAndPlace/Laundry/Restaurant (each with run/subtasks/skills/prompts/config/scoring).
 tests/                   pytest suite (walkie_graphs, gpsr, hri, restaurant, manipulation, scoring, skills, …).
 manual_tests/            Interactive hardware/server demos (run via python -m manual_tests.*).
-docs/                    Long-form docs: WALKIE_GRAPHS.md, SCORING.md, GPSR_DESIGN.md, RESTAURANT_DESIGN.md, RERUN.md + per-challenge rulebook PDFs.
+docs/                    Long-form docs: WALKIE_WORLD.md, SCORING.md, GPSR_DESIGN.md, RESTAURANT_DESIGN.md, RERUN.md + per-challenge rulebook PDFs.
 ```
 
 ---
@@ -191,6 +191,6 @@ docs/                    Long-form docs: WALKIE_GRAPHS.md, SCORING.md, GPSR_DESI
 | Connection errors to vision/STT/TTS | `walkie-ai-server` not running, or wrong `WALKIE_AI_BASE_URL`. |
 | `PortAudio`/`pyaudio` device errors | Install PortAudio (`sudo apt install portaudio19-dev`), or run with `DISABLE_LISTENING=1`. |
 | Walkie "responds" but says nothing aloud | Expected unless the agent calls `speak` — the no-plain-text contract. |
-| `walkie_graphs` Rerun viewer times out from another computer | The robot's host firewall is dropping the ports. Open both: `sudo ufw allow <WALKIE_GRAPHS_RERUN_WEB_PORT>/tcp && sudo ufw allow <WALKIE_GRAPHS_RERUN_GRPC_PORT>/tcp`. Launch with `WALKIE_GRAPHS_VIZ=rerun WALKIE_GRAPHS_RERUN_SERVE=1` (without it you get a local-only native window). A *connection refused* (instant, not a timeout) means it isn't serving — check the startup log. |
+| `walkie_graphs` Rerun viewer times out from another computer | The robot's host firewall is dropping the ports. Open both: `sudo ufw allow <WALKIE_EXPLORE_RERUN_WEB_PORT>/tcp && sudo ufw allow <WALKIE_EXPLORE_RERUN_GRPC_PORT>/tcp`. Launch with `WALKIE_EXPLORE_VIZ=rerun WALKIE_EXPLORE_RERUN_SERVE=1` (without it you get a local-only native window). A *connection refused* (instant, not a timeout) means it isn't serving — check the startup log. |
 
 For deeper architecture and conventions, see **[`CLAUDE.md`](./CLAUDE.md)**.

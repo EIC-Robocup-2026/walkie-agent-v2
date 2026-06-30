@@ -31,7 +31,7 @@ from tasks.base import TaskContext
 
 from .plan import CmdStatus, Plan, prefer_tier1, summarize_status
 from .skills import SKILLS
-from .world import WorldModel
+from walkie_world.map.vocab import WorldModel
 
 
 # --- scoped Tier-2 fallback -------------------------------------------------

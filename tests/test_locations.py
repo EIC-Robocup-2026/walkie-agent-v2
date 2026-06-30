@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from tasks.skills import locations as loc
-from tasks.skills.locations import LocationBook, load_location_book, resolve_pose
+from walkie_world.map import locations as loc
+from walkie_world.map.locations import LocationBook, load_location_book, resolve_pose
 
 
 _MAP_TOML = """

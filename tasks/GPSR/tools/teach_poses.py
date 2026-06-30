@@ -93,17 +93,18 @@ def main() -> None:
 
     load_dotenv()
     from ...common import initialize_robot, load_task_config  # type: ignore  # heavy: torch
-    from ..world import load_world
+    from walkie_world.map.vocab import load_world
 
     load_task_config(Path(__file__).resolve().parents[1])
 
     ap = argparse.ArgumentParser(description="Teach arena poses into the GPSR world file by driving the robot.")
-    ap.add_argument("--file", help="world TOML to edit (default: $GPSR_WORLD_FILE or tasks/GPSR/world.toml)")
+    ap.add_argument("--file", help="world TOML to edit (default: the global map — $WALKIE_MAP_FILE or repo-root world.toml)")
     ap.add_argument("--all", action="store_true", help="re-survey poses already set (default: only [0,0,0])")
     args = ap.parse_args()
 
-    from .. import world as world_mod
-    path = Path(args.file or os.getenv("GPSR_WORLD_FILE") or Path(world_mod.__file__).with_name("world.toml"))
+    from walkie_world.map.locations import _default_map_path
+    # Edit the SAME single global map the readers resolve, so taught poses take effect.
+    path = Path(args.file) if args.file else _default_map_path()
     if not path.exists():
         raise SystemExit(f"world file not found: {path}")
     world = load_world(path)

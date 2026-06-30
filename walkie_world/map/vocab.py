@@ -1,9 +1,9 @@
 """GPSR world model: the arena nouns and how to ground a parsed reference to them.
 
 The model is the per-competition vocabulary (rooms, locations, objects, names,
-gestures) loaded from a TOML file (`world.toml` by default; override with
-`GPSR_WORLD_FILE`). It is *data, not code* — the EIC team fills in the announced
-arena ~2h before the test.
+gestures) loaded from the single global arena file (the repo-root `world.toml` by
+default; override with `WALKIE_MAP_FILE`). It is *data, not code* — the EIC team
+fills in the announced arena ~2h before the test.
 
 This module is **pure and offline** — no robot, no LLM, no network. The parser
 (`parse.py`) calls into it to ground the LLM's loose noun strings ("the kitchen
@@ -19,14 +19,15 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Location primitives live in the shared map layer; GPSR's WorldModel is built on
+# Location primitives live in the shared map layer; the vocab model is built on
 # them (correct dependency direction). `_fuzzy_match` is re-exported here because
 # tests/test_gpsr_hardening.py imports it from this module.
-from tasks.skills.locations import (  # noqa: F401  (re-export _fuzzy_match)
+from walkie_world.map.locations import (  # noqa: F401  (re-export _fuzzy_match)
     Location,
     Pose,
     Room,
     _alias_keys,
+    _default_map_path,
     _fuzzy_cutoff,
     _fuzzy_match,
     _lookup,
@@ -80,7 +81,7 @@ class WorldModel:
     # --- grounding lookups (alias + article tolerant) -------------------
 
     def _lookup(self, table: dict[str, str], text: str | None) -> str | None:
-        # Shared alias/article/fuzzy lookup (tasks.skills.locations._lookup).
+        # Shared alias/article/fuzzy lookup (walkie_world.map.locations._lookup).
         return _lookup(table, text)
 
     def room(self, text: str | None) -> str | None:
@@ -189,9 +190,11 @@ def load_world(
 ) -> WorldModel:
     """Load the world model from a TOML file.
 
-    Resolution order: explicit *path* arg, else $GPSR_WORLD_FILE, else the
-    sibling `world.toml`. Raises FileNotFoundError if none exists (a missing
-    arena is a setup error worth failing loudly on, unlike runtime perception).
+    Resolution order: explicit *path* arg, else the shared map resolver
+    (:func:`walkie_world.map.locations._default_map_path` — ``$WALKIE_MAP_FILE``, else
+    the repo-root ``world.toml``), so the vocab and the map layer always read the SAME
+    single global file. Raises FileNotFoundError if none exists (a missing arena is a
+    setup error worth failing loudly on, unlike runtime perception).
 
     ``include_absent=True`` loads every room/location regardless of its
     ``present`` flag — the *full* CompetitionTemplate vocabulary. The default
@@ -201,7 +204,7 @@ def load_world(
     `present` is irrelevant — see tasks/GPSR/tools/gen_corpus.py.
     """
     if path is None:
-        path = os.getenv("GPSR_WORLD_FILE") or Path(__file__).with_name("world.toml")
+        path = _default_map_path()  # $WALKIE_MAP_FILE, else the repo-root world.toml
     path = Path(path)
     with path.open("rb") as fh:
         data = tomllib.load(fh)

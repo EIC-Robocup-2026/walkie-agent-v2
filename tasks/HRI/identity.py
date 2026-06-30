@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from PIL import Image
 
 from client import FaceEmbedding, PersonPose
-from perception.people_store import _cosine_sim, _mean_unit
+from walkie_world.people.store import _cosine_sim, _mean_unit
 from tasks.base import TaskContext
 
 from tasks.skills import BBox, cxcywh_to_xyxy, lift_bbox_world_xy

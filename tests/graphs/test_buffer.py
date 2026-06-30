@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from services.walkie_graphs.buffer import Detection, Snapshot, SnapshotBuffer
+from services.realtime_explore.buffer import Detection, Snapshot, SnapshotBuffer
 
 
 # ---------------------------------------------------------------------------

@@ -18,7 +18,8 @@ from agents.vision_agent import create_vision_agent
 from agents.walkie_agent import create_walkie_main_agent
 from client import WalkieAIClient
 from interfaces.walkie_interface import WalkieInterface
-from services.walkie_graphs import WalkieGraphs
+from services.realtime_explore import RealtimeExplore
+from walkie_world import WalkieWorld
 
 
 ZENOH_PORT = 7447
@@ -75,26 +76,32 @@ def build_model():
 
 
 def run_ready_stage(walkieAI: WalkieAIClient, walkie: WalkieInterface, model: ChatOpenAI) -> None:
-    # walkie_graphs: 3D scene-graph spatial memory the Database sub-agent queries, AND the
-    # robot's perception loop. Its background observer thread is the single per-frame
-    # pipeline: detect (scoped to the interested classes) → lift/caption/embed/upsert into the
-    # graph object records → write the live perception.json snapshot the agents read each turn.
-    # Built regardless so the Database agent can read existing memory; WALKIE_GRAPHS_ENABLED
-    # gates whether the loop runs (and thus whether new objects + snapshots are produced).
-    graphs = WalkieGraphs(
+    # The world model (rooms/objects/people) is the single source of truth the Database
+    # sub-agent queries; the realtime_explore producer is the robot's perception loop that
+    # feeds it. The producer's background thread is the per-frame pipeline: detect (scoped
+    # to the interested classes) → lift/caption/embed → world.observe_objects, plus the
+    # live perception.json snapshot the agents read each turn. The world is built
+    # regardless so the Database agent can read existing memory; WALKIE_EXPLORE_ENABLED
+    # gates whether the producer loop runs (and thus whether new objects are produced).
+    world = WalkieWorld(
+        embed_text=(lambda q: walkieAI.image.embed_text(q)),
+        enable_people=True,
+    )
+    explore = RealtimeExplore(
         model=model,
         walkieAI=walkieAI,
         walkie=walkie,
+        world=world,
         snapshot_path=RobotContext.get().perception_path,
     )
-    graphs_enabled = os.getenv("WALKIE_GRAPHS_ENABLED", "1").lower() in ("1", "true", "yes")
+    graphs_enabled = os.getenv("WALKIE_EXPLORE_ENABLED", "1").lower() in ("1", "true", "yes")
     if graphs_enabled:
-        graphs.start()  # background perception loop: detect → ingest → write perception.json
+        explore.start()  # background perception loop: detect → observe_objects → perception.json
 
     actuator = create_actuator_agent(model, walkieAI, walkie)
     vision = create_vision_agent(model, walkieAI, walkie)
     database = create_database_agent(
-        model, walkieAI, walkie, graphs=graphs
+        model, walkieAI, walkie, world=world
     )
     walkie_agent = create_walkie_main_agent(
         model, walkieAI, walkie, actuator, vision, database
@@ -143,7 +150,8 @@ def run_ready_stage(walkieAI: WalkieAIClient, walkie: WalkieInterface, model: Ch
         # hangs the interpreter at exit (threading._shutdown), so the process
         # never dies and the next launch finds port 8500 still held. close()
         # disconnects the robot, which stops those threads.
-        graphs.stop()
+        explore.stop()
+        world.persist()
         walkie.close()
         print("[main] shutdown complete.")
 

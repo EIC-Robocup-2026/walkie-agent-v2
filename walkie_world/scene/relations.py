@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from services.walkie_graphs.scene import ObjectNode, Relation, l2
+from walkie_world.scene.store import ObjectNode, Relation, l2
 
 __all__ = ["derive_relations"]
 

@@ -1,21 +1,21 @@
 """Render the scene graph into the shared viz session (see :mod:`services.viz`).
 
 The scene-graph-specific *layer*: it knows how to turn a
-:class:`~services.walkie_graphs.scene.SceneStore` into draw calls, but owns no Rerun
+:class:`~walkie_world.scene.store.SceneStore` into draw calls, but owns no Rerun
 session of its own — it draws through a :class:`~services.viz.session.VizSession` (real
 or no-op) under the ``world/...`` namespace, so it coexists with task-level
 visualization (e.g. a grasp triad under ``grasp/...``) in one viewer.
 
 :meth:`SceneGraphViz.update` logs, in the ``world`` space:
 - one colored point cloud per confirmed object (colored by class),
-- one AABB per object (``WALKIE_GRAPHS_VIZ_BOXES``), labelled with the class name
-  (``WALKIE_GRAPHS_VIZ_LABELS``); when boxes are off but labels on, the class name is
+- one AABB per object (``WALKIE_EXPLORE_VIZ_BOXES``), labelled with the class name
+  (``WALKIE_EXPLORE_VIZ_LABELS``); when boxes are off but labels on, the class name is
   anchored to the object centroid as a standalone marker instead,
 - the geometric relations as labelled line segments between object centroids,
 - the robot position + heading and the camera 3D position + look direction (reusable
   markers from the session, gated by ``WALKIE_VIZ_ROBOT`` / ``WALKIE_VIZ_CAMERA``),
 - optionally the TSDF structural cloud as a faint "background"
-  (``WALKIE_GRAPHS_VIZ_BACKGROUND``), passed in by the build.
+  (``WALKIE_EXPLORE_VIZ_BACKGROUND``), passed in by the build.
 
 :meth:`update_markers` is the cheap subset (just robot + camera) the capture thread
 calls every tick so those markers stay live between the occasional batch builds.
@@ -43,13 +43,22 @@ class SceneGraphViz:
 
     def __init__(self, viz) -> None:
         self._viz = viz  # a services.viz session (RerunSession or NoOpViz)
-        self._show_boxes = _flag("WALKIE_GRAPHS_VIZ_BOXES")
-        self._show_labels = _flag("WALKIE_GRAPHS_VIZ_LABELS")
-        self._show_background = _flag("WALKIE_GRAPHS_VIZ_BACKGROUND")
+        self._show_boxes = _flag("WALKIE_EXPLORE_VIZ_BOXES")
+        self._show_labels = _flag("WALKIE_EXPLORE_VIZ_LABELS")
+        self._show_background = _flag("WALKIE_EXPLORE_VIZ_BACKGROUND")
 
-    def update(self, store, *, robot_pose=None, cam_pose=None, structural=None) -> None:
-        """Redraw the whole scene from the current ``store`` (called after each build)."""
+    def update(self, store, *, robot_pose=None, cam_pose=None, structural=None, rooms=None) -> None:
+        """Redraw the whole scene from the current ``store`` (called after each build).
+
+        ``rooms`` (an optional ``{name: Room}`` from the world map) draws each room's
+        boundary polygon as walls. Object point clouds + AABB boxes come from ``store``:
+        a map-seeded object (no cloud yet) shows as its bounding box, and once perception
+        promotes it to a real cloud the cloud is drawn — the bbox->point-cloud swap.
+        """
         viz = self._viz
+
+        # Room boundary polygons as walls (closed line strips on the floor plane).
+        self._draw_rooms(rooms)
 
         # Faint structural cloud (TSDF map) as background, when present.
         if self._show_background and structural is not None and len(structural):
@@ -90,6 +99,22 @@ class SceneGraphViz:
         else:
             viz.clear("world/relations", recursive=True)
 
+    def _draw_rooms(self, rooms) -> None:
+        """Draw each room's boundary polygon as a closed wall line strip (z=0 floor)."""
+        if not rooms:
+            return
+        strips = []
+        for room in rooms.values():
+            poly = getattr(room, "polygon", ()) or ()
+            if len(poly) >= 2:
+                ring = [[float(x), float(y), 0.0] for (x, y) in poly]
+                ring.append(ring[0])  # close the loop back to the first vertex
+                strips.append(ring)
+        if strips:
+            self._viz.lines("world/rooms", strips)
+        else:
+            self._viz.clear("world/rooms", recursive=True)
+
     def update_markers(self, *, robot_pose=None, cam_pose=None) -> None:
         """Cheap live markers — robot position/heading + camera position/look direction."""
         self._viz.robot(robot_pose)
@@ -98,7 +123,7 @@ class SceneGraphViz:
     def update_live(self, frame, detections, *, exclude=()) -> None:
         """Live feed: draw the CURRENT frame's lifted detections under ``world/live``.
 
-        Refreshed every capture tick (when ``WALKIE_GRAPHS_VIZ_LIVE=1``) so you can watch
+        Refreshed every capture tick (when ``WALKIE_EXPLORE_VIZ_LIVE=1``) so you can watch
         the scene fill in as walkie_graphs takes each snapshot — independent of the slower
         batch build that produces the persistent ``world/objects``. Lifts via the canonical
         :meth:`CameraSnapshot.mask_to_points`, so the live clouds sit exactly where the
