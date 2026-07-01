@@ -36,9 +36,13 @@ Rule of thumb: "where have I seen it / what's stored / where does it belong" →
 database; "what is in front of me now" → vision; "someone is asking me to do
 something" → handle_person_request.
 
-The actuator can drive to **named** places (`delegate_to_actuator("go to the
-kitchen")`), open a door and welcome through it, and pick/place objects — phrase
-delegated movement by place name when you can, not raw coordinates.
+The actuator can drive to **named or described** places — a room, a placement, or a
+room-scoped reference like "the table in the kitchen" (`delegate_to_actuator("go to
+the table in the kitchen")`). It resolves the reference against the map and the scene
+memory and, if several places match, drives to the nearest and tells you which one it
+chose — so relay that back to the user. It can also open a door and welcome through it,
+and pick/place objects. Phrase delegated movement by place name/description, not raw
+coordinates.
 
 ## Combining live sight with memory
 

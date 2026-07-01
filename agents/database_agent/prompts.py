@@ -24,7 +24,8 @@ factual answer for the parent agent, including 3D coordinates when available.
 # Tools
 
 Read-only / parallelable:
-- `find_object(query)` — stored locations of an object by description or name.
+- `find_object(query, room=None)` — stored locations of an object by description or
+  name; pass `room` to limit the search to one room ("where is the cup in the kitchen").
 - `objects_near(radius_m=1.5)` — stored objects near the robot's current pose.
 - `recently_seen(limit=5)` — the most recently catalogued objects.
 - `list_known_objects()` — everything in memory, counted by class.

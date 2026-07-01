@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from typing import Optional
 
 from langchain_core.tools import tool
 
@@ -46,24 +47,29 @@ def make_database_tools(
 
     @parallelable_tool
     @tool(parse_docstring=True)
-    def find_object(query: str) -> str:
+    def find_object(query: str, room: Optional[str] = None) -> str:
         """Find where an object has been seen, by description or name.
 
-        Use for "where is the red mug?", "have you seen a backpack?". Searches the
-        long-term 3D memory (captions + appearance) and returns stored locations.
+        Use for "where is the red mug?", "have you seen a backpack?", or room-scoped
+        "where is the cup in the kitchen?" (pass room="kitchen"). Searches the long-term
+        3D memory (captions + appearance); when a room is given, results are limited to
+        that room's area.
 
         Args:
             query: A description or class name, e.g. "red mug" or "chair".
+            room: Optional room to limit the search to, e.g. "kitchen".
 
         Returns:
             Matching objects with their 3D map coordinates, or a not-found note.
         """
         if world is None:
             return _NO_MEM
-        hits = world.query_text(query, k=5)
+        hits = world.query_text_in_room(query, room) if room else world.query_text(query, k=5)
         if not hits:
-            return f"No stored object matches {query!r}."
-        return f"Found {len(hits)} match(es) for {query!r}:\n" + "\n".join(
+            where = f" in the {room}" if room else ""
+            return f"No stored object matches {query!r}{where}."
+        where = f" in the {room}" if room else ""
+        return f"Found {len(hits)} match(es) for {query!r}{where}:\n" + "\n".join(
             f"- {_fmt_node(n)}" for n in hits
         )
 
