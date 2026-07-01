@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 __all__ = [
     "WalkieWorld",
+    "PlaceMatch",
     "ObjectNode",
     "Relation",
     "ObjectObservation",
@@ -40,6 +41,7 @@ __all__ = [
 
 _LAZY = {
     "WalkieWorld": ("walkie_world.world", "WalkieWorld"),
+    "PlaceMatch": ("walkie_world.world", "PlaceMatch"),
     "ObjectNode": ("walkie_world.scene.store", "ObjectNode"),
     "Relation": ("walkie_world.scene.store", "Relation"),
     "ObjectObservation": ("walkie_world.scene.ingest", "ObjectObservation"),
@@ -64,4 +66,4 @@ if TYPE_CHECKING:  # static type hints only — never imported at runtime
     from walkie_world.people.store import PersonRecord
     from walkie_world.scene.ingest import ObjectObservation
     from walkie_world.scene.store import ObjectNode, Relation
-    from walkie_world.world import WalkieWorld
+    from walkie_world.world import PlaceMatch, WalkieWorld

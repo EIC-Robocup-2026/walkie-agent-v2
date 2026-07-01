@@ -18,8 +18,11 @@ a short string the parent agent can read, e.g. "Reached x=1.2 y=0.3" or
 # Tools
 
 High-level (prefer these — they use the arena map + robot-tested skills):
-- `go_to_location(name)` — drive to a named room/placement ("kitchen", "the cabinet").
-  Resolves the map pose and opens a door only if the route is blocked.
+- `go_to_location(place, room=None)` — drive to a named OR described place: a room
+  ("the kitchen"), a placement ("the cabinet"), or a room-scoped reference ("the table
+  in the kitchen" — or pass `room="kitchen"`). Resolves against the map AND scene
+  memory; when several match it picks the nearest and names its choice. Opens a door
+  only if the route is blocked.
 - `go_through_door(name)` — drive to a door and pass through it, opening it autonomously
   (always asks for it to be opened). Use for the exit/apartment door.
 - `pick_up_object(description)` — grasp an object in front of you ("the cola", "trash on

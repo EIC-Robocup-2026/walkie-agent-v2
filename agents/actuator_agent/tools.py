@@ -178,27 +178,46 @@ def make_actuator_tools(
 
     @sequential_tool
     @tool(parse_docstring=True)
-    def go_to_location(name: str) -> str:
-        """Drive to a named room or placement from the arena map.
+    def go_to_location(place: str, room: Optional[str] = None) -> str:
+        """Drive to a place named or described in natural language.
 
-        Resolves the name against the map and navigates there, asking a human to open a
-        door only if the route is actually blocked. Prefer this over raw coordinates
-        whenever you know the place by name.
+        Resolves *place* against the arena map AND the robot's scene memory: it
+        understands a room-scoped reference ("the table in the kitchen"), and when
+        several places match ("the table" with tables in two rooms) it picks the
+        NEAREST one and names which it chose. If the map has no surveyed spot it falls
+        back to an object the robot has actually seen. Asks a human to open a door only
+        if the route is actually blocked. Prefer this over raw coordinates.
 
         Args:
-            name: A room or location name, e.g. "kitchen", "dining table", "cabinet".
+            place: A room, placement, or described object — e.g. "the kitchen",
+                "the table in the kitchen", "the cabinet", "the plant".
+            room: Optional room to scope the search to, e.g. "kitchen" (also parsed
+                from a "... in the <room>" phrase in *place*).
 
         Returns:
-            Whether the robot reached the place.
+            Which place it drove to (naming the chosen one) and whether it arrived.
         """
-        from tasks.skills import go_to_through_door
-        canon, pose = _resolve_named_pose(name)
-        if canon is None:
-            return f"I don't have a mapped place called {name!r}."
-        if pose is None:
-            return f"I know {canon!r} but it has no surveyed pose yet."
-        ok = go_to_through_door(ctx, *pose, ask_even_if_open=ctx.world.is_barrier(canon))
-        return f"{'Arrived at' if ok else 'Could not reach'} {canon.replace('_', ' ')}."
+        from tasks.skills import approach_point, go_to_through_door
+
+        near = None
+        try:
+            p = walkie.status.get_position()
+            if p:
+                near = (float(p["x"]), float(p["y"]))
+        except Exception:  # noqa: BLE001 — no odometry: resolve without a nearest tiebreak
+            near = None
+        m = ctx.world.resolve_place(place, room=room, near=near)
+        if m is None:
+            return f"I couldn't find {place!r} on the map or in what I've seen."
+        extra = f" (nearest of: {m.label}, {', '.join(m.candidates)})" if m.candidates else ""
+        if m.pose is not None:
+            ok = go_to_through_door(ctx, *m.pose, ask_even_if_open=ctx.world.is_barrier(m.name))
+        elif m.point is not None:
+            stop = float(os.getenv("WALKIE_APPROACH_STOP_M", "0.8"))
+            ok = approach_point(ctx, m.point[0], m.point[1], stop_distance=stop)
+        else:
+            return f"I found the {m.label} but it has no known position yet."
+        return f"{'Arrived at' if ok else 'Could not reach'} the {m.label}{extra}."
 
     @sequential_tool
     @tool(parse_docstring=True)
