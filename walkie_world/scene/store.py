@@ -129,6 +129,7 @@ class ObjectNode:
     points: Optional[np.ndarray] = None  # RAM-only fused cloud (NOT persisted to nodes.json)
     source: str = "perception"  # "map" = seeded from world.toml (authoritative; bbox placeholder)
     footprint_polygon: Optional[list] = None  # map object's XY footprint [[x,y],...] (for viz/overlap)
+    room: Optional[str] = None  # canonical room the centroid falls in (stamped at install; None if unknown)
 
 
 @dataclass(frozen=True)
@@ -162,6 +163,7 @@ class SceneStore:
         *,
         store_dir: str | Path | None = None,
         embed_text: Optional[Callable[[str], list[float]]] = None,
+        room_of: Optional[Callable[[float, float], Optional[str]]] = None,
         embed_dim: int = DEFAULT_EMB_DIM,
         min_obs_confirm: int = 3,
         require_confirmation: bool = True,
@@ -170,6 +172,9 @@ class SceneStore:
     ) -> None:
         self.store_dir = Path(store_dir) if store_dir is not None else None
         self.embed_text = embed_text
+        # Optional (x, y) -> canonical room callable, injected by WalkieWorld (it owns
+        # the map). When set, install() stamps each node's ``room`` from its centroid.
+        self.room_of = room_of
         self.embed_dim = int(embed_dim)
         self.min_obs_confirm = int(min_obs_confirm)
         self.require_confirmation = bool(require_confirmation)
@@ -213,10 +218,26 @@ class SceneStore:
         ONE pointer assignment under the lock: any in-flight query keeps reading the
         previous (consistent) snapshot until it finishes.
         """
+        self._stamp_rooms(nodes)
         scene = self._build_scene(nodes, relations)
         with self._lock:
             self._scene = scene
         self._persist()
+
+    def _stamp_rooms(self, nodes: list[ObjectNode]) -> None:
+        """Link each node to a room from its centroid via the injected ``room_of``.
+
+        The single choke point for room linking: both perception (merge) and map
+        seeding (merge_map_objects) install through here, so map-seeded AND upserted
+        nodes get a ``room``, re-stamped as centroids refine. No-op without ``room_of``.
+        """
+        if self.room_of is None:
+            return
+        for n in nodes:
+            try:
+                n.room = self.room_of(float(n.centroid[0]), float(n.centroid[1]))
+            except Exception:  # noqa: BLE001 — a map lookup hiccup must not break install
+                n.room = None
 
     def _snapshot(self) -> BuiltScene:
         """Read the current snapshot pointer (brief lock, then lock-free use)."""
@@ -497,9 +518,14 @@ class SceneStore:
     # Queries (the contract the Database agent + GPSR depend on)
     # ------------------------------------------------------------------
     def query_text(
-        self, query: str, k: int = 5, *, near=None, radius: Optional[float] = None
+        self, query: str, k: int = 5, *, near=None, radius: Optional[float] = None,
+        room: Optional[str] = None,
     ) -> list[ObjectNode]:
         """Find objects by text. CLIP cross-modal search; falls back to keyword.
+
+        ``room`` (a canonical room name), when given, HARD-filters results to nodes
+        linked to that room (``node.room == room``) — the room-scoped search behind
+        "the cup in the kitchen".
 
         Four fallback triggers, each routing to :meth:`_keyword` over ALL nodes:
         ``embed_text`` is None, it raises, it returns a falsy/empty vector, or the
@@ -521,7 +547,7 @@ class SceneStore:
             except Exception:
                 vec = None
         if not vec:  # embed None / empty / failed → keyword over every node
-            return self._keyword(scene, query, k, near=near, radius=radius)
+            return self._keyword(scene, query, k, near=near, radius=radius, room=room)
         try:
             qv = np.asarray(vec, dtype=np.float32)
             nrm = float(np.linalg.norm(qv))
@@ -542,7 +568,9 @@ class SceneStore:
         # surveyed world.toml objects are findable here too. Disjoint from emb_hits by
         # the clip_emb partition; embedded (perceived) hits stay first.
         kw_hits = self._keyword_hits(scene, query, only_unembedded=True)
-        hits = self._confirmed(self._spatial_filter(emb_hits + kw_hits, near, radius))
+        hits = self._confirmed(
+            self._room_filter(self._spatial_filter(emb_hits + kw_hits, near, radius), room)
+        )
         return hits[:k]
 
     def _keyword_hits(
@@ -568,9 +596,9 @@ class SceneStore:
         scored.sort(key=lambda s: s[0], reverse=True)
         return [n for _, n in scored]
 
-    def _keyword(self, scene: BuiltScene, query: str, k: int, *, near=None, radius=None):
+    def _keyword(self, scene: BuiltScene, query: str, k: int, *, near=None, radius=None, room=None):
         hits = self._keyword_hits(scene, query)
-        hits = self._confirmed(self._spatial_filter(hits, near, radius))
+        hits = self._confirmed(self._room_filter(self._spatial_filter(hits, near, radius), room))
         return hits[:k]
 
     def _confirmed(self, nodes: list[ObjectNode]) -> list[ObjectNode]:
@@ -588,6 +616,13 @@ class SceneStore:
         if near is None or radius is None:
             return nodes
         return [n for n in nodes if l2(n.centroid, near) <= radius]
+
+    @staticmethod
+    def _room_filter(nodes, room):
+        """Hard-filter to nodes linked to *room* (``node.room == room``); no-op if room is None."""
+        if not room:
+            return nodes
+        return [n for n in nodes if n.room == room]
 
     def query_near(self, center, radius: float) -> list[ObjectNode]:
         """Confirmed objects within ``radius`` of ``center`` (2D center -> horizontal dist)."""
@@ -683,6 +718,7 @@ class SceneStore:
             "last_seen_ts": float(n.last_seen_ts),
             "source": n.source,
             "footprint_polygon": n.footprint_polygon,
+            "room": n.room,
         }
 
     @staticmethod
@@ -709,6 +745,7 @@ class SceneStore:
             points=None,  # clouds are RAM-only, never persisted to nodes.json
             source=str(d.get("source", "perception")),
             footprint_polygon=d.get("footprint_polygon"),
+            room=d.get("room"),  # optional; absent in pre-room nodes.json (back-compat)
         )
 
     def _persist(self) -> None:

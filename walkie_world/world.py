@@ -143,10 +143,14 @@ class WalkieWorld:
         self._vocab: Optional[WorldModel] = None
 
         # --- scene store (eager; numpy, cheap) ---
+        # room_of links every node to a room from its centroid (stamped at install);
+        # the closure defers map access to call time, so the lazy map load is fine.
         kwargs = scene_store_kwargs()
         if scene_dir is not None:
             kwargs["store_dir"] = scene_dir
-        self._scene = SceneStore(embed_text=embed_text, **kwargs)
+        self._scene = SceneStore(
+            embed_text=embed_text, room_of=self._room_for_point, **kwargs
+        )
         self._scene_lock = threading.RLock()  # serializes observe/seed installs
         self._relation_kwargs = relation_kwargs()
 
@@ -296,19 +300,21 @@ class WalkieWorld:
         return None
 
     def objects_in_room(self, room: str | None) -> list[ObjectNode]:
-        """Confirmed scene objects whose centroid falls inside *room*'s polygon.
+        """Confirmed scene objects linked to *room*.
 
-        Grounds *room* to a canonical name, then filters ``all_objects()`` by
-        ``room_at`` of each centroid. Empty when the room is unknown, has no
-        boundary polygon, or nothing has been catalogued there.
+        Grounds *room* to a canonical name, then keeps objects whose stored
+        ``node.room`` matches (with an on-the-fly ``room_at`` fallback for any node not
+        yet stamped). Empty when the room is unknown or nothing is catalogued there.
         """
         canon = self.room(room)
         if canon is None:
             return []
         out: list[ObjectNode] = []
         for n in self.all_objects():
-            cx, cy = float(n.centroid[0]), float(n.centroid[1])
-            if self.room_at(cx, cy) == canon:
+            linked = getattr(n, "room", None)
+            if linked is None:
+                linked = self.room_at(float(n.centroid[0]), float(n.centroid[1]))
+            if linked == canon:
                 out.append(n)
         return out
 
@@ -347,21 +353,32 @@ class WalkieWorld:
             return surveyed[0]
         return min(surveyed, key=lambda it: math.hypot(it[1][0] - near[0], it[1][1] - near[1]))
 
-    def _room_center_radius(self, canon_room: Optional[str]):
-        """(center_xy, radius_m) for a room, for spatially scoping a scene query, or (None, None)."""
-        room = self.rooms.get(canon_room) if canon_room else None
-        if room is None:
-            return None, None
-        poly = getattr(room, "polygon", ()) or ()
-        if poly:
-            xs = [p[0] for p in poly]
-            ys = [p[1] for p in poly]
-            cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
-            r = max(0.5, 0.5 * math.hypot(max(xs) - min(xs), max(ys) - min(ys)))
-            return (cx, cy), r
-        if _pose_surveyed(room.pose):
-            return (room.pose[0], room.pose[1]), float(os.getenv("WALKIE_ROOM_QUERY_RADIUS_M", "3.0"))
-        return None, None
+    def _room_for_point(self, x: float, y: float) -> Optional[str]:
+        """Canonical room a point belongs to — the object→room link.
+
+        Geometry first: the room whose boundary polygon contains (x, y) (``room_at``).
+        When no polygon matches and ``WALKIE_ROOM_LINK_NEAREST`` is on (default), fall
+        back to the nearest room by distance to its waypoint ``pose``, but only within
+        ``WALKIE_ROOM_LINK_MAX_M`` (default 6 m) so a point far from every room stays
+        unlinked. This is injected into the scene store as ``room_of`` and called for
+        every node at install time.
+        """
+        hit = self.room_at(x, y)
+        if hit is not None:
+            return hit
+        if os.getenv("WALKIE_ROOM_LINK_NEAREST", "1").lower() not in ("1", "true", "yes"):
+            return None
+        max_m = float(os.getenv("WALKIE_ROOM_LINK_MAX_M", "6.0"))
+        best_name, best_d = None, float("inf")
+        for name, room in self.rooms.items():
+            if not _pose_surveyed(room.pose):
+                continue
+            d = math.hypot(room.pose[0] - x, room.pose[1] - y)
+            if d < best_d:
+                best_name, best_d = name, d
+        if best_name is not None and (max_m <= 0 or best_d <= max_m):
+            return best_name
+        return None
 
     def resolve_place(self, text: str | None, *, room: str | None = None, near=None) -> "PlaceMatch | None":
         """Resolve a natural-language place ("the table in the kitchen") to a nav target.
@@ -422,11 +439,11 @@ class WalkieWorld:
                               pose=pose, room=getattr(self.locations.get(name), "room", None),
                               candidates=others)
 
-        # (3) scene-graph fallback: an observed object (optionally scoped to the room).
+        # (3) scene-graph fallback: an observed object (optionally scoped to the room
+        # via the stored object→room link).
         if os.getenv("WALKIE_RESOLVE_SCENE_FALLBACK", "1").lower() in ("1", "true", "yes"):
-            center, radius = self._room_center_radius(canon_room)
             try:
-                hits = self.query_text(target, k=1, near=center, radius=radius)
+                hits = self.query_text(target, k=1, room=canon_room, scope_by_room=False)
             except Exception:  # noqa: BLE001 — degrade to "not found"
                 hits = []
             if hits:
@@ -437,26 +454,58 @@ class WalkieWorld:
         return None
 
     def query_text_in_room(self, query: str, room: str | None, k: int = 5) -> list[ObjectNode]:
-        """CLIP scene-graph search for *query* limited to *room* (its center + radius).
-
-        Grounds *room*, then spatially filters ``query_text`` to the room's geometry
-        (polygon centroid + half-diagonal, or the room pose + ``WALKIE_ROOM_QUERY_RADIUS_M``
-        when there is no polygon). Empty when the room is unknown; unscoped when the room
-        has no usable geometry. This answers "where is the <object> in the <room>".
+        """CLIP scene-graph search for *query* limited to *room* (the stored object→room
+        link). Grounds *room*, then hard-filters to nodes with ``node.room == room``.
+        Empty when the room is unknown. Answers "where is the <object> in the <room>".
         """
         canon = self.room(room)
         if canon is None:
             return []
-        center, radius = self._room_center_radius(canon)
-        if center is None:
-            return self.query_text(query, k=k)
-        return self.query_text(query, k=k, near=center, radius=radius)
+        return self.query_text(query, k=k, room=canon, scope_by_room=False)
+
+    def _parse_room_scope(self, query: str) -> tuple[Optional[str], str]:
+        """(canonical_room, residual_target) if *query* names a room, else (None, query).
+
+        Grounds candidates so only a real room scopes: "<target> in [the] <room>", then
+        a leading "<room> <object>" (longest room phrase first: "living room table" ->
+        (living_room, "table"); "kitchen table" -> (kitchen_room, "table")). Requires a
+        non-empty residual, so "the kitchen" alone doesn't scope to nothing.
+        """
+        target, room = _split_room_qualifier(query)
+        if room:
+            g = self.room(room)
+            if g and target:
+                return g, target
+        toks = query.split()
+        for take in (2, 1):  # leading "<room> <object>", 2-token room phrase first
+            if len(toks) > take:
+                g = self.room(" ".join(toks[:take]))
+                resid = " ".join(toks[take:]).strip()
+                if g and resid:
+                    return g, resid
+        return None, query
 
     # ==================================================================
     # Objects / scene graph
     # ==================================================================
-    def query_text(self, query: str, k: int = 5, *, near=None, radius: float | None = None) -> list[ObjectNode]:
-        return self._scene.query_text(query, k, near=near, radius=radius)
+    def query_text(
+        self, query: str, k: int = 5, *, near=None, radius: float | None = None,
+        room: str | None = None, scope_by_room: bool = True,
+    ) -> list[ObjectNode]:
+        """CLIP scene search for *query*; optionally hard-scoped to a room.
+
+        When ``room`` is given it grounds and hard-filters to that room. Otherwise, if
+        ``scope_by_room`` (default), a room named INSIDE the query is auto-detected and
+        stripped — so ``query_text("kitchen table")`` returns the table linked to the
+        kitchen. A query with no room word behaves exactly as before. Internal callers
+        that already handle the room pass ``scope_by_room=False``.
+        """
+        canon = self.room(room) if room else None
+        if canon is None and scope_by_room:
+            grounded, target = self._parse_room_scope(query)
+            if grounded is not None:
+                query, canon = target, grounded
+        return self._scene.query_text(query, k, near=near, radius=radius, room=canon)
 
     def query_near(self, center, radius: float) -> list[ObjectNode]:
         return self._scene.query_near(center, radius)
