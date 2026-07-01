@@ -17,11 +17,15 @@ the serial path it falls back to.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from .plan import Plan, step_location
-from walkie_world.map.vocab import WorldModel
+
+if TYPE_CHECKING:
+    from walkie_world.world import WalkieWorld  # ctx.world; only its .locations is used here
 
 
-def _region(world: WorldModel, location: str | None) -> str | None:
+def _region(world: WalkieWorld, location: str | None) -> str | None:
     """The room a step's location belongs to (a placement -> its room; a room ->
     itself; None/unknown -> as-is), so 'kitchen_table' and 'kitchen' batch together."""
     if location is None:
@@ -32,7 +36,7 @@ def _region(world: WorldModel, location: str | None) -> str | None:
     return location  # a room name, or an unknown location -> treat the name as a region
 
 
-def interleave(indexed: list[tuple[int, Plan]], world: WorldModel) -> list[tuple[int, int]]:
+def interleave(indexed: list[tuple[int, Plan]], world: WalkieWorld) -> list[tuple[int, int]]:
     """Return the interleaved execution order as ``[(command_id, step_index), ...]``.
 
     Greedy room batching that PRESERVES each command's internal step order (a

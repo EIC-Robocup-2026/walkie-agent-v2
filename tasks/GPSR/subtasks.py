@@ -12,7 +12,7 @@ the deterministic Tier-1 skill dispatch.
 
 Blackboard layout (ctx.data):
     brain:    WalkieBrain          # the agent stack (Tier-2 fallback), set by run.py
-    world:    WorldModel           # arena nouns, set by run.py
+    world:    WalkieWorld          # ctx.world: arena nouns + scene graph + people, set by run.py
     commands: list[Command]        # parsed + planned operator commands
 
 Live scoring (ctx.score, GPSR_SHEET): unlike PnP/Restaurant/HRI — whose tallies are
@@ -319,11 +319,18 @@ class ExecuteCommands(SubTask):
                 continue
             cmd.status = CmdStatus.IN_PROGRESS
             ctx.say(prompts.COMMAND_ANNOUNCE.format(n=cmd.id, command=cmd.utterance))
+            state: dict = {}  # per-command scratch; also collects Tier-2 fallback notes
             try:
-                cmd.status = execute_plan(ctx, cmd.plan, world, brain, manip_enabled=manip)
+                cmd.status = execute_plan(ctx, cmd.plan, world, brain, manip_enabled=manip, state=state)
             except Exception as exc:
                 print(f"[gpsr] command {cmd.id} execution raised ({exc})")
                 cmd.status = CmdStatus.FAILED
+            # Surface what any scoped Tier-2 fallback did (dispatch stashes each
+            # sub-agent's spoken line in state["_notes"]) without clobbering a note
+            # already set (e.g. a skip reason).
+            notes = state.get("_notes")
+            if notes and not cmd.result_note:
+                cmd.result_note = "; ".join(notes)
             print(f"[gpsr] command {cmd.id} -> {cmd.status.name}")
             if _one_by_one() and cmd.id < len(commands):
                 x, y, h = _pose("GPSR_INSTRUCTION_POINT_POSE")

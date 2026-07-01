@@ -35,6 +35,7 @@ import os
 import re
 import time
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from langchain.messages import HumanMessage
 
@@ -54,10 +55,23 @@ from tasks.skills import (
 from . import gestures
 from .plan import PlanStep, _person_phrase
 from .tracking import ArrivalStopper, companion_present, heading_between, segment_route
-from walkie_world.map.vocab import WorldModel
+
+if TYPE_CHECKING:
+    from walkie_world.world import WalkieWorld  # the runtime `world` is ctx.world (WalkieWorld)
 
 
 # --- low-level helpers ------------------------------------------------------
+
+def _pose_is_surveyed(pose) -> bool:
+    """A pose is usable unless it's missing or the all-zero [0,0,0] placeholder.
+
+    world.toml uses ``[0,0,0]`` for "not yet surveyed"; driving there would go to
+    the map origin. Mirrors ``walkie_world.world._pose_surveyed`` so a skill can
+    reject a placeholder before navigating (and fall back to a text/scene lookup)."""
+    return pose is not None and not (
+        abs(pose[0]) < 1e-6 and abs(pose[1]) < 1e-6 and abs(pose[2]) < 1e-6
+    )
+
 
 def _conf_floor() -> float:
     """Minimum detector confidence for an object detection to count (0 = keep all).
@@ -141,41 +155,80 @@ def _facts_context() -> str:
     )
 
 
+def _drive_to_pose(ctx: TaskContext, pose, *, ask_even_if_open: bool) -> bool:
+    """Drive to a surveyed pose, asking for a blocking door when needed.
+
+    If a closed door blocks the route, ask a human to open it and retry
+    (go_to_through_door only asks when the way is actually blocked + not seen open;
+    gate OFF with GPSR_NAV_DOOR_RETRY=0 if it false-asks on the robot). For a place
+    flagged `barrier = true` in world.toml (a door/partition the depth check reads
+    as "open" because it can't see a too-narrow gap), ask on the block even when
+    depth says open — nav success is the real signal."""
+    if os.getenv("GPSR_NAV_DOOR_RETRY", "1").lower() in ("1", "true", "yes"):
+        return go_to_through_door(ctx, *pose, ask_even_if_open=ask_even_if_open)
+    return ctx.goto(*pose)
+
+
 def go_to_named(
-    ctx: TaskContext, name: str | None, world: WorldModel, state: dict | None = None
+    ctx: TaskContext, name: str | None, world: WalkieWorld, state: dict | None = None
 ) -> bool:
-    """Navigate to a canonical room/location by its world-model pose.
+    """Navigate to a room/location — by its surveyed map pose, else by resolving the
+    name against ``ctx.world`` (text + scene graph).
 
     Idempotent within a command: if `state` already records the robot at `name`,
     the redundant drive is skipped. This dedups the parser's *explicit* navigate
     step against a following find/greet/count step that also names the same place
     (the parser is told to make navigation explicit, but still fills the find
     step's room/location) — otherwise the robot drives there twice.
+
+    Fast path: the canonical name has a *surveyed* map pose -> drive there.
+    Otherwise (no pose, or the unsurveyed [0,0,0] placeholder that would drive to
+    the map origin) fall back to ``world.resolve_place(name, near=<robot xy>)``,
+    which resolves the name as free text against the map AND the observed scene
+    graph and disambiguates by nearest — so an ambiguous / unsurveyed / scene-only
+    place still navigates instead of forfeiting to Tier-2. A bare vocab
+    ``WorldModel`` (no ``resolve_place``) keeps the honest "no pose" failure.
     """
     if not name:
         return False
     if state is not None and state.get("at") == name:
         return True  # already here this command — don't drive again
     pose = world.location_pose(name)
-    if pose is None:
+    if _pose_is_surveyed(pose):
+        ok = _drive_to_pose(ctx, pose, ask_even_if_open=world.is_barrier(name))
+        if ok and state is not None:
+            state["at"] = name  # remember so the next step doesn't re-navigate
+        return ok
+    # No surveyed map pose. Resolve the name against ctx.world (text + scene) when
+    # available; a bare vocab WorldModel has none -> honest failure (as before).
+    if not hasattr(world, "resolve_place"):
         print(f"[gpsr.skill] no pose for {name!r}")
         return False
-    # If a closed door blocks the route, ask a human to open it and retry
-    # (go_to_through_door only asks when the way is actually blocked + not seen
-    # open; gate OFF with GPSR_NAV_DOOR_RETRY=0 if it false-asks on the robot).
-    # For a place flagged `barrier = true` in world.toml (a door/partition that the
-    # depth check reads as "open" because it can't see a too-narrow gap), ask on the
-    # block even when depth says open — nav success is the real signal.
-    if os.getenv("GPSR_NAV_DOOR_RETRY", "1").lower() in ("1", "true", "yes"):
-        ok = go_to_through_door(ctx, *pose, ask_even_if_open=world.is_barrier(name))
+    near = None
+    try:
+        cp = ctx.current_pose()
+        near = (cp["x"], cp["y"])
+    except Exception:  # noqa: BLE001 — no odometry: resolve without a nearest tiebreak
+        near = None
+    m = world.resolve_place(name, near=near)
+    if m is None:
+        print(f"[gpsr.skill] could not resolve {name!r} to a place")
+        return False
+    if m.pose is not None:
+        ok = _drive_to_pose(ctx, m.pose, ask_even_if_open=world.is_barrier(m.name))
+    elif m.point is not None:  # an observed scene object -> approach its XY
+        approach_point(ctx, m.point[0], m.point[1],
+                       stop_distance=float(os.getenv("GPSR_FIND_APPROACH_M", "0.8")))
+        ok = True
     else:
-        ok = ctx.goto(*pose)
+        print(f"[gpsr.skill] resolved {name!r} to {m.label!r} but it has no position")
+        return False
     if ok and state is not None:
-        state["at"] = name  # remember so the next step doesn't re-navigate
+        state["at"] = name  # dedup on the requested target, not the resolved anchor
     return ok
 
 
-def _object_classes(obj: str | None, category: str | None, world: WorldModel) -> list[str]:
+def _object_classes(obj: str | None, category: str | None, world: WalkieWorld) -> list[str]:
     """Detector prompt classes for an object/category (underscores -> spaces)."""
     if obj:
         return [obj.replace("_", " ")]
@@ -255,7 +308,7 @@ def _pick_by_size(dets, direction: str):
 
 # --- primitives -------------------------------------------------------------
 
-def navigate(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
+def navigate(ctx: TaskContext, step: PlanStep, world: WalkieWorld, state: dict) -> bool:
     return go_to_named(ctx, step.args.get("target"), world, state)
 
 
@@ -270,7 +323,7 @@ def _memory_graphs(ctx: TaskContext):
     return getattr(ctx, "world", None)
 
 
-def _detect_here(ctx: TaskContext, obj, category, world: WorldModel):
+def _detect_here(ctx: TaskContext, obj, category, world: WalkieWorld):
     """Look for `obj` in the current camera view. Returns (status, xy): status is
     'found' | 'none' | 'no_frame'; xy is the lifted world (x, y) or None."""
     snap = ctx.snapshot()
@@ -291,16 +344,26 @@ def _stash_found(state: dict, obj, xy) -> None:
         state["found_object"] = obj
 
 
-def _find_via_memory(ctx: TaskContext, obj, category, label: str, world: WorldModel, state: dict) -> bool:
+def _find_via_memory(
+    ctx: TaskContext, obj, category, label: str, world: WalkieWorld, state: dict, *, room: str | None = None
+) -> bool:
     """Fallback (option A): recall where `obj` was last seen from the scene graph,
     drive there, and confirm with a live detection. The position comes from the
-    CLIP scene memory, not world.toml. True only if the re-detect confirms it (so a
-    stale recall never makes a false 'found' claim)."""
+    CLIP scene memory, not world.toml. When a room is known and ``ctx.world``
+    supports it, the recall is spatially scoped to that room
+    (``query_text_in_room``) so a same-named object in another room can't win; a
+    bare scene facade without that method falls back to the unscoped ``query_text``.
+    True only if the re-detect confirms it (so a stale recall never makes a false
+    'found' claim)."""
     graphs = _memory_graphs(ctx)
     if graphs is None:
         return False
+    query = obj or label
     try:
-        hits = graphs.query_text(obj or label, k=1)
+        if room and hasattr(graphs, "query_text_in_room"):
+            hits = graphs.query_text_in_room(query, room)
+        else:
+            hits = graphs.query_text(query, k=1)
     except Exception as exc:
         print(f"[gpsr.skill] scene-graph query failed ({exc})")
         return False
@@ -317,7 +380,7 @@ def _find_via_memory(ctx: TaskContext, obj, category, label: str, world: WorldMo
     return False
 
 
-def find_object(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
+def find_object(ctx: TaskContext, step: PlanStep, world: WalkieWorld, state: dict) -> bool:
     """Find an object. Primary: where the command says (or the current view if it
     named no place). On a miss — or when no place was named — fall back to the
     scene-graph memory (option A) for where it was last seen, then confirm with a
@@ -336,7 +399,7 @@ def find_object(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict
         _stash_found(state, obj, xy)
         ctx.say(f"I found the {label}.")
         return True
-    if _find_via_memory(ctx, obj, category, label, world, state):
+    if _find_via_memory(ctx, obj, category, label, world, state, room=step.args.get("room")):
         ctx.say(f"I found the {label}.")
         return True
     ctx.say(f"I could not find the {label}.")
@@ -473,7 +536,7 @@ def _find_person_match(ctx: TaskContext, step: PlanStep):
     return snap, None
 
 
-def find_person(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
+def find_person(ctx: TaskContext, step: PlanStep, world: WalkieWorld, state: dict) -> bool:
     where = step.args.get("location") or step.args.get("room")  # room or a beacon
     if where:
         go_to_named(ctx, where, world, state)
@@ -536,7 +599,7 @@ def _count_people_scanning(ctx: TaskContext, step: PlanStep) -> int | None:
     return len(seen) + unlocated
 
 
-def count(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
+def count(ctx: TaskContext, step: PlanStep, world: WalkieWorld, state: dict) -> bool:
     where = step.args.get("location") or step.args.get("room")
     if where:
         go_to_named(ctx, where, world, state)
@@ -562,7 +625,7 @@ def count(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> b
     return True
 
 
-def say(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
+def say(ctx: TaskContext, step: PlanStep, world: WalkieWorld, state: dict) -> bool:
     info = (step.args.get("info") or "").strip()
     if not info:
         return False
@@ -583,7 +646,7 @@ def say(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> boo
     return True
 
 
-def greet(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
+def greet(ctx: TaskContext, step: PlanStep, world: WalkieWorld, state: dict) -> bool:
     where = step.args.get("location") or step.args.get("room")  # room or a beacon
     if where:
         go_to_named(ctx, where, world, state)
@@ -597,7 +660,7 @@ def greet(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> b
     return True
 
 
-def get_person_info(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
+def get_person_info(ctx: TaskContext, step: PlanStep, world: WalkieWorld, state: dict) -> bool:
     which = step.args.get("which")
     snap = ctx.snapshot()
     if snap is None:
@@ -620,7 +683,7 @@ def get_person_info(ctx: TaskContext, step: PlanStep, world: WorldModel, state: 
     return True
 
 
-def get_object_property(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
+def get_object_property(ctx: TaskContext, step: PlanStep, world: WalkieWorld, state: dict) -> bool:
     which = step.args.get("which")
     obj = step.args.get("object")
     # Category is known from the world model — no perception needed.
@@ -663,7 +726,7 @@ def get_object_property(ctx: TaskContext, step: PlanStep, world: WorldModel, sta
     return True
 
 
-def follow(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
+def follow(ctx: TaskContext, step: PlanStep, world: WalkieWorld, state: dict) -> bool:
     """Follow a person, reusing HRI's ``follow_person`` tracking loop (off main).
 
     GPSR enrolls nobody, so we track whoever is in front via
@@ -739,7 +802,7 @@ def _lead_with_reacquire(ctx: TaskContext, dest_pose) -> bool:
     return True
 
 
-def _lead_to(ctx: TaskContext, to_name, world: WorldModel, state: dict) -> bool:
+def _lead_to(ctx: TaskContext, to_name, world: WalkieWorld, state: dict) -> bool:
     """Drive to ``to_name`` while leading a follower. With GPSR_GUIDE_REACQUIRE on,
     lead in segments with mid-route look-back; otherwise one blocking drive
     (``go_to_named``, the legacy behaviour). Honours the per-command nav dedup."""
@@ -757,7 +820,7 @@ def _lead_to(ctx: TaskContext, to_name, world: WorldModel, state: dict) -> bool:
     return ok
 
 
-def guide(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
+def guide(ctx: TaskContext, step: PlanStep, world: WalkieWorld, state: dict) -> bool:
     """Guide (lead) a person to a destination — nav + best-effort person confirm.
 
     Optionally goes to ``from`` first (where the person is), confirms/faces them,
@@ -791,7 +854,7 @@ def guide(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> b
     return True
 
 
-def pick(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
+def pick(ctx: TaskContext, step: PlanStep, world: WalkieWorld, state: dict) -> bool:
     """Grasp the named object via the shared grasp system (GraspNet pick).
 
     Drives to the object's named location if the command gave one, then re-acquires
@@ -816,7 +879,7 @@ def pick(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bo
     return False  # grasp missed -> let the Tier-2 agent reposition and retry
 
 
-def place(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> bool:
+def place(ctx: TaskContext, step: PlanStep, world: WalkieWorld, state: dict) -> bool:
     """Set the held object down on the named placement via the shared grasp system.
 
     Drives to the target placement if named, then runs the vision placement (scan
@@ -832,7 +895,12 @@ def place(ctx: TaskContext, step: PlanStep, world: WorldModel, state: dict) -> b
         state.pop("holding", None)
         ctx.say(f"I have placed the {label}.")
         return True
-    return False  # placement missed -> Tier-2 agent fallback
+    # Placement missed -> Tier-2 agent fallback. Clear the stale grasp belief so a
+    # later place/deliver in this command doesn't wrongly assume we still hold it
+    # (a Tier-2 recovery may drop or reposition the object); dispatch re-derives the
+    # label from step.args on any retry.
+    state.pop("holding", None)
+    return False
 
 
 # primitive value -> skill. `pick`/`place` route to the shared grasp system but
