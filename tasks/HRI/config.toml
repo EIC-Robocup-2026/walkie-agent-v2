@@ -78,6 +78,29 @@ HRI_DUP_FACE_SIM = "0.75"            # face cosine-sim at/above which a pair is 
 HRI_DUP_APP_SIM = "0.85"             # attire cosine-sim flag (clothes legitimately resemble more)
 HRI_DUP_ACTION = "widen"             # log = warn only; widen = warn + lean on face
 HRI_DUP_WIDENED_APP_MARGIN = "0.10"  # if action=widen: raise HRI_FOLLOW_APPEARANCE_MARGIN to this
+# --- Enrollment dedup + recognition quality gates ----------------------------
+# 1 = before enrolling, check whether the person strongly matches someone already
+# enrolled. When the caller pinned no id, reuse the matched id (no duplicate
+# record); when the caller pinned an id that strongly matches a DIFFERENT existing
+# id, log a duplicate warning (never auto-merge distinct guests — that would drop
+# one). 0 = always enroll under the requested id.
+HRI_ENROLL_DEDUP = "1"
+# Fused-similarity floor for the pre-enroll dedup check — higher than the
+# recognition floor (APPEARANCE_MATCH_THRESHOLD=0.5) so only a STRONG match
+# reuses/flags an id and a weak match safely creates a new person.
+HRI_ENROLL_DEDUP_MIN_SCORE = "0.7"
+# A detected face must clear this detection score to be trusted for a HARD identity
+# decision (introduction labeling, follow re-acquire). Below it the embedding is
+# too noisy to label someone with; steady-state follow maintenance is NOT gated on
+# it (a small far face still holds an existing lock). Matches the face_conf_med
+# fusion knee, so lower-confidence faces were already scored appearance-only.
+HRI_RECOG_MIN_DET_SCORE = "0.5"
+# 1 = also require a roughly front-facing pose before a HARD identity decision.
+# Opt-in hook, off by default (the face box arrives without its pose keypoints).
+HRI_RECOG_REQUIRE_FRONTAL = "0"
+# Minimum person-crop area (px^2) before its attire embedding is trusted for a
+# follow decision. 0 = no size gate (default).
+HRI_RECOG_MIN_CROP_PX = "0"
 # --- Face presence & tracking ------------------------------------------------
 # "Biggest face" must exceed this bbox area (px²) to count as the person
 # standing right in front — distant bystanders are ignored. Used both by
@@ -99,6 +122,19 @@ HRI_FACE_TRACK_GAIN = "0.8"
 HRI_INTRO_SWEEP_DEG = "10"
 # Seconds to let the base + depth settle after each sweep rotation before capturing.
 HRI_SWEEP_SETTLE_SEC = "1.0"
+# --- Introduction recognition (locate_people) --------------------------------
+# When matching a face's box to an enrolled guest, that guest's fused score must
+# beat the RUNNER-UP enrolled id's score on the same box by this margin, else the
+# box is left unlabeled (the caller falls back to the guest's stored seat rather
+# than risk labeling person A as person B). Assignment across boxes is globally
+# optimal (max total similarity), so a higher wrong pairing can't steal another
+# guest's box either. 0 = accept the top-1 id per box (old behaviour).
+HRI_LOCATE_BOX_MARGIN = "0.06"
+# Minimum sweep frames that must agree on an id<->box match before it is trusted.
+# 1 = a single frame suffices (old behaviour); 2 demands agreement across the
+# left/center/right sweep for near-identical guests (more precise, slightly lower
+# recall).
+HRI_LOCATE_MIN_VOTES = "1"
 # 1 = forget all remembered people at task start (guests differ every run).
 HRI_PEOPLE_RESET = "1"
 # 1 = enable the timed gripper bag-handover steps (no torque sensing yet).
@@ -168,6 +204,49 @@ HRI_FOLLOW_APPEARANCE_MARGIN = "0.05"
 # enrolled person by this margin. Faces are far more discriminative than attire,
 # so a small margin is plenty — it just rejects an ambiguous frame.
 HRI_FOLLOW_FACE_MARGIN = "0.05"
+# --- Follow robustness: don't lock a look-alike (esp. as the host leaves frame) --
+# The chosen host box must beat the RUNNER-UP *visible* candidate's host-similarity
+# by at least this much, else the tick is ambiguous and the selector returns None
+# (follow_person then coasts on its motion prediction rather than risk locking a
+# look-alike). This is the core fix for a bystander near the host's last spot being
+# picked. 0 = pick the top scorer even in a near-tie (old behaviour). Raise if it
+# still grabs look-alikes; lower if it too often coasts in a genuine crowd.
+HRI_FOLLOW_VISIBLE_MARGIN = "0.06"
+# 1 = drop an attire candidate whose box shows a clearly-visible NON-host face.
+# While the host walks away their back is to the camera (no face in their box) but
+# bystanders usually face the robot, so a face-shown look-alike who took the host's
+# spot is ruled out by their own face even though their clothing matches. 0 = off.
+HRI_FOLLOW_EXCLUDE_NONHOST_FACE = "1"
+# How far below the face-recognition similarity floor (1 - FACE_MATCH_THRESHOLD) a
+# face inside a candidate box must score against the host before that box is called
+# "not the host". Larger = more conservative (excludes only very-clearly-other
+# faces, so a host glancing sideways is never wrongly excluded).
+HRI_FOLLOW_NONHOST_FACE_MARGIN = "0.10"
+# After losing the lock (re-acquiring), the attire/face floor is raised to this so a
+# look-alike wandering into the host's last spot can't grab a fresh lock. Steady-
+# state tracking keeps the perception-wide APPEARANCE_MATCH_THRESHOLD; set equal to
+# it to disable the stricter re-acquire floor.
+HRI_FOLLOW_REACQUIRE_MIN_SCORE = "0.6"
+# Visible-candidate margin used WHILE re-acquiring, in place of
+# HRI_FOLLOW_VISIBLE_MARGIN — higher, because committing a fresh lock is riskier
+# than holding an existing one.
+HRI_FOLLOW_REACQUIRE_MARGIN = "0.10"
+# 1 = re-establishing a lock after a loss REQUIRES a face match (no attire-only
+# re-acquire). Left OFF by default because a host being followed is normally
+# back-turned (face hidden); the raised floor/margin + non-host-face exclusion +
+# lock confirmation guard the look-alike case without it. Turn on only if the arena
+# reliably shows the host's face on re-acquire.
+HRI_FOLLOW_REACQUIRE_REQUIRE_FACE = "0"
+# Consecutive confirming ticks before committing a NEW host lock (at start or after
+# a loss). During confirmation the selector returns None (the loop coasts), so a
+# one-frame fluke match on a look-alike never commits. 1 = lock on the first good
+# tick (old behaviour).
+HRI_FOLLOW_LOCK_CONFIRM_TICKS = "2"
+# While locked, tolerate this many consecutive no-match ticks (coasting via the
+# predictor/grace) before dropping the lock and re-acquiring under the strict
+# face-aware gate. Keeps a brief occlusion/turn from forcing a full re-acquire
+# without letting a stale lock linger. 0 = drop on the first miss (old behaviour).
+HRI_FOLLOW_LOCK_MISS_TOLERANCE = "2"
 # Among the boxes that pass the identity gate (face or attire), the follow loop
 # prefers the NEAREST: the combined score is similarity + this weight × the
 # box's pose-keypoint scale relative to the nearest qualifier. It is only a
