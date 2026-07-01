@@ -7,7 +7,6 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import (
     AgentMiddleware,
     SummarizationMiddleware,
-    TodoListMiddleware,
 )
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import InMemorySaver
@@ -18,6 +17,7 @@ from .middleware import (
     StubToolMiddleware,
     ToolGroupingMiddleware,
     TraceMiddleware,
+    TodoListMiddleware,
 )
 
 
@@ -68,8 +68,8 @@ def create_walkie_agent(
                 keep=("messages", int(os.getenv("WALKIE_SUMMARIZE_KEEP_MSGS", "12"))),
             )
         )
-    # if enable_todos:
-    #     middleware.append(TodoListMiddleware())
+    if enable_todos:
+        middleware.append(TodoListMiddleware())
     middleware.extend(
         [
             # Both no-op when RobotContext isn't initialized (they catch the

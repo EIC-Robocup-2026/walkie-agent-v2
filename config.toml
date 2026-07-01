@@ -22,7 +22,7 @@
 [llm]
 # 1 = use a local OpenAI-compatible LLM (LOCAL_BASE_URL/LOCAL_MODEL) instead of
 # OpenRouter. The OpenRouter API key + base URL are the only things left in .env.
-LLM_USE_LOCAL = "0"
+LLM_USE_LOCAL = "1"
 WALKIE_MODEL = "google/gemini-3-flash-preview:nitro"
 WALKIE_TEMPERATURE = "0.5"
 # Local LLM endpoint (OpenAI-compatible), used when LLM_USE_LOCAL=1.

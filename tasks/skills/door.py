@@ -79,6 +79,7 @@ def door_open_from_depth(
     y0, x0 = (h - ch) // 2, (w - cw) // 2
     region = arr[y0:y0 + ch, x0:x0 + cw]
     valid = region[np.isfinite(region) & (region > 0.0)]
+    print(region, valid)
     if valid.size == 0:
         return True  # no near returns in the doorway -> clear / open
     if valid.size / region.size >= min_valid_frac and float(np.median(valid)) < clear_m:
@@ -165,6 +166,9 @@ def request_open_door(
     reprompt_every = float(os.getenv("WALKIE_DOOR_REPROMPT_SEC", "15")) if reprompt_every is None else reprompt_every
     max_wait = float(os.getenv("WALKIE_DOOR_WAIT_SEC", "120")) if max_wait is None else max_wait
     confirm_reads = int(os.getenv("WALKIE_DOOR_CONFIRM_READS", "2")) if confirm_reads is None else confirm_reads
+
+    ctx.walkie.robot.head.tilt(0.4)
+    time.sleep(0.5)
 
     # Default the sensor to the built-in depth detector; it returns None (-> not
     # open -> ask) when there's no camera, so the spoken flow still works offline.

@@ -1,0 +1,72 @@
+# Inspection task (RoboCup@Home robot inspection) knobs.
+# Loaded by tasks/Inspection/run.py via tasks.common.load_task_config BEFORE the
+# root config.toml, so any key here wins over the global value.
+# TOML keys ARE env-var names; the [inspection] table header is just grouping.
+# Precedence: shell env > .env > this file > root config.toml > code default.
+
+[inspection]
+# Agent mode. 0 (default, recommended) = fully deterministic scaffold + lightweight
+# custom model calls (reliable, no heavy agent/perception stack pulled in). 1 = also
+# build the full WalkieBrain and hand the referee Q&A to the Walkie orchestrator
+# agent. Navigation (door, safety stop, points, exit) and the scripted
+# demonstrations (device list, loudness) stay deterministic either way.
+INSPECTION_AGENT_MODE = "0"
+
+# --- points of interest (map-frame "x,y,heading_rad") ------------------------
+# The referee publishes the arena map with these points before the run. Survey them
+# here — the robot reads them straight from config, not the world.toml map.
+# Pose to drive to just INSIDE the arena once the entry door opens.
+INSPECTION_ENTRY_POINT = "0.0,0.0,0.0"
+# Fallback if no entry pose is surveyed: creep this far (m) forward through the door.
+INSPECTION_ENTRY_FORWARD_M = "1.0"
+# Inspection points to visit in order, ';'-separated "x,y,heading_rad" poses.
+INSPECTION_POINTS = "6.2,-1.65,0.0"
+# Pose at the exit, driven to on the referee's signal (then the stop button).
+INSPECTION_EXIT_POINT = "0.6526,3.9947,3.114"
+
+# --- head tilt for the depth reads -------------------------------------------
+# The door/safety depth reads snapshot at the head's resting tilt; a head tilted
+# down sees floor < the near threshold and false-reads "blocked". Level the head
+# first. NEGATIVE = up, POSITIVE = down (SDK convention); 0.0 = level. The tilt
+# offset is uncalibrated on the new robot box — tune on-robot if it false-triggers.
+INSPECTION_HEAD_TILT_RAD = "0.0"
+INSPECTION_HEAD_SETTLE_SEC = "0.5"
+
+# --- entry door --------------------------------------------------------------
+# request_open_door watches the depth camera and drives in on its own once the
+# doorway reads clear. Its thresholds/timeouts are the shared WALKIE_DOOR_* knobs
+# in the root config.toml (WALKIE_DOOR_CLEAR_M, WALKIE_DOOR_WAIT_SEC, ...).
+
+# --- safety stop -------------------------------------------------------------
+# The referee steps in front to check the robot stops. Trigger is depth-near in the
+# frame centre (something is close in front); pose estimation refines the announce
+# wording ("I see you" vs "something is in front"). Nav2's costmap already avoids
+# obstacles during the drive — this is the visible/audible demonstration on top.
+INSPECTION_SAFETY_NEAR_M = "1.2"          # a surface closer than this in the centre = blocked
+INSPECTION_SAFETY_CENTER_FRAC = "0.4"     # central box fraction of the frame examined
+INSPECTION_SAFETY_MIN_VALID_FRAC = "0.5"  # min valid-depth pixels to trust a "blocked" read
+INSPECTION_SAFETY_MIN_AREA_FRAC = "0.05"  # person box must cover >= this frac of the frame (near)
+INSPECTION_SAFETY_POLL_SEC = "0.4"        # seconds between safety reads
+INSPECTION_SAFETY_CLEAR_READS = "3"       # consecutive clear reads before continuing (debounce)
+INSPECTION_SAFETY_APPEAR_SEC = "20"       # nobody steps in front within this long -> continue
+INSPECTION_SAFETY_MAX_WAIT_SEC = "90"     # hard cap: continue regardless (never hang)
+
+# --- external-devices report -------------------------------------------------
+# ';'-separated list of external devices in use to declare to the referee (rulebook:
+# wireless keyboard, computer, mouse, mobile phone, tray extensions, ...). Set to the
+# devices you actually run with; empty = declare that no external devices are used.
+INSPECTION_EXTERNAL_DEVICES = "a wireless keyboard;a laptop computer;a wireless mouse"
+
+# --- loudness test -----------------------------------------------------------
+INSPECTION_LOUDNESS_PHRASE = "Testing my speaker volume. Can everyone hear me clearly? One, two, three."
+INSPECTION_LOUDNESS_CONFIRM = "1"         # 1 = ask the referee to confirm and repeat once if not
+INSPECTION_LOUDNESS_LISTEN_SEC = "12"     # how long to listen for the confirmation
+
+# --- exit signal -------------------------------------------------------------
+# Words that, heard/typed in the referee's signal, mean "go to the exit now"
+# (deterministic path). A ctx.extract model call also classifies less-obvious
+# phrasings; a bare Enter while typing (DISABLE_LISTENING) is the always-works signal.
+INSPECTION_EXIT_SIGNAL_WORDS = "exit;leave;done;finished;go to the exit;you can go;that's all;that is all"
+INSPECTION_EXIT_LISTEN_TIMEOUT_SEC = "20" # how long to listen for the signal each round
+INSPECTION_EXIT_IDLE_SEC = "90"           # nothing understood for this long -> go to exit anyway
+INSPECTION_MAX_QNA_ROUNDS = "20"          # cap on referee Q&A turns before proceeding
