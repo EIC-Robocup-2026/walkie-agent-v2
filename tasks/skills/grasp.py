@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import math
 import os
+import threading
 import time
 from dataclasses import dataclass, replace
 
 import numpy as np
+from pydantic import BaseModel
 from scipy.spatial.transform import Rotation
 
 from interfaces.devices.camera import camera_pose
@@ -46,6 +48,233 @@ def _i(name: str, default: str) -> int:
 
 def _b(name: str, default: str) -> bool:
     return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+# --- descriptor-prompt detection + CLIP rerank ------------------------------
+# YOLOE is open-vocab but PROMPT-DRIVEN: it can't box a brand name ("coke") even
+# though the scene-graph loop already prompts it with that exact word. But under a
+# generic *visual* descriptor ("can", "red can") it returns SEVERAL boxes (the coke
+# plus neighbours). So we detect with descriptors, then CLIP-rerank the boxes against
+# the SPECIFIC target name to pick the right one. The correctness trap: detect with the
+# GENERIC descriptor, but embed_text the SPECIFIC target — embedding "can" scores every
+# can equally and defeats disambiguation.
+#
+# The descriptors themselves are now **LLM-generated** (`_llm_descriptors`): for an
+# arbitrary GPSR target the LLM emits the same kind of generic visual phrases, few-shot
+# -anchored on the curated map below. That map is therefore no longer the only source of
+# descriptors — it is (a) the few-shot examples that steer the LLM and (b) the fallback
+# used when the LLM is disabled (WALKIE_GRASP_LLM_DESCRIPTORS=0) or the call fails. Keys
+# are lowercased item names matching the known set (services/walkie_graphs/config.toml
+# WALKIE_EXPLORE_INTERESTED_CLASSES); the wording is a starting point, tuned on-robot
+# against YOLOE's vocab, and doubles as the demonstration the LLM imitates.
+_GRASP_DESCRIPTORS: dict[str, list[str]] = {
+    "cola": ["can", "red can", "soda can"],
+    "coke": ["can", "red can", "soda can"],
+    "red bull": ["can", "blue can", "slim can", "energy drink can"],
+    "ice tea": ["bottle", "carton", "drink bottle"],
+    "orange juice": ["carton", "bottle", "juice carton"],
+    "milk": ["carton", "bottle", "milk carton"],
+    "bottle": ["bottle", "water bottle"],
+    "water bottle": ["bottle", "water bottle"],
+    "pringles": ["can", "tube", "cylindrical can", "chips can"],
+    "chips": ["bag", "snack bag", "chip bag"],
+    "cookies": ["box", "package", "snack box"],
+    "cornflakes": ["box", "cereal box"],
+    "instant noodles": ["cup", "package", "noodle cup"],
+    "tomato soup": ["can", "soup can"],
+    "mixed nuts": ["can", "jar", "package"],
+    "gum": ["box", "small box", "package"],
+    "hand cream": ["tube", "bottle"],
+    "soap": ["bottle", "box", "bar"],
+    "toothpaste": ["box", "tube"],
+}
+
+# Success-only cache for CLIP text embeddings, keyed by the formatted query. NOT
+# functools.lru_cache: that would pin a None failure forever and never retry the server.
+_TEXT_EMB_CACHE: dict[str, list[float]] = {}
+
+# Success-only cache for LLM-generated descriptors, keyed by lowercased target. Same
+# rationale as _TEXT_EMB_CACHE: a pick runs many locates (multi-tilt × attempts), so the
+# LLM is asked once per unique target and reused; a failed call is NOT cached, so a flaky
+# endpoint is retried on the next locate instead of being pinned to the static fallback.
+_DESCRIPTOR_CACHE: dict[str, list[str]] = {}
+
+# Hard cap on descriptors per target: instructions ask for 2-4, but a misbehaving model
+# could dump 20 — and every extra prompt costs YOLOE compute on EVERY locate, then dilutes
+# the CLIP rerank. Trim defensively regardless of what the model returns.
+_MAX_DESCRIPTORS = 5
+
+
+class _DescriptorList(BaseModel):
+    """Structured-output schema for `_llm_descriptors` (one field: the phrase list)."""
+
+    descriptors: list[str]
+
+
+def _call_with_timeout(fn, timeout_s: float):
+    """Run ``fn()`` on a daemon thread, returning its result or raising on timeout.
+
+    Scoped guard for the one blocking LLM round-trip this module makes: ``ctx.model`` (the
+    OpenRouter/local ``ChatOpenAI``) is built WITHOUT an HTTP timeout, so a stalled endpoint
+    would otherwise hang the grasp hot path indefinitely. The worker is a daemon, so an
+    abandoned (timed-out) call can never block process exit. Re-raises the worker's own
+    exception so the caller's degrade-to-static path fires identically for hang or error.
+    """
+    box: dict = {}
+
+    def _run():
+        try:
+            box["v"] = fn()
+        except Exception as exc:  # noqa: BLE001 — relayed to the caller verbatim
+            box["e"] = exc
+
+    th = threading.Thread(target=_run, daemon=True)
+    th.start()
+    th.join(timeout_s)
+    if th.is_alive():
+        raise TimeoutError(f"LLM call exceeded {timeout_s:.0f}s")
+    if "e" in box:
+        raise box["e"]
+    return box.get("v")
+
+
+def _llm_descriptors(ctx, target: str) -> list[str]:
+    """Generic visual descriptors for *target*, generated by the LLM, cached per target.
+
+    YOLOE can't box a brand name, so we feed it generic visual phrases ("can", "red can").
+    The static :data:`_GRASP_DESCRIPTORS` only covers a handful of competition items; for an
+    arbitrary GPSR target we ask ``ctx.model`` (via :meth:`TaskContext.extract`, which keeps
+    a JSON-mode fallback for tool-call-less local backends) for the same kind of phrases,
+    few-shot-anchored on that map. Returns ``[]`` — the signal for the caller to fall back to
+    the static map — when disabled, given an empty target, or on ANY failure (timeout,
+    network, no ``extract``/``model`` on the ctx, empty result).
+
+    Every outcome (success, empty, AND failure) is cached per target — unlike
+    :data:`_TEXT_EMB_CACHE` (success-only), because a pick runs many locates and an embed
+    miss fails *fast* whereas an LLM miss can fail *slow* (an 8 s timeout to a dead host).
+    Caching the miss costs nothing — the fallback IS the pre-LLM behaviour — and turns a
+    per-pick stall (timeout × locates) into one timeout per target per session.
+    """
+    target = (target or "").strip().lower()
+    if not target or not _b("WALKIE_GRASP_LLM_DESCRIPTORS", "1"):
+        return []
+    cached = _DESCRIPTOR_CACHE.get(target)
+    if cached is not None:
+        return cached
+    examples = "\n".join(
+        f"- {name} -> {', '.join(descs)}" for name, descs in _GRASP_DESCRIPTORS.items()
+    )
+    instructions = (
+        "You name an object the way an open-vocabulary object detector (YOLOE) can find it. "
+        "Given a specific item — often a brand name the detector cannot recognise — output "
+        "1-4 SHORT, GENERIC visual descriptors in lowercase: the object's container/shape "
+        "type (can, bottle, box, carton, bag, tube, jar, cup, ...) optionally qualified by a "
+        "distinctive colour or size word. NEVER include the brand name itself, and never "
+        "invent a shape you are unsure of. Order them from most generic to most specific.\n\n"
+        f"Examples:\n{examples}"
+    )
+    timeout_s = _f("WALKIE_GRASP_LLM_DESCRIPTORS_TIMEOUT_S", "8")
+    try:
+        result = _call_with_timeout(
+            lambda: ctx.extract(_DescriptorList, instructions, target), timeout_s
+        )
+    except Exception as exc:  # noqa: BLE001 — timeout/network/bad-ctx -> static fallback
+        print(f"[grasp] LLM descriptor gen failed for {target!r} ({exc}); using static map")
+        _DESCRIPTOR_CACHE[target] = []  # cache the miss: don't re-pay the timeout per locate
+        return []
+    raw = list(result.descriptors) if result else []
+    descs: list[str] = []
+    for d in raw:
+        d = (d or "").strip().lower()
+        if d and d != target and d not in descs:  # skip the brand name + dupes
+            descs.append(d)
+    descs = descs[:_MAX_DESCRIPTORS]
+    _DESCRIPTOR_CACHE[target] = descs  # cache success AND empty alike
+    print(f"[grasp] llm descriptors outputs: {descs}")
+    return descs
+
+
+def _detection_prompts(ctx, prompts: list[str]) -> list[str]:
+    """Expand the caller's prompts with generic visual descriptors for CLIP rerank.
+
+    The first prompt is the human target (Restaurant passes ``[item]``); keep it first,
+    append descriptors (LLM-generated and few-shot-anchored on :data:`_GRASP_DESCRIPTORS`,
+    falling back to a static lookup in that map when the LLM is off/fails), dedup preserving
+    order. Unknown items with no LLM/static descriptors -> ``[target]`` (harmless under
+    rerank). Returns *prompts* unchanged when rerank is off.
+    """
+    if not prompts or not _b("WALKIE_GRASP_CLIP_RERANK", "1"):
+        return list(prompts)
+    target = prompts[0].strip().lower()
+    descriptors = _llm_descriptors(ctx, target) or _GRASP_DESCRIPTORS.get(target, [])
+    out = list(prompts)
+    for d in descriptors:
+        if d not in out:
+            out.append(d)
+    return out
+
+
+def _cosine(a, b) -> float:
+    """Cosine similarity of two vectors; 0.0 on degenerate (zero-norm/empty) input."""
+    a = np.asarray(a, dtype=float).reshape(-1)
+    b = np.asarray(b, dtype=float).reshape(-1)
+    if a.size == 0 or b.size == 0 or a.size != b.size:
+        return 0.0
+    na = float(np.linalg.norm(a))
+    nb = float(np.linalg.norm(b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return float(a @ b) / (na * nb)
+
+
+def _rank_by_clip(detections, text_emb, *, sim_floor: float):
+    """Rank detections by ``cosine(det.embedding, text_emb)`` descending.
+
+    Returns ``[(det, sim)]`` for detections whose cosine is ``>= sim_floor``. Returns
+    ``[]`` (the fall-back-to-nearest signal) when *text_emb* is falsy or no detection
+    carries an embedding. Pure: no network, no snapshot.
+    """
+    if not text_emb:
+        return []
+    scored = []
+    for d in detections:
+        emb = getattr(d, "embedding", None)
+        if not emb:
+            continue
+        sim = _cosine(emb, text_emb)
+        if sim >= sim_floor:
+            scored.append((d, sim))
+    scored.sort(key=lambda ds: ds[1], reverse=True)
+    return scored
+
+
+def _target_text_embedding(ctx, target: str) -> list[float] | None:
+    """CLIP text embedding for the SPECIFIC target, cached across one pick's many locates.
+
+    Builds the query via ``WALKIE_GRASP_CLIP_QUERY_TMPL`` (default ``"a photo of {t}"`` —
+    a bare brand string embeds poorly zero-shot). Returns ``None`` (never raises) on any
+    failure, so the next call retries (the cache stores successes only).
+    """
+    target = (target or "").strip()
+    if not target:
+        return None
+    tmpl = os.getenv("WALKIE_GRASP_CLIP_QUERY_TMPL", "a photo of {t}")
+    try:
+        key = tmpl.format(t=target)
+    except (KeyError, IndexError, ValueError):
+        key = target
+    cached = _TEXT_EMB_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        emb = ctx.walkieAI.image.embed_text(key)
+    except Exception as exc:  # noqa: BLE001 — network/empty-text; degrade to nearest
+        print(f"[grasp] embed_text failed for {key!r} ({exc}); CLIP rerank off this call")
+        return None
+    if emb:
+        _TEXT_EMB_CACHE[key] = list(emb)
+        return _TEXT_EMB_CACHE[key]
+    return None
 
 
 def _clean_object_cloud(pts: np.ndarray, *, ref_optical: np.ndarray | None = None) -> np.ndarray:
@@ -324,6 +553,7 @@ class ObjectLocation:
     snap: object
     range_m: float
     confidence: float | None = None  # detector confidence (drives multi-tilt tie-break)
+    clip_sim: float | None = None  # CLIP cosine to the target (None on the nearest-wins path)
 
 
 def _to_map_frame(snap, g, standoff_m: float) -> GraspCandidate:
@@ -362,20 +592,43 @@ def _detect_and_lift(
     erode_px: int,
     min_points: int,
     min_confidence: float,
-) -> tuple[np.ndarray, float, float | None] | None:
-    """One masked detection for *prompts* -> the nearest matching object's cloud.
+) -> tuple[np.ndarray, float, float | None, float | None] | None:
+    """One detect (descriptor prompts + per-detection embed) -> the chosen object's cloud.
 
     Shared by :func:`locate_object` and the best-of-N loop in
-    :func:`get_object_grasp_pos`. The custom open-vocab detector boxes the target
-    directly (including brand names), so *prompts* are passed through unchanged — no
-    descriptor expansion or CLIP rerank. Runs masked detection, drops detections
-    below *min_confidence* or without a mask, lifts each surviving mask to a
-    camera-optical cloud, and keeps the **nearest** (smallest median range) that
-    lifts to ``>= min_points`` points.
+    :func:`get_object_grasp_pos`. Expands *prompts* with visual descriptors, runs masked
+    detection (requesting per-crop CLIP embeddings in the SAME round trip), drops
+    detections below *min_confidence*, and selects:
 
-    Returns ``(cloud_optical, range_m, det_confidence)`` or ``None`` (never raises).
+      * **CLIP-similarity-first** — when rerank is on and there is more than one box to
+        disambiguate, embed the SPECIFIC target text once and keep the highest-cosine box
+        that lifts to ``>= min_points``;
+      * **nearest-wins fallback** — when rerank is off, no target/embeddings are available,
+        or every CLIP pick lifts too sparse: the smallest-median-range box (today's rule).
+
+    Returns ``(cloud_optical, range_m, det_confidence, clip_sim)`` or ``None`` (never
+    raises). ``clip_sim`` is ``None`` on the fallback path.
     """
-    detections = ctx.walkieAI.image.detect(snap.img, prompts=prompts, return_mask=True)
+    det_prompts = _detection_prompts(ctx, prompts)
+    rerank_on = _b("WALKIE_GRASP_CLIP_RERANK", "1")
+
+    detections = None
+    if rerank_on:
+        try:
+            # detect() can't pass per_detection, so call process() directly to get masks
+            # AND per-crop CLIP embeddings in one round trip (client/image.py).
+            res = ctx.walkieAI.image.process(
+                snap.img,
+                detection={"prompts": det_prompts, "return_mask": True},
+                per_detection={"embed": True},
+            )
+            detections = res.detection or []
+        except Exception as exc:  # noqa: BLE001 — degrade to a plain masked detect
+            print(f"[grasp] detect+embed failed ({exc}); falling back to plain detect")
+            detections = None
+    if detections is None:
+        detections = ctx.walkieAI.image.detect(snap.img, prompts=det_prompts, return_mask=True)
+
     detections = [
         d for d in detections
         if d.mask is not None
@@ -384,15 +637,34 @@ def _detect_and_lift(
     if not detections:
         return None
 
-    # Nearest-wins among the detections: lift each mask and keep the closest cloud.
-    best = None
-    for det in detections:
+    def _lift(det):
         pts = snap.mask_to_points(det.mask, voxel=voxel, frame="optical", erode_px=erode_px)
         if pts.shape[0] < min_points:
+            return None
+        return pts, float(np.median(np.linalg.norm(pts, axis=1)))
+
+    # CLIP rerank — only worth a text-embed call when there's more than one box to tell apart.
+    if rerank_on and len(detections) > 1:
+        text_emb = _target_text_embedding(ctx, prompts[0] if prompts else "")
+        scored = _rank_by_clip(
+            detections, text_emb,
+            sim_floor=_f("WALKIE_GRASP_CLIP_SIM_THRESHOLD", "0.0"),
+        )
+        for det, sim in scored:
+            lifted = _lift(det)
+            if lifted is not None:
+                pts, rng = lifted
+                return pts, rng, det.confidence, sim
+
+    # Fallback: nearest-wins among the (expanded) detections — today's selector.
+    best = None
+    for det in detections:
+        lifted = _lift(det)
+        if lifted is None:
             continue
-        rng = float(np.median(np.linalg.norm(pts, axis=1)))
+        pts, rng = lifted
         if best is None or rng < best[1]:
-            best = (pts, rng, det.confidence)
+            best = (pts, rng, det.confidence, None)
     return best
 
 
@@ -410,11 +682,12 @@ def locate_object(
 
     The fast "where is it" primitive ``pick_object`` uses to position the base/head
     before committing to the (expensive) grasp plan. Takes a snapshot (or reuses
-    *snap*), runs masked open-vocab detection for *prompts* (see
+    *snap*), runs masked open-vocab detection (descriptor prompts + CLIP rerank — see
     :func:`_detect_and_lift`), drops detections below *min_confidence*, and lifts the
-    **nearest** (smallest median range) detection's mask to a camera-optical cloud.
-    Returns the lifted cloud plus the map-frame centroid, or ``None`` (never raises)
-    when nothing graspable is in view.
+    chosen detection's mask to a camera-optical cloud: the **CLIP-best** box matching
+    the target when rerank disambiguates several, else the **nearest** (smallest median
+    range). Returns the lifted cloud plus the map-frame centroid, or ``None`` (never
+    raises) when nothing graspable is in view.
     """
     snap = snap if snap is not None else ctx.snapshot()
     if snap is None or not snap.has_geometry:
@@ -429,16 +702,17 @@ def locate_object(
         print(f"[grasp] locate: no graspable detection for {prompts} "
               f"(confidence >= {min_confidence}, lifted >= {min_points} pts)")
         return None
-    cloud, nearest_range, nearest_conf = found
+    cloud, nearest_range, nearest_conf, clip_sim = found
 
     cm = cloud @ snap.cam.R.T + snap.cam.t
     xyz = np.median(cm, axis=0)
     xyz_map = (float(xyz[0]), float(xyz[1]), float(xyz[2]))
+    sim_str = f" clip={clip_sim:.3f}" if clip_sim is not None else ""
     print(f"[grasp] locate: {prompts} at ({xyz_map[0]:+.2f},{xyz_map[1]:+.2f},"
-          f"{xyz_map[2]:+.2f}) range={nearest_range:.2f}m conf={nearest_conf}")
+          f"{xyz_map[2]:+.2f}) range={nearest_range:.2f}m conf={nearest_conf}{sim_str}")
     return ObjectLocation(
         xyz_map=xyz_map, cloud_optical=cloud, snap=snap,
-        range_m=nearest_range, confidence=nearest_conf,
+        range_m=nearest_range, confidence=nearest_conf, clip_sim=clip_sim,
     )
 
 
@@ -820,9 +1094,10 @@ def get_object_grasp_pos(
                 print(f"[grasp] {tag}: no snapshot geometry (is the ZED running?)")
                 continue
 
-            # Detect + lift the nearest object via the shared path (so the best-of-N loop
-            # selects the same way locate_object does). Passing snap reuses this attempt's
-            # frame; ref_optical anchors the cleanup on the detection centroid.
+            # Detect + CLIP-rerank + lift the chosen object via the shared path (so the
+            # best-of-N loop disambiguates brand items the same way locate_object does).
+            # Passing snap reuses this attempt's frame; ref_optical anchors the cleanup
+            # on the detection centroid (the old inline loop passed none).
             loc = locate_object(
                 ctx, prompts, voxel=voxel, erode_px=erode_px,
                 min_points=min_points, min_confidence=min_confidence, snap=snap,
