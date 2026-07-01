@@ -91,7 +91,7 @@ RESTAURANT_APPROACH_MAX_STALLS = "1"
 # (Nav2 halts at the table/customer inflation boundary), so a tighter value never
 # promotes and the approach retries forever. 0.4 still leaves the robot ~0.8–1.2 m
 # from the customer — a safe conversational distance.
-WALKIE_NAV_GOAL_TOLERANCE_M = "0.4"
+# WALKIE_NAV_GOAL_TOLERANCE_M = "0.4"
 
 # --- Live scan + live approach (RESTAURANT_LIVE_SCAN) ------------------------
 # The new find+approach path: a bearing-first sweep (deduping callers by absolute BEARING,

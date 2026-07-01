@@ -48,6 +48,11 @@ class GoToLaundryArea(SubTask):
     critical = True
 
     def run(self, ctx: TaskContext) -> StepResult:
+        # Wait start task button
+        print("[Laundry] waiting for start button to be pressed...")
+        while not ctx.walkie.robot.button.is_pressed:
+            pass
+        print("[Laundry] start button pressed")
         ctx.say(prompts.START_ANNOUNCE)
         x, y, h = _pose("LAUNDRY_AREA_POSE")
         if ctx.goto(x, y, h):

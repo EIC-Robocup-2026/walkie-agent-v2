@@ -13,7 +13,8 @@
 # no map; set it in .env if needed.)
 # Host's name and favorite drink (given in the competition briefing). Used in
 # the seat-offer wording ("next to our host James"); "" = unknown.
-HRI_HOST_NAME = "Armmy"
+HRI_DOOR_POSE = "1.15,0,3.14"
+HRI_HOST_NAME = "Host"
 HRI_HOST_DRINK = "pepsi"
 # Open-vocab detector prompts used to find seats.
 HRI_SEAT_CLASSES = "seat,chair,sofa,armchair,stool"
@@ -59,7 +60,7 @@ HRI_ASK_RETRIES = "4"
 # face frames (head level) + attire frames (head tilted DOWN to frame the body),
 # averaging each into one embedding for a robust enrollment. Tune for the door.
 HRI_GREET_BACKUP_M = "0.30"          # step back this far (m) so face + body fit in frame
-HRI_GREET_FACE_TILT = "0.0"          # head tilt (rad) for the FACE frames (0 = level; + = down)
+HRI_GREET_FACE_TILT = "-0.15"          # head tilt (rad) for the FACE frames (0 = level; + = down)
 HRI_GREET_APPEARANCE_TILT = "0.15"   # head tilt (rad) for the ATTIRE frames (tilts down to the body)
 HRI_GREET_CAPTURE_COUNT = "3"        # frames per modality, averaged for a robust embedding
 HRI_GREET_TILT_SETTLE_SEC = "0.8"    # wait (s) after an async head tilt before capturing

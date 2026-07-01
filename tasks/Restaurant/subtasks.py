@@ -417,6 +417,11 @@ class GoToStart(SubTask):
     critical = True
 
     def run(self, ctx: TaskContext) -> StepResult:
+        # Wait start task button
+        print("[Restaurant] waiting for start button to be pressed...")
+        while not ctx.walkie.robot.button.is_pressed:
+            pass
+        print("[Restaurant] start button pressed")
         raw = os.getenv("RESTAURANT_KITCHEN_BAR_POSE", "current").strip().lower()
         explicit = raw not in ("", "current", "here", "now")
 
