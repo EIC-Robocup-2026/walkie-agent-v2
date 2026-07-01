@@ -26,13 +26,13 @@ LLM_USE_LOCAL = "1"
 WALKIE_MODEL = "google/gemini-3-flash-preview:nitro"
 WALKIE_TEMPERATURE = "0.5"
 # Local LLM endpoint (OpenAI-compatible), used when LLM_USE_LOCAL=1.
-LOCAL_BASE_URL = "http://10.30.0.202:8000/v1"
+LOCAL_BASE_URL = "http://10.0.0.201:8000/v1"
 LOCAL_MODEL = "qwen3.5-9b"
 
 [services]
 # Remote AI inference server (walkie-ai-server): STT, TTS, object detection,
 # image captioning, pose estimation, CLIP image-embed.
-WALKIE_AI_BASE_URL = "http://10.30.0.202:5000"
+WALKIE_AI_BASE_URL = "http://10.0.0.201:5000"
 
 [transport]
 # walkie-sdk robot transport. ROS services over rosbridge (default), camera over
