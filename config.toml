@@ -268,29 +268,6 @@ WALKIE_GRASP_RETRY_BACK_M = "0.05"   # backward base step between retries
 #     the object is close ("rotate" can over-shoot and face the wall, dropping the object
 #     out of view). Opt in only after an on-robot A/B.
 WALKIE_GRASP_ARM_ALIGN = "rotate"    # "rotate" | "strafe"
-# Descriptor-prompt detection + CLIP rerank (tasks/skills/grasp.py): YOLOE is prompt-driven
-# and can't box brand names ("coke"), but under a generic visual descriptor ("can","red can")
-# it returns SEVERAL boxes — so we detect with descriptors (the _GRASP_DESCRIPTORS map),
-# then CLIP-rerank the boxes against the SPECIFIC target name and pick the best match.
-# "0" = exactly today's behaviour (single-prompt detect + nearest-wins); the real kill switch
-# if a server lacks per_detection embeddings. Gates BOTH prompt expansion and rerank.
-WALKIE_GRASP_CLIP_RERANK = "1"
-# CLIP cosine floor: drop boxes scoring below this against the target. "0.0" = pure rerank,
-# reject nothing (raw CLIP cosines on small crops are compressed; a high floor on UNTUNED
-# CLIP silently rejects the real target -> nearest fallback). RAISE only after on-robot tuning.
-WALKIE_GRASP_CLIP_SIM_THRESHOLD = "0.0"
-# CLIP text-query template ("{t}" = target); "a photo of {t}" beats a bare brand string
-# in CLIP zero-shot. Tune on-robot.
-WALKIE_GRASP_CLIP_QUERY_TMPL = "a photo of {t}"
-# Descriptor SOURCE: ask the LLM (ctx.model) to generate the generic visual phrases YOLOE
-# detects with, few-shot-anchored on the _GRASP_DESCRIPTORS map — so an arbitrary GPSR
-# target (not in that map) still gets boxable descriptors instead of just its brand name.
-# Cached once per target. "0" = use ONLY the static map (exactly the pre-LLM behaviour) —
-# the rollback switch. On any LLM failure/timeout it falls back to the static map anyway.
-WALKIE_GRASP_LLM_DESCRIPTORS = "1"
-# Wall-clock cap on that one LLM round-trip (ctx.model is built without an HTTP timeout, so
-# a stalled endpoint must not hang the grasp): on timeout it degrades to the static map.
-WALKIE_GRASP_LLM_DESCRIPTORS_TIMEOUT_S = "10"
 
 [skills]
 # Final-approach "creep" — direct cmd_vel closed-loop relative drive (NOT Nav2), used
