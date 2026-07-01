@@ -123,6 +123,8 @@ PHOTO_SAY_CHEESE = (
     "Please look at me and stand still — say cheese!"
 )
 
+YAY_I_REMEMBER = "I've successfully taken a picture of you"
+
 HOST_APPEARANCE_CAPTION_PROMPT = (
     "Describe the visible appearance of the SEATED person in this image in one "
     "sentence for someone who must recognize them at a party: clothing and its "

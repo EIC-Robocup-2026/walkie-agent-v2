@@ -552,7 +552,8 @@ def approach_to_standoff(ctx: TaskContext, world_xy: tuple[float, float], *,
     try:
         status = ctx.walkie.nav.go_to(
             x=cx, y=cy, blocking=True, standoff=standoff_m,
-            align_method="face_target", goal_tolerance=(tol if tol > 0 else None),
+            align_method="face_target",
+            # goal_tolerance=(tol if tol > 0 else None),
         )
     except Exception as exc:
         print(f"[restaurant.skills] approach: nav raised ({exc})")

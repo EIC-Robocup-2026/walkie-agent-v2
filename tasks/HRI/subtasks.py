@@ -92,10 +92,25 @@ class GoToDoor(SubTask):
         self.critical = guest == 1  # if nav is dead on step 1, nothing works
 
     def run(self, ctx: TaskContext) -> StepResult:
+        # Wait start task button
+        # ctx.say("I'm waiting for the start button to be pressed.")
+        # print("[HRI] waiting for start button to be pressed...")
+        # while not ctx.walkie.robot.button.is_pressed:
+        #     print(ctx.walkie.robot.button.is_pressed)
+        #     pass
+        # ctx.say("Start button pressed. Heading to the door.")
+        print("[HRI] start button pressed")
         ctx.walkie.robot.arm.go_to_home(group_name="both_arms_lift", blocking=False)  # reset the arm for better nav
-        x, y, heading = resolve_pose("entrance_door", env_fallback="HRI_DOOR_POSE", default="0.0,0.0,0")
-        if not ctx.goto(x, y, heading):
-            return StepResult.RETRY
+        # Greeting waypoint = the mapped `entrance` door (world.toml). Its heading is
+        # the passage direction (faces into the arena); GreetAndLearn re-centers on the
+        # guest via face-tracking, so the initial heading is not critical. Falls back to
+        # an optional HRI_DOOR_POSE env override, then origin, on a box with no map.
+        door = ctx.world.doors.get("entrance") if ctx.world else None
+        if door is not None:
+            x, y, heading = door.pose
+        x, y, heading = resolve_pose(None, env_fallback="HRI_DOOR_POSE", default=f"{x},{y},{heading}")
+        print(x, y, heading)
+        ctx.goto(x, y, heading)
         # Wait for the guest to come stand in front before greeting. Look
         # straight ahead so a standing person's face is in frame (nav may have
         # left the head tilted down), then poll for a face bigger than the area
@@ -184,13 +199,13 @@ class GreetAndLearn(SubTask):
                     time.sleep(cap_gap)
             return imgs
 
+        ctx.say(prompts.PHOTO_SAY_CHEESE)
         # Step back first so the whole body fits, then cue the guest right before
         # the face burst (so the "cheese" smile is fresh when the shutter fires).
         move_base_relative(ctx, -backup_m)  # blocking goto; no extra settle needed
 
         # FACE frames: head level (needs the face for the embedding + the caption).
         tilt_head(ctx, face_tilt, settle=tilt_settle)
-        ctx.say(prompts.PHOTO_SAY_CHEESE)
         face_imgs = _burst()
         # ATTIRE frames: head tilted down to frame the body for a strong OSNet crop.
         tilt_head(ctx, app_tilt, settle=tilt_settle)
@@ -218,6 +233,8 @@ class GreetAndLearn(SubTask):
         else:
             print("[HRI] posed capture produced no frames; skipping enrollment")
 
+        ctx.say(prompts.YAY_I_REMEMBER)
+
 
 class GuideToLivingRoom(SubTask):
     def __init__(self, guest: int):
@@ -225,7 +242,7 @@ class GuideToLivingRoom(SubTask):
 
     def run(self, ctx: TaskContext) -> StepResult:
         ctx.say(prompts.FOLLOW_ME)
-        x, y, heading = resolve_pose("living_room", env_fallback="HRI_LIVING_ROOM_POSE", default="0.0,0.0,0")
+        x, y, heading = resolve_pose("living_room", default="0.0,0.0,0")
         if not ctx.goto(x, y, heading):
             return StepResult.RETRY
         ctx.score("gaze_navigation")  # guided the guest, facing the navigation goal
@@ -331,6 +348,8 @@ class OfferSeat(SubTask):
         final_xy = guest_xy or world_xy
         if final_xy is not None:
             remember_person_xy(ctx, f"guest-{self.guest}", final_xy)
+        x, y, heading = resolve_pose("living_room", default="0.0,0.0,0")
+        ctx.goto(x, y, heading)
         ctx.walkie.robot.arm.right.go_to_home(blocking=False)  # reset the arm for better nav after facing
         return StepResult.DONE
 

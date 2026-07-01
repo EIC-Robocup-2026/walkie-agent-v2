@@ -56,9 +56,20 @@ class WalkieWorld:
         embed_text: Optional[Callable[[str], list[float]]] = None,
         enable_people: bool = True,
         include_absent: bool = False,
+        seed_locations: bool | None = None,
     ) -> None:
         self._embed_text = embed_text
         self._include_absent = include_absent
+        # Seed the static map's [locations] (furniture) as queryable scene nodes too,
+        # not just [object_instances]. Default OFF (env override) because it changes
+        # what every scene consumer sees (all_objects / recently_seen / the Database
+        # agent's dumps), so it's opt-in. See _location_map_objects.
+        self._seed_locations = (
+            seed_locations
+            if seed_locations is not None
+            else os.getenv("WALKIE_EXPLORE_SEED_LOCATIONS", "0").strip().lower()
+            in ("1", "true", "yes", "on")
+        )
 
         # --- map + vocab (lazy; pure, light) ---
         self._map_path = map_path
@@ -282,14 +293,49 @@ class WalkieWorld:
             self._scene.install(nodes, rels)
 
     def _seed_map_objects(self) -> None:
-        """Seed world-editor object shapes as ``source="map"`` placeholder nodes."""
-        mos = self.map.map_objects
+        """Seed surveyed world.toml shapes as ``source="map"`` placeholder nodes.
+
+        Always seeds the world-editor object instances (``[object_instances]``). When
+        ``seed_locations`` is on (env ``WALKIE_EXPLORE_SEED_LOCATIONS``), the surveyed
+        furniture (``[locations]``: table/sofa/sink/…) is seeded too, so ``query_text``
+        / ``query_near`` can return world.toml entries — at the cost of those nodes also
+        showing up in ``all_objects`` / ``recently_seen`` / the Database agent's dumps.
+        """
+        mos = list(self.map.map_objects)
+        if self._seed_locations:
+            mos += self._location_map_objects()
         if not mos:
             return
         with self._scene_lock:
             nodes = self._scene.merge_map_objects(mos, now=time.time())
             rels = derive_relations(nodes, **self._relation_kwargs)
             self._scene.install(nodes, rels)
+
+    def _location_map_objects(self) -> list[MapObject]:
+        """Surveyed ``[locations]`` as :class:`MapObject` placeholders (query_text seed).
+
+        A :class:`Location` carries no Z extent (only an XY footprint + a nav pose), so
+        the node is a flat footprint at ``z=0`` — enough for text + XY-proximity recall,
+        which is all ``query_text``/``query_near`` need. The node id is ``map:<location>``
+        (distinct from the ``map:<class>.<i>`` object-instance ids), and ``class_name`` is
+        the location name so the keyword matcher substring-hits it (``"table"`` ⊂
+        ``"table_2"``). Honours the ``present``/``include_absent`` drop already applied by
+        the LocationBook, so a ``present = false`` location is never seeded.
+        """
+        out: list[MapObject] = []
+        for name, loc in self.map.locations.items():
+            out.append(
+                MapObject(
+                    name=name,
+                    class_name=name,
+                    footprint_polygon=tuple(loc.polygon) if loc.polygon else (),
+                    z_min=0.0,
+                    z_max=0.0,
+                    pose=loc.pose,
+                    on=loc.room,
+                )
+            )
+        return out
 
     # ==================================================================
     # People

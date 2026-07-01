@@ -98,6 +98,11 @@ class GoToKitchen(SubTask):
     critical = True  # nothing else works if we never reach the kitchen
 
     def run(self, ctx: TaskContext) -> StepResult:
+        # Wait start task button
+        print("[PickAndPlace] waiting for start button to be pressed...")
+        while not ctx.walkie.robot.button.is_pressed:
+            pass
+        print("[PickAndPlace] start button pressed")
         x, y, h = _pose("PNP_KITCHEN_POSE")
         return StepResult.DONE if ctx.goto(x, y, h) else StepResult.RETRY
 

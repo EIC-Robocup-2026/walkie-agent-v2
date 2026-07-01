@@ -417,6 +417,11 @@ class GoToStart(SubTask):
     critical = True
 
     def run(self, ctx: TaskContext) -> StepResult:
+        # Wait start task button
+        print("[Restaurant] waiting for start button to be pressed...")
+        while not ctx.walkie.robot.button.is_pressed:
+            pass
+        print("[Restaurant] start button pressed")
         raw = os.getenv("RESTAURANT_KITCHEN_BAR_POSE", "current").strip().lower()
         explicit = raw not in ("", "current", "here", "now")
 
@@ -630,15 +635,21 @@ class TestTask(SubTask):
     critical = True
 
     def run(self, ctx: TaskContext) -> StepResult:
+        pos = ctx.walkie.status.get_position()
+        results = ctx.world.query_text("table", near=[pos["x"], pos["y"]])
+        for result in results:
+            print(result.class_name)
+        
+        # ctx.world.locations.
         # Full pick via the grasp skill: detect -> approach+aim -> de-deadzone ->
         # grasp on the auto-selected arm (per-move result checks inside).
-        ctx.walkie.arm.go_to_home(group_name="right_arm", pose_name="standby", blocking=False)
-        ok = pick_object(
-            ctx, prompts=["red can"], arm="auto",
-            pregrasp_standoff_m=0.2, approach_preference="side", approach_weight=2.0,
-        )
-        print(f"[test] pick_object -> {ok}")
-        return StepResult.DONE if ok else StepResult.RETRY
+        # ctx.walkie.arm.go_to_home(group_name="right_arm", pose_name="standby", blocking=False)
+        # ok = pick_object(
+        #     ctx, prompts=["red can"], arm="auto",
+        #     pregrasp_standoff_m=0.2, approach_preference="side", approach_weight=2.0,
+        # )
+        # print(f"[test] pick_object -> {ok}")
+        return StepResult.DONE
 
 
 class GraspPlanTestTask(SubTask):
@@ -780,15 +791,15 @@ class PickAndPlaceTestTask(SubTask):
     critical = True
 
     def run(self, ctx: TaskContext) -> StepResult:
-        parsed = ctx.extract(prompts.Order, prompts.EXTRACT_ORDER_INSTRUCTIONS, "I want coke")
-        print(parsed)
-        return StepResult.DONE
+        # parsed = ctx.extract(prompts.Order, prompts.EXTRACT_ORDER_INSTRUCTIONS, "I want coke")
+        # print(parsed)
+        # return StepResult.DONE
 
         # ctx.walkie.arm.go_to_home(group_name="right_arm", pose_name="standby", blocking=False)
 
         # 1. Pick — on success this records the held object (per arm) for the placer.
         if not pick_object(
-            ctx, prompts=["cereal"], arm="left",
+            ctx, prompts=["tea bottle"], arm="left",
             pregrasp_standoff_m=0.2, approach_preference="side", approach_weight=2.0,
         ):
             print("[test] pick_object -> False; nothing to place")

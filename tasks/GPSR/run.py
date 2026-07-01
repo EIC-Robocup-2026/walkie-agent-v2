@@ -72,6 +72,9 @@ def main() -> None:
         except Exception as exc:
             print(f"[gpsr] perception loop failed to start ({exc}); continuing without it")
 
+    while True:
+        pass
+
     try:
         build_gpsr_task(ctx).run()
     finally:

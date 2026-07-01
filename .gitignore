@@ -48,3 +48,6 @@ graph_background.npz
 graph_captures/
 mic_recording/
 walkie-ros-main/
+graph_scene/
+graph_buffer/
+graph_debug/
