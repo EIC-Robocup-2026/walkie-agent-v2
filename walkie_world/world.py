@@ -22,9 +22,11 @@ WalkieWorld per process so the scene lock and the people DB stay single-owner.
 
 from __future__ import annotations
 
+import math
 import os
 import threading
 import time
+from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from walkie_world.config import relation_kwargs, scene_store_kwargs
@@ -41,6 +43,70 @@ from walkie_world.map.locations import (
 from walkie_world.map.vocab import WorldModel, load_world
 from walkie_world.scene.relations import derive_relations
 from walkie_world.scene.store import ObjectNode, Relation, SceneStore
+
+
+def _pose_surveyed(pose: Optional[Pose]) -> bool:
+    """A pose is 'surveyed' unless it's missing or the all-zero [0,0,0] placeholder.
+
+    world.toml uses ``[0,0,0]`` for "not yet surveyed"; navigating there would drive
+    to the map origin, so such a location is treated as having no usable pose.
+    """
+    if pose is None:
+        return False
+    return not (abs(pose[0]) < 1e-6 and abs(pose[1]) < 1e-6 and abs(pose[2]) < 1e-6)
+
+
+_LEAD_VERBS = (
+    "go to ", "goto ", "drive to ", "navigate to ", "move to ", "come to ",
+    "head to ", "walk to ", "get to ", "go ", "go to the ",
+)
+
+
+def _strip_lead_verbs(text: str) -> str:
+    """Drop a leading navigation verb ("go to the cabinet" -> "the cabinet").
+
+    The LLM usually passes a bare place name, but a delegated phrase may include the
+    verb; stripping it keeps the resolver robust. Longest prefixes first.
+    """
+    low = text.lower()
+    for v in sorted(_LEAD_VERBS, key=len, reverse=True):
+        if low.startswith(v):
+            return text[len(v):].strip()
+    return text
+
+
+def _split_room_qualifier(text: str) -> tuple[str, Optional[str]]:
+    """Split a "<target> in [the] <room>" phrase into (target, room); else (text, None).
+
+    Lets the resolver handle "the table in the kitchen" without an LLM round-trip
+    (the agent can also pass ``room=`` explicitly).
+    """
+    low = text.lower()
+    for sep in (" in the ", " in "):
+        i = low.find(sep)
+        if i != -1:
+            return text[:i].strip(), text[i + len(sep):].strip()
+    return text.strip(), None
+
+
+@dataclass
+class PlaceMatch:
+    """A resolved place reference (see :meth:`WalkieWorld.resolve_place`).
+
+    Exactly one navigation anchor is set: ``pose`` (a surveyed map location/room —
+    drive there with heading) or ``point`` (an observed scene object's XY — approach
+    it). ``candidates`` holds the other places that also matched when several did and
+    the nearest was auto-picked (so the caller can announce "the nearest table").
+    """
+
+    kind: str                                  # "location" | "room" | "object"
+    label: str                                 # human-readable, e.g. "kitchen table"
+    name: Optional[str] = None                 # canonical location/room name, or scene node id
+    pose: Optional[Pose] = None                # full nav pose (x, y, heading) for a map place
+    point: Optional[tuple] = None              # (x, y) only, for an observed scene object
+    room: Optional[str] = None                 # resolved room, if any
+    candidates: list = field(default_factory=list)  # other matched labels (auto-picked nearest)
+    source: str = "map"                        # "map" | "scene"
 
 
 class WalkieWorld:
@@ -208,6 +274,183 @@ class WalkieWorld:
     def map_objects(self) -> list[MapObject]:
         """The world-editor's surveyed object shapes (XY footprint + Z height)."""
         return list(self.map.map_objects)
+
+    def default_location_for(self, name: str | None) -> tuple[str, Pose | None] | None:
+        """The canonical placement (name, pose) where an object/category belongs.
+
+        Resolves object -> category -> the location whose ``category`` matches it
+        (the map's "the drinks live in the cabinet" encoding). Accepts either an
+        object name ("cola") or a category ("drinks"). Returns ``(location_name,
+        pose)`` — ``pose`` may be ``None`` for an unsurveyed location — or ``None``
+        when nothing grounds. This is the lookup the Finals "return a misplaced
+        object to its default location" problem (and the Database agent's
+        ``get_default_location`` tool) is built on.
+        """
+        obj = self.obj(name)
+        cat = self.objects.get(obj) if obj else self.category(name)
+        if cat is None:
+            return None
+        for loc_name, loc in self.locations.items():
+            if getattr(loc, "category", None) == cat:
+                return loc_name, self.location_pose(loc_name)
+        return None
+
+    def objects_in_room(self, room: str | None) -> list[ObjectNode]:
+        """Confirmed scene objects whose centroid falls inside *room*'s polygon.
+
+        Grounds *room* to a canonical name, then filters ``all_objects()`` by
+        ``room_at`` of each centroid. Empty when the room is unknown, has no
+        boundary polygon, or nothing has been catalogued there.
+        """
+        canon = self.room(room)
+        if canon is None:
+            return []
+        out: list[ObjectNode] = []
+        for n in self.all_objects():
+            cx, cy = float(n.centroid[0]), float(n.centroid[1])
+            if self.room_at(cx, cy) == canon:
+                out.append(n)
+        return out
+
+    # --- natural-language place resolution ----------------------------------
+    def _match_locations(self, target: str, canon_room: Optional[str]) -> list[str]:
+        """Canonical locations matching *target*, optionally scoped to *canon_room*.
+
+        Matches by name token ("table" ∈ kitchen_table), the vocab's 1-best alias/fuzzy
+        grounding ("couch" → sofa), the category a location holds ("drinks" → cabinet),
+        or a fuzzy hit on a name token. Room-scoping filters by ``Location.room``.
+        """
+        t = _loc._strip_article(_loc._norm(target)) if target else ""  # norm first, then strip
+        if not t:
+            return []
+        global_hit = self.location(target)          # 1-best alias/fuzzy (may be another room)
+        target_cat = self.category(target)          # e.g. "drinks"
+        cutoff = _loc._fuzzy_cutoff()
+        out: list[str] = []
+        for name, loc in self.locations.items():
+            if canon_room is not None and getattr(loc, "room", None) != canon_room:
+                continue
+            tokens = name.split("_")
+            if (
+                t in tokens
+                or global_hit == name
+                or (target_cat is not None and getattr(loc, "category", None) == target_cat)
+                or bool(_loc._fuzzy_match(t, tokens, cutoff))
+            ):
+                out.append(name)
+        return out
+
+    @staticmethod
+    def _nearest(surveyed: list[tuple[str, Pose]], near) -> tuple[str, Pose]:
+        """The (name, pose) whose XY is closest to *near*; first entry if near is None."""
+        if near is None:
+            return surveyed[0]
+        return min(surveyed, key=lambda it: math.hypot(it[1][0] - near[0], it[1][1] - near[1]))
+
+    def _room_center_radius(self, canon_room: Optional[str]):
+        """(center_xy, radius_m) for a room, for spatially scoping a scene query, or (None, None)."""
+        room = self.rooms.get(canon_room) if canon_room else None
+        if room is None:
+            return None, None
+        poly = getattr(room, "polygon", ()) or ()
+        if poly:
+            xs = [p[0] for p in poly]
+            ys = [p[1] for p in poly]
+            cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
+            r = max(0.5, 0.5 * math.hypot(max(xs) - min(xs), max(ys) - min(ys)))
+            return (cx, cy), r
+        if _pose_surveyed(room.pose):
+            return (room.pose[0], room.pose[1]), float(os.getenv("WALKIE_ROOM_QUERY_RADIUS_M", "3.0"))
+        return None, None
+
+    def resolve_place(self, text: str | None, *, room: str | None = None, near=None) -> "PlaceMatch | None":
+        """Resolve a natural-language place ("the table in the kitchen") to a nav target.
+
+        Composes the whole world model: direct vocab grounding, then **room-scoped**
+        location matching (disambiguating "the table" by room), then a **scene-graph**
+        fallback to an observed object's position. Returns a :class:`PlaceMatch` whose
+        ``pose`` (map place) or ``point`` (observed object) is the navigation anchor, or
+        ``None`` when nothing resolves.
+
+        - ``room`` scopes the search to a room (the agent can pass it explicitly; a
+          "... in the <room>" phrase is also parsed out of *text*).
+        - ``near`` is the robot's ``(x, y)``: when several map places match, the nearest
+          is auto-picked and the rest are returned in ``candidates``.
+        - The scene fallback (``WALKIE_RESOLVE_SCENE_FALLBACK=1``, default on) uses
+          ``query_text`` scoped to the room's center/radius.
+        """
+        if not text or not str(text).strip():
+            canon_room = self.room(room) if room else None
+            if canon_room and _pose_surveyed(self.location_pose(canon_room)):
+                return PlaceMatch(kind="room", label=canon_room.replace("_", " "),
+                                  name=canon_room, pose=self.location_pose(canon_room),
+                                  room=canon_room)
+            return None
+
+        text = _strip_lead_verbs(str(text).strip())
+        target, room_from_text = _split_room_qualifier(text)
+        room_hint = room or room_from_text
+        canon_room = self.room(room_hint) if room_hint else None
+
+        # (1) direct location grounding (full phrase, then the target), room-consistent.
+        for probe in (text, target):
+            canon = self.location(probe)
+            if canon:
+                loc = self.locations.get(canon)
+                loc_room = getattr(loc, "room", None) if loc else None
+                if canon_room is None or loc_room == canon_room:
+                    pose = self.location_pose(canon)
+                    if _pose_surveyed(pose):
+                        return PlaceMatch(kind="location", label=canon.replace("_", " "),
+                                          name=canon, pose=pose, room=loc_room or canon_room)
+
+        # (1b) the whole reference IS a room ("the kitchen", "living room").
+        canon_txt_room = self.room(text)
+        if canon_txt_room and _pose_surveyed(self.location_pose(canon_txt_room)):
+            return PlaceMatch(kind="room", label=canon_txt_room.replace("_", " "),
+                              name=canon_txt_room, pose=self.location_pose(canon_txt_room),
+                              room=canon_txt_room)
+
+        # (2) room-scoped / ambiguous location collect -> single, else nearest to `near`.
+        cands = self._match_locations(target, canon_room)
+        surveyed = [(n, self.location_pose(n)) for n in cands]
+        surveyed = [(n, p) for n, p in surveyed if _pose_surveyed(p)]
+        if surveyed:
+            name, pose = self._nearest(surveyed, near) if len(surveyed) > 1 else surveyed[0]
+            others = [n.replace("_", " ") for n, _ in surveyed if n != name]
+            return PlaceMatch(kind="location", label=name.replace("_", " "), name=name,
+                              pose=pose, room=getattr(self.locations.get(name), "room", None),
+                              candidates=others)
+
+        # (3) scene-graph fallback: an observed object (optionally scoped to the room).
+        if os.getenv("WALKIE_RESOLVE_SCENE_FALLBACK", "1").lower() in ("1", "true", "yes"):
+            center, radius = self._room_center_radius(canon_room)
+            try:
+                hits = self.query_text(target, k=1, near=center, radius=radius)
+            except Exception:  # noqa: BLE001 — degrade to "not found"
+                hits = []
+            if hits:
+                n = hits[0]
+                return PlaceMatch(kind="object", label=(n.best_caption or n.class_name),
+                                  name=n.id, point=(float(n.centroid[0]), float(n.centroid[1])),
+                                  room=canon_room, source="scene")
+        return None
+
+    def query_text_in_room(self, query: str, room: str | None, k: int = 5) -> list[ObjectNode]:
+        """CLIP scene-graph search for *query* limited to *room* (its center + radius).
+
+        Grounds *room*, then spatially filters ``query_text`` to the room's geometry
+        (polygon centroid + half-diagonal, or the room pose + ``WALKIE_ROOM_QUERY_RADIUS_M``
+        when there is no polygon). Empty when the room is unknown; unscoped when the room
+        has no usable geometry. This answers "where is the <object> in the <room>".
+        """
+        canon = self.room(room)
+        if canon is None:
+            return []
+        center, radius = self._room_center_radius(canon)
+        if center is None:
+            return self.query_text(query, k=k)
+        return self.query_text(query, k=k, near=center, radius=radius)
 
     # ==================================================================
     # Objects / scene graph

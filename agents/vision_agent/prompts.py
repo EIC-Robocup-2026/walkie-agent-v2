@@ -21,6 +21,8 @@ Read-only / parallelable:
   that `detect_objects_from_view` reports only as "can"/"bottle" or misses.
 - `image_caption(prompt=None)` — natural-language description of the scene.
 - `detect_people_poses()` — bbox + simple pose summary per visible person.
+- `find_person_raising_hand()` — is anyone visible raising a hand (calling for help)?
+- `find_person(descriptor=None)` — is a person visible (optionally matching a look)?
 - `get_camera_view_description()` — combined snapshot (detection + caption + people).
 
 Effectful / sequential:

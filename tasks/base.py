@@ -345,6 +345,7 @@ class TaskContext:
         unless a task opts in (Restaurant sets it in its config.toml).
         """
         _log("ctx", f"goto x={x:.2f} y={y:.2f} heading={math.degrees(heading_rad):.0f}deg")
+        # return True
         tol = float(os.getenv("WALKIE_NAV_GOAL_TOLERANCE_M", "0.0"))
         try:
             status = self.walkie.nav.go_to(

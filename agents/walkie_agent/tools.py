@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import uuid
+from typing import TYPE_CHECKING
 
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
@@ -8,6 +10,9 @@ from langchain_core.tools import tool
 from agents.core.tool_decorators import parallelable_tool, sequential_tool
 from agents.core.robot_context import RobotContext
 from interfaces.walkie_interface import WalkieInterface
+
+if TYPE_CHECKING:  # annotation only — never import tasks.* at agent import time
+    from tasks.base import TaskContext
 
 
 def make_walkie_main_tools(
@@ -18,6 +23,7 @@ def make_walkie_main_tools(
     database_agent,
     *,
     agent_name: str = "walkie",
+    ctx: "TaskContext | None" = None,
 ):
     """Tools for the main Walkie agent.
 
@@ -121,9 +127,48 @@ def make_walkie_main_tools(
             pass
         return f"Spoke: {text!r}"
 
-    return [
-        delegate_to_actuator,
-        delegate_to_vision,
-        delegate_to_database,
-        speak,
-    ]
+    @sequential_tool
+    @tool(parse_docstring=True)
+    def handle_person_request(request: str = "") -> str:
+        """Take a person's spoken request, repeat it back, and carry it out.
+
+        Use when a person asks Walkie to do something — e.g. after they raise a hand,
+        or after you welcome a guest. If `request` is empty, Walkie listens for the
+        person to speak. It repeats the understood command aloud (in the Finals,
+        correctly repeating the command scores), then executes it with the full GPSR
+        command pipeline (parse → ground → Tier-1 skills, Tier-2 sub-agent fallback).
+
+        Args:
+            request: The person's request text; leave empty to listen via the microphone.
+
+        Returns:
+            A summary of what was understood and the outcome of each command.
+        """
+        from tasks.GPSR.dispatch import execute_plan
+        from tasks.GPSR.parse import parse_commands
+        from tasks.GPSR.plan import render_plan_speech
+
+        utterance = (request or "").strip() or ctx.listen()
+        if not utterance:
+            return "I did not catch any request."
+        world = ctx.world.vocab
+        parsed = parse_commands(ctx.model, utterance, world)
+        if not parsed:
+            return f"I heard {utterance!r} but could not turn it into an action."
+        brain = ctx.data.get("brain")
+        manip = (
+            os.getenv("FINAL_ARM_CALIBRATED") or os.getenv("GPSR_ENABLE_MANIPULATION", "0")
+        ).lower() in ("1", "true", "yes")
+        outcomes = []
+        for src, plan in parsed:
+            try:  # repeat the command back (Finals: repeating the command scores)
+                ctx.say(render_plan_speech(plan))
+            except Exception:  # noqa: BLE001 — never let TTS/render abort execution
+                pass
+            status = execute_plan(ctx, plan, world, brain, manip_enabled=manip)
+            outcomes.append(f"{src!r}: {status}")
+        return "Handled request — " + "; ".join(outcomes)
+
+    base = [delegate_to_actuator, delegate_to_vision, delegate_to_database]
+    extra = [handle_person_request] if ctx is not None else []
+    return [*base, *extra, speak]

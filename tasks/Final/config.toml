@@ -1,0 +1,37 @@
+# Final task (RoboCup@Home 2026 Finals, rulebook chapter 6) knobs.
+# TOML keys ARE env-var names; the [final] table header is just grouping.
+# Precedence: shell env > .env > this file > root config.toml > code default.
+
+[final]
+# Total run budget (the Finals cap is 10:00). The patrol loop stops driving new
+# rooms once this elapses; the fixed high-value steps run first.
+FINAL_TIME_BUDGET_SEC = "600"
+
+# Arm gate. 0 = manipulation steps (pick/place, laundry basket, dishwasher) ANNOUNCE
+# instead of moving the arm — same convention as LAUNDRY_/RESTAURANT_ARM_CALIBRATED.
+# Flip to 1 only once grasp/place poses are calibrated on the robot. This same var
+# also gates the agents' pick_up_object/place_object_down tools.
+FINAL_ARM_CALIBRATED = "0"
+
+# Rooms to patrol, in order (canonical room names from the arena world.toml). The
+# robot drives to each and hands it to the agent to find + solve one problem.
+FINAL_PATROL_ROOMS = "kitchen,living_room"
+
+# Named map places for the fixed problems. Survey these in the arena's world.toml
+# (walkie-map-editor); the handlers degrade gracefully when a name has no pose.
+FINAL_EXIT_DOOR = "exit"                 # the apartment/exit door to open + welcome through
+FINAL_WASHING_MACHINE = "washing_machine"  # where the laundry basket must end up
+FINAL_DISHWASHER = "dishwasher"          # the dishwasher to close
+
+# Open-vocab detector phrase for the laundry basket (the object to pick + carry).
+FINAL_LAUNDRY_BASKET = "laundry basket"
+
+# Where to stand after entering the arena: "current" stays put; "x,y,heading_rad"
+# drives to a fixed start pose.
+FINAL_START_POSE = "current"
+
+# Cap on agent-driven patrol problems (the Finals minimum is 8 generated problems).
+FINAL_MAX_PATROL_PROBLEMS = "8"
+
+# Live scorecard path (attempted/claimed points, NOT referee-awarded).
+FINAL_SCORECARD_PATH = "final_scorecard.json"

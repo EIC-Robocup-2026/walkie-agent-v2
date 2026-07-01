@@ -3,6 +3,7 @@ from .robot_context import RobotContextMiddleware
 from .stub_tools import StubToolMiddleware
 from .tool_grouping import ToolGroupingMiddleware
 from .trace import TraceMiddleware
+from .todo import TodoListMiddleware
 
 __all__ = [
     "PerceptionContextMiddleware",
@@ -10,4 +11,5 @@ __all__ = [
     "StubToolMiddleware",
     "ToolGroupingMiddleware",
     "TraceMiddleware",
+    "TodoListMiddleware"
 ]

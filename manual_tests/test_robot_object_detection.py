@@ -23,7 +23,7 @@ def test_object_detection():
     robot = get_robot()
     walkie = WalkieInterface(robot)
     walkieAI = WalkieAIClient(
-        base_url=os.getenv("WALKIE_AI_BASE_URL", "http://10.0.0.211:5000"),
+        base_url=os.getenv("WALKIE_AI_BASE_URL", "http://10.0.0.201:5000"),
     )
     print("Walkie Client initialized")
 
@@ -45,7 +45,7 @@ def test_object_detection():
         frame = walkie.camera.capture()
 
         detections = walkieAI.image.detect(frame,
-                                        #    prompts=["sofa","door","chair","armchair","table","stool","shirt","sponge","bowl","cup","fork","knife","plate","spoon","coke","ice/ tea","milk","orange juice","red bull","water bottle","bread","cornflakes","instant noodles","potato","tomato soup","apple","avocado","lemon","orange","chips","cookies","gum","mixed nuts","pringles","hand cream","soap","toothpaste","dish rack","shelf","monitor","bed","pillow"]
+                                           prompts=["sofa","door","chair","armchair","table","stool","shirt","sponge","bowl","cup","fork","knife","plate","spoon","coke","ice/ tea","milk","orange juice","red bull","water bottle","bread","cornflakes","instant noodles","potato","tomato soup","apple","avocado","lemon","orange","chips","cookies","gum","mixed nuts","pringles","hand cream","soap","toothpaste","dish rack","shelf","monitor","bed","pillow"]
                                            )
         # Show the detections
         for detection in detections:

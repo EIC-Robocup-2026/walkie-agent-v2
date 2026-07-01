@@ -109,7 +109,7 @@ class GoToDoor(SubTask):
         if door is not None:
             x, y, heading = door.pose
         x, y, heading = resolve_pose(None, env_fallback="HRI_DOOR_POSE", default=f"{x},{y},{heading}")
-        print(x, y, heading)
+        # print(x, y, heading)
         ctx.goto(x, y, heading)
         # Wait for the guest to come stand in front before greeting. Look
         # straight ahead so a standing person's face is in frame (nav may have
@@ -670,9 +670,11 @@ class TestRememberAndFollowHost(SubTask):
         ctx.say("Hello! I am going to remember you as the host. "
                 "Please stand in front of me and look at me.")
         tilt_head(ctx, face_tilt, settle=tilt_settle)
+        ctx.walkie.robot.head.set_auto_tilt(False)
         if not wait_for_person(ctx):
             print("[HRI] no host face detected before timeout; capturing anyway")
         move_base_relative(ctx, -backup_m)  # frame the whole body for the attire crop
+        ctx.walkie.robot.head.set_auto_tilt(True)
         # FACE frames: head level (needs the face for the embedding + caption).
         ctx.say(prompts.PHOTO_SAY_CHEESE)
         face_imgs = _burst()

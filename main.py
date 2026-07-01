@@ -11,14 +11,11 @@ from walkie_sdk import WalkieRobot
 
 from walkie_config import load_config
 
-from agents.actuator_agent import create_actuator_agent
 from agents.core.robot_context import RobotContext
-from agents.database_agent import create_database_agent
-from agents.vision_agent import create_vision_agent
-from agents.walkie_agent import create_walkie_main_agent
 from client import WalkieAIClient
 from interfaces.walkie_interface import WalkieInterface
-from services.realtime_explore import RealtimeExplore
+from tasks.base import TaskContext
+from tasks.common import WalkieBrain
 from walkie_world import WalkieWorld
 
 
@@ -87,28 +84,25 @@ def run_ready_stage(walkieAI: WalkieAIClient, walkie: WalkieInterface, model: Ch
         embed_text=(lambda q: walkieAI.image.embed_text(q)),
         enable_people=True,
     )
-    explore = RealtimeExplore(
-        model=model,
-        walkieAI=walkieAI,
+    # One shared TaskContext: the agents bind to it (so their tools reach the ctx-based
+    # nav/grasp/door/people skills) and the perception producer + Database agent share
+    # its world. RobotContext (the perception.json path + stage="ready") is already
+    # initialized in main(); the agents' perception/robot-context middleware read it.
+    listening_disabled = os.getenv("DISABLE_LISTENING", "0").lower() in ("1", "true", "yes")
+    ctx = TaskContext(
         walkie=walkie,
+        walkieAI=walkieAI,
+        model=model,
+        disable_listening=listening_disabled,
         world=world,
-        snapshot_path=RobotContext.get().perception_path,
+        people=world.people,
     )
-    graphs_enabled = os.getenv("WALKIE_EXPLORE_ENABLED", "1").lower() in ("1", "true", "yes")
-    if graphs_enabled:
-        explore.start()  # background perception loop: detect → observe_objects → perception.json
-
-    actuator = create_actuator_agent(model, walkieAI, walkie)
-    vision = create_vision_agent(model, walkieAI, walkie)
-    database = create_database_agent(
-        model, walkieAI, walkie, world=world
-    )
-    walkie_agent = create_walkie_main_agent(
-        model, walkieAI, walkie, actuator, vision, database
-    )
+    brain = WalkieBrain(ctx, disable_listening=listening_disabled)
+    ctx.data["brain"] = brain
+    if os.getenv("WALKIE_EXPLORE_ENABLED", "1").lower() in ("1", "true", "yes"):
+        brain.explore.start()  # background perception loop: detect → observe_objects → perception.json
 
     print("[Ready] Listening — speak to Walkie. Ctrl+C to exit.")
-    listening_disabled = os.getenv("DISABLE_LISTENING", "0").lower() in ("1", "true", "yes")
     try:
         while True:
             # One bad turn (STT hiccup, OpenRouter timeout, TTS outage, a sub-agent
@@ -125,10 +119,10 @@ def run_ready_stage(walkieAI: WalkieAIClient, walkie: WalkieInterface, model: Ch
                 if not text:
                     continue
                 print(f"[user] {text}")
-                # walkie_agent.invoke(
-                #     {"messages": [HumanMessage(content=text)]},
-                #     config={"configurable": {"thread_id": "main"}},
-                # )
+                brain.walkie_agent.invoke(
+                    {"messages": [HumanMessage(content=text)]},
+                    config={"configurable": {"thread_id": "main"}},
+                )
             except EOFError:
                 # Ctrl+D at the typed-input prompt — treat as a clean exit.
                 print("\n[main] EOF — shutting down.")
@@ -150,7 +144,7 @@ def run_ready_stage(walkieAI: WalkieAIClient, walkie: WalkieInterface, model: Ch
         # hangs the interpreter at exit (threading._shutdown), so the process
         # never dies and the next launch finds port 8500 still held. close()
         # disconnects the robot, which stops those threads.
-        explore.stop()
+        brain.explore.stop()
         world.persist()
         walkie.close()
         print("[main] shutdown complete.")

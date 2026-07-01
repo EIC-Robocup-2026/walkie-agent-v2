@@ -13,7 +13,6 @@
 # no map; set it in .env if needed.)
 # Host's name and favorite drink (given in the competition briefing). Used in
 # the seat-offer wording ("next to our host James"); "" = unknown.
-HRI_DOOR_POSE = "1.15,0,3.14"
 HRI_HOST_NAME = "Host"
 HRI_HOST_DRINK = "pepsi"
 # Open-vocab detector prompts used to find seats.

@@ -5,7 +5,7 @@
 
 [gpsr]
 # Map-frame waypoint "x,y,heading_rad" announced ~2h before the test.
-GPSR_INSTRUCTION_POINT_POSE = "0.0,0.0,0.0"
+GPSR_INSTRUCTION_POINT_POSE = "6.73,-2.24,2.33"
 # 1 = on entry, ask a human to open the arena door and wait for it before driving
 # to the instruction point (the robot starts outside a possibly-closed door). Uses
 # the shared tasks.skills.request_open_door. Default OFF so dev/practice runs with
