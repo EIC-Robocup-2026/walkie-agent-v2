@@ -247,6 +247,11 @@ def build_rooms_locations(data: dict, *, include_absent: bool = False):
         )
         for k in _alias_keys(canonical, raw.get("aliases")):
             room_alias[k] = canonical
+        # Redundant "<name>_room" naming (e.g. "kitchen_room"): also accept the bare
+        # name ("kitchen"), so "the kitchen" / "kitchen table" ground to it. setdefault
+        # so an explicitly-named room always wins over the derived alias.
+        if canonical.endswith("_room") and len(canonical) > len("_room"):
+            room_alias.setdefault(canonical[: -len("_room")], canonical)
 
     for name, raw in (data.get("locations") or {}).items():
         if not include_absent and not raw.get("present", True):

@@ -82,7 +82,7 @@ def test_scene_fallback(world, monkeypatch):
         best_caption = "a potted plant"
         centroid = (1.5, 8.0, 0.6)
 
-    monkeypatch.setattr(world, "query_text", lambda q, k=5, near=None, radius=None: [_Node()])
+    monkeypatch.setattr(world, "query_text", lambda q, k=5, **kw: [_Node()])
     m = world.resolve_place("plant", room="living room")
     assert m.kind == "object" and m.source == "scene"
     assert m.pose is None and m.point == (1.5, 8.0)
@@ -100,16 +100,15 @@ def test_unsurveyed_location_not_returned(world, monkeypatch):
     assert world.resolve_place("bookshelf", room="living room") is None
 
 
-def test_query_text_in_room_scopes_by_geometry(world, monkeypatch):
+def test_query_text_in_room_scopes_by_room(world, monkeypatch):
     seen = {}
 
-    def fake_query(q, k=5, near=None, radius=None):
-        seen["near"], seen["radius"] = near, radius
+    def fake_query(q, k=5, *, near=None, radius=None, room=None, scope_by_room=True):
+        seen["room"], seen["q"] = room, q
         return []
 
     monkeypatch.setattr(world, "query_text", fake_query)
     world.query_text_in_room("cup", "kitchen")
-    # kitchen polygon centroid is (3, 0); radius is the polygon half-diagonal (> 0).
-    assert seen["near"] == (3.0, 0.0)
-    assert seen["radius"] and seen["radius"] > 0
+    # Scopes by the stored object→room link (grounded canonical room), not geometry.
+    assert seen["room"] == "kitchen" and seen["q"] == "cup"
     assert world.query_text_in_room("cup", "nowhere") == []
