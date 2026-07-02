@@ -395,3 +395,64 @@ HRI_FOLLOW_PREDICT_MAX_DIST = "3.0"
 # A gap (s) between sightings longer than this clears the trajectory history —
 # after a long blackout the old velocity is stale and must not be reused.
 HRI_FOLLOW_PREDICT_GAP_RESET_SEC = "3.0"
+# --- Hybrid lidar tracking (tasks/skills/lidar_track.py) ----------------------
+# 1 = hybrid follow: the 2D lidar carries the person's position at scan rate
+# (~10 Hz) through a CV-seeded cluster track, while the CV selector runs in a
+# background worker as the slow-trusted identity source (seed/confirm/reseed).
+# 0 = legacy camera-paced loop. With the flag on but no scan available the loop
+# falls back to the legacy path automatically, so this is safe to leave on.
+HRI_FOLLOW_LIDAR = "0"
+# Main-loop tick (s) in lidar mode — replaces HRI_FOLLOW_NAV_PERIOD_SEC pacing.
+# Match the scan period (a faster tick just re-reads the same cached scan).
+HRI_FOLLOW_LIDAR_TICK_SEC = "0.1"
+# Fixed lidar-sensor -> base_link 2D transform (m, m, deg). 0,0,0 = the sensor
+# sits at the base origin facing forward; set from the robot's URDF if not.
+HRI_FOLLOW_LIDAR_OFFSET_X = "0.0"
+HRI_FOLLOW_LIDAR_OFFSET_Y = "0.0"
+HRI_FOLLOW_LIDAR_OFFSET_YAW_DEG = "0.0"
+# Ignore beams beyond this (m) — person following is close-range; far returns
+# only add wall clusters for the associator to wade through.
+HRI_FOLLOW_LIDAR_MAX_RANGE_M = "8.0"
+# Jump-distance segmentation: a new cluster starts when the adjacent-beam range
+# step exceeds BASE + SLOPE * range (the slope term compensates the beams
+# spreading apart with distance).
+HRI_FOLLOW_LIDAR_JUMP_BASE_M = "0.10"
+HRI_FOLLOW_LIDAR_JUMP_SLOPE = "0.04"
+# Person-sized candidate filters: min beams per cluster, and physical width
+# (first-to-last point, m) bounds — a leg is ~0.1 m, a torso ~0.4 m; anything
+# wider is furniture/wall arc.
+HRI_FOLLOW_LIDAR_CLUSTER_MIN_PTS = "3"
+HRI_FOLLOW_LIDAR_CLUSTER_MIN_WIDTH_M = "0.05"
+HRI_FOLLOW_LIDAR_CLUSTER_MAX_WIDTH_M = "0.80"
+# Merge consecutive clusters whose centroids are closer than this (m): two legs
+# become one person blob. Geometry only — identity still comes from CV.
+HRI_FOLLOW_LIDAR_MERGE_DIST_M = "0.40"
+# Association gate around the track's constant-velocity prediction: radius (m)
+# at zero staleness, growth per second since the last accepted update, and cap.
+# Nearest candidate inside the gate wins; an empty gate is a miss.
+HRI_FOLLOW_LIDAR_GATE_M = "0.60"
+HRI_FOLLOW_LIDAR_GATE_GROW_MPS = "1.0"
+HRI_FOLLOW_LIDAR_GATE_MAX_M = "1.2"
+# Alpha-beta filter gains (position / velocity residual weights). Track speed is
+# clamped by the shared HRI_FOLLOW_PREDICT_MAX_SPEED.
+HRI_FOLLOW_LIDAR_ALPHA = "0.4"
+HRI_FOLLOW_LIDAR_BETA = "0.2"
+# Continuous empty-gate time (s, over fresh scans) before the track drops into
+# the legacy coast (predictor extrapolation -> grace hold -> rotate-search).
+HRI_FOLLOW_LIDAR_MISS_SEC = "0.8"
+# CV fix handling: a fix farther than RESEED_DIST (m) from the track's
+# prediction hard-reseeds it (CV is the identity truth — recovers a stolen
+# gate within one CV round-trip); fixes older than MAX_AGE (s) are ignored.
+HRI_FOLLOW_LIDAR_CV_RESEED_DIST_M = "1.0"
+HRI_FOLLOW_LIDAR_CV_MAX_AGE_SEC = "2.0"
+# Min interval (s) between rotate-search steps / lost increments, so
+# HRI_FOLLOW_MAX_LOST keeps roughly its CV-paced meaning at the 10 Hz tick.
+HRI_FOLLOW_LIDAR_SEARCH_PERIOD_SEC = "0.7"
+# Retarget throttle: skip re-issuing nav.go_to when the goal moved less than
+# MIN_DELTA (m) since the last issued goal, unless MAX_AGE (s) has elapsed —
+# a 10 Hz stream of sub-cm goal changes only thrashes the planner.
+HRI_FOLLOW_LIDAR_RETARGET_MIN_DELTA_M = "0.10"
+HRI_FOLLOW_LIDAR_RETARGET_MAX_AGE_SEC = "1.0"
+# Floor (s) on the CV worker's iteration period. The real pace is the CV
+# round-trip (far larger); this only stops a stubbed camera from busy-spinning.
+HRI_FOLLOW_LIDAR_CV_MIN_PERIOD_SEC = "0.05"

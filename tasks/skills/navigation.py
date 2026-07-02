@@ -9,13 +9,20 @@ import math
 import os
 import threading
 import time
-
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager, nullcontext
+from typing import NamedTuple
 
 from tasks.base import TaskContext
 
 from .geometry import BBox
+from .lidar_track import (
+    AlphaBetaTrack,
+    LidarFollowParams,
+    associate,
+    cluster_scan,
+    sensor_to_map,
+)
 from .lift import lift_bbox_world_xy
 
 
@@ -188,13 +195,17 @@ def approach_point_cmdvel(
     dx, dy = x - rx, y - ry
     dist = math.hypot(dx, dy)
     bearing = math.atan2(dy, dx)
-    yaw_err = math.atan2(math.sin(bearing - h), math.cos(bearing - h))  # wrap to (-pi, pi]
+    yaw_err = math.atan2(
+        math.sin(bearing - h), math.cos(bearing - h)
+    )  # wrap to (-pi, pi]
     wz = max(-max_yaw, min(max_yaw, kp_yaw * yaw_err))
     remaining = dist - stop_distance
     if remaining <= 0.0:
         vx = 0.0  # already within the follow gap: only rotate to face
     else:
-        align = max(0.0, math.cos(yaw_err))  # ramp forward in as the base faces the target
+        align = max(
+            0.0, math.cos(yaw_err)
+        )  # ramp forward in as the base faces the target
         vx = min(max_speed, max(min_speed, kp_lin * remaining)) * align
     try:
         nav.set_velocity(float(vx), 0.0, float(wz))
@@ -317,7 +328,11 @@ def creep_base_relative(
     target = math.hypot(forward_m, left_m)
     if target < 1e-3:
         return True
-    speed = float(os.getenv("WALKIE_CREEP_SPEED_MPS", "0.08")) if speed_mps is None else speed_mps
+    speed = (
+        float(os.getenv("WALKIE_CREEP_SPEED_MPS", "0.08"))
+        if speed_mps is None
+        else speed_mps
+    )
     tol = float(os.getenv("WALKIE_CREEP_TOL_M", "0.01")) if tol_m is None else tol_m
     rate = float(os.getenv("WALKIE_CREEP_HZ", "15.0")) if hz is None else hz
     min_speed = float(os.getenv("WALKIE_CREEP_MIN_SPEED_MPS", "0.03"))
@@ -348,7 +363,9 @@ def creep_base_relative(
     # deadline, so it must reflect how fast we're actually commanding, not the slow
     # ease-in floor — otherwise it's ~3x too loose and rides full speed into the table.
     deadline = time.monotonic() + target / max(speed, 1e-3) + 1.0
-    max_stall = max(1, int(stall_sec * rate))  # cycles with no odom progress before bailing
+    max_stall = max(
+        1, int(stall_sec * rate)
+    )  # cycles with no odom progress before bailing
 
     def _publish(vx: float, vy: float, wz: float) -> None:
         # SDK helper: builds the correct geometry_msgs/msg/TwistStamped and publishes it to
@@ -356,8 +373,10 @@ def creep_base_relative(
         # TwistStamped) and moves it 0 m — the "base stuck" symptom we saw.
         nav.set_velocity(float(vx), float(vy), float(wz))
 
-    print(f"[skills] creep_base_relative: fwd={forward_m:+.2f} left={left_m:+.2f} "
-          f"(|{target:.2f}|m @ {speed:.2f}m/s, Nav2-free)")
+    print(
+        f"[skills] creep_base_relative: fwd={forward_m:+.2f} left={left_m:+.2f} "
+        f"(|{target:.2f}|m @ {speed:.2f}m/s, Nav2-free)"
+    )
     reached = False
     best_travelled = 0.0
     stalled = 0
@@ -379,15 +398,18 @@ def creep_base_relative(
             else:
                 stalled += 1
                 if stalled >= max_stall:
-                    print("[skills] creep_base_relative: no odom progress "
-                          f"({travelled:.3f}m of {target:.2f}m); base stuck or odom "
-                          "stale — stopping")
+                    print(
+                        "[skills] creep_base_relative: no odom progress "
+                        f"({travelled:.3f}m of {target:.2f}m); base stuck or odom "
+                        "stale — stopping"
+                    )
                     break
             v = min(speed, max(min_speed, kp_lin * remaining))  # ease in to the goal
             wz = 0.0
             if hold_heading and pose:
-                yaw_err = math.atan2(math.sin(h0 - pose["heading"]),
-                                     math.cos(h0 - pose["heading"]))
+                yaw_err = math.atan2(
+                    math.sin(h0 - pose["heading"]), math.cos(h0 - pose["heading"])
+                )
                 wz = max(-max_yaw, min(max_yaw, kp_yaw * yaw_err))
             _publish(v * ux, v * uy, wz)
             time.sleep(dt)
@@ -443,7 +465,11 @@ def strafe_servo(
     once ``|error| <= tol_m``; False on blocked/timeout/no odom/no cmd_vel
     channel (base stopped safely). Never raises.
     """
-    speed = float(os.getenv("WALKIE_CREEP_SPEED_MPS", "0.08")) if speed_mps is None else speed_mps
+    speed = (
+        float(os.getenv("WALKIE_CREEP_SPEED_MPS", "0.08"))
+        if speed_mps is None
+        else speed_mps
+    )
     rate = float(os.getenv("WALKIE_CREEP_HZ", "15.0")) if hz is None else hz
     min_speed = float(os.getenv("WALKIE_CREEP_MIN_SPEED_MPS", "0.03"))
     kp_lin = float(os.getenv("WALKIE_CREEP_KP_LIN", "1.5"))
@@ -467,7 +493,9 @@ def strafe_servo(
     h0 = start["heading"]
     dt = 1.0 / max(1.0, rate)
     deadline = time.monotonic() + timeout_sec
-    max_stall = max(1, int(stall_sec * rate))  # commanded-but-not-moving ticks before bailing
+    max_stall = max(
+        1, int(stall_sec * rate)
+    )  # commanded-but-not-moving ticks before bailing
 
     reached = False
     stalled = 0
@@ -487,8 +515,10 @@ def strafe_servo(
             if commanding and moved < stall_eps:
                 stalled += 1
                 if stalled >= max_stall:
-                    print(f"[skills] strafe_servo: commanded but not moving for "
-                          f"{stall_sec:.1f}s; blocked — stopping here")
+                    print(
+                        f"[skills] strafe_servo: commanded but not moving for "
+                        f"{stall_sec:.1f}s; blocked — stopping here"
+                    )
                     break
             else:
                 stalled = 0
@@ -511,8 +541,9 @@ def strafe_servo(
             vy = math.copysign(v, err)
             wz = 0.0
             if hold_heading and pose:
-                yaw_err = math.atan2(math.sin(h0 - pose["heading"]),
-                                     math.cos(h0 - pose["heading"]))
+                yaw_err = math.atan2(
+                    math.sin(h0 - pose["heading"]), math.cos(h0 - pose["heading"])
+                )
                 wz = max(-max_yaw, min(max_yaw, kp_yaw * yaw_err))
             nav.set_velocity(0.0, vy, wz)
             commanding = v >= min_speed
@@ -685,7 +716,7 @@ def _follow_base_stop(ctx: TaskContext, used_cmdvel):
                 pass
 
 
-def follow_person(
+def _follow_person_cv(
     ctx: TaskContext,
     select,
     *,
@@ -701,7 +732,9 @@ def follow_person(
     lead_gain: float | None = None,
     predict_on: bool | None = None,
 ) -> str:
-    """Follow a person by re-targeting nav at their (predicted) position each tick.
+    """Camera-paced follow loop (legacy path; ``HRI_FOLLOW_LIDAR=0``).
+
+    Follow a person by re-targeting nav at their (predicted) position each tick.
 
     A dead-simple synchronous loop — no background thread. Every tick it
     snapshots the camera, asks *select* for the person's box, lifts it to a
@@ -741,7 +774,11 @@ def follow_person(
     if lead_gain is None:
         lead_gain = float(os.getenv("HRI_FOLLOW_LEAD_GAIN", "0.5"))
     if predict_on is None:
-        predict_on = os.getenv("HRI_FOLLOW_PREDICT", "1").lower() in ("1", "true", "yes")
+        predict_on = os.getenv("HRI_FOLLOW_PREDICT", "1").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
     # Keep driving to the last seen point for this long (s) when a tick yields no
     # detection — a dropped pose frame or a briefly-stationary person must NOT
     # fall straight into the rotate-search (which would otherwise stutter / stall).
@@ -758,8 +795,12 @@ def follow_person(
     # the PERSON as a costmap obstacle and plan around / back off / refuse. Hysteresis
     # (enter < exit) stops mode-thrash at the boundary. Off by default (on-robot A/B).
     cmdvel_on = os.getenv("HRI_FOLLOW_CMDVEL", "0").lower() in ("1", "true", "yes")
-    cmdvel_enter = follow_distance + float(os.getenv("HRI_FOLLOW_CMDVEL_ENTER_MARGIN_M", "0.8"))
-    cmdvel_exit = follow_distance + float(os.getenv("HRI_FOLLOW_CMDVEL_EXIT_MARGIN_M", "1.4"))
+    cmdvel_enter = follow_distance + float(
+        os.getenv("HRI_FOLLOW_CMDVEL_ENTER_MARGIN_M", "0.8")
+    )
+    cmdvel_exit = follow_distance + float(
+        os.getenv("HRI_FOLLOW_CMDVEL_EXIT_MARGIN_M", "1.4")
+    )
     cmdvel_kw = dict(
         max_speed=float(os.getenv("HRI_FOLLOW_CMDVEL_MAX_SPEED", "0.4")),
         min_speed=float(os.getenv("HRI_FOLLOW_CMDVEL_MIN_SPEED", "0.08")),
@@ -773,9 +814,11 @@ def follow_person(
     lost = 0
     cmdvel_mode = False  # hysteresis: currently in the close-range cmd_vel regime?
     used_cmdvel = False  # ever published a raw Twist? (gates the finally stop + cancel)
-    last_goto = False    # last drive command was a Nav2 goal (cancel it before a Twist)
+    last_goto = False  # last drive command was a Nav2 goal (cancel it before a Twist)
     last_dir = 1.0  # default search direction (left) until first seen
-    last_xy: tuple[float, float] | None = None  # last good lifted point, for the grace hold
+    last_xy: tuple[float, float] | None = (
+        None  # last good lifted point, for the grace hold
+    )
     last_seen_t: float | None = None
     last_box: BBox | None = None  # last selected box, drawn dim while coasting (viz)
     deadline = time.monotonic() + timeout
@@ -783,10 +826,14 @@ def follow_person(
     n, t_log = 0, time.monotonic()
     if on_warmup is not None:
         on_warmup()  # speak the ack BEFORE the stopper starts (so the mic skips it)
-    with (stopper if stopper is not None else nullcontext()) as listener, \
-            _follow_base_stop(ctx, lambda: used_cmdvel):
+    with (
+        stopper if stopper is not None else nullcontext() as listener,
+        _follow_base_stop(ctx, lambda: used_cmdvel),
+    ):
         triggered = getattr(listener, "triggered", None)
-        while time.monotonic() < deadline and not (triggered is not None and triggered.is_set()):
+        while time.monotonic() < deadline and not (
+            triggered is not None and triggered.is_set()
+        ):
             now = time.monotonic()
             snap = ctx.snapshot()
             t_snap = time.monotonic()
@@ -806,7 +853,10 @@ def follow_person(
                         predictor.update(now, xy)
                         vel = predictor.velocity()
                         if vel is not None and lead_gain:
-                            xy = (xy[0] + lead_gain * vel[0], xy[1] + lead_gain * vel[1])
+                            xy = (
+                                xy[0] + lead_gain * vel[0],
+                                xy[1] + lead_gain * vel[1],
+                            )
                     target = xy
             if target is None:
                 # No fresh point this tick — COAST instead of searching: use the
@@ -844,15 +894,23 @@ def follow_person(
                                 try:
                                     ctx.walkie.nav.cancel()
                                 except Exception as exc:  # noqa: BLE001
-                                    print(f"[skills] follow_person: nav.cancel before cmd_vel failed ({exc})")
+                                    print(
+                                        f"[skills] follow_person: nav.cancel before cmd_vel failed ({exc})"
+                                    )
                             drove_cmdvel = approach_point_cmdvel(
-                                ctx, *target, stop_distance=follow_distance, pose=rp, **cmdvel_kw
+                                ctx,
+                                *target,
+                                stop_distance=follow_distance,
+                                pose=rp,
+                                **cmdvel_kw,
                             )
                             used_cmdvel = used_cmdvel or drove_cmdvel
                 if drove_cmdvel:
                     last_goto = False
                 else:  # far target, cmd_vel disabled, or no odom: Nav2 (keeps obstacle avoidance)
-                    approach_point(ctx, *target, stop_distance=follow_distance, blocking=False)
+                    approach_point(
+                        ctx, *target, stop_distance=follow_distance, blocking=False
+                    )
                     last_goto = True
             else:
                 # Truly lost (no detection, no prediction, grace expired): turn
@@ -863,7 +921,9 @@ def follow_person(
                 if lost == 1 and on_lost is not None:
                     on_lost()  # nudge once, then keep searching
                 if lost >= max_lost:
-                    print("[skills] follow_person: lost the target past the search budget")
+                    print(
+                        "[skills] follow_person: lost the target past the search budget"
+                    )
                     reason = "lost"
                     break
                 rotate_by(ctx, last_dir * search_step, blocking=False)
@@ -879,15 +939,20 @@ def follow_person(
                 tx = f"({target[0]:.2f},{target[1]:.2f})" if target is not None else "-"
                 sd = f"{side:+.2f}" if side is not None else "-"
                 _draw_follow_viz(
-                    snap.img, draw_box, color=color, save_path=viz_path,
+                    snap.img,
+                    draw_box,
+                    color=color,
+                    save_path=viz_path,
                     label=f"{state} side={sd} target={tx} lost={lost}",
                 )
             if debug:
                 n += 1
                 state = "drive" if target is not None else f"search(lost={lost})"
-                print(f"[follow_person] {state} box={'Y' if box is not None else 'N'} "
-                      f"snap={1e3 * (t_snap - now):.0f}ms select={1e3 * (t_sel - t_snap):.0f}ms "
-                      f"lift+nav={1e3 * (time.monotonic() - t_sel):.0f}ms")
+                print(
+                    f"[follow_person] {state} box={'Y' if box is not None else 'N'} "
+                    f"snap={1e3 * (t_snap - now):.0f}ms select={1e3 * (t_sel - t_snap):.0f}ms "
+                    f"lift+nav={1e3 * (time.monotonic() - t_sel):.0f}ms"
+                )
                 if time.monotonic() - t_log >= 3.0:
                     print(f"[follow_person] {n / (time.monotonic() - t_log):.1f} Hz")
                     n, t_log = 0, time.monotonic()
@@ -898,6 +963,452 @@ def follow_person(
             if on_stopped is not None:
                 on_stopped()  # speak while the threads wind down
     return reason
+
+
+class _CvFix(NamedTuple):
+    """One identity-confirmed CV sighting published by :class:`_CvFixWorker`."""
+
+    seq: int  # monotonically increasing publish counter (newness check)
+    t: float  # time.monotonic() at snapshot time — the fix is already stale by CV latency
+    xy: tuple[float, float]  # map-frame lift of the selected box
+    box: BBox
+    side: float  # box center offset from frame center in [-0.5, 0.5] (search direction)
+
+
+class _CvFixWorker:
+    """Background CV pipeline for the hybrid follow loop: snapshot → *select* →
+    map-frame lift, publishing the latest fix into a lock-guarded slot.
+
+    This thread is the ONLY caller of *select* — stateful selectors
+    (:class:`tasks.HRI.identity.FollowSelector`) are documented single-threaded,
+    and that invariant moves here with them. The loop is self-paced by the CV
+    round-trip (a `min_period` floor keeps a stubbed-out camera from busy
+    spinning); an empty tick (no snapshot / no box / failed lift) publishes
+    nothing, so the main loop keys freshness off ``fix.seq``. It also owns the
+    ``HRI_FOLLOW_VIZ`` frame — it holds the snapshots; the lidar loop has none —
+    drawing the selected box over the main loop's ``state_label``. Every
+    exception is printed and swallowed: a CV glitch degrades to lidar coasting,
+    never crashes the follow.
+    """
+
+    def __init__(
+        self,
+        ctx: TaskContext,
+        select,
+        *,
+        min_period: float = 0.0,
+        viz: bool = False,
+        viz_path: str = "follow_viz.jpg",
+    ) -> None:
+        self.ctx = ctx
+        self.select = select
+        self.min_period = min_period
+        self.viz = viz
+        self.viz_path = viz_path
+        self.state_label = "ACQUIRE"  # written by the main loop, drawn on the viz
+        self._lock = threading.Lock()
+        self._fix: _CvFix | None = None
+        self._seq = 0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> "_CvFixWorker":
+        if self._thread is None:
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._loop, daemon=True)
+            self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3.0)
+            self._thread = None
+
+    def latest(self) -> _CvFix | None:
+        with self._lock:
+            return self._fix
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            t0 = time.monotonic()
+            try:
+                self._tick()
+            except Exception as exc:
+                print(f"[skills] follow CV worker tick failed ({exc})")
+            rem = self.min_period - (time.monotonic() - t0)
+            if rem > 0:
+                self._stop.wait(rem)
+
+    def _tick(self) -> None:
+        t = time.monotonic()
+        snap = self.ctx.snapshot()
+        box = self.select(self.ctx, snap) if snap is not None else None
+        if box is not None:
+            side = (box[0] + box[2]) / 2 / snap.img.width - 0.5
+            xy = lift_bbox_world_xy(self.ctx, snap, box, use_edge_filter=False)
+            if xy is not None:
+                with self._lock:
+                    self._seq += 1
+                    self._fix = _CvFix(self._seq, t, xy, box, side)
+        if self.viz and snap is not None:
+            state = self.state_label
+            # Green = the CV pass sees the person this frame; otherwise color by
+            # the main loop's state (yellow coasting, red searching/acquiring).
+            if box is not None:
+                color = (0, 255, 0)
+            elif state in ("TRACK", "COAST"):
+                color = (255, 200, 0)
+            else:
+                color = (255, 60, 60)
+            _draw_follow_viz(
+                snap.img,
+                box,
+                color=color,
+                save_path=self.viz_path,
+                label=f"{state} cv_box={'Y' if box is not None else 'N'}",
+            )
+
+
+def _scan_key(scan: dict):
+    """Identity of a LaserScan message, for skipping already-processed scans.
+
+    The header stamp when present; otherwise the ``ranges`` list's object id —
+    ``Lidar.get_scan`` shallow-copies the cached message, so the list object
+    only changes when a new message actually arrived.
+    """
+    stamp = (scan.get("header") or {}).get("stamp")
+    if isinstance(stamp, dict):
+        return (stamp.get("sec"), stamp.get("nanosec"))
+    return id(scan.get("ranges"))
+
+
+def _follow_person_lidar(
+    ctx: TaskContext,
+    select,
+    *,
+    stopper=None,
+    on_warmup=None,
+    on_lost=None,
+    on_stopped=None,
+    follow_distance: float | None = None,
+    timeout: float | None = None,
+    nav_period: float | None = None,
+    search_step_deg: float | None = None,
+    max_lost: int | None = None,
+    lead_gain: float | None = None,
+    predict_on: bool | None = None,
+) -> str:
+    """Hybrid lidar+CV follow loop (``HRI_FOLLOW_LIDAR=1``).
+
+    The main loop ticks at lidar rate (``HRI_FOLLOW_LIDAR_TICK_SEC``, ~10 Hz)
+    and owns all actuation, the stopper, the timeout, and the exit reasons; a
+    :class:`_CvFixWorker` runs the slow-trusted CV pipeline in the background.
+    Identity comes ONLY from CV: a fresh fix seeds the :class:`AlphaBetaTrack`
+    (velocity from the shared :class:`MotionPredictor`), a fix agreeing with the
+    track's prediction just confirms it, and a contradicting fix (farther than
+    ``HRI_FOLLOW_LIDAR_CV_RESEED_DIST_M``) hard-reseeds — CV wins, by design, so
+    a bystander who stole the lidar gate is recovered within one CV round-trip.
+    Between fixes each NEW scan is clustered (:func:`cluster_scan`), lifted to
+    the map frame with the pose read next to the scan, and the cluster nearest
+    the track's prediction inside a staleness-grown gate updates the filter.
+    The gate staying empty for ``HRI_FOLLOW_LIDAR_MISS_SEC`` of fresh scans
+    drops the track into the legacy coast (predictor extrapolation, then the
+    grace hold) and finally the rate-limited rotate-search. ``nav.go_to``
+    re-targeting is throttled (``RETARGET_MIN_DELTA_M`` / ``RETARGET_MAX_AGE_SEC``)
+    so a 10 Hz tick doesn't thrash the planner with sub-cm goal changes.
+
+    Same contract as :func:`_follow_person_cv` (callbacks, stopper ordering,
+    exit reasons); *nav_period* is unused here — the lidar tick paces the loop.
+    If no scan arrives at entry the whole call falls back to the CV loop, so
+    lidar-less robots and off-robot stubs behave exactly as before.
+    """
+    if follow_distance is None:
+        follow_distance = float(os.getenv("HRI_FOLLOW_DISTANCE_M", "1.0"))
+    if timeout is None:
+        timeout = float(os.getenv("HRI_FOLLOW_TIMEOUT_SEC", "90"))
+    if search_step_deg is None:
+        search_step_deg = float(os.getenv("HRI_FOLLOW_SEARCH_STEP_DEG", "10"))
+    search_step = math.radians(search_step_deg)
+    if max_lost is None:
+        max_lost = int(os.getenv("HRI_FOLLOW_MAX_LOST", "8"))
+    if lead_gain is None:
+        lead_gain = float(os.getenv("HRI_FOLLOW_LEAD_GAIN", "0.5"))
+    if predict_on is None:
+        predict_on = os.getenv("HRI_FOLLOW_PREDICT", "1").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+    lost_grace = float(os.getenv("HRI_FOLLOW_LOST_GRACE_SEC", "1.5"))
+    debug = os.getenv("HRI_FOLLOW_TRACK_DEBUG", "0").lower() in ("1", "true", "yes")
+    viz = os.getenv("HRI_FOLLOW_VIZ", "0").lower() in ("1", "true", "yes")
+    viz_path = os.getenv("HRI_FOLLOW_VIZ_PATH", "follow_viz.jpg")
+
+    # Availability probe: no lidar / no scan -> the legacy loop, byte-for-byte.
+    try:
+        lidar = ctx.walkie.robot.lidar
+        probe = lidar.get_once(timeout=2.0)
+    except Exception as exc:
+        print(f"[skills] follow_person: lidar unavailable ({exc})")
+        probe = None
+    if probe is None:
+        print("[skills] follow_person: no lidar scan; falling back to the CV-only loop")
+        return _follow_person_cv(
+            ctx,
+            select,
+            stopper=stopper,
+            on_warmup=on_warmup,
+            on_lost=on_lost,
+            on_stopped=on_stopped,
+            follow_distance=follow_distance,
+            timeout=timeout,
+            nav_period=nav_period,
+            search_step_deg=search_step_deg,
+            max_lost=max_lost,
+            lead_gain=lead_gain,
+            predict_on=predict_on,
+        )
+
+    p = LidarFollowParams.from_env()
+    predictor = MotionPredictor() if predict_on else None
+    track: AlphaBetaTrack | None = None
+    idle = threading.Event()  # never set — an interruptible sleep when no stopper
+    lost = 0
+    last_dir = 1.0  # default search direction (left) until first seen
+    last_xy: tuple[float, float] | None = None  # last trusted point, for the grace hold
+    last_seen_t: float | None = None
+    consumed_seq = 0  # last CV fix folded into the track
+    last_scan_key = _scan_key(probe)  # the probe scan predates any track — skip it
+    last_goal: tuple[float, float] | None = None  # retarget throttle state
+    last_goal_t = 0.0
+    last_search_t = (
+        0.0  # rate-limits search steps so max_lost keeps its CV-paced meaning
+    )
+    deadline = time.monotonic() + timeout
+    reason = "timeout"
+    n, t_log = 0, time.monotonic()
+
+    worker = _CvFixWorker(
+        ctx, select, min_period=p.cv_min_period, viz=viz, viz_path=viz_path
+    )
+    worker.start()
+    try:
+        if on_warmup is not None:
+            on_warmup()  # speak the ack BEFORE the stopper starts (so the mic skips it)
+        with stopper if stopper is not None else nullcontext() as listener:
+            triggered = getattr(listener, "triggered", None)
+            while time.monotonic() < deadline and not (
+                triggered is not None and triggered.is_set()
+            ):
+                now = time.monotonic()
+                # 1. Fold in the newest CV fix — the only identity source.
+                fix = worker.latest()
+                if fix is not None and fix.seq != consumed_seq:
+                    consumed_seq = fix.seq
+                    last_dir = 1.0 if fix.side < 0 else -1.0
+                    last_xy, last_seen_t = fix.xy, fix.t
+                    if predictor is not None:
+                        predictor.update(fix.t, fix.xy)
+                    if now - fix.t <= p.cv_max_age:
+                        if track is None:
+                            vel = (
+                                predictor.velocity() if predictor is not None else None
+                            )
+                            vx, vy = vel if vel is not None else (0.0, 0.0)
+                            track = AlphaBetaTrack(
+                                fix.xy[0],
+                                fix.xy[1],
+                                fix.t,
+                                vx,
+                                vy,
+                                alpha=p.alpha,
+                                beta=p.beta,
+                                max_speed=p.max_speed,
+                            )
+                        else:
+                            px, py = track.predict(fix.t)
+                            if (
+                                math.hypot(fix.xy[0] - px, fix.xy[1] - py)
+                                > p.cv_reseed_dist
+                            ):
+                                # Identity contradicts the track: the gate locked
+                                # onto someone/something else. CV wins — reseed
+                                # (zero velocity; the next scan re-acquires it).
+                                track.reseed(fix.xy[0], fix.xy[1], fix.t)
+                # 2. Fold in a NEW scan — the fast position carrier.
+                try:
+                    scan = lidar.get_scan()
+                except Exception as exc:
+                    print(f"[skills] follow_person: lidar read failed ({exc})")
+                    scan = None
+                if scan is not None and _scan_key(scan) != last_scan_key:
+                    last_scan_key = _scan_key(scan)
+                    if track is not None:
+                        try:
+                            pose = ctx.walkie.status.get_position()
+                        except Exception:
+                            pose = None
+                        if pose:
+                            clusters = cluster_scan(scan, p)
+                            pts = [sensor_to_map(c.cx, c.cy, pose, p) for c in clusters]
+                            pred = track.predict(now)
+                            gate = min(
+                                p.gate_max,
+                                p.gate + p.gate_grow * (now - track.t_accept),
+                            )
+                            i = associate(pts, pred, gate)
+                            if i is not None:
+                                track.update(now, *pts[i])
+                                if predictor is not None:
+                                    predictor.update(now, pts[i])
+                                last_xy, last_seen_t = pts[i], now
+                                lost = 0
+                            elif now - track.t_accept > p.miss_sec:
+                                # Gate dry on fresh scans: drop the track into the
+                                # grace hold at its last position (fresh window,
+                                # so the handoff to coast/search is seamless).
+                                last_xy, last_seen_t = (track.x, track.y), now
+                                track = None
+                # 3. Drive (track > prediction > grace hold) or rotate-search.
+                target = None
+                state = "SEARCH"
+                if track is not None:
+                    px, py = track.predict(now)
+                    target = (px + lead_gain * track.vx, py + lead_gain * track.vy)
+                    state = "TRACK"
+                else:
+                    pred = predictor.predict(now) if predictor is not None else None
+                    if pred is not None:
+                        target, state = pred, "COAST"
+                    elif (
+                        last_xy is not None
+                        and last_seen_t is not None
+                        and (now - last_seen_t) <= lost_grace
+                    ):
+                        target, state = last_xy, "COAST"
+                worker.state_label = state
+                if target is not None:
+                    lost = 0
+                    moved = last_goal is None or (
+                        math.hypot(target[0] - last_goal[0], target[1] - last_goal[1])
+                        >= p.retarget_min_delta
+                    )
+                    if moved or (now - last_goal_t) >= p.retarget_max_age:
+                        approach_point(
+                            ctx, *target, stop_distance=follow_distance, blocking=False
+                        )
+                        last_goal, last_goal_t = target, now
+                elif now - last_search_t >= p.search_period:
+                    last_search_t = now
+                    lost += 1
+                    if lost == 1 and on_lost is not None:
+                        on_lost()  # nudge once, then keep searching
+                    if lost >= max_lost:
+                        print(
+                            "[skills] follow_person: lost the target past the search budget"
+                        )
+                        reason = "lost"
+                        break
+                    rotate_by(ctx, last_dir * search_step, blocking=False)
+                if debug:
+                    n += 1
+                    age = f"{now - fix.t:.1f}s" if fix is not None else "-"
+                    print(
+                        f"[follow_person:lidar] {state} track={'Y' if track is not None else 'N'} "
+                        f"cv_age={age} lost={lost}"
+                    )
+                    if time.monotonic() - t_log >= 3.0:
+                        print(
+                            f"[follow_person:lidar] {n / (time.monotonic() - t_log):.1f} Hz"
+                        )
+                        n, t_log = 0, time.monotonic()
+                rem = p.tick_sec - (time.monotonic() - now)
+                if rem > 0:
+                    (triggered or idle).wait(rem)
+            if triggered is not None and triggered.is_set():
+                reason = "stopped"
+                if on_stopped is not None:
+                    on_stopped()  # speak while the threads wind down
+    finally:
+        worker.stop()
+    return reason
+
+
+def follow_person(
+    ctx: TaskContext,
+    select,
+    *,
+    stopper=None,
+    on_warmup=None,
+    on_lost=None,
+    on_stopped=None,
+    follow_distance: float | None = None,
+    timeout: float | None = None,
+    nav_period: float | None = None,
+    search_step_deg: float | None = None,
+    max_lost: int | None = None,
+    lead_gain: float | None = None,
+    predict_on: bool | None = None,
+) -> str:
+    """Follow a person, re-targeting nav at their (predicted) position each tick.
+
+    Returns the exit reason: ``'stopped'`` | ``'lost'`` | ``'timeout'``.
+
+    *select* is a callable ``(ctx, snap) -> bbox_xyxy | None`` — e.g.
+    :func:`select_largest_person` (follow whoever's closest, for testing) or
+    ``identity.select_person_to_follow`` (match an enrolled person by face first,
+    attire fallback). *stopper*, when given, is a context manager carrying a
+    ``.triggered`` :class:`threading.Event` (a :class:`tasks.skills.CommandListener`);
+    it is entered AFTER *on_warmup* — so a background mic listener never
+    transcribes the warmup speech — and its event ends the loop the instant it
+    is set. *on_warmup* runs once before the loop (e.g. a spoken ack); *on_lost*
+    runs once the first time the target is lost; *on_stopped* runs after a
+    *stopper*-triggered exit, before teardown, so a closing speech overlaps the
+    join cost. Every tunable defaults from the ``HRI_FOLLOW_*`` env vars.
+
+    Two interchangeable engines behind this contract, picked by
+    ``HRI_FOLLOW_LIDAR``:
+
+    * ``0`` (default) — :func:`_follow_person_cv`: the camera-paced loop, each
+      tick bounded by snapshot + detector round-trips (~1-3 Hz).
+    * ``1`` — :func:`_follow_person_lidar`: hybrid tracking. The 2D lidar
+      carries the person's position at scan rate (~10 Hz) through a CV-seeded
+      cluster track, while the CV selector keeps running in a background worker
+      as the slow-trusted identity source (seed / confirm / reseed). Falls back
+      to the CV loop automatically when no scan is available.
+    """
+    if os.getenv("HRI_FOLLOW_LIDAR", "0").lower() in ("1", "true", "yes"):
+        return _follow_person_lidar(
+            ctx,
+            select,
+            stopper=stopper,
+            on_warmup=on_warmup,
+            on_lost=on_lost,
+            on_stopped=on_stopped,
+            follow_distance=follow_distance,
+            timeout=timeout,
+            nav_period=nav_period,
+            search_step_deg=search_step_deg,
+            max_lost=max_lost,
+            lead_gain=lead_gain,
+            predict_on=predict_on,
+        )
+    return _follow_person_cv(
+        ctx,
+        select,
+        stopper=stopper,
+        on_warmup=on_warmup,
+        on_lost=on_lost,
+        on_stopped=on_stopped,
+        follow_distance=follow_distance,
+        timeout=timeout,
+        nav_period=nav_period,
+        search_step_deg=search_step_deg,
+        max_lost=max_lost,
+        lead_gain=lead_gain,
+        predict_on=predict_on,
+    )
 
 
 def side_relative_to_listener(
