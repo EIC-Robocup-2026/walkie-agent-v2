@@ -124,6 +124,14 @@ class GoToInstructionPoint(SubTask):
     critical = True
 
     def run(self, ctx: TaskContext) -> StepResult:
+        # results = ctx.world.query_text("kitchen table")
+        # for result in results:
+        #     print(result.id, result.centroid)
+
+        # while True:
+        #     pass
+
+
         x, y, h = _pose("GPSR_INSTRUCTION_POINT_POSE")
         # The arena door may be closed — ask a human to open it before driving in.
         # Reusable across challenges: tasks.skills.{request_open_door,go_to_through_door}.

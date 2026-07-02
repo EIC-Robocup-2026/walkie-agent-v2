@@ -363,7 +363,7 @@ class ReceiveBag(SubTask):
         ctx.say(prompts.BAG_ASK_HANDOVER)
         ctx.walkie.robot.arm.left.gripper(1.0, blocking=False)  # open: ready to receive
         ctx.walkie.robot.arm.go_to_pose(0.45, 0.16, 1.15, -0.8, 0, -1.57, group_name="left_arm", blocking=True)
-
+        time.sleep(0.5)
         _, _, efforts = ctx.walkie.robot.arm.left.get_joint_states()
         initial_effort = efforts[3] if efforts else 0.0
         # Get joint 4's effort, which spikes when the bag is placed in the hand.
@@ -382,7 +382,9 @@ class ReceiveBag(SubTask):
         ctx.say(prompts.BAG_CLOSING_WARNING)
         time.sleep(1)  # let the nav settle after the arm movement and possible wait
         ctx.walkie.robot.arm.left.gripper(0.0)  # close
-        ctx.walkie.robot.arm.go_to_pose(0.1413, 0.0481, 0.9640, -1.2972, -0.3040, -3.0219, group_name="left_arm", blocking=True)
+        # ctx.walkie.robot.arm.go_to_pose(0.1413, 0.0481, 0.9640, -1.2972, -0.3040, -3.0219, group_name="left_arm", blocking=True)
+        # ctx.walkie.robot.arm.go_to_pose(0.1413, 0.0481, 0.9640, -1.2972, -0.3040, -3.0219, group_name="left_arm", blocking=True)
+        ctx.walkie.robot.arm.left.set_joint_position([0.8727, -0.2269, 0.2618, 2.1817, 1.4312, 0.0524, -1.2217 ])
         ctx.say(prompts.BAG_RECEIVED)
         return StepResult.DONE
 

@@ -303,12 +303,12 @@ def _extract(model, schema: "type[BaseModel]", instructions: str, text: str):
     from tasks.base import _parse_to_schema, _schema_prompt
 
     use_local = os.getenv("LLM_USE_LOCAL", "0").strip().lower() in ("1", "true", "yes")
-    if not use_local:
-        try:
-            structured = model.with_structured_output(schema, method="json_schema")
-            return structured.invoke([SystemMessage(content=instructions), HumanMessage(content=text)])
-        except Exception as exc:
-            print(f"[gpsr] structured extract failed ({exc}); trying JSON fallback")
+    # if not use_local:
+    try:
+        structured = model.with_structured_output(schema, method="json_schema")
+        return structured.invoke([SystemMessage(content=instructions), HumanMessage(content=text)])
+    except Exception as exc:
+        print(f"[gpsr] structured extract failed ({exc}); trying JSON fallback")
     try:
         prompt = _schema_prompt(instructions, schema)
         reply = model.invoke([SystemMessage(content=prompt), HumanMessage(content=text)])

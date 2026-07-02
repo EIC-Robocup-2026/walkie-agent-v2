@@ -156,10 +156,11 @@ def go_to_named(
         return False
     if state is not None and state.get("at") == name:
         return True  # already here this command — don't drive again
-    pose = world.location_pose(name)
-    if pose is None:
+    object = ctx.world.query_text(name)
+    if object is None:
         print(f"[gpsr.skill] no pose for {name!r}")
         return False
+    pose = object[0].centroid
     # If a closed door blocks the route, ask a human to open it and retry
     # (go_to_through_door only asks when the way is actually blocked + not seen
     # open; gate OFF with GPSR_NAV_DOOR_RETRY=0 if it false-asks on the robot).

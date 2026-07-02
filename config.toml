@@ -26,7 +26,7 @@ LLM_USE_LOCAL = "1"
 WALKIE_MODEL = "google/gemini-3-flash-preview:nitro"
 WALKIE_TEMPERATURE = "0.5"
 # Local LLM endpoint (OpenAI-compatible), used when LLM_USE_LOCAL=1.
-LOCAL_BASE_URL = "http://10.0.0.201:8000/v1"
+LOCAL_BASE_URL = "http://192.168.102.37:8000/v1"
 LOCAL_MODEL = "qwen3.5-9b"
 
 [services]
