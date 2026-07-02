@@ -186,7 +186,7 @@ HRI_BAG_WAIT_TIMEOUT_SEC = "20"
 # --- Follow host & place the bag ---------------------------------------------
 # How far (m) the base stops short of the host when following, so it never
 # bumps them (the host's lifted body point minus this along the approach line).
-HRI_FOLLOW_DISTANCE_M = "1.2"
+HRI_FOLLOW_DISTANCE_M = "0.5"
 # Close-range drive via direct cmd_vel instead of Nav2 (approach_point_cmdvel).
 # A go_to goal ~FOLLOW_DISTANCE behind the person makes Nav2 treat the PERSON as a
 # costmap obstacle and plan around / back off / refuse (the rotate-translate-rotate
@@ -401,7 +401,7 @@ HRI_FOLLOW_PREDICT_GAP_RESET_SEC = "3.0"
 # background worker as the slow-trusted identity source (seed/confirm/reseed).
 # 0 = legacy camera-paced loop. With the flag on but no scan available the loop
 # falls back to the legacy path automatically, so this is safe to leave on.
-HRI_FOLLOW_LIDAR = "0"
+HRI_FOLLOW_LIDAR = "1"
 # Main-loop tick (s) in lidar mode — replaces HRI_FOLLOW_NAV_PERIOD_SEC pacing.
 # Match the scan period (a faster tick just re-reads the same cached scan).
 HRI_FOLLOW_LIDAR_TICK_SEC = "0.1"
@@ -409,7 +409,7 @@ HRI_FOLLOW_LIDAR_TICK_SEC = "0.1"
 # sits at the base origin facing forward; set from the robot's URDF if not.
 HRI_FOLLOW_LIDAR_OFFSET_X = "0.0"
 HRI_FOLLOW_LIDAR_OFFSET_Y = "0.0"
-HRI_FOLLOW_LIDAR_OFFSET_YAW_DEG = "0.0"
+HRI_FOLLOW_LIDAR_OFFSET_YAW_DEG = "90.0"
 # Ignore beams beyond this (m) — person following is close-range; far returns
 # only add wall clusters for the associator to wade through.
 HRI_FOLLOW_LIDAR_MAX_RANGE_M = "8.0"

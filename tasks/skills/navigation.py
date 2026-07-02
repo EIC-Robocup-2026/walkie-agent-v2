@@ -127,7 +127,8 @@ def approach_point(
     if blocking:
         return ctx.goto(gx, gy, heading)
     try:
-        ctx.walkie.nav.go_to(gx, gy, heading, blocking=False)
+        # ctx.walkie.nav.go_to(gx, gy, heading, blocking=False)
+        ctx.walkie.nav.go_to(gx, gy, heading, blocking=False, align_method="face_target")
     except Exception as exc:
         print(f"[skills] approach_point: non-blocking go_to failed ({exc})")
         return False
