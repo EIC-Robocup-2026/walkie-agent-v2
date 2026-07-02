@@ -1,0 +1,19 @@
+# YOLOE benchmark deps — install in an ISOLATED venv, not the robot's uv env.
+#
+#   python -m venv .venv && . .venv/bin/activate
+#   pip install -r requirements.txt
+#
+# ultralytics pulls torch/torchvision automatically. On a CPU-only box (e.g. the
+# AMD-iGPU dev machine) that default may be a CUDA wheel that won't import; in that
+# case install a CPU torch FIRST:
+#
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements.txt
+#
+# On the NVIDIA GPU box the default CUDA wheel is correct.
+
+ultralytics>=8.3.0      # provides YOLOE (text-prompt open-vocab detection)
+gdown>=5.2.0            # download the Drive folder (fetch_dataset.py)
+pillow-heif>=0.16       # read/convert the HEIC photos in the set
+pillow>=10
+opencv-python>=4.8      # annotated-overlay writing (cv2)

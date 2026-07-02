@@ -1,0 +1,7 @@
+# Benchmark artifacts — never commit the dataset, model weights, or run outputs.
+dataset/
+outputs*/
+*.pt
+.venv/
+weights/
+*.ts

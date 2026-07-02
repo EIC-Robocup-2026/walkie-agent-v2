@@ -1,0 +1,43 @@
+# Official RoboCup@Home object set — Incheon 2026
+# Source: https://github.com/RoboCupAtHome/Incheon2026 (objects/known_objects/)
+# Names normalized: filename stem, underscores -> spaces. One prompt per line.
+
+apple
+banana
+baseball
+bowl
+cheezit
+chocolate jello
+cleanser
+coffee grounds
+cola
+cornflakes
+cup
+dice
+fork
+iced tea
+juice pack
+knife
+lemon
+milk
+mustard
+orange
+orange juice
+peach
+pear
+plate
+plum
+pringles
+red wine
+rubiks cube
+soccer ball
+spam
+sponge
+spoon
+strawberry
+strawberry jello
+sugar
+tennis ball
+tomato soup
+tropical juice
+tuna
