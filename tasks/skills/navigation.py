@@ -16,11 +16,13 @@ from typing import NamedTuple
 from tasks.base import TaskContext
 
 from .geometry import BBox
+from .lidar_follow_viz import follow_title
 from .lidar_track import (
     AlphaBetaTrack,
     LidarFollowParams,
     associate,
     cluster_scan,
+    scan_points_map,
     sensor_to_map,
 )
 from .lift import lift_bbox_world_xy
@@ -1145,6 +1147,11 @@ def _follow_person_lidar(
     debug = os.getenv("HRI_FOLLOW_TRACK_DEBUG", "0").lower() in ("1", "true", "yes")
     viz = os.getenv("HRI_FOLLOW_VIZ", "0").lower() in ("1", "true", "yes")
     viz_path = os.getenv("HRI_FOLLOW_VIZ_PATH", "follow_viz.jpg")
+    # Live 2D top-down matplotlib view of the lidar tracker (scan / candidates /
+    # the SELECTED cluster's cloud / track / gate / CV fix). Separate from the
+    # camera JPEG above; opt-in because it opens a GUI window.
+    lidar_viz_on = os.getenv("HRI_FOLLOW_LIDAR_VIZ", "0").lower() in ("1", "true", "yes")
+    lidar_viz_save = os.getenv("HRI_FOLLOW_LIDAR_VIZ_PATH", "").strip()
 
     # Availability probe: no lidar / no scan -> the legacy loop, byte-for-byte.
     try:
@@ -1172,8 +1179,27 @@ def _follow_person_lidar(
         )
 
     p = LidarFollowParams.from_env()
+    lidar_viz = None
+    if lidar_viz_on and threading.current_thread() is not threading.main_thread():
+        # A matplotlib GUI off the main thread can HANG (not raise), so refuse it
+        # — this loop is main-threaded from tasks/HRI/run.py, but an agent-tool
+        # caller could run it in an executor. Save-to-file still works there.
+        print("[skills] follow_person: lidar viz needs the main thread; disabled")
+        lidar_viz_on = False
+    if lidar_viz_on:
+        try:  # a missing matplotlib / no display must not stop the follow
+            from .lidar_follow_viz import LidarFollowViz
+
+            lidar_viz = LidarFollowViz(
+                lim=float(os.getenv("HRI_FOLLOW_LIDAR_VIZ_LIM_M", "6.0")), gate=p.gate
+            )
+            print("[skills] follow_person: lidar 2D viz window open")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[skills] follow_person: lidar viz unavailable ({exc})")
+            lidar_viz = None
     predictor = MotionPredictor() if predict_on else None
     track: AlphaBetaTrack | None = None
+    last_cv_fix_xy: tuple[float, float] | None = None  # latest CV fix, for the viz star
     idle = threading.Event()  # never set — an interruptible sleep when no stopper
     lost = 0
     last_dir = 1.0  # default search direction (left) until first seen
@@ -1209,6 +1235,7 @@ def _follow_person_lidar(
                     consumed_seq = fix.seq
                     last_dir = 1.0 if fix.side < 0 else -1.0
                     last_xy, last_seen_t = fix.xy, fix.t
+                    last_cv_fix_xy = fix.xy  # the purple star in the 2D viz
                     if predictor is not None:
                         predictor.update(fix.t, fix.xy)
                     if now - fix.t <= p.cv_max_age:
@@ -1238,6 +1265,12 @@ def _follow_person_lidar(
                                 # (zero velocity; the next scan re-acquires it).
                                 track.reseed(fix.xy[0], fix.xy[1], fix.t)
                 # 2. Fold in a NEW scan — the fast position carrier.
+                # Tick-scoped viz state (map frame); stays None when not computed.
+                viz_pose = None
+                viz_clusters = None
+                viz_cand = None
+                viz_sel_i = None
+                viz_gate = None
                 try:
                     scan = lidar.get_scan()
                 except Exception as exc:
@@ -1251,15 +1284,19 @@ def _follow_person_lidar(
                         except Exception:
                             pose = None
                         if pose:
+                            viz_pose = pose
                             clusters = cluster_scan(scan, p)
                             pts = [sensor_to_map(c.cx, c.cy, pose, p) for c in clusters]
+                            viz_clusters, viz_cand = clusters, pts
                             pred = track.predict(now)
                             gate = min(
                                 p.gate_max,
                                 p.gate + p.gate_grow * (now - track.t_accept),
                             )
+                            viz_gate = gate
                             i = associate(pts, pred, gate)
                             if i is not None:
+                                viz_sel_i = i  # the cluster we locked onto this scan
                                 track.update(now, *pts[i])
                                 if predictor is not None:
                                     predictor.update(now, pts[i])
@@ -1312,6 +1349,54 @@ def _follow_person_lidar(
                         reason = "lost"
                         break
                     rotate_by(ctx, last_dir * search_step, blocking=False)
+                # 4. Live 2D top-down view — best-effort, never disturbs the loop.
+                if lidar_viz is not None:
+                    if not lidar_viz.alive():
+                        lidar_viz = None  # user closed the window
+                    elif scan is not None:
+                        try:
+                            vp = viz_pose
+                            if vp is None:  # non-fresh scan / no track: read pose now
+                                try:
+                                    vp = ctx.walkie.status.get_position()
+                                except Exception:  # noqa: BLE001
+                                    vp = None
+                            if vp:
+                                cl = (
+                                    viz_clusters
+                                    if viz_clusters is not None
+                                    else cluster_scan(scan, p)
+                                )
+                                cand = (
+                                    viz_cand
+                                    if viz_cand is not None
+                                    else [sensor_to_map(c.cx, c.cy, vp, p) for c in cl]
+                                )
+                                sel = ()
+                                if viz_sel_i is not None and 0 <= viz_sel_i < len(cl):
+                                    sel = [
+                                        sensor_to_map(mx, my, vp, p)
+                                        for (mx, my) in cl[viz_sel_i].points
+                                    ]
+                                lidar_viz.update(
+                                    robot_xy=(vp["x"], vp["y"]),
+                                    scan_xy=scan_points_map(scan, vp, p),
+                                    cand_xy=cand,
+                                    selected_xy=sel,
+                                    track_xy=(track.predict(now) if track is not None else None),
+                                    track_vel=(
+                                        (track.vx, track.vy)
+                                        if track is not None
+                                        else (0.0, 0.0)
+                                    ),
+                                    gate=viz_gate,
+                                    fix_xy=last_cv_fix_xy,
+                                    title=follow_title(state, len(cand), track),
+                                )
+                                if lidar_viz_save:
+                                    lidar_viz.save(lidar_viz_save)
+                        except Exception as exc:  # noqa: BLE001
+                            print(f"[skills] follow_person: lidar viz tick failed ({exc})")
                 if debug:
                     n += 1
                     age = f"{now - fix.t:.1f}s" if fix is not None else "-"
@@ -1333,6 +1418,8 @@ def _follow_person_lidar(
                     on_stopped()  # speak while the threads wind down
     finally:
         worker.stop()
+        if lidar_viz is not None:
+            lidar_viz.close()
     return reason
 
 

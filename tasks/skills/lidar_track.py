@@ -30,6 +30,7 @@ class Cluster:
     cy: float
     n_points: int
     width: float  # first-to-last point distance (m), the blob's physical extent
+    points: tuple[tuple[float, float], ...] = ()  # member points (sensor frame), for viz
 
 
 @dataclass(frozen=True)
@@ -179,7 +180,30 @@ def cluster_scan(scan: dict, p: LidarFollowParams) -> list[Cluster]:
         if not (p.cluster_min_width <= width <= p.cluster_max_width):
             continue
         cx, cy = centroid(pts)
-        out.append(Cluster(cx=cx, cy=cy, n_points=len(pts), width=width))
+        out.append(Cluster(cx=cx, cy=cy, n_points=len(pts), width=width, points=tuple(pts)))
+    return out
+
+
+def scan_points_map(scan: dict, pose: dict, p: LidarFollowParams) -> list[tuple[float, float]]:
+    """Every valid beam lifted to the map frame — display only (no clustering).
+
+    Mirrors :func:`cluster_scan`'s beam validity gate (``_valid_range`` +
+    ``max_range``) so the raw scan drawn in the follow viz is exactly the set of
+    returns the clusterer considered. Used by both the runtime loop's live
+    top-down view and ``manual_tests/test_lidar_follow_viz.py``.
+    """
+    out: list[tuple[float, float]] = []
+    angle = scan.get("angle_min", 0.0)
+    inc = scan.get("angle_increment", 0.0)
+    rmin = scan.get("range_min", 0.0) or 0.0
+    rmax = min(float(scan.get("range_max") or p.max_range), p.max_range)
+    for r in scan.get("ranges") or []:
+        theta = angle
+        angle += inc
+        rf = _valid_range(r, rmin, rmax)
+        if rf is None:
+            continue
+        out.append(sensor_to_map(rf * math.cos(theta), rf * math.sin(theta), pose, p))
     return out
 
 

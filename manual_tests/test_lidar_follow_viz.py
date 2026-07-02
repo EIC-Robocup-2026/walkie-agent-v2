@@ -2,11 +2,14 @@
 
 Runs the exact scan pipeline the hybrid ``follow_person`` uses — `cluster_scan`
 → map-frame lift → gate association → :class:`AlphaBetaTrack` — against the
-real robot's lidar and odometry, and plots it in the map frame (matplotlib,
-mirroring walkie-sdk/tests/test_lidar_interactive.py): grey scan points,
-colored candidate cluster centroids, the gate circle at the track's prediction,
-the track position + velocity arrow, CV fixes as stars, and the robot pose as a
-triangle. The base is never commanded, so this is safe to run anywhere.
+real robot's lidar and odometry, and plots it in the map frame through the SAME
+:class:`~tasks.skills.lidar_follow_viz.LidarFollowViz` the live follow loop uses
+(``HRI_FOLLOW_LIDAR_VIZ=1``), so what you see here is what the robot draws while
+following: grey scan points, hollow-orange candidate cluster centroids, the RED
+member points of the SELECTED cluster (the person's lidar cloud), the gate
+circle at the track's prediction, the track position + velocity arrow, CV fixes
+as stars, and the robot pose as a triangle. The base is never commanded, so
+this is safe to run anywhere.
 
 Seeding the track (identity source):
   * default   — CLICK a point on the plot to seed/reseed the track there
@@ -45,11 +48,13 @@ load_task_config(Path(__file__).resolve().parent.parent / "tasks" / "HRI")
 
 from walkie_sdk import WalkieRobot
 
+from tasks.skills.lidar_follow_viz import LidarFollowViz, follow_title
 from tasks.skills.lidar_track import (
     AlphaBetaTrack,
     LidarFollowParams,
     associate,
     cluster_scan,
+    scan_points_map,
     sensor_to_map,
 )
 
@@ -66,28 +71,6 @@ def get_robot() -> WalkieRobot:
         camera_protocol="zenoh",
         camera_port=ZENOH_PORT,
     )
-
-
-def _scan_points_map(scan: dict, pose: dict, p: LidarFollowParams) -> tuple[list, list]:
-    """Every valid beam as a map-frame (xs, ys) — display only."""
-    xs, ys = [], []
-    angle = scan.get("angle_min", 0.0)
-    inc = scan.get("angle_increment", 0.0)
-    rmin = scan.get("range_min", 0.0) or 0.0
-    rmax = min(float(scan.get("range_max") or p.max_range), p.max_range)
-    for r in scan.get("ranges") or []:
-        theta = angle
-        angle += inc
-        try:
-            rf = float(r)
-        except (TypeError, ValueError):
-            continue
-        if math.isnan(rf) or math.isinf(rf) or rf < rmin or rf > rmax:
-            continue
-        x, y = sensor_to_map(rf * math.cos(theta), rf * math.sin(theta), pose, p)
-        xs.append(x)
-        ys.append(y)
-    return xs, ys
 
 
 def _make_cv_worker(robot):
@@ -115,12 +98,6 @@ def main() -> int:
     parser.add_argument("--save", default=None, help="also save each rendered frame to this path")
     args = parser.parse_args()
 
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError:
-        print("[FAIL] matplotlib not installed. Run: uv pip install matplotlib")
-        return 1
-
     p = LidarFollowParams.from_env()
     print(f"Params: gate={p.gate}m(+{p.gate_grow}/s, cap {p.gate_max}) "
           f"jump={p.jump_base}+{p.jump_slope}r merge={p.merge_dist}m "
@@ -138,27 +115,15 @@ def main() -> int:
             print("Starting the CV fix worker (select_largest_person) ...")
             worker = _make_cv_worker(robot)
 
-        fig, ax = plt.subplots(figsize=(9, 9))
-        ax.set_aspect("equal")
-        ax.set_xlabel("map x (m)")
-        ax.set_ylabel("map y (m)")
-        ax.grid(True, linestyle=":", alpha=0.5)
-        (scan_dots,) = ax.plot([], [], ".", color="0.6", markersize=2, label="scan")
-        (cand_dots,) = ax.plot([], [], "o", color="tab:orange", markersize=7,
-                               fillstyle="none", label="candidates")
-        (track_dot,) = ax.plot([], [], "o", color="tab:green", markersize=10, label="track")
-        (fix_star,) = ax.plot([], [], "*", color="tab:purple", markersize=14, label="CV fix")
-        (robot_tri,) = ax.plot([], [], "b^", markersize=12, label="robot")
-        gate_circle = plt.Circle((0, 0), p.gate, fill=False, color="tab:green",
-                                 linestyle="--", alpha=0.7)
-        ax.add_patch(gate_circle)
-        gate_circle.set_visible(False)
-        (vel_line,) = ax.plot([], [], "-", color="tab:green", lw=2)  # 1-second velocity lead
-        ax.legend(loc="upper right")
+        try:
+            viz = LidarFollowViz(lim=args.lim, gate=p.gate)
+        except ImportError:
+            print("[FAIL] matplotlib not installed. Run: uv pip install matplotlib")
+            return 1
 
         def on_click(event):
             nonlocal track
-            if event.inaxes is not ax or event.xdata is None:
+            if event.inaxes is not viz.ax or event.xdata is None:
                 return
             now = time.monotonic()
             if track is None:
@@ -168,29 +133,29 @@ def main() -> int:
                 track.reseed(event.xdata, event.ydata, now)
             print(f"[seed] track @ ({event.xdata:.2f}, {event.ydata:.2f}) — click again to reseed")
 
-        fig.canvas.mpl_connect("button_press_event", on_click)
+        viz.fig.canvas.mpl_connect("button_press_event", on_click)
         print("Animating. CLICK the plot to seed the track on a cluster; close the window to stop.")
-        plt.ion()
-        plt.show()
 
         last_fix_xy = None
-        while plt.fignum_exists(fig.number):
+        while viz.alive():
             now = time.monotonic()
             scan = robot.lidar.get_scan()
             pose = robot.status.get_position()
             if scan is None or not pose:
-                plt.pause(0.1)
+                time.sleep(0.1)
                 continue
 
             # Same per-scan pipeline as _follow_person_lidar.
             clusters = cluster_scan(scan, p)
             pts = [sensor_to_map(c.cx, c.cy, pose, p) for c in clusters]
             gate = None
+            selected_i = None
             if track is not None:
                 pred = track.predict(now)
                 gate = min(p.gate_max, p.gate + p.gate_grow * (now - track.t_accept))
                 i = associate(pts, pred, gate)
                 if i is not None:
+                    selected_i = i
                     track.update(now, *pts[i])
                 elif now - track.t_accept > p.miss_sec:
                     print("[track] gate dry past miss window — track dropped")
@@ -211,36 +176,26 @@ def main() -> int:
                                 track.reseed(fix.xy[0], fix.xy[1], fix.t)
                                 print(f"[cv] RESEED @ ({fix.xy[0]:.2f}, {fix.xy[1]:.2f})")
 
-            # ---- draw ----
-            xs, ys = _scan_points_map(scan, pose, p)
-            scan_dots.set_data(xs, ys)
-            cand_dots.set_data([x for x, _ in pts], [y for _, y in pts])
-            robot_tri.set_data([pose["x"]], [pose["y"]])
-            if track is not None:
-                tx, ty = track.predict(now)
-                track_dot.set_data([tx], [ty])
-                gate_circle.center = (tx, ty)
-                gate_circle.set_radius(gate if gate is not None else p.gate)
-                gate_circle.set_visible(True)
-                vel_line.set_data([tx, tx + track.vx], [ty, ty + track.vy])
-                speed = math.hypot(track.vx, track.vy)
-            else:
-                track_dot.set_data([], [])
-                gate_circle.set_visible(False)
-                vel_line.set_data([], [])
-                speed = 0.0
-            if last_fix_xy is not None:
-                fix_star.set_data([last_fix_xy[0]], [last_fix_xy[1]])
-            ax.set_xlim(pose["x"] - args.lim, pose["x"] + args.lim)
-            ax.set_ylim(pose["y"] - args.lim, pose["y"] + args.lim)
-            ax.set_title(
-                f"{len(pts)} candidates / {len(xs)} pts — "
-                + (f"TRACK v={speed:.2f} m/s" if track is not None else "no track (click to seed)")
+            # The RED "selected cloud": member points of the cluster the gate
+            # locked onto this scan (the lidar blob being followed).
+            selected = ()
+            if selected_i is not None:
+                selected = [sensor_to_map(mx, my, pose, p) for (mx, my) in clusters[selected_i].points]
+
+            viz.update(
+                robot_xy=(pose["x"], pose["y"]),
+                scan_xy=scan_points_map(scan, pose, p),
+                cand_xy=pts,
+                selected_xy=selected,
+                track_xy=(track.predict(now) if track is not None else None),
+                track_vel=((track.vx, track.vy) if track is not None else (0.0, 0.0)),
+                gate=gate,
+                fix_xy=last_fix_xy,
+                title=follow_title("TRACK" if track is not None else "SEARCH", len(pts), track),
             )
             if args.save:
-                fig.savefig(args.save, dpi=100, bbox_inches="tight")
-            fig.canvas.draw_idle()
-            plt.pause(0.1)
+                viz.save(args.save)
+            time.sleep(0.1)
         return 0
     except KeyboardInterrupt:
         print("\nInterrupted.")

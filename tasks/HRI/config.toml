@@ -402,6 +402,19 @@ HRI_FOLLOW_PREDICT_GAP_RESET_SEC = "3.0"
 # 0 = legacy camera-paced loop. With the flag on but no scan available the loop
 # falls back to the legacy path automatically, so this is safe to leave on.
 HRI_FOLLOW_LIDAR = "1"
+# 1 = open a live 2D top-down matplotlib window while following (map frame):
+# grey scan points, hollow-orange candidate cluster centroids, the RED member
+# points of the cluster SELECTED to follow (the person's lidar cloud), the green
+# track + velocity arrow + staleness-grown gate circle, the purple CV fix, and
+# the blue robot triangle. Best-effort — a missing matplotlib / no display just
+# prints a note and the follow runs without it. Needs a display (X / forwarding);
+# leave 0 on a headless robot. Separate from the HRI_FOLLOW_VIZ camera JPEG.
+HRI_FOLLOW_LIDAR_VIZ = "0"
+# Plot half-extent (m) around the robot for the 2D window above.
+HRI_FOLLOW_LIDAR_VIZ_LIM_M = "6.0"
+# Optional path to also save each rendered 2D frame to (overwritten each tick),
+# so the view survives headless / no-X runs. Empty = window only, no file.
+HRI_FOLLOW_LIDAR_VIZ_PATH = ""
 # Main-loop tick (s) in lidar mode — replaces HRI_FOLLOW_NAV_PERIOD_SEC pacing.
 # Match the scan period (a faster tick just re-reads the same cached scan).
 HRI_FOLLOW_LIDAR_TICK_SEC = "0.1"

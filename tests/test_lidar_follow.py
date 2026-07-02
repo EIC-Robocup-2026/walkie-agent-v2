@@ -108,6 +108,32 @@ def test_cluster_scan_splits_on_range_jump():
     assert len(out) == 2
 
 
+def test_cluster_scan_exposes_member_points_for_viz():
+    # Each cluster carries its sensor-frame member points (the "selected cloud"
+    # the follow viz highlights); they must be consistent with n_points/centroid.
+    scan = make_scan([(2.0, 0.0, 0.4)])
+    (c,) = cluster_scan(scan, P)
+    assert len(c.points) == c.n_points
+    cx = sum(x for x, _ in c.points) / len(c.points)
+    cy = sum(y for _, y in c.points) / len(c.points)
+    assert abs(cx - c.cx) < 1e-9 and abs(cy - c.cy) < 1e-9
+    # Points are the raw sensor-frame beams (+x forward), so ~2 m ahead, y ~ 0.
+    assert all(abs(x - 2.0) < 0.2 for x, _ in c.points)
+
+
+def test_scan_points_map_lifts_every_valid_beam():
+    from tasks.skills.lidar_track import scan_points_map
+
+    scan = make_scan([(2.0, 0.0, 0.4)])
+    pose = {"x": 1.0, "y": 2.0, "heading": 0.0}
+    pts = scan_points_map(scan, pose, P)
+    # Only the valid blob beams survive (the inf background is dropped), and each
+    # is offset by the robot position (heading 0, zero sensor offset -> +x, +y).
+    valid = sum(1 for r in scan["ranges"] if r != float("inf") and r is not None)
+    assert pts and len(pts) == valid
+    assert all(abs(x - 3.0) < 0.2 and abs(y - 2.0) < 0.3 for x, y in pts)
+
+
 def test_associate_nearest_in_gate_wins():
     pts = [(0.0, 0.0), (1.0, 0.0), (1.2, 0.1)]
     assert associate(pts, (1.1, 0.0), gate=0.5) == 1
@@ -158,7 +184,9 @@ class FakeNav:
     def __init__(self):
         self.goals: list[tuple[float, float, float]] = []
 
-    def go_to(self, x, y, heading, blocking=True):
+    def go_to(self, x, y, heading, blocking=True, **kwargs):
+        # **kwargs mirrors the real nav.go_to gaining align_method (approach_point
+        # passes align_method="face_target"); the fake just ignores the extras.
         self.goals.append((float(x), float(y), float(heading)))
         return True
 
