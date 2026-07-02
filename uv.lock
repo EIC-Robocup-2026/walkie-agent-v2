@@ -4615,6 +4615,7 @@ dependencies = [
     { name = "pillow" },
     { name = "pyaudio" },
     { name = "pydub" },
+    { name = "pynput" },
     { name = "pytest" },
     { name = "python-dotenv" },
     { name = "rerun-sdk" },
@@ -4649,6 +4650,7 @@ requires-dist = [
     { name = "pillow", specifier = ">=12.2.0" },
     { name = "pyaudio", specifier = ">=0.2.14" },
     { name = "pydub", specifier = ">=0.25.1" },
+    { name = "pynput", specifier = ">=1.8.2" },
     { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
@@ -4670,10 +4672,10 @@ version = "0.2.0"
 source = { editable = "../walkie-sdk" }
 dependencies = [
     { name = "eclipse-zenoh" },
+    { name = "evdev", marker = "sys_platform == 'linux'" },
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "opencv-python" },
-    { name = "pynput" },
     { name = "pyyaml" },
     { name = "rosbags" },
     { name = "roslibpy" },
@@ -4683,6 +4685,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "eclipse-zenoh", specifier = ">=1.7.2" },
+    { name = "evdev", marker = "sys_platform == 'linux'", specifier = ">=1.6.0" },
     { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.110" },
     { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.110" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
@@ -4691,7 +4694,6 @@ requires-dist = [
     { name = "mkdocstrings", extras = ["python"], marker = "extra == 'docs'", specifier = ">=0.25" },
     { name = "numpy", specifier = ">=2.3.5" },
     { name = "opencv-python", specifier = ">=4.11.0.86" },
-    { name = "pynput", specifier = ">=1.7.7" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pyyaml" },
     { name = "rosbags" },
