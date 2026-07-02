@@ -98,6 +98,14 @@ GPSR_INTERLEAVE = "0"
 # 1 = run the walkie_graphs perception loop in the background during the task so
 # "find/bring object" commands can use long-term spatial memory.
 GPSR_START_PERCEPTION = "1"
+# GPSR-SCOPED override of the shared perception class list (this file loads before
+# services/realtime_explore/config.toml, so it wins during GPSR only — other
+# challenges keep the service default). Objects = the OFFICIAL Incheon-2026 list
+# (== world.toml [object_categories], spaces for underscores) so every object the
+# referee can name is recallable from scene memory (GPSR_FIND_USE_MEMORY); the
+# service default only covers 15/39 of them. + the same furniture/context classes.
+# Validate tick latency + precision on the GPU box after edits (benchmarks/yoloe).
+WALKIE_EXPLORE_INTERESTED_CLASSES = "apple,banana,baseball,bowl,cheezit,chocolate jello,cleanser,coffee grounds,cola,cornflakes,cup,dice,fork,iced tea,juice pack,knife,lemon,milk,mustard,orange,orange juice,peach,pear,plate,plum,pringles,red wine,rubiks cube,soccer ball,spam,sponge,spoon,strawberry,strawberry jello,sugar,tennis ball,tomato soup,tropical juice,tuna,sofa,door,chair,armchair,table,stool,shirt,dish rack,shelf,monitor,bed,pillow"
 # find_object scene-memory fallback (skills.py). 1 = when the command names no
 # location, or the named place comes up empty, recall where the object was last
 # seen from the walkie_graphs CLIP scene graph, drive there, and confirm with a
