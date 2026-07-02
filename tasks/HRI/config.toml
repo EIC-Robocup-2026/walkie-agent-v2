@@ -96,6 +96,11 @@ HRI_ENROLL_DEDUP_MIN_SCORE = "0.7"
 # it (a small far face still holds an existing lock). Matches the face_conf_med
 # fusion knee, so lower-confidence faces were already scored appearance-only.
 HRI_RECOG_MIN_DET_SCORE = "0.5"
+# Minimum face bbox area (px^2) for a HARD identity decision (and for the
+# non-host-face exclusion). ~50x50 px — a guest seated across the living room
+# still clears it. Deliberately NOT the door-greeter's HRI_FACE_MIN_AREA_PX
+# (10000), which is sized for someone standing right in front of the robot.
+HRI_RECOG_MIN_FACE_AREA_PX = "2500"
 # 1 = also require a roughly front-facing pose before a HARD identity decision.
 # Opt-in hook, off by default (the face box arrives without its pose keypoints).
 HRI_RECOG_REQUIRE_FRONTAL = "0"
@@ -220,14 +225,20 @@ HRI_FOLLOW_VISIBLE_MARGIN = "0.06"
 HRI_FOLLOW_EXCLUDE_NONHOST_FACE = "1"
 # How far below the face-recognition similarity floor (1 - FACE_MATCH_THRESHOLD) a
 # face inside a candidate box must score against the host before that box is called
-# "not the host". Larger = more conservative (excludes only very-clearly-other
-# faces, so a host glancing sideways is never wrongly excluded).
-HRI_FOLLOW_NONHOST_FACE_MARGIN = "0.10"
-# After losing the lock (re-acquiring), the attire/face floor is raised to this so a
-# look-alike wandering into the host's last spot can't grab a fresh lock. Steady-
-# state tracking keeps the perception-wide APPEARANCE_MATCH_THRESHOLD; set equal to
-# it to disable the stricter re-acquire floor.
-HRI_FOLLOW_REACQUIRE_MIN_SCORE = "0.6"
+# "not the host". Larger = more conservative. Default 0.25 → exclude below ~0.35:
+# same-person face sims in bad lighting land ~0.4-0.6 while different-person sims
+# sit ~0.1-0.3, so this rules out real bystanders without ever excluding a host
+# whose single-frame enrollment scores modestly. The face must also clear
+# HRI_RECOG_MIN_FACE_AREA_PX + HRI_RECOG_MIN_DET_SCORE — a tiny/blurry face never
+# vetoes a candidate.
+HRI_FOLLOW_NONHOST_FACE_MARGIN = "0.25"
+# After LOSING a previously-held lock (re-acquiring), the attire/face floor is
+# raised to this so a look-alike wandering into the host's last spot can't grab a
+# fresh lock. The INITIAL acquisition at follow start uses the base
+# APPEARANCE_MATCH_THRESHOLD (the host is front-and-center then, and their stored
+# attire is from one seated frame, so a high floor would block the follow from
+# ever starting). Set equal to APPEARANCE_MATCH_THRESHOLD to disable.
+HRI_FOLLOW_REACQUIRE_MIN_SCORE = "0.55"
 # Visible-candidate margin used WHILE re-acquiring, in place of
 # HRI_FOLLOW_VISIBLE_MARGIN — higher, because committing a fresh lock is riskier
 # than holding an existing one.
@@ -238,11 +249,19 @@ HRI_FOLLOW_REACQUIRE_MARGIN = "0.10"
 # lock confirmation guard the look-alike case without it. Turn on only if the arena
 # reliably shows the host's face on re-acquire.
 HRI_FOLLOW_REACQUIRE_REQUIRE_FACE = "0"
-# Consecutive confirming ticks before committing a NEW host lock (at start or after
-# a loss). During confirmation the selector returns None (the loop coasts), so a
-# one-frame fluke match on a look-alike never commits. 1 = lock on the first good
-# tick (old behaviour).
+# Consecutive confirming ticks before RE-committing a lock after a LOSS. During
+# confirmation the selector returns None (the loop coasts/searches), so a
+# one-frame fluke match on a look-alike never re-commits. The INITIAL lock at
+# follow start always commits on the first qualifying tick — an unconfirmed None
+# there makes follow_person rotate-search away from the host. 1 = re-lock on the
+# first good tick (old behaviour).
 HRI_FOLLOW_LOCK_CONFIRM_TICKS = "2"
+# 1 = just before the follow starts, re-embed the host's attire from the current
+# (standing) frame and refresh the stored vector (latest-wins): the enrollment
+# frame is from OfferSeat with the host SEATED, and the posture change otherwise
+# drags every follow-tick attire similarity down. Face-verified and best-effort —
+# if the host isn't located in the frame, the old vector is kept. 0 = off.
+HRI_FOLLOW_REFRESH_ATTIRE = "1"
 # While locked, tolerate this many consecutive no-match ticks (coasting via the
 # predictor/grace) before dropping the lock and re-acquiring under the strict
 # face-aware gate. Keeps a brief occlusion/turn from forcing a full re-acquire

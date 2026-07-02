@@ -42,6 +42,7 @@ from .identity import (
     enroll_person_in_box,
     locate_people,
     make_follow_selector,
+    refresh_person_attire,
     wait_until_seated,
 )
 from .skills import (
@@ -541,6 +542,14 @@ class FollowHostAndDropBag(SubTask):
         ctx.say(prompts.BAG_ASK_WHERE)
         if classify_host_command(ctx, ctx.listen(timeout=listen_timeout)) == "place":
             return self._place_bag(ctx)
+        # Refresh the host's attire vector from the CURRENT frame before the
+        # follow starts: the stored one is from OfferSeat's single SEATED frame,
+        # and the seated->standing posture change drags every follow-tick attire
+        # similarity down. Face-verified and best-effort (a miss just keeps the
+        # old vector); gated by HRI_FOLLOW_REFRESH_ATTIRE.
+        snap = ctx.snapshot()
+        if snap is not None:
+            refresh_person_attire(ctx, "host", snap.img)
         # Follow the host (selected by face first, attire fallback). The command
         # listener is the stopper: follow_person enters it AFTER the warmup ack
         # (and the speaker pauses the mic while it talks, so neither thread

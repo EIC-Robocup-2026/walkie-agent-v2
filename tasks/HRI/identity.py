@@ -135,8 +135,10 @@ def _face_trusted(face: FaceEmbedding, *, hard: bool) -> bool:
     ``HRI_RECOG_MIN_DET_SCORE`` (default 0.5, the ``face_conf_med`` fusion knee —
     below it the embedding is too noisy to *label* someone). Only for a HARD
     decision (an introduction label, or re-acquiring a lost follow lock) does it
-    also demand a minimum on-screen face area (``HRI_FACE_MIN_AREA_PX``, reused
-    from the greeter): while merely *maintaining* a lock we must not drop a small,
+    also demand a minimum on-screen face area (``HRI_RECOG_MIN_FACE_AREA_PX``,
+    default ~50×50 px — a person across the living room still clears it; NOT the
+    greeter's ``HRI_FACE_MIN_AREA_PX``, which is sized for someone standing right
+    at the door): while merely *maintaining* a lock we must not drop a small,
     far-away host face. Frontalness (``HRI_RECOG_REQUIRE_FRONTAL``) is an opt-in
     hook, off by default because the face box arrives without its pose keypoints.
     """
@@ -144,7 +146,7 @@ def _face_trusted(face: FaceEmbedding, *, hard: bool) -> bool:
     if face.det_score < min_det:
         return False
     if hard:
-        min_area = float(os.getenv("HRI_FACE_MIN_AREA_PX", "10000"))
+        min_area = float(os.getenv("HRI_RECOG_MIN_FACE_AREA_PX", "2500"))
         if face.area() < min_area:
             return False
     return True
@@ -740,6 +742,51 @@ def locate_people(
     return {rid: v for rid, v in located.items() if rid in wanted_set}
 
 
+def refresh_person_attire(ctx: TaskContext, person_id: str, img: Image.Image) -> bool:
+    """Re-embed *person_id*'s attire from *img* and refresh the stored vector.
+
+    The follow loop matches attire against the enrollment-time vector, but the
+    host is enrolled from ONE frame while SEATED (``OfferSeat``) and then followed
+    while STANDING — a posture/crop mismatch that drags every follow-tick attire
+    similarity down. Called right before the follow starts (the robot is facing
+    the host, who is getting up to lead): locate the person face-first in the
+    current frame (:func:`locate_people`, so the refreshed box is
+    identity-verified), embed its attire crop, and re-enroll with only the
+    appearance vector updated — latest-wins is the store's own contract for
+    attire, and re-passing the stored face vector folds a centroid of itself
+    (unchanged). Gated by ``HRI_FOLLOW_REFRESH_ATTIRE``; best-effort — any miss
+    or failure logs and returns False, leaving the stored vector as it was.
+    """
+    if os.getenv("HRI_FOLLOW_REFRESH_ATTIRE", "1").lower() not in ("1", "true", "yes"):
+        return False
+    if ctx.people is None or ctx.people.count() == 0:
+        return False
+    try:
+        found = locate_people(ctx, [img], [person_id]).get(person_id)
+        if found is None:
+            print(f"[identity] attire refresh: {person_id} not located; skipping")
+            return False
+        _fi, box = found
+        app_emb = _appearance_embedding(ctx, img, box)
+        if app_emb is None:
+            return False
+        rec = ctx.people.get(person_id)
+        if rec is None:
+            return False
+        ctx.people.enroll(
+            rec.name or "",
+            rec.drink or "",
+            list(rec.embedding) if rec.embedding else [0.0] * 512,
+            person_id=person_id,
+            app_embedding=app_emb,
+        )
+        print(f"[identity] refreshed {person_id}'s attire from the current frame")
+        return True
+    except Exception as exc:
+        print(f"[identity] attire refresh for {person_id} failed ({exc})")
+        return False
+
+
 def _persons_to_candidates(
     persons: list[PersonPose],
 ) -> list[tuple[BBox, float | None]]:
@@ -778,6 +825,25 @@ def _cand_for_face(
     return _expand_face_to_person(face.bbox_xyxy, img_w, img_h), None
 
 
+def _follow_debug_enabled() -> bool:
+    return os.getenv("HRI_FOLLOW_TRACK_DEBUG", "0").lower() in ("1", "true", "yes")
+
+
+def _log_no_qualifier(
+    modality: str, best_sim: float | None, min_score: float, reacquiring: bool
+) -> None:
+    """One HRI_FOLLOW_TRACK_DEBUG line when a pass scored candidates but none
+    qualified — reports the best host similarity seen against the active floor,
+    which is exactly what's needed to tune the floors to a real arena."""
+    if best_sim is None or not _follow_debug_enabled():
+        return
+    print(
+        f"[identity] follow: no {modality} qualifier "
+        f"(best host sim {best_sim:.2f}, floor {min_score:.2f}"
+        f"{', reacquiring' if reacquiring else ''})"
+    )
+
+
 def _match_floor(ctx: TaskContext, *, reacquiring: bool) -> float:
     """Fused-match floor for a follow tick: the perception-wide
     ``APPEARANCE_MATCH_THRESHOLD`` while maintaining a lock, raised to
@@ -786,7 +852,7 @@ def _match_floor(ctx: TaskContext, *, reacquiring: bool) -> float:
     base = ctx.people.fused_min_score()
     if not reacquiring:
         return base
-    return max(base, float(os.getenv("HRI_FOLLOW_REACQUIRE_MIN_SCORE", "0.6")))
+    return max(base, float(os.getenv("HRI_FOLLOW_REACQUIRE_MIN_SCORE", "0.55")))
 
 
 def _visible_margin(*, reacquiring: bool) -> float:
@@ -877,18 +943,24 @@ def _match_by_face(
     min_score = _match_floor(ctx, reacquiring=reacquiring)
     margin = float(os.getenv("HRI_FOLLOW_FACE_MARGIN", "0.05"))
     qualifying: list[tuple[float, BBox, float | None]] = []
+    best_seen: float | None = None
     for face in faces:
         if not _face_trusted(face, hard=reacquiring):
             continue
         box, scale = _cand_for_face(face, cands, img.width, img.height)
         scores = ctx.people.fused_scores(face.embedding)  # face-only path
         host_sim = scores.get(person_id)
-        if host_sim is None or host_sim < min_score:
+        if host_sim is None:
+            continue
+        best_seen = host_sim if best_seen is None else max(best_seen, host_sim)
+        if host_sim < min_score:
             continue
         best_other = max((s for rid, s in scores.items() if rid != person_id), default=0.0)
         if host_sim - best_other < margin:
             continue
         qualifying.append((host_sim, box, scale))
+    if not qualifying:
+        _log_no_qualifier("face", best_seen, min_score, reacquiring)
     return _pick_closest_qualifier(qualifying, person_id, "face", reacquiring=reacquiring)
 
 
@@ -915,6 +987,7 @@ def _score_attire_candidates(
     margin = float(os.getenv("HRI_FOLLOW_APPEARANCE_MARGIN", "0.05"))
     min_crop = float(os.getenv("HRI_RECOG_MIN_CROP_PX", "0"))
     qualifying: list[tuple[float, BBox, float | None]] = []
+    best_seen: float | None = None
     for (box, scale), app_emb in zip(cands, embeds):
         if app_emb is None:
             continue
@@ -922,12 +995,17 @@ def _score_attire_candidates(
             continue
         scores = ctx.people.fused_scores(None, app_emb)
         host_sim = scores.get(person_id)
-        if host_sim is None or host_sim < min_score:
+        if host_sim is None:
+            continue
+        best_seen = host_sim if best_seen is None else max(best_seen, host_sim)
+        if host_sim < min_score:
             continue
         best_other = max((s for rid, s in scores.items() if rid != person_id), default=0.0)
         if host_sim - best_other < margin:
             continue
         qualifying.append((host_sim, box, scale))
+    if not qualifying:
+        _log_no_qualifier("attire", best_seen, min_score, reacquiring)
     return _pick_closest_qualifier(qualifying, person_id, "appearance", reacquiring=reacquiring)
 
 
@@ -1088,14 +1166,19 @@ def _box_shows_nonhost_face(
     box), but bystanders usually face the robot — so a person box that shows a
     good frontal face whose host similarity is well below the face floor is
     provably someone else and must not be locked onto via attire alone. Only
-    excludes on a *confident negative*: the contained face must clear *min_det* and
-    its host similarity must fall below ``face_sim_floor - nonhost_margin`` (so a
-    host merely glancing sideways, scoring a little low, is not wrongly excluded).
-    Never excludes when the host was enrolled without a face (then a face gives no
-    signal about them).
+    excludes on a *confident negative*: the contained face must clear *min_det*
+    AND the hard-decision size gate (a tiny blurry face gives unreliable sims and
+    must never veto a candidate), and its host similarity must fall below
+    ``face_sim_floor - nonhost_margin``. Same-person face sims in bad conditions
+    land around 0.4–0.6 while different-person sims sit around 0.1–0.3, so the
+    default margin (0.25 → exclude below ~0.35) rules out real bystanders without
+    ruling out a host whose one-frame enrollment scores modestly. Never excludes
+    when the host was enrolled without a face (then a face gives no signal about
+    them).
     """
+    min_area = float(os.getenv("HRI_RECOG_MIN_FACE_AREA_PX", "2500"))
     for face in faces:
-        if face.det_score < min_det:
+        if face.det_score < min_det or face.area() < min_area:
             continue
         fx = (face.bbox_xyxy[0] + face.bbox_xyxy[2]) / 2
         fy = (face.bbox_xyxy[1] + face.bbox_xyxy[3]) / 2
@@ -1128,7 +1211,7 @@ def _drop_nonhost_face_candidates(
     ):
         return cands
     min_det = float(os.getenv("HRI_RECOG_MIN_DET_SCORE", "0.5"))
-    nonhost_margin = float(os.getenv("HRI_FOLLOW_NONHOST_FACE_MARGIN", "0.10"))
+    nonhost_margin = float(os.getenv("HRI_FOLLOW_NONHOST_FACE_MARGIN", "0.25"))
     face_sim_floor = 1.0 - ctx.people.face_match_max_distance()
     kept = [
         (box, scale)
@@ -1246,12 +1329,19 @@ class FollowSelector:
     object satisfies that while carrying the state that makes a follow both cheap
     and hard to hijack:
 
-    * ``locked`` — whether a host lock is currently held. While unlocked the
-      selector is *re-acquiring*: it runs the FACE pass every tick, passes
-      ``reacquiring=True`` (stricter :func:`_match_floor` + margin), and must see
-      the host on ``HRI_FOLLOW_LOCK_CONFIRM_TICKS`` consecutive ticks before
-      committing the lock — during those confirming ticks it returns ``None`` so a
-      one-frame fluke on a look-alike never commits.
+    * ``locked`` / ``ever_locked`` — whether a host lock is currently held, and
+      whether one was ever held this follow. The INITIAL acquisition (never
+      locked yet — the host is front-and-center right after being asked where the
+      bag goes) uses the permissive base gates and commits on the FIRST
+      qualifying tick, exactly like the pre-hysteresis behaviour: every
+      unconfirmed ``None`` makes ``follow_person`` rotate-search, so being strict
+      at start just spins the robot away from a host whose stored vectors (one
+      seated enrollment frame) score modestly. Only RE-acquiring a LOST lock —
+      the look-alike-hijack case — is strict: ``reacquiring=True`` (higher
+      :func:`_match_floor` + margin, hard face gates) and
+      ``HRI_FOLLOW_LOCK_CONFIRM_TICKS`` consecutive confirming ticks before the
+      lock re-commits, returning ``None`` meanwhile so a one-frame fluke on a
+      look-alike never commits.
     * ``last_box`` — the last matched box, used as the attire-gate hint (and set
       during confirmation so the confirming ticks tighten onto the same person).
     * once locked it throttles the FACE pass to every ``HRI_FOLLOW_FACE_EVERY_N``
@@ -1273,12 +1363,13 @@ class FollowSelector:
         self.last_box: BBox | None = None
         self.tick = 0
         self.locked = False
+        self.ever_locked = False  # strict re-acquire applies only after a LOST lock
         self.confirm = 0  # consecutive confirming ticks while re-acquiring
         self.miss = 0  # consecutive no-match ticks while locked
 
     def _run_face_this_tick(self) -> bool:
         if not self.locked:
-            return True  # re-acquiring / confirming: use every modality
+            return True  # acquiring / confirming: use every modality
         every_n = max(1, int(os.getenv("HRI_FOLLOW_FACE_EVERY_N", "5")))
         return self.tick % every_n == 0
 
@@ -1289,7 +1380,7 @@ class FollowSelector:
             self.person_id,
             hint_box=self.last_box,
             run_face=self._run_face_this_tick(),
-            reacquiring=not self.locked,
+            reacquiring=self.ever_locked and not self.locked,
         )
         self.tick += 1
         return self._update(box)
@@ -1297,17 +1388,26 @@ class FollowSelector:
     def _update(self, box: BBox | None) -> BBox | None:
         """Apply the lock hysteresis to this tick's raw match and return what the
         follow loop should drive toward (``None`` = coast)."""
-        confirm_k = max(1, int(os.getenv("HRI_FOLLOW_LOCK_CONFIRM_TICKS", "2")))
         miss_tol = max(0, int(os.getenv("HRI_FOLLOW_LOCK_MISS_TOLERANCE", "2")))
         if not self.locked:
             if box is None:
                 self.confirm = 0
                 self.last_box = None
                 return None
+            # Initial acquisition commits on the first qualifying tick (base
+            # gates); only a RE-acquire after a lost lock needs K confirming
+            # ticks — every unconfirmed None makes follow_person rotate-search,
+            # which at start would spin the robot away from the host.
+            confirm_k = (
+                max(1, int(os.getenv("HRI_FOLLOW_LOCK_CONFIRM_TICKS", "2")))
+                if self.ever_locked
+                else 1
+            )
             self.confirm += 1
             self.last_box = box  # hint the next confirming tick onto this person
             if self.confirm >= confirm_k:
                 self.locked = True
+                self.ever_locked = True
                 self.miss = 0
                 return box
             return None  # still confirming -> coast
