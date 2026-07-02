@@ -181,12 +181,19 @@ class Microphone:
     def is_paused(self) -> bool:
         return self._paused.is_set()
 
-    def _reset_vad(self) -> None:
-        """Reset VAD iterator for new recording session."""
+    def _reset_vad(self, min_silence_duration_ms: int | None = None) -> None:
+        """Reset VAD iterator for new recording session.
+
+        The optional override is PER-RECORDING: record_until_silence threads its
+        own value through every reset it triggers (including the mid-recording
+        pause-resume one, via closure), and the constructor default is never
+        mutated — so one caller's long-utterance setting cannot leak into any
+        other recording, even from another thread.
+        """
         self.vad_iterator = VADIterator(
             self.model,
             threshold=self.threshold,
-            min_silence_duration_ms=self.min_silence_duration_ms,
+            min_silence_duration_ms=min_silence_duration_ms or self.min_silence_duration_ms,
             speech_pad_ms=self.speech_pad_ms,
         )
 
@@ -254,21 +261,33 @@ class Microphone:
         timeout: float = 30.0,
         min_duration: float = 2.0,
         wait_for_speech: bool = True,
+        min_silence_duration_ms: int | None = None,
     ) -> bytes:
         """Record audio until speech ends (silence detected).
-        
+
         Args:
             timeout: Maximum recording duration in seconds.
             min_duration: Minimum recording duration in seconds before silence
                 detection can stop recording.
             wait_for_speech: If True, only stop after speech was detected and ended.
                 If False, can stop on any silence after min_duration.
-            
+            min_silence_duration_ms: Override the constructor's end-of-speech
+                silence for THIS recording only. A long multi-command utterance
+                from a halting speaker (e.g. the GPSR referee reading three
+                commands in one stream) pauses mid-utterance longer than the
+                default before it is truly finished. None = constructor value.
+
         Returns:
             Audio data as bytes (16-bit PCM, 16kHz mono).
         """
         print("============== Microphone recording started ==============")
-        self._reset_vad()
+        # Closure-scoped so the callback's pause-resume reset keeps THIS
+        # recording's value without touching shared state (a background
+        # CommandListener recording must never see another call's override).
+        active_silence_ms = (
+            int(min_silence_duration_ms) if min_silence_duration_ms is not None else None
+        )
+        self._reset_vad(active_silence_ms)
         audio_chunks: list[np.ndarray] = []
         speech_started = False
         speech_ended = False
@@ -305,7 +324,7 @@ class Microphone:
                 # trailing playback doesn't bleed into the next detection.
                 paused_total += time.time() - pause_started
                 pause_started = None
-                self._reset_vad()
+                self._reset_vad(active_silence_ms)
                 speech_started = False
 
             # Track when recording actually starts

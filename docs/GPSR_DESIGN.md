@@ -219,6 +219,22 @@ from the first utterance, ground what you can, and only re-ask when the parse is
 empty — not to "confirm." A partially-grounded plan that scores partial credit
 beats a rephrasing penalty. (Mirrors HRI's "no non-essential questions" instinct.)
 
+> **Revised after the first real run (GPSR_VERIFY_COMMANDS).** The referee read
+> all three commands in ONE continuous, halting stream; STT misheard and the
+> split blurred command boundaries, so the robot burned minutes executing the
+> wrong errand — far more costly than −30. The shipped flow now (a) widens the
+> batch capture window (`GPSR_LISTEN_TIMEOUT_SEC`/`_MIN_SILENCE_MS` — the mic's
+> 1 s end-of-speech default cut the recording at the first mid-command stumble),
+> and (b) reads each parsed command back for a yes/no, re-capturing just the
+> rejected one (−30 each, bounded) and recovering a merged-away command before
+> executing anything. "No re-ask to confirm" still holds for the *parse-empty*
+> path; the verification gate is the deliberate exception: a −30 re-ask is cheap
+> insurance against a multi-minute wrong errand on the 7-minute clock. A command
+> that stays unconfirmed after the re-capture budget follows
+> `GPSR_VERIFY_EXHAUSTED` — "execute" the best understanding, or "skip" it
+> (config default: the operator rejected that text repeatedly, so the minutes
+> are better spent on the confirmed commands).
+
 ### 5.3 Design against drift — re-detect, don't trust stored coordinates
 Same as Restaurant §5.1. The world-model pose gets the robot *near* a room/
 placement; the **final docking and all manipulation act on a fresh on-arrival
@@ -240,9 +256,15 @@ scheduler that earns the bonus comes only after everything else works. Note the
 rulebook says the robot *decides and advises* how commands are issued — so the
 greeting should **actively request all three at once** (and fall back to
 one-by-one only if STT struggles), keeping the bonus reachable, rather than
-passively offering the operator a choice. Even when executed serially, taking all
-three up front also saves the round-trips of returning to the operator between
-commands — pure time win against the 7-min clock.
+passively offering the operator a choice. Taking all three up front still saves
+the *listen* round-trips; the *drive* round-trips between commands are
+deliberately kept in serial mode: after finishing each command the robot
+announces it and re-stations at the instruction point before starting the next
+(`GPSR_RETURN_BETWEEN_COMMANDS`, ON in config.toml for real runs — team
+procedure decision 2026-07-02: command 1 done → back at the instruction point →
+command 2 → back → …). The final return after the last command stays with
+`ReturnToInstructionPoint`; the interleaved executor (the bonus) never returns
+mid-run — that is the bonus.
 
 ---
 

@@ -16,9 +16,13 @@ import pytest
 from dotenv import load_dotenv
 
 from tasks.GPSR.parse import parse_commands
+from walkie_config import load_config
 from walkie_world.map.vocab import load_world
 
+# Same env precedence as every runtime entrypoint (.env > config.toml), so the
+# test drives the SAME model the robot runs (config [llm] WALKIE_MODEL).
 load_dotenv()
+load_config()
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("OPENROUTER_API_KEY"),
@@ -38,7 +42,9 @@ def model():
     return ChatOpenAI(
         base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
         api_key=os.getenv("OPENROUTER_API_KEY"),
-        model=os.getenv("WALKIE_MODEL", "anthropic/claude-sonnet-4.5"),
+        # Mirrors the runtime parser: GPSR_PARSER_MODEL, else the shared model.
+        model=os.getenv("GPSR_PARSER_MODEL")
+        or os.getenv("WALKIE_MODEL", "google/gemini-3-flash-preview:nitro"),
         temperature=0,
     )
 

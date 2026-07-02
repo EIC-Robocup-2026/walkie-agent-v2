@@ -19,7 +19,13 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from ..base import TaskContext
-from ..common import WalkieBrain, initialize_llm_model, initialize_robot, load_task_config
+from ..common import (
+    WalkieBrain,
+    initialize_llm_model,
+    initialize_parser_model,
+    initialize_robot,
+    load_task_config,
+)
 from ..scoring import ScoreTracker
 from .scoring import GPSR_SHEET
 from .subtasks import build_gpsr_task
@@ -55,6 +61,7 @@ def main() -> None:
         walkie=walkie_interface,
         walkieAI=walkie_ai,
         model=model,
+        parser_model=initialize_parser_model(),  # GPSR_PARSER_MODEL; None = share `model`
         disable_listening=disable_listening,
         world=world,
         people=world.people,  # back-compat: ctx.people is the world's people store

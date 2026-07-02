@@ -191,6 +191,10 @@ class TaskContext:
     walkie: WalkieInterface
     walkieAI: WalkieAIClient
     model: ChatOpenAI
+    # Dedicated GPSR-parser model (GPSR_PARSER_MODEL) — the parser is load-bearing
+    # but cheap (~5-10 short calls/run), so it may run a stronger model than the
+    # agent loop. None = share `model`. Consumers: ``ctx.parser_model or ctx.model``.
+    parser_model: "ChatOpenAI | None" = None
     data: dict[str, Any] = field(default_factory=dict)  # cross-step blackboard
     disable_listening: bool = False  # DISABLE_LISTENING: type at a TTY instead of mic
     people: "PeopleStore | None" = None  # face/appearance person memory (optional)
@@ -228,8 +232,14 @@ class TaskContext:
         except Exception as exc:
             _log("ctx", f"say: TTS/speaker failed ({exc}); text printed only")
 
-    def listen(self, timeout: float = 30.0) -> str:
-        """One user utterance via mic+STT (or input() when listening disabled)."""
+    def listen(self, timeout: float = 30.0, min_silence_ms: int | None = None) -> str:
+        """One user utterance via mic+STT (or input() when listening disabled).
+
+        ``min_silence_ms`` overrides the mic's end-of-speech silence for THIS
+        capture — raise it when the speaker is expected to pause mid-utterance
+        (e.g. GPSR's referee reading three commands in one halting stream, where
+        the 1 s default would cut the recording at the first stumble).
+        """
         if self.disable_listening:
             try:
                 return input("[listen] > ").strip()
@@ -237,7 +247,10 @@ class TaskContext:
                 return ""
         try:
             print(f"[listen] Listening... (timeout {timeout:.0f}s)")
-            audio = self.walkie.microphone.record_until_silence(timeout=timeout)
+            kwargs = {}
+            if min_silence_ms is not None:
+                kwargs["min_silence_duration_ms"] = int(min_silence_ms)
+            audio = self.walkie.microphone.record_until_silence(timeout=timeout, **kwargs)
             text = self.walkieAI.stt.transcribe(audio)
         except Exception as exc:
             _log("ctx", f"listen: mic/STT failed ({exc})")
@@ -246,11 +259,21 @@ class TaskContext:
         print(f"[heard] {text}")
         return text
 
-    def ask(self, question: str, retries: int = 1) -> str:
-        """say() the question, listen() for the answer; re-ask on empty."""
+    def ask(
+        self,
+        question: str,
+        retries: int = 1,
+        timeout: float = 30.0,
+        min_silence_ms: int | None = None,
+    ) -> str:
+        """say() the question, listen() for the answer; re-ask on empty.
+
+        ``timeout``/``min_silence_ms`` pass through to :meth:`listen` — widen
+        them when the expected answer is a long multi-part utterance.
+        """
         for _ in range(retries + 1):
             self.say(question)
-            answer = self.listen()
+            answer = self.listen(timeout=timeout, min_silence_ms=min_silence_ms)
             if answer:
                 return answer
         return ""

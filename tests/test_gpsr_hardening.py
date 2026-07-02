@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from tasks.GPSR.parse import ground_step
@@ -27,10 +29,16 @@ from tasks.GPSR.skills import (
 )
 from walkie_world.map.vocab import _fuzzy_match, load_world
 
+# The frozen, vocab-complete CompetitionTemplate arena (see tests/fixtures/).
+# The repo-root world.toml is the LIVE surveyed arena — no grammar vocab in it.
+WORLD_FIXTURE = Path(__file__).parent / "fixtures" / "world.competition_template.toml"
+
 
 @pytest.fixture(scope="module")
 def world():
-    return load_world(include_absent=True)  # full grammar, like the parser tests
+    # Full grammar, like the parser tests — from the frozen fixture, NOT the live
+    # surveyed world.toml (which changes per survey and has no kitchen_table).
+    return load_world(WORLD_FIXTURE, include_absent=True)
 
 
 # --- grounding fuzzy fallback ----------------------------------------------

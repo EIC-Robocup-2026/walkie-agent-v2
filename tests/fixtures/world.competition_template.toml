@@ -1,0 +1,122 @@
+# TEST FIXTURE — the vocab-complete CompetitionTemplate arena (frozen).
+#
+# The parser/grounding/corpus tests measure coverage against the FULL official
+# grammar (rooms/locations/objects/names/gestures), so they need a STABLE,
+# vocabulary-complete world file. The repo-root world.toml is the LIVE surveyed
+# arena (map-editor export) and legitimately changes every re-survey — pointing
+# these tests at it made them break on every survey (and the current export
+# carries no object/name/gesture vocab at all). Restored from the pre-survey
+# world.toml (git 3f35758). Do NOT re-survey this file; it is grammar data, not
+# navigation data.
+#
+# The global arena map + vocabulary (rooms, locations, doors, object shapes/vocab,
+# names, gestures) — the SINGLE world.toml every challenge uses. There is no per-task
+# map; the walkie-map-editor exports this file.
+#
+# This is per-competition CompetitionTemplate data, NOT tuning knobs, so it lives in
+# its own file loaded directly (tomllib) rather than through config.toml's env-var
+# flattening. This repo-root world.toml is the default; point $WALKIE_MAP_FILE at a
+# different file to swap arenas (e.g. the deployed nav-arena export).
+#
+# Defaults below are the official RoboCupAtHome CompetitionTemplate example arena
+# (https://github.com/RoboCupAtHome/CompetitionTemplate). REPLACE the poses with
+# the real announced ones (~2h before the test); the *vocabulary* is what the
+# parser grounds against, the *poses* are what navigation drives to (Phase 1).
+#
+# pose = [x, y, heading_rad] in the map frame. [0,0,0] = "not yet surveyed".
+#
+# present = false  → this room/location is in the template but NOT in the arena
+# you're running (e.g. a smaller practice room). load_world drops it entirely, so
+# the parser won't ground to it and navigation never drives to its [0,0,0]; a
+# command that references it falls to the Tier-2 agent instead. Default: present.
+#
+# barrier = true  → a human-operated door/partition/screen blocks the route here.
+# Navigation (go_to_named) asks a human to open it on a nav block even when the
+# depth check reads the doorway "open" (it can't see a too-narrow gap). Default off.
+#
+# [doors] (optional, see the commented block at the end) → the physical locations of
+# doors, drawn in walkie-map-editor. When present, go_to_through_door asks for a door
+# only where one is actually mapped (within WALKIE_DOOR_NEAR_RADIUS_M of the robot),
+# not on every nav block. `barrier` (above) gates per-destination; `[doors]` gate by
+# geometry — use whichever fits, or both.
+
+# Person names the operator may reference (meet / greet / guide / deliver-to).
+# MUST stay above the first [table] header — a bare key after a table header
+# would be parsed as a member of that table, not a top-level key.
+names = ["Adel", "Angel", "Axel", "Charlie", "Jane", "Jules", "Morgan", "Paris", "Robin", "Simone"]
+
+# Poses below are the re-surveyed practice-arena map frame (walkie-map-editor,
+# 2026-06-27). Room waypoints have no separate survey, so each present room reuses
+# a representative surveyed location pose. Rooms with no surveyed location stay
+# present = false (their old [5.x,...] template poses are a stale, different frame).
+[rooms]
+kitchen     = { pose = [2.6216, -1.1501, -1.5708] }  # waypoint = kitchen_table
+bedroom     = { pose = [0.0, 0.0, 0.0], present = false }
+living_room = { pose = [1.5279, 1.1196, 1.6022], aliases = ["living room", "lounge"] }  # waypoint = living_room_table
+office      = { pose = [0.0, 0.0, 0.0], aliases = ["study"], present = false }
+bathroom    = { pose = [0.0, 0.0, 0.0], present = false }
+
+# Locations / placements / beacons. `room` ties each to a room; `placement=true`
+# means objects can be put there (the "(p)" flag in the template); `category` is
+# the object category that lives there by default (lets "the drinks" resolve to
+# the cabinet). `aliases` cover phrasings the parser/STT may produce.
+[locations]
+bed           = { room = "bedroom",     placement = true,  pose = [0,0,0], present = false }
+bedside_table = { room = "bedroom",     placement = true,  pose = [0,0,0], aliases = ["bedside table", "nightstand"], present = false }
+shelf         = { room = "bathroom",    placement = true,  category = "cleaning_supplies", pose = [0,0,0], present = false }
+dishwasher    = { room = "kitchen",     placement = true,  pose = [0,0,0], present = false }
+kitchen_table = { room = "kitchen",     placement = true,  category = "dishes", pose = [2.6216, -1.1501, -1.5708], aliases = ["kitchen table"] }
+pantry        = { room = "kitchen",     placement = true,  category = "food", pose = [0,0,0], present = false }
+refrigerator  = { room = "kitchen",     placement = true,  pose = [0,0,0], aliases = ["fridge"], present = false }
+sink          = { room = "kitchen",     placement = true,  pose = [0,0,0], present = false }
+cabinet       = { room = "kitchen",     placement = true,  category = "drinks", pose = [0.3267, -0.7881, -3.1223] }
+desk          = { room = "office",      placement = true,  category = "fruits", pose = [0,0,0], present = false }
+tv_stand      = { room = "living_room", placement = true,  pose = [0,0,0], aliases = ["tv stand", "television stand"], present = false }
+storage_rack  = { room = "office",      placement = true,  pose = [0,0,0], aliases = ["storage rack"], present = false }
+side_tables   = { room = "living_room", placement = true,  category = "snacks", pose = [0,0,0], aliases = ["side tables", "side table"], present = false }
+living_room_table = { room = "living_room", placement = true, pose = [1.5279, 1.1196, 1.6022], aliases = ["living room table"] }
+sofa          = { room = "living_room", placement = true,  pose = [2.3002, 0.7931, -0.0476], aliases = ["couch"] }
+bookshelf     = { room = "living_room", placement = true,  category = "toys", pose = [0,0,0], present = false }
+trashbin      = { room = "kitchen",     placement = false, pose = [0,0,0], aliases = ["trash bin", "trash can", "bin"], present = false }
+potted_plant  = { room = "living_room", placement = false, pose = [0,0,0], aliases = ["potted plant", "plant"], present = false }
+armchair      = { room = "living_room", placement = false, pose = [0,0,0], present = false }
+coatrack      = { room = "living_room", placement = false, pose = [0,0,0], aliases = ["coat rack"], present = false }
+entrance      = { room = "living_room", placement = false, pose = [0,0,0], present = false }
+exit          = { room = "living_room", placement = false, pose = [0,0,0], present = false }
+
+# Objects grouped by category (both directions are built in code, so "bring me a
+# drink" can pick the category and "bring me the cola" the item). Names match the
+# detector's open-vocab classes after underscores→spaces.
+[object_categories]
+drinks            = ["juice_pack", "cola", "milk", "orange_juice", "tropical_juice", "red_wine", "iced_tea"]
+toys              = ["tennis_ball", "rubiks_cube", "baseball", "soccer_ball", "dice"]
+fruits            = ["orange", "pear", "peach", "strawberry", "apple", "lemon", "banana", "plum"]
+snacks            = ["cornflakes", "pringles", "cheezit"]
+dishes            = ["cup", "bowl", "fork", "plate", "knife", "spoon"]
+food              = ["chocolate_jello", "coffee_grounds", "mustard", "tomato_soup", "tuna", "strawberry_jello", "spam", "sugar"]
+cleaning_supplies = ["cleanser", "sponge"]
+
+# Recognizable gestures/poses → the keypoint-rule id the perception side uses
+# (Phase 1 wires these to is_calling-style heuristics). The keys are the canonical
+# descriptors the parser emits; aliases cover the generator's phrasings.
+[gestures]
+waving             = { aliases = ["waving person", "person waving"] }
+raising_left_arm   = { aliases = ["raising their left arm", "person raising their left arm", "left arm raised"] }
+raising_right_arm  = { aliases = ["raising their right arm", "person raising their right arm", "right arm raised"] }
+pointing_left      = { aliases = ["pointing to the left", "person pointing to the left"] }
+pointing_right     = { aliases = ["pointing to the right", "person pointing to the right"] }
+sitting            = { aliases = ["sitting person", "seated person", "person sitting"] }
+standing           = { aliases = ["standing person", "person standing"] }
+lying_down         = { aliases = ["lying person", "person lying down", "lying down"] }
+
+# Doors — physical door/passage locations (drawn in walkie-map-editor with the Door
+# tool). Optional: omit the whole table for an arena with no doors on any route. When
+# present, the door-opening skill (go_to_through_door) engages only when the robot is
+# within `radius` m of one (env WALKIE_DOOR_NEAR_RADIUS_M, default 1.5), so it asks
+# for a door exactly where there is one — not at a cabinet/wall that reads "closed".
+#   pose   = [x, y, heading_rad]  (heading = passage direction; display-only)
+#   radius = trigger radius in m  (optional; overrides WALKIE_DOOR_NEAR_RADIUS_M)
+# Uncomment + survey for an arena whose route crosses a human-operated door:
+# [doors.entrance]
+# pose = [0.0, 0.0, 0.0]
+# radius = 1.5

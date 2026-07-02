@@ -417,11 +417,20 @@ class GoToStart(SubTask):
     critical = True
 
     def run(self, ctx: TaskContext) -> StepResult:
-        # Wait start task button
-        print("[Restaurant] waiting for start button to be pressed...")
-        while not ctx.walkie.robot.button.is_pressed:
-            pass
-        print("[Restaurant] start button pressed")
+        # Wait for the physical start button. Best-effort: an off-robot ctx (unit
+        # tests, dev box) has no button interface — skip the wait rather than
+        # crash the whole critical step; and poll with a sleep so the wait doesn't
+        # busy-spin a CPU core while the robot sits at the bar.
+        try:
+            button = ctx.walkie.robot.button
+        except AttributeError:
+            button = None
+            print("[Restaurant] no start button interface; skipping the wait")
+        if button is not None:
+            print("[Restaurant] waiting for start button to be pressed...")
+            while not button.is_pressed:
+                time.sleep(0.05)
+            print("[Restaurant] start button pressed")
         raw = os.getenv("RESTAURANT_KITCHEN_BAR_POSE", "current").strip().lower()
         explicit = raw not in ("", "current", "here", "now")
 

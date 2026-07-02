@@ -167,8 +167,14 @@ def request_open_door(
     max_wait = float(os.getenv("WALKIE_DOOR_WAIT_SEC", "120")) if max_wait is None else max_wait
     confirm_reads = int(os.getenv("WALKIE_DOOR_CONFIRM_READS", "2")) if confirm_reads is None else confirm_reads
 
-    ctx.walkie.robot.head.tilt(0.4)
-    time.sleep(0.5)
+    # Level the head so the depth check reads the doorway, not the floor.
+    # Best-effort: a missing/unresponsive head must never crash the door flow
+    # (and offline test ctxs have no robot at all) — mirrors _set_auto_tilt.
+    try:
+        ctx.walkie.robot.head.tilt(0.4)
+        time.sleep(0.5)
+    except Exception as exc:  # noqa: BLE001 — head is cosmetic to this skill
+        print(f"[skills.door] head tilt failed ({exc}); continuing")
 
     # Default the sensor to the built-in depth detector; it returns None (-> not
     # open -> ask) when there's no camera, so the spoken flow still works offline.

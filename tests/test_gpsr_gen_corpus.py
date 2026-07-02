@@ -9,9 +9,15 @@ mismatch. SKIPPED when the external CommandGenerator checkout isn't present
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from walkie_world.map.vocab import load_world
+
+# The frozen, vocab-complete CompetitionTemplate arena (see tests/fixtures/).
+# The repo-root world.toml is the LIVE surveyed arena — no grammar vocab in it.
+WORLD_FIXTURE = Path(__file__).parent / "fixtures" / "world.competition_template.toml"
 
 gen_corpus = pytest.importorskip("tasks.GPSR.tools.gen_corpus")
 
@@ -24,7 +30,7 @@ except ImportError as exc:  # external repo not checked out on this machine
 @pytest.fixture(scope="module")
 def world():
     # Full arena vocabulary (present flag ignored) — what the generator draws from.
-    return load_world(include_absent=True)
+    return load_world(WORLD_FIXTURE, include_absent=True)
 
 
 def test_singular_category_derivation():
