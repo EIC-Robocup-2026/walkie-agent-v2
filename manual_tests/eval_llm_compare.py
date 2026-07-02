@@ -84,6 +84,33 @@ MODELS: dict[str, ModelSpec] = {
         model="google/gemini-3-flash-preview:nitro",
         api_key_env="OPENROUTER_API_KEY",
     ),
+    # GPSR_PARSER_MODEL candidates (cheap → large), priced 2026-07 on OpenRouter:
+    # glm-4.7-flash $0.06/$0.40 · glm-4.7 $0.40/$1.75 · glm-5 $0.60/$1.92 ·
+    # haiku-4.5 $1/$5 — all well under sonnet-4.5; gemini-3-flash measured 82%.
+    "glm47flash": ModelSpec(
+        label="glm-4.7-flash",
+        base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        model="z-ai/glm-4.7-flash",
+        api_key_env="OPENROUTER_API_KEY",
+    ),
+    "glm47": ModelSpec(
+        label="glm-4.7",
+        base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        model="z-ai/glm-4.7",
+        api_key_env="OPENROUTER_API_KEY",
+    ),
+    "glm5": ModelSpec(
+        label="glm-5",
+        base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        model="z-ai/glm-5",
+        api_key_env="OPENROUTER_API_KEY",
+    ),
+    "haiku": ModelSpec(
+        label="claude-haiku-4.5",
+        base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        model="anthropic/claude-haiku-4.5",
+        api_key_env="OPENROUTER_API_KEY",
+    ),
 }
 
 

@@ -191,6 +191,10 @@ class TaskContext:
     walkie: WalkieInterface
     walkieAI: WalkieAIClient
     model: ChatOpenAI
+    # Dedicated GPSR-parser model (GPSR_PARSER_MODEL) — the parser is load-bearing
+    # but cheap (~5-10 short calls/run), so it may run a stronger model than the
+    # agent loop. None = share `model`. Consumers: ``ctx.parser_model or ctx.model``.
+    parser_model: "ChatOpenAI | None" = None
     data: dict[str, Any] = field(default_factory=dict)  # cross-step blackboard
     disable_listening: bool = False  # DISABLE_LISTENING: type at a TTY instead of mic
     people: "PeopleStore | None" = None  # face/appearance person memory (optional)

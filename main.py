@@ -15,7 +15,7 @@ from agents.core.robot_context import RobotContext
 from client import WalkieAIClient
 from interfaces.walkie_interface import WalkieInterface
 from tasks.base import TaskContext
-from tasks.common import WalkieBrain
+from tasks.common import WalkieBrain, initialize_parser_model
 from walkie_world import WalkieWorld
 
 
@@ -63,7 +63,7 @@ def build_model():
                 "[main] WARNING: OPENROUTER_API_KEY not set. Agent calls will fail.",
                 file=sys.stderr,
             )
-        model = os.getenv("WALKIE_MODEL", "anthropic/claude-sonnet-4.5")
+        model = os.getenv("WALKIE_MODEL", "google/gemini-3-flash-preview:nitro")
     return ChatOpenAI(
         base_url=base_url,
         api_key=api_key,
@@ -93,6 +93,7 @@ def run_ready_stage(walkieAI: WalkieAIClient, walkie: WalkieInterface, model: Ch
         walkie=walkie,
         walkieAI=walkieAI,
         model=model,
+        parser_model=initialize_parser_model(),  # GPSR_PARSER_MODEL for handle_person_request
         disable_listening=listening_disabled,
         world=world,
         people=world.people,

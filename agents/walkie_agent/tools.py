@@ -152,7 +152,7 @@ def make_walkie_main_tools(
         if not utterance:
             return "I did not catch any request."
         world = ctx.world.vocab
-        parsed = parse_commands(ctx.model, utterance, world)
+        parsed = parse_commands(getattr(ctx, "parser_model", None) or ctx.model, utterance, world)
         if not parsed:
             return f"I heard {utterance!r} but could not turn it into an action."
         brain = ctx.data.get("brain")

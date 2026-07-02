@@ -86,6 +86,15 @@ def _confirm_default_proceed() -> bool:
     return os.getenv("GPSR_CONFIRM_DEFAULT", "proceed").strip().lower() != "skip"
 
 
+def _parse_model(ctx: TaskContext):
+    """The model the parser runs on: the dedicated ``ctx.parser_model``
+    (GPSR_PARSER_MODEL — the parser is load-bearing but only makes a handful of
+    short calls, so it can afford a stronger model than the agent loop), else the
+    shared ``ctx.model``. ``getattr`` so scripted test ctx stubs need not know
+    the field."""
+    return getattr(ctx, "parser_model", None) or ctx.model
+
+
 def _verify_enabled() -> bool:
     """Whether to read each heard command back for a yes/no + re-capture on "no"
     (GPSR_VERIFY_COMMANDS). In-code default OFF (the pre-change behaviour, and
@@ -268,7 +277,7 @@ class ReceiveAndPlanCommands(SubTask):
             answer = ctx.ask(prompts.ASK_FOR_COMMANDS, retries=0, **_batch_listen_kwargs())
             print(f"[GPSR] heard: {answer}")
             if answer:
-                parsed = parse_commands(ctx.model, answer, world)
+                parsed = parse_commands(_parse_model(ctx), answer, world)
                 if any(plan for _, plan in parsed):  # at least one usable plan
                     declined: set[int] = set()
                     if _verify_enabled():
@@ -353,7 +362,7 @@ class ReceiveAndPlanCommands(SubTask):
             heard = ctx.ask(prompts.ASK_REPEAT_ONE.format(n=n), retries=0,
                             **_single_listen_kwargs())
             if heard:
-                reparsed = parse_commands(ctx.model, heard, world)
+                reparsed = parse_commands(_parse_model(ctx), heard, world)
                 if reparsed and reparsed[0][1]:  # need a usable plan, not just text
                     if len(reparsed) > 1:
                         print(f"[gpsr] re-capture of command {n} split into "
@@ -380,7 +389,7 @@ class ReceiveAndPlanCommands(SubTask):
                 break  # "yes" or unclear: that was all of them
             ctx.score("pen_rephrasing")  # asking to re-say costs −30 (§5.2)
             heard = ctx.ask(prompts.ASK_SAY_MISSING, retries=0, **_single_listen_kwargs())
-            reparsed = parse_commands(ctx.model, heard, world) if heard else []
+            reparsed = parse_commands(_parse_model(ctx), heard, world) if heard else []
             if not reparsed:
                 ctx.say(prompts.VERIFY_RECAPTURE_MISSED)
                 break

@@ -16,7 +16,13 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from ..base import TaskContext
-from ..common import WalkieBrain, initialize_llm_model, initialize_robot, load_task_config
+from ..common import (
+    WalkieBrain,
+    initialize_llm_model,
+    initialize_parser_model,
+    initialize_robot,
+    load_task_config,
+)
 from ..scoring import ScoreTracker
 from .scoring import FINAL_SHEET
 from .subtasks import build_final_task
@@ -59,6 +65,7 @@ def main() -> None:
         walkie=walkie_interface,
         walkieAI=walkie_ai,
         model=model,
+        parser_model=initialize_parser_model(),  # GPSR_PARSER_MODEL for handle_person_request
         disable_listening=disable_listening,
         world=world,
         people=world.people,

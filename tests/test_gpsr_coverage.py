@@ -24,13 +24,18 @@ from dotenv import load_dotenv
 
 from tasks.GPSR.parse import parse_command
 from tasks.GPSR.plan import render_plan_speech
+from walkie_config import load_config
 from walkie_world.map.vocab import load_world
 
 # The frozen, vocab-complete CompetitionTemplate arena (see tests/fixtures/).
 # The repo-root world.toml is the LIVE surveyed arena — no grammar vocab in it.
 WORLD_FIXTURE = Path(__file__).parent / "fixtures" / "world.competition_template.toml"
 
+# Same env precedence as every runtime entrypoint (.env > config.toml), so the
+# gate measures the SAME model the robot runs (config [llm] WALKIE_MODEL) —
+# without this the gate silently graded the in-code fallback model instead.
 load_dotenv()
+load_config()
 
 
 def _render_defect(cmd: str, plan) -> str | None:
@@ -69,13 +74,18 @@ def _load_corpus() -> list[str]:
 
 
 def _build_model():
-    """A ChatOpenAI on OpenRouter, built standalone (no tasks.common / no hardware)."""
+    """A ChatOpenAI on OpenRouter, built standalone (no tasks.common / no hardware).
+
+    Model resolution mirrors the runtime parser: GPSR_PARSER_MODEL (the dedicated
+    parser model), else the shared WALKIE_MODEL — so this gate always measures the
+    model the parser actually runs."""
     from langchain_openai import ChatOpenAI
 
     return ChatOpenAI(
         base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
         api_key=os.getenv("OPENROUTER_API_KEY"),
-        model=os.getenv("WALKIE_MODEL", "anthropic/claude-sonnet-4.5"),
+        model=os.getenv("GPSR_PARSER_MODEL")
+        or os.getenv("WALKIE_MODEL", "google/gemini-3-flash-preview:nitro"),
         temperature=0,
     )
 

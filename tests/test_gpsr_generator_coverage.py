@@ -30,13 +30,17 @@ from dotenv import load_dotenv
 
 from tasks.GPSR.parse import parse_command
 from tasks.GPSR.plan import render_plan_speech
+from walkie_config import load_config
 from walkie_world.map.vocab import load_world
 
 # The frozen, vocab-complete CompetitionTemplate arena (see tests/fixtures/).
 # The repo-root world.toml is the LIVE surveyed arena — no grammar vocab in it.
 WORLD_FIXTURE = Path(__file__).parent / "fixtures" / "world.competition_template.toml"
 
+# Same env precedence as every runtime entrypoint (.env > config.toml), so the
+# gate measures the SAME model the robot runs (config [llm] WALKIE_MODEL).
 load_dotenv()
+load_config()
 
 
 def _render_defect(cmd: str, plan) -> str | None:
@@ -63,8 +67,14 @@ gen_corpus = pytest.importorskip("tasks.GPSR.tools.gen_corpus")
 CORPUS_N = int(os.getenv("GPSR_GENERATOR_CORPUS_N", "40"))
 # Regression floor. Measured ~98% (39/40, seed 0, N=40) on claude-sonnet-4.5 — the
 # lone miss is a beacon-scoped "meet at the exit" (a known grounding gap, not noise).
-# The floor sits below that (matching the curated gate's 0.85) to absorb sampling /
-# LLM variance and the generator's intentional Tier-2 tail; tighten once triaged.
+# On google/gemini-3-flash-preview:nitro (2026-07) it measures 82% — systematic
+# misses: raw person descriptors ("someone waving") left unnormalized in `person`,
+# and get_person_info/get_object_property `which` left empty / set to the
+# superlative word. claude-haiku-4.5 (the GPSR_PARSER_MODEL this gate now measures
+# via load_config) scored 100% (56/56) on the curated corpus (eval_llm_compare,
+# 2026-07). The floor sits below the Sonnet number (matching the curated gate's
+# 0.85) to absorb sampling / LLM variance and the generator's intentional Tier-2
+# tail; tighten once triaged.
 COVERAGE_MIN = float(os.getenv("GPSR_GENERATOR_COVERAGE_MIN", "0.85"))
 
 
@@ -74,7 +84,9 @@ def _build_model():
     return ChatOpenAI(
         base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
         api_key=os.getenv("OPENROUTER_API_KEY"),
-        model=os.getenv("WALKIE_MODEL", "anthropic/claude-sonnet-4.5"),
+        # Mirrors the runtime parser: GPSR_PARSER_MODEL, else the shared model.
+        model=os.getenv("GPSR_PARSER_MODEL")
+        or os.getenv("WALKIE_MODEL", "google/gemini-3-flash-preview:nitro"),
         temperature=0,
     )
 

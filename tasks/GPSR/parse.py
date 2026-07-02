@@ -382,13 +382,17 @@ def _demo() -> None:
     from dotenv import load_dotenv
     from langchain_openai import ChatOpenAI
 
+    from walkie_config import load_config
+
     from .plan import render_plan_speech
 
     load_dotenv()
+    load_config()  # entrypoint convention: pick up config [llm] WALKIE_MODEL etc.
     model = ChatOpenAI(
         base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
         api_key=os.getenv("OPENROUTER_API_KEY"),
-        model=os.getenv("WALKIE_MODEL", "anthropic/claude-sonnet-4.5"),
+        model=os.getenv("GPSR_PARSER_MODEL")
+        or os.getenv("WALKIE_MODEL", "google/gemini-3-flash-preview:nitro"),
         temperature=0,
     )
     world = load_world()

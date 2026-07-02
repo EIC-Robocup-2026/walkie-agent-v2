@@ -66,12 +66,37 @@ def initialize_llm_model():
                 "[main] WARNING: OPENROUTER_API_KEY not set. Agent calls will fail.",
                 file=sys.stderr,
             )
-        model = os.getenv("WALKIE_MODEL", "anthropic/claude-sonnet-4.5")
+        model = os.getenv("WALKIE_MODEL", "google/gemini-3-flash-preview:nitro")
     return ChatOpenAI(
         base_url=base_url,
         api_key=api_key,
         model=model,
         temperature=float(os.getenv("WALKIE_TEMPERATURE", "0")),
+    )
+
+
+def initialize_parser_model() -> ChatOpenAI | None:
+    """The GPSR parser's dedicated model (``GPSR_PARSER_MODEL``), or None to share
+    the task-wide ``WALKIE_MODEL``.
+
+    The parser is the one structured-output consumer whose quality gates the whole
+    GPSR run (understand + speak-plan + grounding for every solve), yet it makes
+    only ~5-10 short calls per run — so it can afford a stronger model than the
+    token-heavy agent loop. Per-model coverage measurements live in the
+    tests/test_gpsr_*coverage.py floor notes. Ignored under ``LLM_USE_LOCAL``
+    (offline runs share the one local backend).
+    """
+    name = (os.getenv("GPSR_PARSER_MODEL") or "").strip()
+    use_local = os.getenv("LLM_USE_LOCAL", "0").lower() in ("1", "true", "yes")
+    if not name or use_local:
+        return None
+    return ChatOpenAI(
+        base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        model=name,
+        # Pinned to 0 (not WALKIE_TEMPERATURE): parsing is deterministic extraction,
+        # and the coverage gates measure the parser at temperature 0.
+        temperature=0,
     )
 
 class WalkieBrain:
