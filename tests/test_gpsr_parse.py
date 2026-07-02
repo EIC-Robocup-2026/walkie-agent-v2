@@ -133,6 +133,21 @@ def test_deliver_to_me():
     assert s.args["recipient"] == "me"
 
 
+def test_find_object_keeps_out_of_vocab_noun():
+    # Detection is open-vocab: "the plant" isn't in the vocabulary but must stay
+    # searchable by Tier-1 (placement redirect / scan / memory) instead of
+    # gapping the step to Tier-2 — the real run stared at the bed.
+    s = _step("find_object", object="the plant", room="the kitchen")
+    assert s.grounded, s.unresolved
+    assert s.args["object"] == "plant"
+    assert s.args["room"] == "kitchen"
+
+
+def test_find_object_vocab_noun_still_grounds_canonically():
+    s = _step("find_object", object="the cola", room="the kitchen")
+    assert s.grounded and s.args["object"] == "cola"  # canonical wins over _keep_noun
+
+
 def test_find_person_by_gesture():
     s = _step("find_person", person="waving person", descriptor_kind="gesture", room="the kitchen")
     assert s.grounded

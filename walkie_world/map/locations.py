@@ -53,10 +53,15 @@ def parse_pose(s: str) -> tuple[float, float, float]:
 
 def _fuzzy_cutoff() -> float:
     """difflib ratio an STT/LLM near-miss must clear to match a known name
-    (GPSR_GROUNDING_FUZZY_CUTOFF, default 0.8). 0 / unparsable disables fuzzy
-    matching (exact-alias behaviour only)."""
+    (GPSR_GROUNDING_FUZZY_CUTOFF, default 0.84). 0 / unparsable disables fuzzy
+    matching (exact-alias behaviour only).
+
+    0.84, not 0.8: genuine STT/LLM misspellings of a vocab word score >=0.92
+    ("kitchen tabel" 0.92, "cabinett" 0.93), while short DISTINCT English words
+    collide at exactly 0.8 ("plant" vs "plate") — at 0.8 the robot grounded
+    "locate the plant" to the plate and searched for the wrong thing."""
     try:
-        return float(os.getenv("GPSR_GROUNDING_FUZZY_CUTOFF", "0.8") or 0)
+        return float(os.getenv("GPSR_GROUNDING_FUZZY_CUTOFF", "0.84") or 0)
     except ValueError:
         return 0.0
 

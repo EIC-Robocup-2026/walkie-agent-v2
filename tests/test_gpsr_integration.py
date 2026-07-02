@@ -17,6 +17,7 @@ grounding→dispatch→skill chain is exercised exactly as on the robot.
 from __future__ import annotations
 
 import textwrap
+from types import SimpleNamespace
 
 import pytest
 
@@ -359,6 +360,98 @@ def test_find_object_falls_back_to_memory_when_named_place_empty(world, monkeypa
     assert graphs.queries == ["cola"]        # then recalled from memory
     assert approached == [(7.0, 1.0)]        # and approached the recalled spot
     assert any("found the cola" in s for s in ctx.saids)
+
+
+class _ResolvingWorld:
+    """Vocab world + a WalkieWorld-style resolve_place returning a fixed match
+    (the runtime world IS a WalkieWorld; the tests' vocab WorldModel has none)."""
+
+    def __init__(self, inner, match):
+        self._inner = inner
+        self.match = match
+        self.resolve_calls: list = []
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def resolve_place(self, text, *, room=None, near=None):
+        self.resolve_calls.append((text, room))
+        return self.match
+
+
+def test_find_object_redirects_to_matching_mapped_placement(world):
+    """'locate the plant in the office': the noun matches a surveyed placement
+    (resolve_place, e.g. plant -> plant_pot_2) -> drive TO it instead of staring
+    from the room waypoint (the first real run searched only the bed)."""
+    match = SimpleNamespace(kind="location", name="desk", pose=(5.0, 6.0, 0.0))
+    rworld = _ResolvingWorld(world, match)
+    ctx = _FakeCtx(ai=_FakeAI(dets=[_det(name="plant")]))
+    _, status = _run(
+        ctx, rworld,
+        RawStep(primitive="find_object", object="the plant", room="the office",
+                raw="locate the plant in the office"),
+    )
+    assert status is CmdStatus.DONE
+    assert rworld.resolve_calls == [("plant", "office")]  # room-scoped resolution
+    assert ctx.gotos == [(7.0, 8.0, 0.0), (5.0, 6.0, 0.0)]  # room waypoint, then the placement
+    assert any("found the plant" in s for s in ctx.saids)
+
+
+class _SeeOnLaterCall:
+    """Detect returns nothing for the first N calls, then the object — the
+    forward view misses; a later scan stop faces it."""
+
+    def __init__(self, misses, name="cola"):
+        self.misses, self.name = misses, name
+        self.calls = 0
+
+    def detect(self, img, *, prompts=None, return_mask=False):
+        self.calls += 1
+        return [_det(name=self.name)] if self.calls > self.misses else []
+
+    def estimate_poses(self, img):
+        return []
+
+    def caption(self, img, *, prompt=None):
+        return ""
+
+
+def test_find_object_scans_the_room_when_forward_view_misses(world, monkeypatch):
+    """Arrival heading faces the wrong furniture -> rotate-scan finds the object
+    (GPSR_OBJECT_SCAN_STEPS; the in-code default 0 keeps the old single-frame
+    flow, config turns it on for real runs)."""
+    monkeypatch.setenv("GPSR_OBJECT_SCAN_STEPS", "3")
+    monkeypatch.setenv("GPSR_PERSON_SCAN_SETTLE_SEC", "0")
+    monkeypatch.setenv("GPSR_FIND_USE_MEMORY", "0")
+    ctx = _FakeCtx(ai=type("AI", (), {"image": _SeeOnLaterCall(misses=2)})())
+    _, status = _run(
+        ctx, world,
+        RawStep(primitive="find_object", object="the cola", room="the kitchen",
+                raw="find the cola in the kitchen"),
+    )
+    assert status is CmdStatus.DONE
+    assert len(ctx.rotations) == 2            # scanned; the 2nd stop saw it (early exit)
+    assert any("found the cola" in s for s in ctx.saids)
+
+
+def test_property_superlative_scopes_to_the_placement(world, monkeypatch):
+    """"the biggest object" must not crown furniture across the room ("dining
+    table" at the sink): detections lifting farther than GPSR_PROPERTY_SCOPE_M
+    from the navigated placement are dropped before picking by size."""
+    monkeypatch.setenv("GPSR_PROPERTY_SCOPE_M", "1.5")
+    far_big = _det(bbox=(0, 0, 300, 200), name="plate")     # would win unscoped
+    near_small = _det(bbox=(0, 0, 20, 20), name="cup")
+    lifts = {(0, 0, 300, 200): (9.0, 9.0), (0, 0, 20, 20): (1.6, 2.4)}  # table at (1.5, 2.5)
+    monkeypatch.setattr(skills, "lift_bbox_world_xy", lambda ctx, snap, bbox: lifts[tuple(bbox)])
+    ctx = _FakeCtx(ai=_FakeAI(dets=[far_big, near_small], caption="a cup"))
+    _, status = _run(
+        ctx, world,
+        RawStep(primitive="navigate", location="the kitchen table", raw="go to the kitchen table"),
+        RawStep(primitive="get_object_property", object="object", which="size",
+                raw="what is the biggest object on the kitchen table"),
+    )
+    assert status is CmdStatus.DONE
+    assert any("largest object I see is a cup" in s for s in ctx.saids)
 
 
 def test_distinct_places_are_not_deduped(world):

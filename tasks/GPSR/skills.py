@@ -344,6 +344,43 @@ def _pick_by_size(dets, direction: str):
     return (max if direction == "large" else min)(dets, key=lambda d: _bbox_area(d.bbox))
 
 
+def _scope_dets_to_place(ctx: TaskContext, snap, dets, state: dict | None, world: WalkieWorld):
+    """Keep only detections that lift to within GPSR_PROPERTY_SCOPE_M of the
+    placement the robot navigated to (``state["at"]``).
+
+    The full-frame open-vocab detector happily boxes furniture across the room —
+    the first real run answered "dining table" to "the biggest object in the
+    sink area". Scoping each detection by its lifted world point keeps the
+    answer about the placement the operator actually asked about. Degrades to
+    the UNSCOPED detections when no placement is known, its pose isn't
+    surveyed, the radius is 0 (knob off), or NO detection lifts at all (a
+    broken depth lift must not turn into a false "nothing there")."""
+    try:
+        radius = float(os.getenv("GPSR_PROPERTY_SCOPE_M", "0"))  # in-code default OFF (unit tests); config turns it on
+    except ValueError:
+        radius = 0.0
+    if radius <= 0 or not dets:
+        return dets
+    name = (state or {}).get("at")
+    pose = world.location_pose(name) if name else None
+    if not _pose_is_surveyed(pose):
+        return dets
+    kept, lifted_any = [], False
+    for d in dets:
+        xy = lift_bbox_world_xy(ctx, snap, d.bbox)
+        if xy is None:
+            continue  # this box has no depth — can't place it, drop it
+        lifted_any = True
+        if math.hypot(xy[0] - pose[0], xy[1] - pose[1]) <= radius:
+            kept.append(d)
+    if not lifted_any:
+        return dets  # lift is down wholesale -> keep the honest unscoped view
+    if len(kept) < len(dets):
+        print(f"[gpsr.skill] scoped {len(dets)} detections to {len(kept)} within "
+              f"{radius} m of {name!r}")
+    return kept
+
+
 # --- primitives -------------------------------------------------------------
 
 def navigate(ctx: TaskContext, step: PlanStep, world: WalkieWorld, state: dict) -> bool:
@@ -418,11 +455,42 @@ def _find_via_memory(
     return False
 
 
+def _find_object_scanning(ctx: TaskContext, obj, category, world: WalkieWorld):
+    """Rotate in place and re-detect when the forward view misses the object.
+
+    The arrival heading rarely faces the right furniture (the first real run
+    stared at the bed while the plant sat across the bedroom), so mirror the
+    person scan: a full turn in ``GPSR_OBJECT_SCAN_STEPS`` stops (0 disables),
+    settling ``GPSR_PERSON_SCAN_SETTLE_SEC`` before each re-detect and stopping
+    early on the first hit. Returns (status, xy) like ``_detect_here``.
+    """
+    steps = int(os.getenv("GPSR_OBJECT_SCAN_STEPS", "0"))  # in-code default OFF (unit tests); config turns it on
+    if steps <= 0:
+        return "none", None  # scanning disabled -> honest negative from the forward view
+    settle = float(os.getenv("GPSR_PERSON_SCAN_SETTLE_SEC", "0.7"))
+    base = ctx.current_pose()["heading"]
+    label = (obj or category or "object").replace("_", " ")
+    ctx.say(f"I do not see the {label} from here; let me look around.")
+    for i in range(1, steps + 1):
+        target = base + 2 * math.pi * i / steps
+        ctx.rotate_to(math.atan2(math.sin(target), math.cos(target)))  # normalize
+        if settle > 0:
+            time.sleep(settle)
+        status, xy = _detect_here(ctx, obj, category, world)
+        if status == "found":
+            return status, xy
+    return "none", None
+
+
 def find_object(ctx: TaskContext, step: PlanStep, world: WalkieWorld, state: dict) -> bool:
     """Find an object. Primary: where the command says (or the current view if it
-    named no place). On a miss — or when no place was named — fall back to the
-    scene-graph memory (option A) for where it was last seen, then confirm with a
-    live detection. Object positions come from the scene graph, not world.toml."""
+    named no place). The object itself may BE a mapped placement ("locate the
+    plant" -> plant_pot_2 surveyed in the bedroom) — drive to it rather than
+    hoping the room-waypoint heading happens to face it. On a forward-view miss,
+    scan the room (a full in-place turn), then fall back to the scene-graph
+    memory (option A) for where it was last seen, confirming with a live
+    detection. Dynamic object positions come from the scene graph, not
+    world.toml; the placement redirect uses only surveyed map locations."""
     obj = step.args.get("object")
     category = step.args.get("category")
     where = step.args.get("location") or step.args.get("room")
@@ -430,9 +498,25 @@ def find_object(ctx: TaskContext, step: PlanStep, world: WalkieWorld, state: dic
 
     if where:
         go_to_named(ctx, where, world, state)
+    # Mapped-placement redirect: room-scoped so a same-named placement in another
+    # room can't hijack the search; only a *surveyed map location* redirects (a
+    # scene-graph hit is _find_via_memory's job below). Skipped when the command
+    # already named a specific placement, and on a bare vocab WorldModel.
+    if obj and not step.args.get("location") and hasattr(world, "resolve_place"):
+        try:
+            cp = ctx.current_pose()
+            m = world.resolve_place(obj, room=step.args.get("room"), near=(cp["x"], cp["y"]))
+        except Exception as exc:  # noqa: BLE001 — resolution is best-effort
+            print(f"[gpsr.skill] find_object: resolve_place failed ({exc})")
+            m = None
+        if m is not None and m.kind == "location" and m.pose is not None:
+            print(f"[gpsr.skill] find_object: {obj!r} matches mapped {m.name!r}; going there")
+            go_to_named(ctx, m.name, world, state)
     status, xy = _detect_here(ctx, obj, category, world)
     if status == "no_frame":
         return False  # camera failure -> Tier-2 (don't drive blind on a recall)
+    if status == "none":
+        status, xy = _find_object_scanning(ctx, obj, category, world)  # look around first
     if status == "found":
         _stash_found(state, obj, xy)
         ctx.say(f"I found the {label}.")
@@ -741,7 +825,9 @@ def get_object_property(ctx: TaskContext, step: PlanStep, world: WalkieWorld, st
     direction = _superlative_dir(step.raw) if which == "size" and not obj else None
     if direction:
         classes = [o.replace("_", " ") for o in world.objects] or ["object"]
-        dets = _detect(ctx, snap.img, classes)
+        # Scope to the placement we navigated to — an unscoped full-frame detect
+        # crowned furniture across the room ("dining table" at the sink).
+        dets = _scope_dets_to_place(ctx, snap, _detect(ctx, snap.img, classes), state, world)
         if not dets:
             ctx.say("I could not find any objects there.")
             return True
@@ -753,7 +839,7 @@ def get_object_property(ctx: TaskContext, step: PlanStep, world: WalkieWorld, st
                 else f"I see the {word} object but cannot identify it.")
         return True
     classes = _object_classes(obj, None, world) or ["object"]
-    dets = _detect(ctx, snap.img, classes)
+    dets = _scope_dets_to_place(ctx, snap, _detect(ctx, snap.img, classes), state, world)
     if not dets:
         ctx.say(f"I could not find the {(obj or 'object').replace('_', ' ')}.")
         return True

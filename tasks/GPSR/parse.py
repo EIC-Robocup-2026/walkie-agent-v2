@@ -72,6 +72,19 @@ def _is_generic_object(text: str | None) -> bool:
     return words[-1].rstrip("s") in {g.rstrip("s") for g in _GENERIC_OBJECTS}
 
 
+def _keep_noun(text: str | None) -> str | None:
+    """Normalize an out-of-vocab object noun for use as a free-text detector
+    prompt (canonical underscore form, article stripped): "the plant" ->
+    "plant". Only find_object uses this — its detector is open-vocab, so an
+    unknown noun is searchable, not a grounding gap."""
+    if not text:
+        return None
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    if words and words[0] in ("a", "an", "the"):
+        words = words[1:]
+    return "_".join(words) or None
+
+
 def _ground(unresolved: list[tuple[str, str]], field: str, text: str | None, resolver) -> str | None:
     """Resolve `text` via `resolver`; log (field, text) to `unresolved` on a miss.
 
@@ -190,7 +203,16 @@ def ground_step(raw: RawStep, world: WalkieWorld) -> PlanStep:
         args["target"] = _ground_target(unresolved, raw, world)
 
     elif primitive is Primitive.FIND_OBJECT:
-        args["object"] = obj()
+        # An out-of-vocab object is NOT a grounding gap here (unlike pick/place/
+        # deliver, where the arm must know the item): detection is open-vocab —
+        # the noun goes to the detector as a free-text prompt — and the skill
+        # handles a miss honestly (placement redirect -> scan -> scene memory ->
+        # "could not find"). Gapping it sent "locate the plant" to Tier-2, which
+        # stared at the bed. Canonical vocab still wins when it grounds.
+        if _is_generic_object(raw.object):
+            args["object"] = None  # placement-scoped query, not a concrete item
+        else:
+            args["object"] = world.obj(raw.object) or _keep_noun(raw.object)
         args["location"] = world.location(raw.location) if raw.location else None
         args["room"] = world.room(raw.room) if raw.room else None
         if raw.location and args["location"] is None and not (raw.room and args["room"]):

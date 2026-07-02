@@ -143,6 +143,14 @@ GPSR_ENABLE_MANIPULATION = "1"
 # 7-minute GPSR clock. PAUSE_SEC is the wait between attempts (lets the scene settle).
 GPSR_TIER1_RETRY_ATTEMPTS = "2"
 GPSR_TIER1_RETRY_PAUSE_SEC = "1.0"
+# Tier-2 arm tools (agents/actuator_agent pick_up_object/place_object_down) are
+# gated separately from GPSR_ENABLE_MANIPULATION by FINAL_ARM_CALIBRATED /
+# WALKIE_ARM_ENABLED — with both unset a pick that falls to the Tier-2 agent
+# only ANNOUNCES the grasp (the first real run read as "the arm never
+# connected"). Enable the generic override here so the fallback arm is live
+# during GPSR too. NB: this repo can only enable the software path — the arm
+# driver on the robot must be up, or the grasp still fails (then honestly).
+WALKIE_ARM_ENABLED = "1"
 # For each run the people in the scene is different
 GPSR_PEOPLE_RESET = "1"
 # find_person scan (tasks/GPSR/skills.py): when the forward view at the arrival
@@ -169,6 +177,20 @@ GPSR_PERSON_SCAN_SETTLE_SEC = "0.7"
 # person is double-counted across stops.
 GPSR_COUNT_SCAN_STEPS = "6"
 GPSR_COUNT_DEDUP_M = "0.4"
+# find_object room scan (tasks/GPSR/skills.py::_find_object_scanning): when the
+# forward view at the arrival heading misses the object, rotate a full turn and
+# re-detect at each stop (mirrors the person scan; reuses
+# GPSR_PERSON_SCAN_SETTLE_SEC). The first real run stared at the bed while the
+# plant sat across the bedroom. 0 disables (honest negative from one frame;
+# also the in-code default so bare unit tests keep the old single-frame flow).
+GPSR_OBJECT_SCAN_STEPS = "6"
+# get_object_property placement scoping (skills.py::_scope_dets_to_place): drop
+# detections whose lifted world point is farther than this (m) from the
+# placement the robot navigated to — a full-frame detect crowned "dining table"
+# the biggest object "in the sink area". 0 disables scoping. Degrades to
+# unscoped when the depth lift fails wholesale or no placement is known.
+# 0 is also the in-code default (bare unit tests keep the unscoped flow).
+GPSR_PROPERTY_SCOPE_M = "1.5"
 # Minimum detector confidence for an object detection to count (tasks/GPSR/skills.py
 # _detect, applied to find_object / count-objects / get_object_property). Open-vocab
 # detectors emit low-confidence boxes even for an absent class; with no floor those
@@ -191,7 +213,10 @@ GPSR_COUNT_OBJ_SETTLE_SEC = "0.2"
 # would otherwise be an ungrounded gap (lost plan + command). Only consulted on a
 # miss, so it never overrides a correct exact match. 0 disables (exact-only).
 # Raise toward 0.9 if it mis-corrects a genuinely-absent noun to a similar one.
-GPSR_GROUNDING_FUZZY_CUTOFF = "0.8"
+# 0.84, not 0.8: real STT misspellings score >=0.92 ("kitchen tabel" 0.92),
+# while short DISTINCT words collide at exactly 0.8 — "plant" grounded to
+# "plate" and the robot searched for the wrong thing.
+GPSR_GROUNDING_FUZZY_CUTOFF = "0.84"
 # follow/guide tracking (tasks/GPSR/tracking.py): how close (m) the robot must get
 # to a "follow me to X" destination before the ArrivalStopper ends the follow, and
 # how often (s) it polls the robot pose.
