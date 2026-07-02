@@ -16,11 +16,15 @@ from perception import PeopleStore
 from walkie_world.people.store import _mean_unit
 from tasks.HRI.identity import (
     _avg_unit,
+    _dedup_person_id,
     _gate_candidates,
     _reject_outliers,
     audit_identity_collisions,
     enroll_guest_frames,
+    locate_people,
     make_follow_selector,
+    refresh_person_attire,
+    select_person_to_follow,
 )
 from tasks.skills import cxcywh_to_xyxy
 
@@ -389,6 +393,11 @@ def _follow_env(monkeypatch, *, face_every_n="3"):
     monkeypatch.setenv("HRI_FOLLOW_FACE_EVERY_N", face_every_n)
     monkeypatch.setenv("HRI_FOLLOW_APPEARANCE_MAX_CANDIDATES", "0")  # keep order; no cap
     monkeypatch.setenv("HRI_FOLLOW_APPEARANCE_MARGIN", "0.05")
+    # These gating/throttle tests predate the lock hysteresis — re-lock on the
+    # first good tick so their per-tick expectations are unchanged. (The INITIAL
+    # lock always commits on the first qualifying tick regardless.) The
+    # hysteresis tests below set HRI_FOLLOW_LOCK_CONFIRM_TICKS explicitly.
+    monkeypatch.setenv("HRI_FOLLOW_LOCK_CONFIRM_TICKS", "1")
 
 
 # host box: cxcywh (320, 240, 100, 400) -> xyxy (270, 40, 370, 440), width 100,
@@ -448,3 +457,464 @@ def test_follow_selector_widens_when_gated_candidate_fails(tmp_path, monkeypatch
     assert box == cxcywh_to_xyxy(host_b)
     # 1 gated embed (the decoy, a miss) + 2 full-set embeds (decoy + host) = 3.
     assert app.calls - a0 == 3
+
+
+# ---------------------------------------------------------------------------
+# Follow F1: visible-candidate peakiness (return None on a near-tie)
+# ---------------------------------------------------------------------------
+
+
+def test_follow_returns_none_when_two_candidates_near_tie(tmp_path, monkeypatch):
+    _follow_env(monkeypatch)
+    monkeypatch.setenv("HRI_FOLLOW_VISIBLE_MARGIN", "0.06")
+    face = _FaceRecCounting()  # no faces -> attire path
+    # Two visible people whose attire is near-tied against the host's _vec(0,1,0).
+    app = _AppearanceByWidth({100: _vec(0, 1, 0.05), 120: _vec(0, 1, 0.08)})
+    b1, b2 = (320, 240, 100, 400), (520, 240, 120, 400)
+    ctx = _follow_ctx(tmp_path, [[_pp(b1), _pp(b2)]], face, app)
+    snap = _Snap(_img())
+    # ambiguous: neither clearly the host -> coast (None)
+    assert select_person_to_follow(ctx, snap, "host", run_face=False) is None
+    # margin off -> the top scorer is taken (old behaviour)
+    monkeypatch.setenv("HRI_FOLLOW_VISIBLE_MARGIN", "0")
+    assert select_person_to_follow(ctx, snap, "host", run_face=False) == cxcywh_to_xyxy(b1)
+
+
+def test_follow_picks_host_when_clear_winner(tmp_path, monkeypatch):
+    _follow_env(monkeypatch)
+    monkeypatch.setenv("HRI_FOLLOW_VISIBLE_MARGIN", "0.06")
+    face = _FaceRecCounting()
+    app = _AppearanceByWidth({100: _vec(0, 1, 0), 120: _vec(0, 1, 0.5)})  # b1 clearly host
+    b1, b2 = (320, 240, 100, 400), (520, 240, 120, 400)
+    ctx = _follow_ctx(tmp_path, [[_pp(b1), _pp(b2)]], face, app)
+    box = select_person_to_follow(ctx, _Snap(_img()), "host", run_face=False)
+    assert box == cxcywh_to_xyxy(b1)
+
+
+# ---------------------------------------------------------------------------
+# Follow F2: exclude a candidate whose box shows a clearly non-host face
+# ---------------------------------------------------------------------------
+
+
+def test_follow_excludes_box_showing_nonhost_face(tmp_path, monkeypatch):
+    _follow_env(monkeypatch)
+    monkeypatch.setenv("HRI_FOLLOW_VISIBLE_MARGIN", "0")  # isolate F2 from the peakiness gate
+    host_box = (320, 240, 100, 400)  # width 100
+    decoy_box = (520, 240, 120, 400)  # width 120 — a look-alike (even closer attire)
+    app = _AppearanceByWidth({100: _vec(0, 1, 0.2), 120: _vec(0, 1, 0)})
+    # One detected face, inside the decoy box, that is NOT the host's.
+    nonhost = _fe(_vec(0, 0, 1), bbox=(500, 180, 540, 300), det=0.9)  # center (520, 240)
+    ctx = _follow_ctx(tmp_path, [[_pp(host_box), _pp(decoy_box)]], _FaceRec([[nonhost]]), app)
+    # F2 on: the decoy is ruled out by its non-host face, so the host wins.
+    assert (
+        select_person_to_follow(ctx, _Snap(_img()), "host", run_face=True)
+        == cxcywh_to_xyxy(host_box)
+    )
+    # F2 off: nothing rules the decoy out and its attire out-scores the host.
+    monkeypatch.setenv("HRI_FOLLOW_EXCLUDE_NONHOST_FACE", "0")
+    ctx2 = _follow_ctx(
+        tmp_path, [[_pp(host_box), _pp(decoy_box)]], _FaceRec([[nonhost]]), app
+    )
+    assert (
+        select_person_to_follow(ctx2, _Snap(_img()), "host", run_face=True)
+        == cxcywh_to_xyxy(decoy_box)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Follow F3: stricter re-acquisition floor
+# ---------------------------------------------------------------------------
+
+
+def test_reacquire_uses_higher_floor(tmp_path, monkeypatch):
+    _follow_env(monkeypatch)
+    monkeypatch.setenv("HRI_FOLLOW_REACQUIRE_MIN_SCORE", "0.6")  # pin: default is 0.55
+    face = _FaceRecCounting()
+    v55 = _vec(0, 0.55, 0.835)  # ~0.55 cosine to the host attire _vec(0,1,0)
+    app = _AppearanceByWidth({100: v55})
+    box = (320, 240, 100, 400)
+    ctx = _follow_ctx(tmp_path, [[_pp(box)]], face, app)
+    snap = _Snap(_img())
+    # re-acquiring: 0.55 < 0.6 -> no fresh lock granted
+    assert select_person_to_follow(ctx, snap, "host", run_face=False, reacquiring=True) is None
+    # maintaining: 0.55 >= steady-state 0.5 -> accepted
+    assert (
+        select_person_to_follow(ctx, snap, "host", run_face=False, reacquiring=False)
+        == cxcywh_to_xyxy(box)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Follow F4: temporal hysteresis (lock confirmation + miss tolerance)
+# ---------------------------------------------------------------------------
+
+
+def test_lock_requires_k_confirming_ticks_only_after_loss(tmp_path, monkeypatch):
+    _follow_env(monkeypatch)
+    monkeypatch.setenv("HRI_FOLLOW_LOCK_CONFIRM_TICKS", "2")
+    monkeypatch.setenv("HRI_FOLLOW_LOCK_MISS_TOLERANCE", "0")
+    app = _AppearanceByWidth({100: _vec(0, 1, 0)})
+    box = (320, 240, 100, 400)
+    # present, MISS (drop), then present again
+    ctx = _follow_ctx(
+        tmp_path, [[_pp(box)], [], [_pp(box)]], _FaceRecCounting(), app
+    )
+    sel = make_follow_selector("host")
+    snap = _Snap(_img())
+    # The INITIAL lock commits on the first qualifying tick — an unconfirmed None
+    # here would make follow_person rotate-search away from the host at start.
+    assert sel(ctx, snap) == cxcywh_to_xyxy(box)
+    assert sel(ctx, snap) is None and sel.locked is False  # miss -> dropped (tol 0)
+    # RE-acquiring after the loss needs K=2 confirming ticks.
+    assert sel(ctx, snap) is None  # confirm 1/2 -> coast
+    assert sel(ctx, snap) == cxcywh_to_xyxy(box)  # confirm 2/2 -> re-locked
+    assert sel.locked is True
+
+
+def test_lock_tolerates_brief_miss(tmp_path, monkeypatch):
+    _follow_env(monkeypatch)
+    monkeypatch.setenv("HRI_FOLLOW_LOCK_CONFIRM_TICKS", "1")
+    monkeypatch.setenv("HRI_FOLLOW_LOCK_MISS_TOLERANCE", "1")
+    app = _AppearanceByWidth({100: _vec(0, 1, 0)})
+    box = (320, 240, 100, 400)
+    # present, present, MISS, present, MISS, MISS
+    ctx = _follow_ctx(
+        tmp_path,
+        [[_pp(box)], [_pp(box)], [], [_pp(box)], [], []],
+        _FaceRecCounting(),
+        app,
+    )
+    sel = make_follow_selector("host")
+    snap = _Snap(_img())
+    assert sel(ctx, snap) == cxcywh_to_xyxy(box)  # tick 0: K=1 -> lock now
+    assert sel(ctx, snap) == cxcywh_to_xyxy(box)  # tick 1: held
+    assert sel(ctx, snap) is None and sel.locked is True  # tick 2: miss=1, tolerated
+    assert sel(ctx, snap) == cxcywh_to_xyxy(box)  # tick 3: re-seen, no re-confirm needed
+    assert sel(ctx, snap) is None and sel.locked is True  # tick 4: miss=1
+    assert sel(ctx, snap) is None and sel.locked is False  # tick 5: miss=2 > tol -> dropped
+
+
+def test_face_runs_every_tick_until_locked(tmp_path, monkeypatch):
+    _follow_env(monkeypatch, face_every_n="5")
+    monkeypatch.setenv("HRI_FOLLOW_LOCK_CONFIRM_TICKS", "3")
+    monkeypatch.setenv("HRI_FOLLOW_LOCK_MISS_TOLERANCE", "0")
+    face = _FaceRecCounting()
+    app = _AppearanceByWidth({100: _vec(0, 1, 0)})
+    box = (320, 240, 100, 400)
+    # tick 0 present (initial lock), tick 1 MISS (drop), then present again.
+    ctx = _follow_ctx(tmp_path, [[_pp(box)], [], [_pp(box)]], face, app)
+    sel = make_follow_selector("host")
+    snap = _Snap(_img())
+    assert sel(ctx, snap) == cxcywh_to_xyxy(box)  # tick 0: initial lock
+    sel(ctx, snap)  # tick 1: miss -> lock dropped (tol 0)
+    assert sel.locked is False
+    for _ in range(2):  # re-acquire confirming ticks: face ON despite every_n=5
+        c0 = face.calls
+        assert sel(ctx, snap) is None  # confirming -> coast
+        assert face.calls - c0 == 1
+    c0 = face.calls
+    assert sel(ctx, snap) == cxcywh_to_xyxy(box)  # confirm 3/3 -> re-locked
+    assert face.calls - c0 == 1
+    c0 = face.calls
+    sel(ctx, snap)  # locked again, tick 5 -> 5 % 5 == 0 -> face runs this tick
+    assert face.calls - c0 == 1
+    c0 = face.calls
+    sel(ctx, snap)  # tick 6 -> throttled off
+    assert face.calls - c0 == 0
+
+
+# ---------------------------------------------------------------------------
+# Introduction B1/B2/B3/G1: optimal assignment, peakiness, votes, quality gate
+# ---------------------------------------------------------------------------
+
+
+def _locate_env(monkeypatch):
+    monkeypatch.setenv("HRI_RECOG_MIN_FACE_AREA_PX", "0")  # don't gate synthetic face sizes
+    monkeypatch.setenv("HRI_RECOG_MIN_DET_SCORE", "0")  # trust the synthetic faces
+    monkeypatch.setenv("HRI_LOCATE_BOX_MARGIN", "0.06")
+    monkeypatch.setenv("HRI_LOCATE_MIN_VOTES", "1")
+
+
+def _locate_ctx(tmp_path, faces_per_frame, poses_per_frame, app_items, enroll, sub="p"):
+    store = PeopleStore(persist_dir=tmp_path / sub, embedding_model="m")
+    enroll(store)
+    ai = _AI(
+        face_recognition=_FaceRec(faces_per_frame),
+        pose_estimation=_Pose(poses_per_frame),
+        appearance=_Appearance(app_items),
+    )
+    return _Ctx(store, ai)
+
+
+def test_locate_greedy_steal_fixed(tmp_path, monkeypatch):
+    _locate_env(monkeypatch)
+    g1, g2 = _vec(1, 0, 0), _vec(0, 1, 0)
+
+    def enroll(store):  # face-only (no attire) so the score is purely the face cosine
+        store.enroll("", "", g1, person_id="guest-1")
+        store.enroll("", "", g2, person_id="guest-2")
+
+    box_a, box_b = (200, 240, 100, 400), (450, 240, 100, 400)
+    fa = _vec(0.52, 0.55, 0.6535)  # cos g1=0.52, g2=0.55 (greedy would give box_a to g2)
+    fb = _vec(0.10, 0.90, 0.4243)  # cos g1=0.10, g2=0.90
+    face_a = _fe(fa, bbox=(180, 150, 260, 280))  # center (220,215) inside box_a
+    face_b = _fe(fb, bbox=(420, 150, 500, 280))  # center (460,215) inside box_b
+    ctx = _locate_ctx(
+        tmp_path,
+        [[face_a, face_b]],
+        [[_pp(box_a), _pp(box_b)]],
+        [_vec(0, 0, 1)],
+        enroll,
+    )
+    located = locate_people(ctx, [_img()], ["guest-1", "guest-2"])
+    # Optimal assignment keeps guest-1 on box_a (its true box) even though guest-2
+    # scores higher there, because guest-2 is best explained by box_b.
+    assert located["guest-1"][1] == cxcywh_to_xyxy(box_a)
+    assert located["guest-2"][1] == cxcywh_to_xyxy(box_b)
+
+
+def test_locate_drops_ambiguous_box(tmp_path, monkeypatch):
+    _locate_env(monkeypatch)
+    g1, g2 = _vec(1, 0, 0), _vec(0, 1, 0)
+
+    def enroll(store):
+        store.enroll("", "", g1, person_id="guest-1")
+        store.enroll("", "", g2, person_id="guest-2")
+
+    box = (320, 240, 100, 400)
+    fx = _vec(0.55, 0.54, 0.637)  # top-2 near-tied (0.55 vs 0.54)
+    face = _fe(fx, bbox=(290, 150, 370, 280))  # center (330,215) inside box
+    ctx = _locate_ctx(tmp_path, [[face]], [[_pp(box)]], [_vec(0, 0, 1)], enroll)
+    # ambiguous -> not labeled (caller falls back to the stored seat)
+    assert "guest-1" not in locate_people(ctx, [_img()], ["guest-1", "guest-2"])
+    monkeypatch.setenv("HRI_LOCATE_BOX_MARGIN", "0")
+    assert "guest-1" in locate_people(ctx, [_img()], ["guest-1", "guest-2"])
+
+
+def test_locate_multiframe_vote(tmp_path, monkeypatch):
+    _locate_env(monkeypatch)
+
+    def enroll(store):
+        store.enroll("", "", _vec(1, 0, 0), person_id="guest-1")
+
+    box = (320, 240, 100, 400)
+    face = _fe(_vec(1, 0, 0.05), bbox=(290, 150, 370, 280))  # strong guest-1 in frame 0 only
+    frames = [_img(), _img(), _img()]
+    ctx = _locate_ctx(
+        tmp_path, [[face], [], []], [[_pp(box)], [], []], [_vec(0, 0, 1)], enroll, sub="p1"
+    )
+    assert "guest-1" in locate_people(ctx, frames, ["guest-1"])  # 1 vote suffices
+    monkeypatch.setenv("HRI_LOCATE_MIN_VOTES", "2")
+    ctx2 = _locate_ctx(
+        tmp_path, [[face], [], []], [[_pp(box)], [], []], [_vec(0, 0, 1)], enroll, sub="p2"
+    )
+    assert "guest-1" not in locate_people(ctx2, frames, ["guest-1"])  # only 1 frame agrees
+
+
+def test_locate_appearance_fallback_still_peaky(tmp_path, monkeypatch):
+    _locate_env(monkeypatch)
+
+    def enroll(store):
+        store.enroll("", "", _vec(1, 0, 0), person_id="guest-1", app_embedding=_vec(0, 1, 0))
+        store.enroll("", "", _vec(0, 1, 0), person_id="guest-2", app_embedding=_vec(0, 0, 1))
+
+    box = (320, 240, 100, 400)
+    av = _vec(0, 0.55, 0.54)  # attire near-tied between the two guests
+    ctx = _locate_ctx(tmp_path, [[]], [[_pp(box)]], [av], enroll, sub="p1")  # faces turned away
+    assert "guest-1" not in locate_people(ctx, [_img()], ["guest-1", "guest-2"])
+    monkeypatch.setenv("HRI_LOCATE_BOX_MARGIN", "0")
+    ctx2 = _locate_ctx(tmp_path, [[]], [[_pp(box)]], [av], enroll, sub="p2")
+    assert "guest-1" in locate_people(ctx2, [_img()], ["guest-1", "guest-2"])
+
+
+def test_locate_skips_low_det_face(tmp_path, monkeypatch):
+    _locate_env(monkeypatch)
+    monkeypatch.setenv("HRI_RECOG_MIN_DET_SCORE", "0.5")  # re-enable the det gate
+
+    def enroll(store):
+        store.enroll("", "", _vec(1, 0, 0), person_id="guest-1")
+
+    box = (320, 240, 100, 400)
+    fx = _vec(1, 0, 0.05)  # a strong guest-1 face
+    low = _fe(fx, bbox=(290, 150, 370, 280), det=0.3)  # but below the det gate
+    ctx = _locate_ctx(tmp_path, [[low]], [[_pp(box)]], [_vec(0, 0, 1)], enroll, sub="p1")
+    assert "guest-1" not in locate_people(ctx, [_img()], ["guest-1"])
+    good = _fe(fx, bbox=(290, 150, 370, 280), det=0.9)
+    ctx2 = _locate_ctx(tmp_path, [[good]], [[_pp(box)]], [_vec(0, 0, 1)], enroll, sub="p2")
+    assert "guest-1" in locate_people(ctx2, [_img()], ["guest-1"])
+
+
+def test_follow_maintenance_not_area_gated(tmp_path, monkeypatch):
+    _follow_env(monkeypatch)
+    monkeypatch.setenv("HRI_RECOG_MIN_FACE_AREA_PX", "10000")
+    box = (320, 240, 100, 400)
+    # a SMALL host face (area 60*80 = 4800 < 10000) that matches the host
+    small = _fe(_vec(1, 0, 0), bbox=(300, 160, 360, 240), det=0.9)  # center (330,200) inside box
+    app = _AppearanceByWidth({100: _vec(0, 0, 1)})  # attire deliberately non-matching
+    ctx = _follow_ctx(tmp_path, [[_pp(box)]], _FaceRec([[small]]), app)
+    # maintenance (reacquiring=False -> hard=False): the small face still holds the lock
+    assert (
+        select_person_to_follow(ctx, _Snap(_img()), "host", run_face=True, reacquiring=False)
+        == cxcywh_to_xyxy(box)
+    )
+
+
+# ---------------------------------------------------------------------------
+# G2: pre-enrollment dedup helper
+# ---------------------------------------------------------------------------
+
+
+def _dedup_store(tmp_path):
+    store = PeopleStore(persist_dir=tmp_path / "p", embedding_model="m")
+    store.enroll("", "", _vec(1, 0, 0), person_id="guest-1", app_embedding=_vec(0, 1, 0))
+    return store
+
+
+def test_dedup_reuses_id_when_unpinned_strong_match(tmp_path):
+    ctx = _Ctx(_dedup_store(tmp_path))
+    rid = _dedup_person_id(ctx, _vec(1, 0, 0.05), _vec(0, 1, 0.05), 0.9, "new", pinned=False)
+    assert rid == "guest-1"
+
+
+def test_dedup_warns_keeps_pinned_id_on_collision(tmp_path, capsys):
+    ctx = _Ctx(_dedup_store(tmp_path))
+    rid = _dedup_person_id(ctx, _vec(1, 0, 0.05), _vec(0, 1, 0.05), 0.9, "guest-2", pinned=True)
+    assert rid == "guest-2"  # distinct pinned guests are never auto-merged
+    assert "WARNING" in capsys.readouterr().out
+
+
+def test_dedup_creates_new_on_weak_match(tmp_path):
+    ctx = _Ctx(_dedup_store(tmp_path))
+    rid = _dedup_person_id(ctx, _vec(0, 0, 1), _vec(0, 0, 1), 0.9, "guest-2", pinned=False)
+    assert rid == "guest-2"
+
+
+def test_dedup_disabled_is_noop(tmp_path, monkeypatch):
+    monkeypatch.setenv("HRI_ENROLL_DEDUP", "0")
+    ctx = _Ctx(_dedup_store(tmp_path))
+    rid = _dedup_person_id(ctx, _vec(1, 0, 0.05), _vec(0, 1, 0.05), 0.9, "new", pinned=False)
+    assert rid == "new"
+
+
+# ---------------------------------------------------------------------------
+# Follow regression (field): initial acquisition must use the BASE gates
+# ---------------------------------------------------------------------------
+
+
+def test_initial_acquire_uses_base_floor_and_locks_first_tick(tmp_path, monkeypatch):
+    """The field bug: host enrolled from ONE seated frame scores ~0.55 attire while
+    standing — the strict re-acquire gates must NOT apply to the initial lock, or
+    the follow never starts (every None tick rotate-searches the robot away)."""
+    _follow_env(monkeypatch)
+    monkeypatch.setenv("HRI_FOLLOW_LOCK_CONFIRM_TICKS", "2")  # must not delay initial lock
+    monkeypatch.setenv("HRI_FOLLOW_REACQUIRE_MIN_SCORE", "0.6")
+    v55 = _vec(0, 0.55, 0.835)  # ~0.55 to the host attire: below 0.6, above base 0.5
+    app = _AppearanceByWidth({100: v55})
+    box = (320, 240, 100, 400)
+    ctx = _follow_ctx(tmp_path, [[_pp(box)]], _FaceRecCounting(), app)
+    sel = make_follow_selector("host")
+    assert sel(ctx, _Snap(_img())) == cxcywh_to_xyxy(box)  # locks on tick 0
+    assert sel.locked is True and sel.ever_locked is True
+
+
+def test_reacquire_strict_only_after_loss(tmp_path, monkeypatch):
+    _follow_env(monkeypatch)
+    monkeypatch.setenv("HRI_FOLLOW_LOCK_CONFIRM_TICKS", "1")
+    monkeypatch.setenv("HRI_FOLLOW_LOCK_MISS_TOLERANCE", "0")
+    monkeypatch.setenv("HRI_FOLLOW_REACQUIRE_MIN_SCORE", "0.6")
+    v55 = _vec(0, 0.55, 0.835)
+    app = _AppearanceByWidth({100: v55})
+    box = (320, 240, 100, 400)
+    # present, MISS (drop), then present again
+    ctx = _follow_ctx(tmp_path, [[_pp(box)], [], [_pp(box)]], _FaceRecCounting(), app)
+    sel = make_follow_selector("host")
+    snap = _Snap(_img())
+    assert sel(ctx, snap) == cxcywh_to_xyxy(box)  # initial: base floor accepts 0.55
+    assert sel(ctx, snap) is None and sel.locked is False  # miss -> lock dropped
+    # re-acquire: the same 0.55 candidate now fails the 0.6 floor -> keeps coasting
+    assert sel(ctx, snap) is None and sel.locked is False
+
+
+def test_nonhost_exclusion_spares_weak_host_face(tmp_path, monkeypatch):
+    """The host's OWN face scoring modestly (bad lighting, one-frame enrollment)
+    must not veto their box — only a clearly-other face (sim < ~0.35) excludes."""
+    _follow_env(monkeypatch)
+    monkeypatch.setenv("HRI_FOLLOW_VISIBLE_MARGIN", "0")
+    box = (320, 240, 100, 400)
+    app = _AppearanceByWidth({100: _vec(0, 1, 0)})
+    # host's face at a weak ~0.45 sim, inside the only candidate (area 4800 px^2)
+    weak_host = _fe(_vec(0.45, 0, 0.893), bbox=(300, 160, 360, 240), det=0.9)
+    ctx = _follow_ctx(tmp_path, [[_pp(box)]], _FaceRec([[weak_host]]), app)
+    assert (
+        select_person_to_follow(ctx, _Snap(_img()), "host", run_face=True)
+        == cxcywh_to_xyxy(box)
+    )
+    # a clearly-other face (~0.2 sim) in the same spot DOES exclude the box
+    other = _fe(_vec(0.2, 0, 0.98), bbox=(300, 160, 360, 240), det=0.9)
+    ctx2 = _follow_ctx(tmp_path, [[_pp(box)]], _FaceRec([[other]]), app)
+    assert select_person_to_follow(ctx2, _Snap(_img()), "host", run_face=True) is None
+
+
+def test_locate_accepts_room_range_face(tmp_path, monkeypatch):
+    """A face at living-room range (~4200 px^2) must clear the hard-decision size
+    gate (2500 default) — the old reuse of the 10000 px^2 door gate rejected every
+    seated guest across the room."""
+    monkeypatch.delenv("HRI_RECOG_MIN_FACE_AREA_PX", raising=False)  # use the default
+    monkeypatch.setenv("HRI_RECOG_MIN_DET_SCORE", "0.5")
+    monkeypatch.setenv("HRI_LOCATE_BOX_MARGIN", "0.06")
+    monkeypatch.setenv("HRI_LOCATE_MIN_VOTES", "1")
+
+    def enroll(store):
+        store.enroll("", "", _vec(1, 0, 0), person_id="guest-1")
+
+    box = (320, 240, 100, 400)
+    face = _fe(_vec(1, 0, 0.05), bbox=(300, 170, 360, 240), det=0.9)  # 60x70 = 4200 px^2
+    ctx = _locate_ctx(tmp_path, [[face]], [[_pp(box)]], [_vec(0, 0, 1)], enroll)
+    assert "guest-1" in locate_people(ctx, [_img()], ["guest-1"])
+
+
+# ---------------------------------------------------------------------------
+# Pre-follow attire refresh (seated enrollment vs standing follow)
+# ---------------------------------------------------------------------------
+
+
+def test_refresh_person_attire_updates_store(tmp_path, monkeypatch):
+    monkeypatch.setenv("HRI_LOCATE_BOX_MARGIN", "0.06")
+    store = PeopleStore(persist_dir=tmp_path / "p", embedding_model="m")
+    seated = _vec(0, 1, 0)
+    store.enroll("Host", "pepsi", _vec(1, 0, 0), person_id="host", app_embedding=seated)
+    standing = _vec(0, 0.8, 0.6)  # the outfit as seen standing (different crop)
+    face = _fe(_vec(1, 0, 0.02), bbox=(290, 150, 370, 280), det=0.9)  # 80x130 px
+    ai = _AI(
+        face_recognition=_FaceRec([[face]]),
+        pose_estimation=_Pose([[_pp()]]),
+        appearance=_Appearance([standing]),
+    )
+    ctx = _Ctx(store, ai)
+    assert refresh_person_attire(ctx, "host", _img()) is True
+    av = store.appearance_vectors()
+    assert av["host"] == pytest.approx(standing, abs=1e-6)  # latest-wins refresh
+    rec = store.get("host")
+    assert rec.name == "Host" and rec.drink == "pepsi"  # metadata carried forward
+    assert list(rec.embedding) == pytest.approx(_vec(1, 0, 0), abs=1e-6)  # face unchanged
+
+
+def test_refresh_person_attire_skips_when_not_located(tmp_path, monkeypatch):
+    store = PeopleStore(persist_dir=tmp_path / "p", embedding_model="m")
+    seated = _vec(0, 1, 0)
+    store.enroll("Host", "", _vec(1, 0, 0), person_id="host", app_embedding=seated)
+    ai = _AI(  # host already turned away: no face, no pose box -> can't verify
+        face_recognition=_FaceRec([[]]),
+        pose_estimation=_Pose([[]]),
+        appearance=_Appearance([_vec(0, 0, 1)]),
+    )
+    assert refresh_person_attire(_Ctx(store, ai), "host", _img()) is False
+    av = store.appearance_vectors()
+    assert av["host"] == pytest.approx(seated, abs=1e-6)  # old vector kept
+
+
+def test_refresh_person_attire_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("HRI_FOLLOW_REFRESH_ATTIRE", "0")
+    store = PeopleStore(persist_dir=tmp_path / "p", embedding_model="m")
+    store.enroll("Host", "", _vec(1, 0, 0), person_id="host", app_embedding=_vec(0, 1, 0))
+    assert refresh_person_attire(_Ctx(store, _AI()), "host", _img()) is False

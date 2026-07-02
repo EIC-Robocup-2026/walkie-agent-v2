@@ -13,8 +13,9 @@
 # no map; set it in .env if needed.)
 # Host's name and favorite drink (given in the competition briefing). Used in
 # the seat-offer wording ("next to our host James"); "" = unknown.
+HRI_DOOR_POSE = "1.15,0,3.14"
 HRI_HOST_NAME = "Host"
-HRI_HOST_DRINK = "pepsi"
+# HRI_HOST_DRINK = "none"
 # Open-vocab detector prompts used to find seats.
 HRI_SEAT_CLASSES = "seat,chair,sofa,armchair,stool"
 # Longest edge (px) to downscale the seat-detection frame to before sending it
@@ -28,14 +29,24 @@ HRI_SEAT_DETECT_MAX_SIZE = ""
 # box overlaps most: a person claims a seat when (person bbox ∩ seat bbox) /
 # seat area >= this.
 HRI_SEAT_OCCUPIED_OVERLAP = "0.25"
-# Seat occupancy is decided from where a person actually sits (their hip
-# keypoint anchor), so a neighbour's box clipping a free seat no longer marks it
-# taken and one guest on a sofa no longer hides its free cushions. This overlap
-# floor is only the fallback for a person whose hips weren't detected — keep it
-# high so an edge-clipping box still doesn't count as sitting there.
-HRI_SEAT_OCCUPIED_HARD_OVERLAP = "0.5"
-# Min keypoint confidence for a hip to be used as the seating anchor.
+# Seat occupancy assumes EVERYONE in view is seated (the new guest stands next
+# to the robot, outside the seating area): each person claims the seat/cushion
+# under their seating anchor — hips when detected, else the bbox lower-centre.
+# Min keypoint confidence for a hip to be used as that anchor.
 HRI_POSE_KP_CONF = "0.3"
+# --- OfferSeat multi-view scan (scan_seats_sweep) ------------------------------
+# OfferSeat scans left/center/right (base rotation of +D/0/-D degrees, positive
+# = left) so seats off to the side of a single forward frame are found too;
+# each rotation settles for HRI_SWEEP_SETTLE_SEC before capturing. 0 = one
+# forward scan only.
+HRI_SEAT_SWEEP_DEG = "20"
+# The views overlap, so the same physical seat is detected more than once. Two
+# same-kind detections whose lifted map-frame centres are closer than this (m)
+# are merged, keeping the most CENTRAL view's instance (head-on occupancy is
+# trusted over a side view that may clip the seat at the frame edge). Sofas get
+# their own, larger radius — a clipped sofa's visible centre wanders more.
+HRI_SEAT_SWEEP_DEDUP_M = "0.5"
+HRI_SEAT_SWEEP_DEDUP_SOFA_M = "1.0"
 # Detector classes treated as multi-seat sofas (split into LEFT/MIDDLE/RIGHT
 # cushions with per-cushion occupancy) instead of one free/taken unit.
 HRI_SOFA_CLASSES = "sofa,couch,bench,loveseat"
@@ -78,6 +89,34 @@ HRI_DUP_FACE_SIM = "0.75"            # face cosine-sim at/above which a pair is 
 HRI_DUP_APP_SIM = "0.85"             # attire cosine-sim flag (clothes legitimately resemble more)
 HRI_DUP_ACTION = "widen"             # log = warn only; widen = warn + lean on face
 HRI_DUP_WIDENED_APP_MARGIN = "0.10"  # if action=widen: raise HRI_FOLLOW_APPEARANCE_MARGIN to this
+# --- Enrollment dedup + recognition quality gates ----------------------------
+# 1 = before enrolling, check whether the person strongly matches someone already
+# enrolled. When the caller pinned no id, reuse the matched id (no duplicate
+# record); when the caller pinned an id that strongly matches a DIFFERENT existing
+# id, log a duplicate warning (never auto-merge distinct guests — that would drop
+# one). 0 = always enroll under the requested id.
+HRI_ENROLL_DEDUP = "1"
+# Fused-similarity floor for the pre-enroll dedup check — higher than the
+# recognition floor (APPEARANCE_MATCH_THRESHOLD=0.5) so only a STRONG match
+# reuses/flags an id and a weak match safely creates a new person.
+HRI_ENROLL_DEDUP_MIN_SCORE = "0.7"
+# A detected face must clear this detection score to be trusted for a HARD identity
+# decision (introduction labeling, follow re-acquire). Below it the embedding is
+# too noisy to label someone with; steady-state follow maintenance is NOT gated on
+# it (a small far face still holds an existing lock). Matches the face_conf_med
+# fusion knee, so lower-confidence faces were already scored appearance-only.
+HRI_RECOG_MIN_DET_SCORE = "0.5"
+# Minimum face bbox area (px^2) for a HARD identity decision (and for the
+# non-host-face exclusion). ~50x50 px — a guest seated across the living room
+# still clears it. Deliberately NOT the door-greeter's HRI_FACE_MIN_AREA_PX
+# (10000), which is sized for someone standing right in front of the robot.
+HRI_RECOG_MIN_FACE_AREA_PX = "2500"
+# 1 = also require a roughly front-facing pose before a HARD identity decision.
+# Opt-in hook, off by default (the face box arrives without its pose keypoints).
+HRI_RECOG_REQUIRE_FRONTAL = "0"
+# Minimum person-crop area (px^2) before its attire embedding is trusted for a
+# follow decision. 0 = no size gate (default).
+HRI_RECOG_MIN_CROP_PX = "0"
 # --- Face presence & tracking ------------------------------------------------
 # "Biggest face" must exceed this bbox area (px²) to count as the person
 # standing right in front — distant bystanders are ignored. Used both by
@@ -87,20 +126,57 @@ HRI_FACE_MIN_AREA_PX = "10000"
 # how often (s) to poll the camera while waiting.
 HRI_FACE_WAIT_TIMEOUT_SEC = "90"
 HRI_FACE_WAIT_POLL_SEC = "0.5"
-# GreetAndLearn face tracking: loop period (s); dead-band (px) inside which the
-# face counts as centered and the base doesn't move; per-tick base-rotation cap
-# (deg); and proportional gain on the measured angular offset (<1 damps overshoot).
-HRI_FACE_TRACK_INTERVAL_SEC = "0.6"
-HRI_FACE_TRACK_DEADBAND_PX = "80"
-HRI_FACE_TRACK_MAX_STEP_DEG = "20"
-HRI_FACE_TRACK_GAIN = "0.8"
+# GreetAndLearn face tracking (FaceTracker in tasks/skills/people.py): a continuous
+# cmd_vel proportional loop, NOT discrete rotate_to steps. A detection thread sets an
+# absolute target heading; a control thread at HZ drives to it with wz = KP*error,
+# clamped to [MIN_WZ, MAX_WZ] rad/s and held at 0 inside a DEADBAND_DEG dead-band. If
+# no fresh face arrives for LOST_SEC the base stops. LIFT=1 aims via a depth deprojection
+# of the face (needs a full snapshot per detection) instead of the depth-free HFOV bearing.
+# Gains are on-robot-unverified — kept conservative; A/B on the robot before trusting.
+HRI_FACE_TRACK_HZ = "15"
+HRI_FACE_TRACK_KP = "1.2"
+HRI_FACE_TRACK_MAX_WZ = "0.6"
+HRI_FACE_TRACK_MIN_WZ = "0.15"
+HRI_FACE_TRACK_DEADBAND_DEG = "6"
+HRI_FACE_TRACK_LOST_SEC = "1.0"
+HRI_FACE_TRACK_LIFT = "1"
 # IntroduceGuests sweeps left/center/right by this many degrees (base rotation,
 # positive = left) to find guests who drifted off-center before introducing them.
-HRI_INTRO_SWEEP_DEG = "10"
+HRI_INTRO_SWEEP_DEG = "25"
 # Seconds to let the base + depth settle after each sweep rotation before capturing.
 HRI_SWEEP_SETTLE_SEC = "1.0"
+# --- Introduction recognition (locate_people) --------------------------------
+# When matching a face's box to an enrolled guest, that guest's fused score must
+# beat the RUNNER-UP enrolled id's score on the same box by this margin, else the
+# box is left unlabeled (the caller falls back to the guest's stored seat rather
+# than risk labeling person A as person B). Assignment across boxes is globally
+# optimal (max total similarity), so a higher wrong pairing can't steal another
+# guest's box either. 0 = accept the top-1 id per box (old behaviour).
+HRI_LOCATE_BOX_MARGIN = "0.06"
+# Minimum sweep frames that must agree on an id<->box match before it is trusted.
+# 1 = a single frame suffices (old behaviour); 2 demands agreement across the
+# left/center/right sweep for near-identical guests (more precise, slightly lower
+# recall).
+HRI_LOCATE_MIN_VOTES = "1"
 # 1 = forget all remembered people at task start (guests differ every run).
 HRI_PEOPLE_RESET = "1"
+# --- TestRememberAndDisplay slice (HRI_SLICE=remember_display) ----------------
+# After enrolling host + guest 1 + guest 2, the recognition display loops at this
+# interval (s), locating all three in the live view. Each frame is shown in a cv2
+# window and always written to HRI_RECOG_VIZ_PATH (so it works headless too).
+HRI_RECOG_INTERVAL_SEC = "0.5"
+HRI_RECOG_VIZ_PATH = "recog_viz.jpg"
+# --- TestPersonAppearance slice (HRI_SLICE=person_appearance) ------------------
+# Loop interval (s) for detect-person + appearance-caption; each annotated frame
+# is shown in a cv2 window and always written to HRI_APPEARANCE_VIZ_PATH.
+HRI_APPEARANCE_INTERVAL_SEC = "1.0"
+HRI_APPEARANCE_VIZ_PATH = "person_appearance_viz.jpg"
+# 1 = LLM-distill every raw appearance caption to person-only details (clothing
+# colors, hair, glasses, ...) before storing/speaking it — the server's caption
+# model narrates the whole scene ("a room with chairs and a projector screen...")
+# no matter what the prompt says. Costs one LLM round-trip per caption (only at
+# enrollment / host scan). 0 = keep the raw VLM caption.
+HRI_APPEARANCE_DISTILL = "0"
 # 1 = enable the timed gripper bag-handover steps (no torque sensing yet).
 HRI_ENABLE_BAG = "1"
 # Effort threshold when bag is placed
@@ -111,6 +187,24 @@ HRI_BAG_WAIT_TIMEOUT_SEC = "20"
 # How far (m) the base stops short of the host when following, so it never
 # bumps them (the host's lifted body point minus this along the approach line).
 HRI_FOLLOW_DISTANCE_M = "1.2"
+# Close-range drive via direct cmd_vel instead of Nav2 (approach_point_cmdvel).
+# A go_to goal ~FOLLOW_DISTANCE behind the person makes Nav2 treat the PERSON as a
+# costmap obstacle and plan around / back off / refuse (the rotate-translate-rotate
+# balk); a direct Twist ignores the costmap and drives straight at them — faster AND
+# more reliable at close range. Beyond the band Nav2 still handles the longer path
+# (keeps obstacle avoidance). Enter/exit are FOLLOW_DISTANCE + margin (hysteresis,
+# exit > enter, so a person hovering at the boundary doesn't thrash the mode). Off by
+# default; gains + the speed cap are ON-ROBOT-UNVERIFIED — A/B before trusting.
+# max_speed is sized so one cmd_vel-watchdog window of coast is a safe fraction of
+# FOLLOW_DISTANCE (0.4 m/s x ~0.5 s = 0.2 m << 1.2 m).
+HRI_FOLLOW_CMDVEL = "0"
+HRI_FOLLOW_CMDVEL_ENTER_MARGIN_M = "0.8"   # cmd_vel when target within FOLLOW_DISTANCE + this
+HRI_FOLLOW_CMDVEL_EXIT_MARGIN_M = "1.4"    # revert to go_to past FOLLOW_DISTANCE + this
+HRI_FOLLOW_CMDVEL_MAX_SPEED = "0.4"        # forward speed cap (m/s) — keep low; see note above
+HRI_FOLLOW_CMDVEL_MIN_SPEED = "0.08"       # forward floor (m/s) to overcome base stiction
+HRI_FOLLOW_CMDVEL_KP_LIN = "0.8"           # P gain on remaining distance -> forward speed
+HRI_FOLLOW_CMDVEL_KP_YAW = "1.2"           # P gain on heading error -> yaw rate (faces the target)
+HRI_FOLLOW_CMDVEL_MAX_YAW = "0.8"          # yaw-rate cap (rad/s)
 # Window (s) for the ONE synchronous listen right after asking where the bag
 # goes (the robot is still then). The follow loop itself does not block-listen.
 HRI_FOLLOW_LISTEN_TIMEOUT_SEC = "5"
@@ -168,6 +262,63 @@ HRI_FOLLOW_APPEARANCE_MARGIN = "0.05"
 # enrolled person by this margin. Faces are far more discriminative than attire,
 # so a small margin is plenty — it just rejects an ambiguous frame.
 HRI_FOLLOW_FACE_MARGIN = "0.05"
+# --- Follow robustness: don't lock a look-alike (esp. as the host leaves frame) --
+# The chosen host box must beat the RUNNER-UP *visible* candidate's host-similarity
+# by at least this much, else the tick is ambiguous and the selector returns None
+# (follow_person then coasts on its motion prediction rather than risk locking a
+# look-alike). This is the core fix for a bystander near the host's last spot being
+# picked. 0 = pick the top scorer even in a near-tie (old behaviour). Raise if it
+# still grabs look-alikes; lower if it too often coasts in a genuine crowd.
+HRI_FOLLOW_VISIBLE_MARGIN = "0.06"
+# 1 = drop an attire candidate whose box shows a clearly-visible NON-host face.
+# While the host walks away their back is to the camera (no face in their box) but
+# bystanders usually face the robot, so a face-shown look-alike who took the host's
+# spot is ruled out by their own face even though their clothing matches. 0 = off.
+HRI_FOLLOW_EXCLUDE_NONHOST_FACE = "1"
+# How far below the face-recognition similarity floor (1 - FACE_MATCH_THRESHOLD) a
+# face inside a candidate box must score against the host before that box is called
+# "not the host". Larger = more conservative. Default 0.25 → exclude below ~0.35:
+# same-person face sims in bad lighting land ~0.4-0.6 while different-person sims
+# sit ~0.1-0.3, so this rules out real bystanders without ever excluding a host
+# whose single-frame enrollment scores modestly. The face must also clear
+# HRI_RECOG_MIN_FACE_AREA_PX + HRI_RECOG_MIN_DET_SCORE — a tiny/blurry face never
+# vetoes a candidate.
+HRI_FOLLOW_NONHOST_FACE_MARGIN = "0.25"
+# After LOSING a previously-held lock (re-acquiring), the attire/face floor is
+# raised to this so a look-alike wandering into the host's last spot can't grab a
+# fresh lock. The INITIAL acquisition at follow start uses the base
+# APPEARANCE_MATCH_THRESHOLD (the host is front-and-center then, and their stored
+# attire is from one seated frame, so a high floor would block the follow from
+# ever starting). Set equal to APPEARANCE_MATCH_THRESHOLD to disable.
+HRI_FOLLOW_REACQUIRE_MIN_SCORE = "0.55"
+# Visible-candidate margin used WHILE re-acquiring, in place of
+# HRI_FOLLOW_VISIBLE_MARGIN — higher, because committing a fresh lock is riskier
+# than holding an existing one.
+HRI_FOLLOW_REACQUIRE_MARGIN = "0.10"
+# 1 = re-establishing a lock after a loss REQUIRES a face match (no attire-only
+# re-acquire). Left OFF by default because a host being followed is normally
+# back-turned (face hidden); the raised floor/margin + non-host-face exclusion +
+# lock confirmation guard the look-alike case without it. Turn on only if the arena
+# reliably shows the host's face on re-acquire.
+HRI_FOLLOW_REACQUIRE_REQUIRE_FACE = "0"
+# Consecutive confirming ticks before RE-committing a lock after a LOSS. During
+# confirmation the selector returns None (the loop coasts/searches), so a
+# one-frame fluke match on a look-alike never re-commits. The INITIAL lock at
+# follow start always commits on the first qualifying tick — an unconfirmed None
+# there makes follow_person rotate-search away from the host. 1 = re-lock on the
+# first good tick (old behaviour).
+HRI_FOLLOW_LOCK_CONFIRM_TICKS = "2"
+# 1 = just before the follow starts, re-embed the host's attire from the current
+# (standing) frame and refresh the stored vector (latest-wins): the enrollment
+# frame is from OfferSeat with the host SEATED, and the posture change otherwise
+# drags every follow-tick attire similarity down. Face-verified and best-effort —
+# if the host isn't located in the frame, the old vector is kept. 0 = off.
+HRI_FOLLOW_REFRESH_ATTIRE = "1"
+# While locked, tolerate this many consecutive no-match ticks (coasting via the
+# predictor/grace) before dropping the lock and re-acquiring under the strict
+# face-aware gate. Keeps a brief occlusion/turn from forcing a full re-acquire
+# without letting a stale lock linger. 0 = drop on the first miss (old behaviour).
+HRI_FOLLOW_LOCK_MISS_TOLERANCE = "2"
 # Among the boxes that pass the identity gate (face or attire), the follow loop
 # prefers the NEAREST: the combined score is similarity + this weight × the
 # box's pose-keypoint scale relative to the nearest qualifier. It is only a
@@ -222,7 +373,7 @@ HRI_FOLLOW_SEARCH_STEP_DEG = "10"
 HRI_FOLLOW_TIMEOUT_SEC = "450"
 # Consecutive lost frames (each predicting or turning to look for the host)
 # before giving up the search and placing the bag here.
-HRI_FOLLOW_MAX_LOST = "35"
+HRI_FOLLOW_MAX_LOST = "100"
 # --- Predictive re-acquisition (MotionPredictor) -----------------------------
 # 1 = when the host leaves the frame, extrapolate their recent map-frame
 # trajectory and drive to the predicted spot before falling back to rotating.

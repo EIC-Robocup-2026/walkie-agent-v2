@@ -193,6 +193,8 @@ def go_to_named(
         return False
     if state is not None and state.get("at") == name:
         return True  # already here this command — don't drive again
+    object = ctx.world.query_text(name)
+    if object is None:
     pose = world.location_pose(name)
     if _pose_is_surveyed(pose):
         ok = _drive_to_pose(ctx, pose, ask_even_if_open=world.is_barrier(name))

@@ -10,8 +10,8 @@ import os
 import threading
 import time
 
-from collections.abc import Sequence
-from contextlib import nullcontext
+from collections.abc import Callable, Sequence
+from contextlib import contextmanager, nullcontext
 
 from tasks.base import TaskContext
 
@@ -126,6 +126,81 @@ def approach_point(
         return False
     if settle > 0:
         time.sleep(settle)  # let the base make progress before re-targeting
+    return True
+
+
+def approach_point_cmdvel(
+    ctx: TaskContext,
+    x: float,
+    y: float,
+    *,
+    stop_distance: float,
+    max_speed: float = 0.4,
+    min_speed: float = 0.08,
+    kp_lin: float = 0.8,
+    kp_yaw: float = 1.2,
+    max_yaw: float = 0.8,
+    pose: dict | None = None,
+) -> bool:
+    """ONE body-frame velocity pulse toward a map point (Nav2-free); True if issued.
+
+    A single ``nav.set_velocity`` command meant to run INSIDE a fast re-targeting
+    loop (``follow_person``'s close-range regime) — NOT a self-contained move like
+    :func:`creep_base_relative` (which loops + integrates odom to a fixed
+    displacement). Here the caller's loop IS the closed loop: it re-evaluates the
+    target and calls this again every tick, so each call just sets an instantaneous
+    velocity setpoint.
+
+    Why prefer this over a Nav2 goal at close range: a ``go_to`` target
+    ~``stop_distance`` behind a person makes Nav2 treat the PERSON as a costmap
+    obstacle and plan around / back up / refuse (the rotate-translate-rotate balk
+    the creep skill also fights); a direct Twist ignores the costmap and drives
+    straight toward them. That's a correctness win at close range, not just speed.
+
+    Motion: rotate to FACE the target (``wz = kp_yaw * yaw_err``, clamped to
+    ``max_yaw``) and drive FORWARD toward the point ``stop_distance`` short of it
+    (``vx = kp_lin * remaining``, clamped to ``[min_speed, max_speed]``). No lateral
+    strafe — facing the target keeps them centred for the next tick's detection.
+    Forward speed is gated by heading alignment (``max(0, cos(yaw_err))``) so an
+    off-axis target is turned toward before it drives, not lunged at sideways.
+    Within ``stop_distance`` it only rotates to face (zero translation).
+
+    IMPORTANT — the base HOLDS the last commanded velocity until the next command
+    or the cmd_vel watchdog zeroes it. Keep *max_speed* low enough that one watchdog
+    window of coast is a safe fraction of *stop_distance* (e.g. 0.4 m/s x ~0.5 s =
+    0.2 m against a 1.2 m follow gap), and guarantee a zero-velocity stop when the
+    loop ends. Best-effort: returns False and commands NOTHING without an odom fix
+    or a set_velocity channel, so the caller can fall back to ``go_to``. *pose* may
+    be passed in to reuse a read the caller already made (else it reads its own).
+    """
+    nav = getattr(ctx.walkie, "nav", None)
+    if nav is None or not hasattr(nav, "set_velocity"):
+        return False
+    if pose is None:
+        try:
+            pose = ctx.walkie.status.get_position()
+        except Exception as exc:
+            print(f"[skills] approach_point_cmdvel: odometry unavailable ({exc})")
+            return False
+    if not pose:
+        return False
+    rx, ry, h = pose["x"], pose["y"], pose["heading"]
+    dx, dy = x - rx, y - ry
+    dist = math.hypot(dx, dy)
+    bearing = math.atan2(dy, dx)
+    yaw_err = math.atan2(math.sin(bearing - h), math.cos(bearing - h))  # wrap to (-pi, pi]
+    wz = max(-max_yaw, min(max_yaw, kp_yaw * yaw_err))
+    remaining = dist - stop_distance
+    if remaining <= 0.0:
+        vx = 0.0  # already within the follow gap: only rotate to face
+    else:
+        align = max(0.0, math.cos(yaw_err))  # ramp forward in as the base faces the target
+        vx = min(max_speed, max(min_speed, kp_lin * remaining)) * align
+    try:
+        nav.set_velocity(float(vx), 0.0, float(wz))
+    except Exception as exc:
+        print(f"[skills] approach_point_cmdvel: set_velocity failed ({exc})")
+        return False
     return True
 
 
@@ -330,6 +405,132 @@ def creep_base_relative(
     return reached
 
 
+def strafe_servo(
+    ctx: TaskContext,
+    lateral_error_fn: Callable[[], float | None],
+    *,
+    tol_m: float = 0.015,
+    timeout_sec: float = 12.0,
+    stall_sec: float | None = None,
+    speed_mps: float | None = None,
+    hz: float | None = None,
+    hold_heading: bool = True,
+) -> bool:
+    """Closed-loop lateral (strafe) velocity servo via direct cmd_vel.
+
+    Unlike :func:`creep_base_relative`, which drives a displacement computed
+    ONCE, this servos on a LIVE error: every tick *lateral_error_fn* returns how
+    far the base must still move to its LEFT (body +y, metres; negative =
+    right; ``None`` = couldn't compute this tick), and the loop commands a
+    P-eased strafe velocity toward zeroing it. Because the error is recomputed
+    from the current pose each tick, the drive self-corrects — over/undershoot
+    just shrinks on the next tick instead of being baked in.
+
+    Obstacles are deliberately NOT a stop condition: the nav stack scales
+    cmd_vel down near them, so the servo watches ACTUAL motion instead — odom
+    position differencing per tick (odom twist is unusable here:
+    ``status.get_velocity()`` drops the strafe axis linear.y). If the base is
+    being commanded at/above the ease-in floor yet its planar displacement
+    stays under ``WALKIE_CREEP_STALL_EPS_M`` for *stall_sec* (default
+    ``WALKIE_GRASP_SERVO_STALL_SEC``, longer than creep's guard because the nav
+    scaling ramps down gradually), it is as far over as the world allows —
+    stop and let the caller continue from there (best-effort).
+
+    Heading is held with the same yaw P-term as the creep, and all low-level
+    gains reuse the ``WALKIE_CREEP_*`` knobs — one tuning surface for both
+    cmd_vel drives. Hard-guarded like the creep: wall-clock *timeout_sec*
+    backstop and a guaranteed zero-velocity stop in ``finally``. Returns True
+    once ``|error| <= tol_m``; False on blocked/timeout/no odom/no cmd_vel
+    channel (base stopped safely). Never raises.
+    """
+    speed = float(os.getenv("WALKIE_CREEP_SPEED_MPS", "0.08")) if speed_mps is None else speed_mps
+    rate = float(os.getenv("WALKIE_CREEP_HZ", "15.0")) if hz is None else hz
+    min_speed = float(os.getenv("WALKIE_CREEP_MIN_SPEED_MPS", "0.03"))
+    kp_lin = float(os.getenv("WALKIE_CREEP_KP_LIN", "1.5"))
+    kp_yaw = float(os.getenv("WALKIE_CREEP_KP_YAW", "1.2"))
+    max_yaw = float(os.getenv("WALKIE_CREEP_MAX_YAW_RPS", "0.4"))
+    stall_eps = float(os.getenv("WALKIE_CREEP_STALL_EPS_M", "0.002"))
+    if stall_sec is None:
+        stall_sec = float(os.getenv("WALKIE_GRASP_SERVO_STALL_SEC", "1.5"))
+
+    nav = ctx.walkie.nav
+    if not hasattr(nav, "set_velocity"):
+        print("[skills] strafe_servo: nav.set_velocity unavailable")
+        return False
+
+    ctx.walkie.robot.head.set_auto_tilt(False)
+    start = ctx.walkie.status.get_position()
+    if not start:
+        print("[skills] strafe_servo: no odom fix; refusing to drive")
+        ctx.walkie.robot.head.set_auto_tilt(True)
+        return False
+    h0 = start["heading"]
+    dt = 1.0 / max(1.0, rate)
+    deadline = time.monotonic() + timeout_sec
+    max_stall = max(1, int(stall_sec * rate))  # commanded-but-not-moving ticks before bailing
+
+    reached = False
+    stalled = 0
+    prev_xy = (start["x"], start["y"])
+    commanding = False  # was the last published |vy| at/above the ease-in floor?
+    try:
+        while time.monotonic() < deadline:
+            pose = ctx.walkie.status.get_position()
+            # Blocked guard: commanded motion with no odom displacement means the
+            # nav layer scaled us to ~zero (obstacle / footprint limit) or odom is
+            # frozen — either way, more commanding won't move the base.
+            if pose:
+                moved = math.hypot(pose["x"] - prev_xy[0], pose["y"] - prev_xy[1])
+                prev_xy = (pose["x"], pose["y"])
+            else:
+                moved = 0.0
+            if commanding and moved < stall_eps:
+                stalled += 1
+                if stalled >= max_stall:
+                    print(f"[skills] strafe_servo: commanded but not moving for "
+                          f"{stall_sec:.1f}s; blocked — stopping here")
+                    break
+            else:
+                stalled = 0
+
+            err = lateral_error_fn()
+            if err is None:  # can't compute this tick — hold still, count as stalled
+                nav.set_velocity(0.0, 0.0, 0.0)
+                commanding = False
+                stalled += 1
+                if stalled >= max_stall:
+                    print("[skills] strafe_servo: error unavailable; stopping")
+                    break
+                time.sleep(dt)
+                continue
+            if abs(err) <= tol_m:
+                reached = True
+                break
+
+            v = min(speed, max(min_speed, kp_lin * abs(err)))  # ease in to the goal
+            vy = math.copysign(v, err)
+            wz = 0.0
+            if hold_heading and pose:
+                yaw_err = math.atan2(math.sin(h0 - pose["heading"]),
+                                     math.cos(h0 - pose["heading"]))
+                wz = max(-max_yaw, min(max_yaw, kp_yaw * yaw_err))
+            nav.set_velocity(0.0, vy, wz)
+            commanding = v >= min_speed
+            time.sleep(dt)
+        else:
+            print("[skills] strafe_servo: timed out before aligning")
+    except Exception as exc:  # noqa: BLE001 — never let the servo raise mid-grasp
+        print(f"[skills] strafe_servo: drive error ({exc}); stopping")
+    finally:
+        for _ in range(3):  # publish zero a few times so the stop isn't lost
+            try:
+                nav.set_velocity(0.0, 0.0, 0.0)
+            except Exception:  # noqa: BLE001
+                break
+        ctx.walkie.robot.head.set_auto_tilt(True)
+    return reached
+
+
 def tilt_head(ctx: TaskContext, angle_rad: float, *, settle: float = 0.0) -> None:
     """Tilt the head servo best-effort; optional settle sleep before a capture.
 
@@ -457,6 +658,33 @@ def _draw_follow_viz(img, box, *, color, label, save_path) -> None:
         print(f"[skills] follow viz failed ({exc})")
 
 
+@contextmanager
+def _follow_base_stop(ctx: TaskContext, used_cmdvel):
+    """Guarantee the base halts when a cmd_vel follow run exits by ANY path.
+
+    *used_cmdvel* is a 0-arg callable returning whether :func:`follow_person` ever
+    issued a raw ``cmd_vel`` Twist this run. On exit — normal, ``break``, stopper
+    trigger, or exception — if it did, publish a few zero-velocity commands and
+    cancel any lingering Nav2 goal left by a ``go_to`` tick, so the base is still
+    for whatever the caller does next (e.g. the HRI bag place). A no-op when only
+    ``go_to`` was used, leaving that path's teardown exactly as before.
+    """
+    try:
+        yield
+    finally:
+        if used_cmdvel():
+            nav = getattr(ctx.walkie, "nav", None)
+            for _ in range(3):  # publish zero a few times so the stop isn't lost
+                try:
+                    nav.set_velocity(0.0, 0.0, 0.0)
+                except Exception:  # noqa: BLE001
+                    break
+            try:
+                nav.cancel()  # also halt any async go_to goal still executing
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def follow_person(
     ctx: TaskContext,
     select,
@@ -524,10 +752,28 @@ def follow_person(
     # watch who the robot is locked onto. Separate flag from the timing debug.
     viz = os.getenv("HRI_FOLLOW_VIZ", "0").lower() in ("1", "true", "yes")
     viz_path = os.getenv("HRI_FOLLOW_VIZ_PATH", "follow_viz.jpg")
+    # Close-range drive: within the CMDVEL_ENTER band, drive the base straight at the
+    # target with a direct cmd_vel pulse (approach_point_cmdvel) instead of a Nav2
+    # go_to — a goal ~follow_distance behind the person otherwise makes Nav2 treat
+    # the PERSON as a costmap obstacle and plan around / back off / refuse. Hysteresis
+    # (enter < exit) stops mode-thrash at the boundary. Off by default (on-robot A/B).
+    cmdvel_on = os.getenv("HRI_FOLLOW_CMDVEL", "0").lower() in ("1", "true", "yes")
+    cmdvel_enter = follow_distance + float(os.getenv("HRI_FOLLOW_CMDVEL_ENTER_MARGIN_M", "0.8"))
+    cmdvel_exit = follow_distance + float(os.getenv("HRI_FOLLOW_CMDVEL_EXIT_MARGIN_M", "1.4"))
+    cmdvel_kw = dict(
+        max_speed=float(os.getenv("HRI_FOLLOW_CMDVEL_MAX_SPEED", "0.4")),
+        min_speed=float(os.getenv("HRI_FOLLOW_CMDVEL_MIN_SPEED", "0.08")),
+        kp_lin=float(os.getenv("HRI_FOLLOW_CMDVEL_KP_LIN", "0.8")),
+        kp_yaw=float(os.getenv("HRI_FOLLOW_CMDVEL_KP_YAW", "1.2")),
+        max_yaw=float(os.getenv("HRI_FOLLOW_CMDVEL_MAX_YAW", "0.8")),
+    )
 
     predictor = MotionPredictor() if predict_on else None
     idle = threading.Event()  # never set — an interruptible sleep when no stopper
     lost = 0
+    cmdvel_mode = False  # hysteresis: currently in the close-range cmd_vel regime?
+    used_cmdvel = False  # ever published a raw Twist? (gates the finally stop + cancel)
+    last_goto = False    # last drive command was a Nav2 goal (cancel it before a Twist)
     last_dir = 1.0  # default search direction (left) until first seen
     last_xy: tuple[float, float] | None = None  # last good lifted point, for the grace hold
     last_seen_t: float | None = None
@@ -537,7 +783,8 @@ def follow_person(
     n, t_log = 0, time.monotonic()
     if on_warmup is not None:
         on_warmup()  # speak the ack BEFORE the stopper starts (so the mic skips it)
-    with (stopper if stopper is not None else nullcontext()) as listener:
+    with (stopper if stopper is not None else nullcontext()) as listener, \
+            _follow_base_stop(ctx, lambda: used_cmdvel):
         triggered = getattr(listener, "triggered", None)
         while time.monotonic() < deadline and not (triggered is not None and triggered.is_set()):
             now = time.monotonic()
@@ -578,7 +825,35 @@ def follow_person(
                     target = last_xy
             if target is not None:
                 lost = 0
-                approach_point(ctx, *target, stop_distance=follow_distance, blocking=False)
+                drove_cmdvel = False
+                if cmdvel_on:
+                    try:
+                        rp = ctx.walkie.status.get_position()
+                    except Exception:  # noqa: BLE001
+                        rp = None
+                    if rp:
+                        d = math.hypot(target[0] - rp["x"], target[1] - rp["y"])
+                        if not cmdvel_mode and d <= cmdvel_enter:
+                            cmdvel_mode = True
+                        elif cmdvel_mode and d >= cmdvel_exit:
+                            cmdvel_mode = False
+                        if cmdvel_mode:
+                            if last_goto:
+                                # Raw cmd_vel does NOT cancel an active Nav2 goal — its
+                                # controller keeps publishing Twists that fight ours.
+                                try:
+                                    ctx.walkie.nav.cancel()
+                                except Exception as exc:  # noqa: BLE001
+                                    print(f"[skills] follow_person: nav.cancel before cmd_vel failed ({exc})")
+                            drove_cmdvel = approach_point_cmdvel(
+                                ctx, *target, stop_distance=follow_distance, pose=rp, **cmdvel_kw
+                            )
+                            used_cmdvel = used_cmdvel or drove_cmdvel
+                if drove_cmdvel:
+                    last_goto = False
+                else:  # far target, cmd_vel disabled, or no odom: Nav2 (keeps obstacle avoidance)
+                    approach_point(ctx, *target, stop_distance=follow_distance, blocking=False)
+                    last_goto = True
             else:
                 # Truly lost (no detection, no prediction, grace expired): turn
                 # toward the last-seen side until the target reappears. NON-blocking

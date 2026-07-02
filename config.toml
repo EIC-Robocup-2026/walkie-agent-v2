@@ -26,7 +26,7 @@ LLM_USE_LOCAL = "1"
 WALKIE_MODEL = "google/gemini-3-flash-preview:nitro"
 WALKIE_TEMPERATURE = "0.5"
 # Local LLM endpoint (OpenAI-compatible), used when LLM_USE_LOCAL=1.
-LOCAL_BASE_URL = "http://10.0.0.201:8000/v1"
+LOCAL_BASE_URL = "http://192.168.103.25:8000/v1"
 LOCAL_MODEL = "qwen3.5-9b"
 
 [services]
@@ -261,13 +261,24 @@ WALKIE_GRASP_RETRY_ATTEMPTS = "3"    # max grasp executions per pick
 WALKIE_GRASP_RETRY_STRAFE_M = "0.08" # sideways base step between retries
 WALKIE_GRASP_RETRY_BACK_M = "0.05"   # backward base step between retries
 # How pick_object lines the chosen arm up with the object before grasping (step 4):
-#   "rotate" (default — the usable PR #31 behaviour) — turn the base so the arm shoulder
-#     aims at the object (face_object_with_arm).
-#   "strafe" (experimental, NOT yet validated on-robot) — slide the omni base sideways
-#     with the heading HELD (align_arm_to_object). Addresses an over-rotation seen when
-#     the object is close ("rotate" can over-shoot and face the wall, dropping the object
-#     out of view). Opt in only after an on-robot A/B.
-WALKIE_GRASP_ARM_ALIGN = "rotate"    # "rotate" | "strafe"
+#   "strafe" (default) — closed-loop cmd_vel servo (strafe_servo) sliding the omni base
+#     sideways with the heading HELD (align_arm_to_object), recomputing the lateral
+#     error from live odom every tick. Obstacles are not a stop condition (the nav
+#     stack scales cmd_vel down near them); instead "commanded but not moving for
+#     SERVO_STALL_SEC" means the base is as far over as the world allows — stop there
+#     and grasp anyway. Fixes the over-rotation seen when the object is close ("rotate"
+#     can over-shoot and face the wall). Gains robot-unverified — A/B against "rotate".
+#   "rotate" (fallback escape hatch — the usable PR #31 behaviour) — turn the base so
+#     the arm shoulder aims at the object (face_object_with_arm).
+WALKIE_GRASP_ARM_ALIGN = "strafe"    # "strafe" | "rotate"
+# Servo-specific knobs (the low-level gains — speed/floor/rate/P-terms/stall eps —
+# are the shared WALKIE_CREEP_* knobs in [skills] below: one tuning surface for
+# both cmd_vel drives).
+WALKIE_GRASP_SERVO_TOL_M = "0.015"   # aligned when |lateral error| <= this (m)
+WALKIE_GRASP_SERVO_TIMEOUT_S = "12"  # wall-clock backstop on the whole servo
+WALKIE_GRASP_SERVO_STALL_SEC = "1.5" # commanded-but-not-moving for this long = blocked;
+                                     # longer than CREEP_STALL_SEC because the nav
+                                     # obstacle scaling ramps velocity down gradually
 # Descriptor-prompt detection + CLIP rerank (tasks/skills/grasp.py): YOLOE is prompt-driven
 # and can't box brand names ("coke"), but under a generic visual descriptor ("can","red can")
 # it returns SEVERAL boxes — so we detect with descriptors (the _GRASP_DESCRIPTORS map),
@@ -296,8 +307,11 @@ WALKIE_GRASP_LLM_DESCRIPTORS_TIMEOUT_S = "10"
 # Final-approach "creep" — direct cmd_vel closed-loop relative drive (NOT Nav2), used
 # for the cm-scale precision moves next to a table where Nav2 would route around the
 # inflation / fail to strafe and nudge the base backwards (tasks/skills/navigation.py
-# creep_base_relative; grasp align/creep/retry-reposition). Stops on integrated odom
-# displacement, hard-guarded by a slow speed, a stop margin, a timeout and a finally-stop.
+# creep_base_relative; now serves the grasp retry-reposition steps only). Stops on
+# integrated odom displacement, hard-guarded by a slow speed, a stop margin, a timeout
+# and a finally-stop. The speed/floor/rate/P/stall-eps gains here are ALSO the low-level
+# gains of strafe_servo (the default arm-align; WALKIE_GRASP_SERVO_* above adds its
+# tolerance/timeout/stall-time on top).
 WALKIE_CREEP_SPEED_MPS = "0.08"      # cruise speed; eased down to MIN near the goal
 WALKIE_CREEP_MIN_SPEED_MPS = "0.03"  # floor so it overcomes stiction near the goal
 WALKIE_CREEP_TOL_M = "0.01"          # stop when remaining displacement <= this (m)

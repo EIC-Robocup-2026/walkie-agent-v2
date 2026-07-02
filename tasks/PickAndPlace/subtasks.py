@@ -19,7 +19,7 @@ Blackboard layout (ctx.data):
 """
 
 from __future__ import annotations
-
+import time
 import os
 
 from tasks.base import StepResult, SubTask, Task, TaskContext
@@ -37,6 +37,11 @@ from .skills import (
     place_at,
     place_object,
     sort_object,
+    enter_through_door,
+)
+
+from tasks.skills import (
+    pick_object as _pick_object
 )
 
 # Map each PnP nav waypoint to its canonical name in the shared LocationBook (the
@@ -92,19 +97,20 @@ def _indicate_shelf_once(ctx: TaskContext) -> None:
     ctx.data["shelf_indicated"] = True
 
 
-class GoToKitchen(SubTask):
-    """Enter the arena and navigate to the kitchen when the door opens."""
+# class GoToKitchen(SubTask):
+#     """Enter the arena and navigate to the kitchen when the door opens."""
 
-    critical = True  # nothing else works if we never reach the kitchen
+#     critical = True  # nothing else works if we never reach the kitchen
 
-    def run(self, ctx: TaskContext) -> StepResult:
-        # Wait start task button
-        print("[PickAndPlace] waiting for start button to be pressed...")
-        while not ctx.walkie.robot.button.is_pressed:
-            pass
-        print("[PickAndPlace] start button pressed")
-        x, y, h = _pose("PNP_KITCHEN_POSE")
-        return StepResult.DONE if ctx.goto(x, y, h) else StepResult.RETRY
+#     def run(self, ctx: TaskContext) -> StepResult:
+#         # Wait start task button
+#         print("[PickAndPlace] waiting for start button to be pressed...")
+#         while not ctx.walkie.robot.button.is_pressed:
+#             pass
+#         print("[PickAndPlace] start button pressed")
+#         # x, y, h = _pose("PNP_KITCHEN_POSE")
+#         x, y, h = [6.3984, -0.5992, 0.0]
+#         return StepResult.DONE if ctx.goto(x, y, h) else StepResult.RETRY
 
 
 class PerceiveDiningTable(SubTask):
@@ -115,15 +121,19 @@ class PerceiveDiningTable(SubTask):
     """
 
     def run(self, ctx: TaskContext) -> StepResult:
-        x, y, h = _pose("PNP_DINING_TABLE_POSE")
-        if ctx.goto(x, y, h):
-            ctx.score("navigate_table")  # reached the dining table (claimed)
+        # x, y, h = _pose("PNP_DINING_TABLE_POSE")
+        # if ctx.goto(x, y, h):
+        #     ctx.score("navigate_table")  # reached the dining table (claimed)
         objects = perceive_surface(ctx)
         ctx.data["table_objects"] = objects
         ctx.say(prompts.PERCEPTION_ANNOUNCE.format(count=len(objects)))
         for o in objects:
             announce_object(ctx, o)  # 'correctly recognize an object' (scoresheet 5.2)
             print(f"[pnp] perceived {o.class_name} ({o.confidence:.2f}) @ {o.world_xy}")
+        
+        # TODO: Remove this later
+        ctx.say("I cannot clean the dining table yet. I'll move on to the next task.")
+
         return StepResult.DONE
 
 
@@ -345,19 +355,90 @@ class NavTour(SubTask):
         return StepResult.DONE
 
 
+class FinishDeclare(SubTask):
+    """Visit each configured waypoint and announce arrival — a localization /
+    waypoint sanity check with no perception or manipulation.
+
+    The first thing to validate on a freshly-mapped arena: that every PNP_*_POSE
+    is set and reachable before any perception/arm bring-up depends on it.
+    """
+
+    def run(self, ctx: TaskContext) -> StepResult:
+        ctx.say("I've finished the task")
+        return StepResult.DONE
+
+
+class GoToDishSink(SubTask):
+    def run(self, ctx: TaskContext) -> StepResult:
+        ctx.say("I'm going to the sink")
+        x, y, h = [5.672, -2.195, -1.5708]
+        return StepResult.DONE if ctx.goto(x, y, h) else StepResult.RETRY
+
+
+class PercieveSink(SubTask):
+    def run(self, ctx: TaskContext) -> StepResult:
+        x, y, h = _pose("PNP_DINING_TABLE_POSE")
+        if ctx.goto(x, y, h):
+            ctx.score("navigate_table")  # reached the dining table (claimed)
+        objects = perceive_surface(ctx)
+        ctx.data["table_objects"] = objects
+        ctx.say(prompts.PERCEPTION_ANNOUNCE.format(count=len(objects)))
+        for o in objects:
+            announce_object(ctx, o)  # 'correctly recognize an object' (scoresheet 5.2)
+            print(f"[pnp] perceived {o.class_name} ({o.confidence:.2f}) @ {o.world_xy}")
+        return StepResult.DONE
+
+
+class TidySink(SubTask):
+
+    def run(self, ctx: TaskContext) -> StepResult:
+        classes = ["soda can", "bottle", "pringles", "can"]
+        objects = perceive_surface(ctx, classes=classes)
+        target = max(objects, key=lambda o: o.confidence) if objects else None
+        if target is None:
+            ctx.say("I couldn't find anything to pick up at the sink.")
+            return StepResult.DONE
+        ctx.say(f"I am picking up the {target.class_name}")
+        # if not arm_enabled():
+        #     print(f"[pnp] breakfast: arm gated; indicated {obj_name} only (no fetch)")
+        #     return False
+        if not _pick_object(ctx, [target.class_name], arm="left"):
+            ctx.say("I have failed to pick the object")
+            return StepResult.RETRY
+        return StepResult.DONE
+
+
+class CheckOpenDoor(SubTask):
+
+    def run(self, ctx: TaskContext) -> StepResult:
+        ctx.say("I'm waiting for the enter button to be pressed.")
+        while not ctx.walkie.robot.button.is_pressed:
+            print(ctx.walkie.robot.button.is_pressed)
+            pass
+        ctx.say("Start button pressed. Heading to the door.")
+        # time.sleep(10)
+        # ctx.say("I'm waiting for the enter button to be pressed.")
+        enter_through_door(ctx, 6.3984, -0.5992, 0.0)
+        return StepResult.DONE
+
+
 def build_pick_and_place_task(ctx: TaskContext) -> Task:
     """Construct the Pick and Place task. Pure: touches no hardware at build time."""
     return Task(
         "PickAndPlace",
         [
-            GoToKitchen(),
+            CheckOpenDoor(),
             PerceiveDiningTable(),
-            OpenDishwasher(),     # optional, gated — open before loading tableware
-            TidyDiningTable(),
-            CloseDishwasher(),    # optional, gated — close after >=1 item loaded
-            ServeBreakfast(),
-            PourBreakfast(),      # optional, gated
-            TidyExtraSurface(),
+            GoToDishSink(),
+            TidySink(),
+            # PercieveDishWasher(),
+            # OpenDishwasher(),     # optional, gated — open before loading tableware
+            # TidyDiningTable(),
+            # CloseDishwasher(),    # optional, gated — close after >=1 item loaded
+            # ServeBreakfast(),
+            # PourBreakfast(),      # optional, gated
+            # TidyExtraSurface(),
+            FinishDeclare(),
         ],
         ctx,
     )

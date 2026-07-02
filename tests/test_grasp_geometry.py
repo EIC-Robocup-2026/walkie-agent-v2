@@ -183,10 +183,10 @@ def test_face_object_points_heading_at_object():
 
 
 # --- align_arm_to_object ----------------------------------------------------
-# align_arm_to_object now issues a pure lateral body-frame creep via
-# creep_base_relative (direct cmd_vel, NOT nav.go_to), so the tests capture the
-# (forward_m, left_m) it asks for rather than an absolute map goal. The strafe is
-# body-frame and therefore heading-independent by construction.
+# align_arm_to_object now hands a LIVE lateral-error callback to strafe_servo
+# (closed-loop direct cmd_vel, NOT nav.go_to), so the tests capture that callback
+# and probe it: the error it reports is the metres the base must move LEFT to put
+# the object in front of the arm, recomputed from the current pose each call.
 
 
 class AlignTransform:
@@ -219,48 +219,65 @@ class AlignCtx:
 
 
 @pytest.fixture
-def captured_creep(monkeypatch):
-    """Capture (forward_m, left_m) handed to creep_base_relative; stub the drive out."""
+def captured_servo(monkeypatch):
+    """Capture the (error_fn, kwargs) handed to strafe_servo; stub the drive out."""
     calls = []
 
-    def fake_creep(ctx, forward_m, left_m=0.0, **kwargs):
-        calls.append((forward_m, left_m))
+    def fake_servo(ctx, error_fn, **kwargs):
+        calls.append((error_fn, kwargs))
         return True
 
-    monkeypatch.setattr("tasks.skills.grasp.creep_base_relative", fake_creep)
+    monkeypatch.setattr("tasks.skills.grasp.strafe_servo", fake_servo)
     return calls
 
 
-def test_align_arm_strafes_to_put_object_in_front_of_arm(captured_creep):
+def test_align_arm_error_puts_object_in_front_of_arm(captured_servo):
     # Robot facing +x; left arm mounted +0.2 m to the left. Object dead ahead
-    # (0.6, 0) -> obj_left 0, so the base must strafe -0.2 m (to the right, i.e.
-    # left_m = -0.2) to line the arm up, with no forward component.
+    # (0.6, 0) -> obj_left 0, so the base must move -0.2 m (to the right) to
+    # line the arm up: the live error callback reports exactly that.
     ctx = AlignCtx(arm_left=0.2)
     assert align_arm_to_object(ctx, (0.6, 0.0, 0.8), arm="left") is True
-    forward_m, left_m = captured_creep[-1]
-    assert forward_m == pytest.approx(0.0, abs=1e-9)  # pure strafe, no creep
-    assert left_m == pytest.approx(-0.2, abs=1e-9)
+    error_fn, _ = captured_servo[-1]
+    assert error_fn() == pytest.approx(-0.2, abs=1e-9)
 
 
-def test_align_arm_strafe_is_heading_independent(captured_creep):
-    # The strafe is a body-frame lateral creep, so the SAME object geometry
-    # relative to the arm yields the same strafe whatever the map heading. Robot
-    # facing +y with the object straight ahead (0, 0.6) -> obj_left 0, arm_left 0.2
-    # -> left_m -0.2, identical to the +x-facing case above.
+def test_align_arm_error_is_heading_independent(captured_servo):
+    # The error is a body-frame lateral offset, so the SAME object geometry
+    # relative to the arm yields the same error whatever the map heading. Robot
+    # facing +y with the object straight ahead (0, 0.6) -> obj_left 0, arm_left
+    # 0.2 -> error -0.2, identical to the +x-facing case above.
     ctx = AlignCtx(arm_left=0.2, heading=math.pi / 2)
     align_arm_to_object(ctx, (0.0, 0.6, 0.8), arm="left")
-    forward_m, left_m = captured_creep[-1]
-    assert forward_m == pytest.approx(0.0, abs=1e-9)
-    assert left_m == pytest.approx(-0.2, abs=1e-9)
+    error_fn, _ = captured_servo[-1]
+    assert error_fn() == pytest.approx(-0.2, abs=1e-9)
 
 
-def test_align_arm_ignores_creep_failure(captured_creep, monkeypatch):
-    # A blocked/refused strafe (creep returns False) is best-effort — align still
-    # reports True so the grasp proceeds from wherever the base got to.
-    monkeypatch.setattr("tasks.skills.grasp.creep_base_relative",
-                        lambda *a, **k: False)
+def test_align_arm_error_tracks_the_live_pose(captured_servo):
+    # Closed loop: as the base moves, the SAME callback reports the shrinking
+    # residual — no re-call of align_arm_to_object needed.
     ctx = AlignCtx(arm_left=0.2)
-    assert align_arm_to_object(ctx, (0.6, 0.0, 0.8), arm="left") is True
+    align_arm_to_object(ctx, (0.6, 0.0, 0.8), arm="left")
+    error_fn, _ = captured_servo[-1]
+    assert error_fn() == pytest.approx(-0.2, abs=1e-9)
+    ctx._pose["y"] = -0.2  # base finished the strafe -> error closes to zero
+    assert error_fn() == pytest.approx(0.0, abs=1e-9)
+
+
+def test_align_arm_error_none_when_pose_unavailable(captured_servo):
+    # A pose failure mid-servo must yield None (skip tick), not raise.
+    ctx = AlignCtx(arm_left=0.2)
+    align_arm_to_object(ctx, (0.6, 0.0, 0.8), arm="left")
+    error_fn, _ = captured_servo[-1]
+    ctx.current_pose = None  # not callable -> _world_to_base raises inside _err
+    assert error_fn() is None
+
+
+def test_align_arm_passes_through_blocked_servo(monkeypatch):
+    # A blocked/timed-out servo (False) passes through — best-effort, no raise;
+    # callers grasp from wherever the base got to.
+    monkeypatch.setattr("tasks.skills.grasp.strafe_servo", lambda *a, **k: False)
+    ctx = AlignCtx(arm_left=0.2)
+    assert align_arm_to_object(ctx, (0.6, 0.0, 0.8), arm="left") is False
 
 
 # --- _grasp_cloud_multi_tilt (dedup + fuse + reframe) -----------------------

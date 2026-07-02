@@ -277,14 +277,13 @@ class TaskContext:
         the strict validator would reject.
         """
         use_local = os.getenv("LLM_USE_LOCAL", "0").strip().lower() in ("1", "true", "yes")
-        if not use_local:
-            try:
-                structured = self.model.with_structured_output(schema, method="json_schema")
-                return structured.invoke(
-                    [SystemMessage(content=instructions), HumanMessage(content=text)]
-                )
-            except Exception as exc:
-                _log("ctx", f"extract: structured output failed ({exc}); trying JSON fallback")
+        try:
+            structured = self.model.with_structured_output(schema, method="json_schema")
+            return structured.invoke(
+                [SystemMessage(content=instructions), HumanMessage(content=text)]
+            )
+        except Exception as exc:
+            _log("ctx", f"extract: structured output failed ({exc}); trying JSON fallback")
         try:
             prompt = _schema_prompt(instructions, schema)
             reply = self.model.invoke(
