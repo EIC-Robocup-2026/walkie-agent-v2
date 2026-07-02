@@ -146,6 +146,14 @@ GREET_OPERATOR = (
     "Hello, I am Walkie. Please give me all three of your commands now, one after "
     "another, and I will plan and carry them out."
 )
+# Verification-gate variant (GPSR_VERIFY_COMMANDS): sets the operator's
+# expectations up front — take your time, and be ready to answer yes/no when
+# each command is read back.
+GREET_OPERATOR_VERIFY = (
+    "Hello, I am Walkie. Please give me all three of your commands now, one "
+    "after another. Take your time. When you have finished, I will read each "
+    "command back to you, and you can confirm it with yes or no."
+)
 ASK_FOR_COMMANDS = "What would you like me to do?"
 ASK_REPEAT = "Sorry, I did not catch that. Could you please repeat the command?"
 # Recovery escalation (rulebook 5.3). Each rephrasing request costs −30, so we
@@ -162,6 +170,26 @@ GIVE_UP_ON_COMMANDS = (
 )
 PLAN_PREAMBLE = "For command {n}, here is my plan."
 CONFIRM_RECEIVED = "Understood. I will get to work."
+# Per-command verification gate (GPSR_VERIFY_COMMANDS): the referee reads all
+# three commands in ONE halting stream, so STT can mishear a command or the
+# split can blur where one ends and the next begins. Before executing anything
+# the robot reads EACH heard command back and gets a yes/no; a "no" re-captures
+# just that command. Cheap insurance: a mishear costs one −30 re-ask instead of
+# a wasted multi-minute errand on the 7-minute clock.
+ASK_VERIFY_COMMAND = (
+    "Command {n}. I heard: {command}. Is that correct? Please say yes or no."
+)
+ASK_REPEAT_ONE = "Okay. Please repeat only command {n}, and nothing else."
+VERIFY_CONFIRMED = "Command {n} confirmed."
+VERIFY_RECAPTURE_MISSED = "Sorry, I did not catch that."
+VERIFY_BEST_EFFORT = "I will go with my best understanding of command {n}."
+# Mis-split recovery: halting speech can MERGE two commands into one parse
+# entry, silently dropping a command. When fewer than the expected number were
+# heard, ask — a "no" captures the missing command(s) one at a time.
+ASK_GOT_ALL = (
+    "I heard {n} commands in total. Did I get all of them? Please say yes or no."
+)
+ASK_SAY_MISSING = "Please say the missing command now."
 # Plan-confirmation gate (GPSR_CONFIRM_PLAN): after speaking a command's plan the
 # robot asks a human to approve it before executing. Off by default (the rulebook
 # run is autonomous); turn on for supervised practice/demos.

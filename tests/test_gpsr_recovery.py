@@ -40,15 +40,17 @@ class _Ctx:
         self.saids: list[str] = []
         self.asked: list[str] = []
         self.ask_retries: list[int] = []
+        self.ask_kwargs: list[dict] = []  # timeout/min_silence_ms pass-throughs
         self.scored: list[tuple[str, int]] = []  # (key, n) for each ctx.score()
         self.data: dict = {}
         self.world = object()  # non-None so run() proceeds (parse_commands is stubbed)
         self.model = object()
         self.disable_listening = False  # answers come via ask() = the STT path
 
-    def ask(self, question, retries=1):
+    def ask(self, question, retries=1, **kwargs):
         self.asked.append(question)
         self.ask_retries.append(retries)
+        self.ask_kwargs.append(kwargs)
         return self._answers.pop(0) if self._answers else ""  # exhausted -> silence
 
     def say(self, text):

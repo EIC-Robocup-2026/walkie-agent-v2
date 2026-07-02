@@ -191,7 +191,7 @@ class _FakeCtx:
     def say(self, text):
         self.saids.append(text)
 
-    def ask(self, question, retries=1):
+    def ask(self, question, retries=1, **kwargs):
         self.asked.append(question)
         return self._ask_reply
 

@@ -219,6 +219,18 @@ from the first utterance, ground what you can, and only re-ask when the parse is
 empty — not to "confirm." A partially-grounded plan that scores partial credit
 beats a rephrasing penalty. (Mirrors HRI's "no non-essential questions" instinct.)
 
+> **Revised after the first real run (GPSR_VERIFY_COMMANDS).** The referee read
+> all three commands in ONE continuous, halting stream; STT misheard and the
+> split blurred command boundaries, so the robot burned minutes executing the
+> wrong errand — far more costly than −30. The shipped flow now (a) widens the
+> batch capture window (`GPSR_LISTEN_TIMEOUT_SEC`/`_MIN_SILENCE_MS` — the mic's
+> 1 s end-of-speech default cut the recording at the first mid-command stumble),
+> and (b) reads each parsed command back for a yes/no, re-capturing just the
+> rejected one (−30 each, bounded) and recovering a merged-away command before
+> executing anything. "No re-ask to confirm" still holds for the *parse-empty*
+> path; the verification gate is the deliberate exception: a −30 re-ask is cheap
+> insurance against a multi-minute wrong errand on the 7-minute clock.
+
 ### 5.3 Design against drift — re-detect, don't trust stored coordinates
 Same as Restaurant §5.1. The world-model pose gets the robot *near* a room/
 placement; the **final docking and all manipulation act on a fresh on-arrival

@@ -39,6 +39,33 @@ GPSR_NAV_DOOR_RETRY = "1"
 WALKIE_DOOR_AT_GOAL_M = "1.0"
 # Maximum commands taken in one go (the rulebook issues three).
 GPSR_MAX_COMMANDS = "3"
+# --- Continuous 3-command capture + per-command verification -----------------
+# The referee reads all three commands in ONE continuous, often halting stream
+# (mid-command stumbles, uneven pauses). Give that single capture a wide window
+# and a larger end-of-speech silence than the mic default (1 s), so a stumble
+# doesn't cut the recording between commands. TIMEOUT is the hard cap on the
+# recording; MIN_SILENCE is how long the referee must stay quiet before the VAD
+# calls the utterance finished (raise it if captures still end mid-stream; lower
+# it if the robot waits too long after the referee clearly finished).
+GPSR_LISTEN_TIMEOUT_SEC = "90"
+GPSR_LISTEN_MIN_SILENCE_MS = "2500"
+# Re-capture of ONE corrected command (after a "no" in verification, or a
+# recovered missing command): shorter window, still stumble-tolerant.
+GPSR_RELISTEN_TIMEOUT_SEC = "30"
+GPSR_RELISTEN_MIN_SILENCE_MS = "1500"
+# 1 = after parsing, read EACH command back and ask yes/no; a "no" asks the
+# operator to repeat JUST that command (−30 rephrasing each, bounded below),
+# re-parses and re-confirms; and when fewer than GPSR_MAX_COMMANDS were heard,
+# ask whether one was missed and capture it. Execution starts only after every
+# command is confirmed — the sure-points strategy: a mishear costs one cheap
+# re-ask instead of a wasted multi-minute errand on the 7-minute clock. An
+# unclear/silent verdict follows GPSR_CONFIRM_DEFAULT ("proceed" keeps the
+# command as heard). In-code default is 0 (pre-change behaviour, what the unit
+# tests exercise); this file turns it ON for real runs.
+GPSR_VERIFY_COMMANDS = "1"
+# Re-captures per command before going with the best understanding anyway (a
+# possibly-wrong command still beats a forfeited one — partial credit exists).
+GPSR_VERIFY_MAX_RECAPTURES = "2"
 # How the operator issues commands: "consecutive" (all at once, enables the
 # interleaved-task bonus) or "one_by_one" (return to the instruction point
 # between each).

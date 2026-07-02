@@ -75,6 +75,35 @@ def _confirm_default_proceed() -> bool:
     return os.getenv("GPSR_CONFIRM_DEFAULT", "proceed").strip().lower() != "skip"
 
 
+def _verify_enabled() -> bool:
+    """Whether to read each heard command back for a yes/no + re-capture on "no"
+    (GPSR_VERIFY_COMMANDS). In-code default OFF (the pre-change behaviour, and
+    what the unit tests exercise); tasks/GPSR/config.toml turns it ON for real
+    runs — the referee reads all three commands in one halting stream, and a
+    mishear caught here costs one −30 re-ask instead of a wasted errand."""
+    return os.getenv("GPSR_VERIFY_COMMANDS", "0").lower() in ("1", "true", "yes")
+
+
+def _batch_listen_kwargs() -> dict:
+    """ctx.ask kwargs for the ONE continuous 3-command capture. The referee reads
+    all three in a row, often haltingly, so the capture needs a wide window and a
+    bigger end-of-speech silence than the mic's 1 s default (which would cut the
+    recording at the first mid-command stumble)."""
+    return {
+        "timeout": float(os.getenv("GPSR_LISTEN_TIMEOUT_SEC", "90")),
+        "min_silence_ms": int(os.getenv("GPSR_LISTEN_MIN_SILENCE_MS", "2500")),
+    }
+
+
+def _single_listen_kwargs() -> dict:
+    """ctx.ask kwargs for re-capturing ONE corrected command (shorter than the
+    batch window, still stumble-tolerant)."""
+    return {
+        "timeout": float(os.getenv("GPSR_RELISTEN_TIMEOUT_SEC", "30")),
+        "min_silence_ms": int(os.getenv("GPSR_RELISTEN_MIN_SILENCE_MS", "1500")),
+    }
+
+
 _AFFIRM_WORDS = {
     "yes", "yeah", "yep", "yup", "ok", "okay", "sure", "correct", "right",
     "proceed", "affirmative", "confirm", "confirmed", "alright", "fine", "perfect",
@@ -166,6 +195,14 @@ class ReceiveAndPlanCommands(SubTask):
     behaviour silently left it unset and forfeited the whole run. On total
     failure it returns DONE (not ABORT) so the robot still returns to the
     instruction point and stays "attending".
+
+    Verification (GPSR_VERIFY_COMMANDS, the sure-points gate): the referee reads
+    all three commands in ONE continuous, halting stream, so the batch capture
+    uses a wide listen window (GPSR_LISTEN_TIMEOUT_SEC / _MIN_SILENCE_MS) and,
+    after parsing, each command is read back for a yes/no — a "no" re-captures
+    JUST that command (−30 each, bounded), and a merged-away command is
+    recovered by asking whether all commands were heard. Only after every
+    command is confirmed does planning/execution proceed.
     """
 
     max_retries = 0  # recovery is handled in-loop by _receive_commands
@@ -176,7 +213,7 @@ class ReceiveAndPlanCommands(SubTask):
             print("[gpsr] no world model on ctx.world — cannot plan")
             ctx.say(prompts.PLAN_NOT_UNDERSTOOD)
             return StepResult.ABORT
-        ctx.say(prompts.GREET_OPERATOR)
+        ctx.say(prompts.GREET_OPERATOR_VERIFY if _verify_enabled() else prompts.GREET_OPERATOR)
         commands = self._receive_commands(ctx, world)
         ctx.data["commands"] = commands
         if commands:
@@ -204,12 +241,15 @@ class ReceiveAndPlanCommands(SubTask):
             # retries=0 so each ask is ONE say+listen — this loop owns all
             # re-prompting, so GPSR_MAX_REPHRASINGS is the true re-prompt bound
             # (ctx.ask's default retries=1 would re-prompt internally and inflate
-            # the −30 count + the clock).
-            answer = ctx.ask(prompts.ASK_FOR_COMMANDS, retries=0)
+            # the −30 count + the clock). The wide batch-listen window keeps a
+            # halting referee's mid-command pauses from cutting the capture.
+            answer = ctx.ask(prompts.ASK_FOR_COMMANDS, retries=0, **_batch_listen_kwargs())
             print(f"[GPSR] heard: {answer}")
             if answer:
                 parsed = parse_commands(ctx.model, answer, world)
                 if any(plan for _, plan in parsed):  # at least one usable plan
+                    if _verify_enabled():
+                        parsed = self._verify_commands(ctx, world, parsed)
                     return self._build_commands(ctx, parsed)
             # Nothing usable this round — escalate (rephrase, then custom operator).
             if rephrasings < max_rephrasings:
@@ -226,6 +266,87 @@ class ReceiveAndPlanCommands(SubTask):
                 custom_attempts += 1
             else:
                 return []  # rephrasings + custom operator exhausted
+
+    def _verify_commands(self, ctx: TaskContext, world, parsed) -> list:
+        """Read each heard command back for a yes/no, then recover any command
+        the split merged away (GPSR_VERIFY_COMMANDS — the sure-points gate).
+
+        Execution starts only after every command is confirmed: the referee
+        reads all three in one halting stream, so per-command verification
+        converts a mishear/mis-split into one cheap re-capture instead of a
+        wasted multi-minute errand.
+        """
+        verified = [
+            self._verify_one(ctx, world, i, text, plan)
+            for i, (text, plan) in enumerate(parsed, 1)
+        ]
+        return self._recover_missing(ctx, world, verified)
+
+    def _verify_one(self, ctx: TaskContext, world, n: int, text: str, plan: Plan):
+        """Confirm command *n* with the operator; on "no" re-capture JUST it.
+
+        A clear "yes" keeps the command as heard; a clear "no" asks the operator
+        to repeat only that command (−30 rephrasing each, bounded by
+        GPSR_VERIFY_MAX_RECAPTURES), re-parses and re-confirms. An unclear/silent
+        verdict follows GPSR_CONFIRM_DEFAULT: "proceed" (default) keeps the
+        command as heard — a mumbled "yes" must not forfeit it — while "skip"
+        demands a clear yes and treats unclear as "no". Once the re-capture
+        budget is spent the best understanding stands (a possibly-wrong command
+        still beats a forfeited one — partial credit exists, zero doesn't).
+        Returns the (possibly re-captured) ``(text, plan)`` pair.
+        """
+        max_recaptures = int(os.getenv("GPSR_VERIFY_MAX_RECAPTURES", "2"))
+        recaptures = 0
+        while True:
+            answer = ctx.ask(prompts.ASK_VERIFY_COMMAND.format(n=n, command=text), retries=1)
+            if _is_affirmative(answer):
+                ctx.say(prompts.VERIFY_CONFIRMED.format(n=n))
+                return text, plan
+            if not _is_negative(answer) and _confirm_default_proceed():
+                print(f"[gpsr] command {n}: unclear verification {answer!r} -> keep as heard")
+                return text, plan
+            # Clear "no" (or strict mode on an unclear answer) -> re-capture.
+            if recaptures >= max_recaptures:
+                ctx.say(prompts.VERIFY_BEST_EFFORT.format(n=n))
+                return text, plan
+            recaptures += 1
+            ctx.score("pen_rephrasing")  # asking to re-say costs −30 (§5.2)
+            heard = ctx.ask(prompts.ASK_REPEAT_ONE.format(n=n), retries=0,
+                            **_single_listen_kwargs())
+            if heard:
+                reparsed = parse_commands(ctx.model, heard, world)
+                if reparsed:
+                    if len(reparsed) > 1:
+                        print(f"[gpsr] re-capture of command {n} split into "
+                              f"{len(reparsed)} commands; keeping the first")
+                    text, plan = reparsed[0]
+                    continue  # loop re-confirms the corrected version
+            ctx.say(prompts.VERIFY_RECAPTURE_MISSED)  # then re-confirm what we had
+
+    def _recover_missing(self, ctx: TaskContext, world, commands: list) -> list:
+        """Recover commands the batch split merged away (halting speech blurs the
+        seam between two commands, leaving fewer than the operator gave).
+
+        When fewer than GPSR_MAX_COMMANDS were heard, ask; a "no" (not all)
+        captures the missing command(s) one at a time, each verified like the
+        rest. A "yes"/unclear answer moves on — operators legitimately give
+        fewer than three in practice runs. Any capture/parse failure breaks out
+        rather than looping (the clock outweighs a maybe-recoverable command).
+        """
+        max_n = int(os.getenv("GPSR_MAX_COMMANDS", "3"))
+        while len(commands) < max_n:
+            answer = ctx.ask(prompts.ASK_GOT_ALL.format(n=len(commands)), retries=1)
+            if not _is_negative(answer):
+                break  # "yes" or unclear: that was all of them
+            ctx.score("pen_rephrasing")  # asking to re-say costs −30 (§5.2)
+            heard = ctx.ask(prompts.ASK_SAY_MISSING, retries=0, **_single_listen_kwargs())
+            reparsed = parse_commands(ctx.model, heard, world) if heard else []
+            if not reparsed:
+                ctx.say(prompts.VERIFY_RECAPTURE_MISSED)
+                break
+            for text, plan in reparsed[: max_n - len(commands)]:
+                commands.append(self._verify_one(ctx, world, len(commands) + 1, text, plan))
+        return commands
 
     def _build_commands(self, ctx: TaskContext, parsed) -> list[Command]:
         """Turn parsed (text, Plan) pairs into Commands, speaking each plan."""

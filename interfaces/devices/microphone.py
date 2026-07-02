@@ -111,6 +111,10 @@ class Microphone:
         self.device = device
         self.threshold = threshold
         self.min_silence_duration_ms = min_silence_duration_ms
+        # Per-recording override of min_silence_duration_ms (see
+        # record_until_silence): held on the instance because the callback's
+        # mid-recording _reset_vad() (pause-resume) must keep using it.
+        self._active_min_silence_ms = min_silence_duration_ms
         self.speech_pad_ms = speech_pad_ms
         self.debug_save_dir = debug_save_dir or os.getenv("WALKIE_MIC_DEBUG_DIR")
         self._debug_counter = 0
@@ -186,7 +190,7 @@ class Microphone:
         self.vad_iterator = VADIterator(
             self.model,
             threshold=self.threshold,
-            min_silence_duration_ms=self.min_silence_duration_ms,
+            min_silence_duration_ms=self._active_min_silence_ms,
             speech_pad_ms=self.speech_pad_ms,
         )
 
@@ -254,20 +258,30 @@ class Microphone:
         timeout: float = 30.0,
         min_duration: float = 2.0,
         wait_for_speech: bool = True,
+        min_silence_duration_ms: int | None = None,
     ) -> bytes:
         """Record audio until speech ends (silence detected).
-        
+
         Args:
             timeout: Maximum recording duration in seconds.
             min_duration: Minimum recording duration in seconds before silence
                 detection can stop recording.
             wait_for_speech: If True, only stop after speech was detected and ended.
                 If False, can stop on any silence after min_duration.
-            
+            min_silence_duration_ms: Override the constructor's end-of-speech
+                silence for THIS recording only. A long multi-command utterance
+                from a halting speaker (e.g. the GPSR referee reading three
+                commands in one stream) pauses mid-utterance longer than the
+                default before it is truly finished. None = constructor value.
+
         Returns:
             Audio data as bytes (16-bit PCM, 16kHz mono).
         """
         print("============== Microphone recording started ==============")
+        self._active_min_silence_ms = (
+            int(min_silence_duration_ms) if min_silence_duration_ms
+            else self.min_silence_duration_ms
+        )
         self._reset_vad()
         audio_chunks: list[np.ndarray] = []
         speech_started = False
