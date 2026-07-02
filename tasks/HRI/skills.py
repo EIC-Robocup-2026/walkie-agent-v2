@@ -19,6 +19,7 @@ from tasks.skills import (
     CommandListener,
     SeatCandidate,
     SeatPart,
+    SeatSweep,
     cxcywh_to_xyxy,
     find_seated_person_bbox,
     overlap_fraction,
@@ -27,6 +28,7 @@ from tasks.skills import (
 )
 
 from . import prompts
+from .identity import distill_appearance_caption
 
 
 def describe_seated_person(
@@ -39,7 +41,9 @@ def describe_seated_person(
 
     Crops to the person overlapping an occupied seat when pose detection found
     one (a lone detected person is accepted too); otherwise captions the whole
-    frame and lets the prompt single out the seated person. None on failure.
+    frame and lets the prompt single out the seated person. The raw caption is
+    LLM-distilled to person-only details (the caption model narrates the whole
+    scene regardless of the prompt). None on failure.
     """
     target = find_seated_person_bbox(persons, seats)
     crop = img
@@ -51,12 +55,13 @@ def describe_seated_person(
             min(img.width, int(x2 + m)), min(img.height, int(y2 + m)),
         ))
     try:
-        return ctx.walkieAI.image.caption(
+        raw = ctx.walkieAI.image.caption(
             crop, prompt=prompts.HOST_APPEARANCE_CAPTION_PROMPT
         )
     except Exception as exc:
         print(f"[skills] seated-person appearance caption failed ({exc})")
         return None
+    return distill_appearance_caption(ctx, raw)
 
 
 def classify_host_command(ctx: TaskContext, heard: str) -> str:
@@ -110,9 +115,7 @@ def _person_label(pid: str, names: dict[str, str | None] | None = None) -> str:
 
 
 def describe_seating_scene(
-    seats: list[SeatCandidate],
-    persons: list[PersonPose],
-    img_w: int,
+    sweep: SeatSweep,
     guest: int,
     guest_name: str | None = None,
     host_name: str | None = None,
@@ -120,23 +123,31 @@ def describe_seating_scene(
     host_appearance: str | None = None,
     prior_seats: dict[int, tuple[SeatCandidate, int, tuple[float, float] | None]] | None = None,
     seat_occupants: dict[int, str] | None = None,
-    seatless_people: dict[str, BBox] | None = None,
+    seatless_people: dict[str, tuple[int, BBox]] | None = None,
     person_names: dict[str, str | None] | None = None,
 ) -> str:
-    """Text rendering of one seat scan for the LLM seat picker.
+    """Text rendering of a seat sweep for the LLM seat picker.
 
     Everything the model needs to decide and to word the offer: each seat's
-    position in the frame (pixel x, where x=0 is far left), size, confidence and
-    occupancy, each person's position, per-seat person overlap, the host
-    (always present and seated, with drink/appearance when known), and where
-    an earlier guest was seated.
+    view + position in that view's frame (pixel x, where x=0 is that view's
+    left edge), size, confidence and occupancy, each person's position, per-seat
+    person overlap, the host (always present and seated, with drink/appearance
+    when known), and where an earlier guest was seated. The sweep's seats are
+    already de-duplicated across the overlapping views.
 
     When *seat_occupants* (seat index -> recognized person id, from
     :func:`match_people_to_seats`) is given, each named seat says WHO is sitting
-    in it; *seatless_people* (id -> box) flags people recognized in the frame
-    that no detected seat lined up with, so the model neither offers their spot
-    nor double-seats them. *person_names* supplies display names for the ids.
+    in it; *seatless_people* (id -> (frame, box)) flags people recognized in the
+    sweep that no detected seat lined up with, so the model neither offers their
+    spot nor double-seats them. *person_names* supplies display names for the ids.
     """
+    labels = sweep.frame_labels
+    multi = len(sweep.snaps) > 1
+    img_w = sweep.snaps[0].img.width if sweep.snaps else 0
+
+    def _view(fi: int) -> str:
+        return f" in the {labels[fi]}" if multi and 0 <= fi < len(labels) else ""
+
     guest_label = f"Guest {guest}" + (f", named {guest_name}," if guest_name else "")
     host_line = (
         f"The party host{f', {host_name},' if host_name else ''} is already "
@@ -146,21 +157,38 @@ def describe_seating_scene(
         host_line += f" The host's favorite drink is {host_drink}."
     if host_appearance:
         host_line += f" The host's appearance: {host_appearance}"
+    if multi:
+        frame_line = (
+            f"The robot scanned the seating area from {len(labels)} camera "
+            f"headings: {', '.join(labels)}. The views overlap, so the same "
+            f"person may appear in more than one view; the seat list below is "
+            f"already de-duplicated across views. Each frame is {img_w}px wide; "
+            f"x positions are within the named view's frame, x=0 that view's "
+            f"left edge."
+        )
+    else:
+        frame_line = (
+            f"The camera frame is {img_w}px wide; x=0 is the robot's far left, "
+            f"x={img_w} its far right."
+        )
     lines = [
-        f"The camera frame is {img_w}px wide; x=0 is the robot's far left, "
-        f"x={img_w} its far right.",
+        frame_line,
         f"{guest_label} has just arrived, is standing next to the robot, and "
         f"needs a seat.",
         host_line,
         "",
-        f"Detected seats ({len(seats)}):",
+        f"Detected seats ({len(sweep.seats)}):",
     ]
-    person_boxes = [cxcywh_to_xyxy(p.bbox) for p in persons]
+    person_boxes_by_frame = [
+        [cxcywh_to_xyxy(p.bbox) for p in ppl] for ppl in sweep.persons_by_frame
+    ]
     occupants = seat_occupants or {}
-    for i, seat in enumerate(seats):
+    for i, seat in enumerate(sweep.seats):
+        fi = sweep.seat_frames[i]
         x1, y1, x2, y2 = seat.bbox_xyxy
         overlap = max(
-            (overlap_fraction(pb, seat.bbox_xyxy) for pb in person_boxes),
+            (overlap_fraction(pb, seat.bbox_xyxy)
+             for pb in person_boxes_by_frame[fi]),
             default=0.0,
         )
         if seat.parts:
@@ -183,45 +211,49 @@ def describe_seating_scene(
             status = "OCCUPIED" if seat.occupied else "free"
             if overlap > 0:
                 status += f" (a person's box covers {overlap:.0%} of it)"
+        view = f"{labels[fi]}, " if multi else ""
         lines.append(
-            f"  [{i}] {seat.class_name} — center x={seat.center_px[0]:.0f}px, "
-            f"{x2 - x1:.0f}x{y2 - y1:.0f}px, "
+            f"  [{i}] {seat.class_name} — {view}center "
+            f"x={seat.center_px[0]:.0f}px, {x2 - x1:.0f}x{y2 - y1:.0f}px, "
             f"detection confidence {seat.confidence:.2f}, {status}"
         )
     lines.append("")
-    if persons:
-        lines.append(f"Detected people ({len(persons)}):")
-        for p in persons:
-            cx, _cy, w, h = p.bbox
-            lines.append(
-                f"  - person at x={cx:.0f}px, {w:.0f}x{h:.0f}px"
-            )
+    n_persons = sum(len(ppl) for ppl in sweep.persons_by_frame)
+    if n_persons:
+        note = (" — overlapping views may show the same person more than once"
+                if multi else "")
+        lines.append(f"Detected people ({n_persons}{note}):")
+        for fi, ppl in enumerate(sweep.persons_by_frame):
+            for p in ppl:
+                cx, _cy, w, h = p.bbox
+                lines.append(
+                    f"  - person at x={cx:.0f}px{_view(fi)}, {w:.0f}x{h:.0f}px"
+                )
     else:
-        lines.append("No people detected in the frame.")
-    for pid, box in (seatless_people or {}).items():
+        lines.append("No people detected.")
+    for pid, (fi, box) in (seatless_people or {}).items():
         cx = (box[0] + box[2]) / 2
         lines.append(
-            f"{_person_label(pid, person_names)} is seated around x={cx:.0f}px, "
-            f"but no detected seat lines up with them — their seat is likely one "
-            f"the detector missed (a couch, stool, or surface). They are there: "
-            f"don't offer that spot, and don't seat the new guest on top of them."
+            f"{_person_label(pid, person_names)} is seated around "
+            f"x={cx:.0f}px{_view(fi)}, but no detected seat lines up with them "
+            f"— their seat is likely one the detector missed (a couch, stool, "
+            f"or surface). They are there: don't offer that spot, and don't "
+            f"seat the new guest on top of them."
         )
     for n, (seat, _w, _xy) in (prior_seats or {}).items():
         if n == guest:
             continue
         lines.append(
-            f"Guest {n} was earlier offered the {seat.class_name} around "
-            f"x={seat.center_px[0]:.0f}px (from an earlier scan, so it may "
-            f"have shifted) and is probably sitting there now."
+            f"Guest {n} was earlier offered a {seat.class_name} (from an "
+            f"earlier scan, so it may have shifted) and is probably sitting "
+            f"there now."
         )
     return "\n".join(lines)
 
 
 def llm_pick_seat(
     ctx: TaskContext,
-    seats: list[SeatCandidate],
-    persons: list[PersonPose],
-    img_w: int,
+    sweep: SeatSweep,
     guest: int,
     guest_name: str | None = None,
     host_name: str | None = None,
@@ -229,25 +261,29 @@ def llm_pick_seat(
     host_appearance: str | None = None,
     prior_seats: dict[int, tuple[SeatCandidate, int, tuple[float, float] | None]] | None = None,
     seat_occupants: dict[int, str] | None = None,
-    seatless_people: dict[str, BBox] | None = None,
+    seatless_people: dict[str, tuple[int, BBox]] | None = None,
     person_names: dict[str, str | None] | None = None,
 ) -> tuple[SeatCandidate | None, SeatPart | None, str | None]:
     """Let the LLM choose which seat to offer and word the spoken offer.
 
-    Returns (seat, part, announcement). *part* is the chosen sofa cushion
+    Returns (seat, part, announcement); the returned seat is one of
+    ``sweep.seats``, so the caller can recover its view/geometry via
+    ``sweep.seats.index(seat)``. *part* is the chosen sofa cushion
     (LEFT/MIDDLE/RIGHT) when the seat is a sofa, else None — the caller faces and
     announces that cushion rather than the whole sofa. The model sees the whole
-    frame (seats, each sofa's free cushions, who is recognized where, the host,
-    the other guest's seat) so it can offer a free cushion next to the host and
-    refer to the host in the announcement. A null announcement means "use the
-    default line". An explicit null seat from the model means "nothing suitable";
-    an extraction failure or out-of-range index degrades to the deterministic
-    pick_free_seat (whose first free cushion is then used for a sofa).
+    sweep (seats across all views, each sofa's free cushions, who is recognized
+    where, the host, the other guest's seat) so it can suggest a free seat next
+    to the host and refer to the host in the announcement. A null announcement
+    means "use the default line". An explicit null seat from the model means
+    "nothing suitable"; an extraction failure or out-of-range index degrades to
+    the deterministic pick_free_seat (whose first free cushion is then used for
+    a sofa).
     """
+    seats = sweep.seats
     if not seats:
         return None, None, None
     scene = describe_seating_scene(
-        seats, persons, img_w, guest,
+        sweep, guest,
         guest_name=guest_name, host_name=host_name,
         host_drink=host_drink, host_appearance=host_appearance,
         prior_seats=prior_seats,
@@ -280,12 +316,17 @@ def _guest_intro_fallback(
     subject_name: str | None,
     subject_drink: str | None,
     side: str | None,
+    subject_appearance: str | None = None,
 ) -> str:
     """Template introduction spoken to one guest about the other beside them."""
     who = f"the person on your {side}" if side else "the guest next to you"
     name = subject_name or prompts.GENERIC_OTHER_GUEST
     lead = f"{listener_name}, " if listener_name else ""
     line = f"{lead}{who} is {name}."
+    if subject_appearance:
+        line += f" You can recognize them easily: {subject_appearance}"
+        if not line.endswith("."):
+            line += "."
     if subject_drink:
         line += f" Their favorite drink is {subject_drink}."
     return line
@@ -299,14 +340,18 @@ def llm_guest_intro_speeches(ctx: TaskContext, acts: list[dict]) -> dict[int, st
 
         {"listener": 1|2, "listener_name": str|None,
          "subject_name": str|None, "subject_drink": str|None,
+         "subject_appearance": str|None,
          "side": "left"|"right"|None}
 
-    Returns a speech keyed by listener number, each falling back to a template
-    on extraction failure.
+    ``subject_appearance`` is the presented guest's captioned look (clothing,
+    hair, glasses, ...) — the LLM is instructed to describe it in detail so the
+    listener can actually spot them. Returns a speech keyed by listener number,
+    each falling back to a template on extraction failure.
     """
     fallback = {
         a["listener"]: _guest_intro_fallback(
-            a["listener_name"], a["subject_name"], a["subject_drink"], a["side"]
+            a["listener_name"], a["subject_name"], a["subject_drink"], a["side"],
+            a.get("subject_appearance"),
         )
         for a in acts
     }
@@ -316,7 +361,8 @@ def llm_guest_intro_speeches(ctx: TaskContext, acts: list[dict]) -> dict[int, st
             f"While facing guest {a['listener']} (name="
             f"{a['listener_name'] or 'unknown'}), present the OTHER guest "
             f"(name={a['subject_name'] or 'unknown'}; favorite drink="
-            f"{a['subject_drink'] or 'unknown'}), who is on guest "
+            f"{a['subject_drink'] or 'unknown'}; appearance="
+            f"{a.get('subject_appearance') or 'unknown'}), who is on guest "
             f"{a['listener']}'s {a['side'] or 'unknown'} side."
         )
     speeches = ctx.extract(

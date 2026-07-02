@@ -29,14 +29,24 @@ HRI_SEAT_DETECT_MAX_SIZE = ""
 # box overlaps most: a person claims a seat when (person bbox ∩ seat bbox) /
 # seat area >= this.
 HRI_SEAT_OCCUPIED_OVERLAP = "0.25"
-# Seat occupancy is decided from where a person actually sits (their hip
-# keypoint anchor), so a neighbour's box clipping a free seat no longer marks it
-# taken and one guest on a sofa no longer hides its free cushions. This overlap
-# floor is only the fallback for a person whose hips weren't detected — keep it
-# high so an edge-clipping box still doesn't count as sitting there.
-HRI_SEAT_OCCUPIED_HARD_OVERLAP = "0.5"
-# Min keypoint confidence for a hip to be used as the seating anchor.
+# Seat occupancy assumes EVERYONE in view is seated (the new guest stands next
+# to the robot, outside the seating area): each person claims the seat/cushion
+# under their seating anchor — hips when detected, else the bbox lower-centre.
+# Min keypoint confidence for a hip to be used as that anchor.
 HRI_POSE_KP_CONF = "0.3"
+# --- OfferSeat multi-view scan (scan_seats_sweep) ------------------------------
+# OfferSeat scans left/center/right (base rotation of +D/0/-D degrees, positive
+# = left) so seats off to the side of a single forward frame are found too;
+# each rotation settles for HRI_SWEEP_SETTLE_SEC before capturing. 0 = one
+# forward scan only.
+HRI_SEAT_SWEEP_DEG = "20"
+# The views overlap, so the same physical seat is detected more than once. Two
+# same-kind detections whose lifted map-frame centres are closer than this (m)
+# are merged, keeping the most CENTRAL view's instance (head-on occupancy is
+# trusted over a side view that may clip the seat at the frame edge). Sofas get
+# their own, larger radius — a clipped sofa's visible centre wanders more.
+HRI_SEAT_SWEEP_DEDUP_M = "0.5"
+HRI_SEAT_SWEEP_DEDUP_SOFA_M = "1.0"
 # Detector classes treated as multi-seat sofas (split into LEFT/MIDDLE/RIGHT
 # cushions with per-cushion occupancy) instead of one free/taken unit.
 HRI_SOFA_CLASSES = "sofa,couch,bench,loveseat"
@@ -116,16 +126,23 @@ HRI_FACE_MIN_AREA_PX = "10000"
 # how often (s) to poll the camera while waiting.
 HRI_FACE_WAIT_TIMEOUT_SEC = "90"
 HRI_FACE_WAIT_POLL_SEC = "0.5"
-# GreetAndLearn face tracking: loop period (s); dead-band (px) inside which the
-# face counts as centered and the base doesn't move; per-tick base-rotation cap
-# (deg); and proportional gain on the measured angular offset (<1 damps overshoot).
-HRI_FACE_TRACK_INTERVAL_SEC = "0.6"
-HRI_FACE_TRACK_DEADBAND_PX = "80"
-HRI_FACE_TRACK_MAX_STEP_DEG = "20"
-HRI_FACE_TRACK_GAIN = "0.8"
+# GreetAndLearn face tracking (FaceTracker in tasks/skills/people.py): a continuous
+# cmd_vel proportional loop, NOT discrete rotate_to steps. A detection thread sets an
+# absolute target heading; a control thread at HZ drives to it with wz = KP*error,
+# clamped to [MIN_WZ, MAX_WZ] rad/s and held at 0 inside a DEADBAND_DEG dead-band. If
+# no fresh face arrives for LOST_SEC the base stops. LIFT=1 aims via a depth deprojection
+# of the face (needs a full snapshot per detection) instead of the depth-free HFOV bearing.
+# Gains are on-robot-unverified — kept conservative; A/B on the robot before trusting.
+HRI_FACE_TRACK_HZ = "15"
+HRI_FACE_TRACK_KP = "1.2"
+HRI_FACE_TRACK_MAX_WZ = "0.6"
+HRI_FACE_TRACK_MIN_WZ = "0.15"
+HRI_FACE_TRACK_DEADBAND_DEG = "6"
+HRI_FACE_TRACK_LOST_SEC = "1.0"
+HRI_FACE_TRACK_LIFT = "1"
 # IntroduceGuests sweeps left/center/right by this many degrees (base rotation,
 # positive = left) to find guests who drifted off-center before introducing them.
-HRI_INTRO_SWEEP_DEG = "10"
+HRI_INTRO_SWEEP_DEG = "25"
 # Seconds to let the base + depth settle after each sweep rotation before capturing.
 HRI_SWEEP_SETTLE_SEC = "1.0"
 # --- Introduction recognition (locate_people) --------------------------------
@@ -143,6 +160,23 @@ HRI_LOCATE_BOX_MARGIN = "0.06"
 HRI_LOCATE_MIN_VOTES = "1"
 # 1 = forget all remembered people at task start (guests differ every run).
 HRI_PEOPLE_RESET = "1"
+# --- TestRememberAndDisplay slice (HRI_SLICE=remember_display) ----------------
+# After enrolling host + guest 1 + guest 2, the recognition display loops at this
+# interval (s), locating all three in the live view. Each frame is shown in a cv2
+# window and always written to HRI_RECOG_VIZ_PATH (so it works headless too).
+HRI_RECOG_INTERVAL_SEC = "0.5"
+HRI_RECOG_VIZ_PATH = "recog_viz.jpg"
+# --- TestPersonAppearance slice (HRI_SLICE=person_appearance) ------------------
+# Loop interval (s) for detect-person + appearance-caption; each annotated frame
+# is shown in a cv2 window and always written to HRI_APPEARANCE_VIZ_PATH.
+HRI_APPEARANCE_INTERVAL_SEC = "1.0"
+HRI_APPEARANCE_VIZ_PATH = "person_appearance_viz.jpg"
+# 1 = LLM-distill every raw appearance caption to person-only details (clothing
+# colors, hair, glasses, ...) before storing/speaking it — the server's caption
+# model narrates the whole scene ("a room with chairs and a projector screen...")
+# no matter what the prompt says. Costs one LLM round-trip per caption (only at
+# enrollment / host scan). 0 = keep the raw VLM caption.
+HRI_APPEARANCE_DISTILL = "0"
 # 1 = enable the timed gripper bag-handover steps (no torque sensing yet).
 HRI_ENABLE_BAG = "1"
 # Effort threshold when bag is placed
@@ -153,6 +187,24 @@ HRI_BAG_WAIT_TIMEOUT_SEC = "20"
 # How far (m) the base stops short of the host when following, so it never
 # bumps them (the host's lifted body point minus this along the approach line).
 HRI_FOLLOW_DISTANCE_M = "1.2"
+# Close-range drive via direct cmd_vel instead of Nav2 (approach_point_cmdvel).
+# A go_to goal ~FOLLOW_DISTANCE behind the person makes Nav2 treat the PERSON as a
+# costmap obstacle and plan around / back off / refuse (the rotate-translate-rotate
+# balk); a direct Twist ignores the costmap and drives straight at them — faster AND
+# more reliable at close range. Beyond the band Nav2 still handles the longer path
+# (keeps obstacle avoidance). Enter/exit are FOLLOW_DISTANCE + margin (hysteresis,
+# exit > enter, so a person hovering at the boundary doesn't thrash the mode). Off by
+# default; gains + the speed cap are ON-ROBOT-UNVERIFIED — A/B before trusting.
+# max_speed is sized so one cmd_vel-watchdog window of coast is a safe fraction of
+# FOLLOW_DISTANCE (0.4 m/s x ~0.5 s = 0.2 m << 1.2 m).
+HRI_FOLLOW_CMDVEL = "0"
+HRI_FOLLOW_CMDVEL_ENTER_MARGIN_M = "0.8"   # cmd_vel when target within FOLLOW_DISTANCE + this
+HRI_FOLLOW_CMDVEL_EXIT_MARGIN_M = "1.4"    # revert to go_to past FOLLOW_DISTANCE + this
+HRI_FOLLOW_CMDVEL_MAX_SPEED = "0.4"        # forward speed cap (m/s) — keep low; see note above
+HRI_FOLLOW_CMDVEL_MIN_SPEED = "0.08"       # forward floor (m/s) to overcome base stiction
+HRI_FOLLOW_CMDVEL_KP_LIN = "0.8"           # P gain on remaining distance -> forward speed
+HRI_FOLLOW_CMDVEL_KP_YAW = "1.2"           # P gain on heading error -> yaw rate (faces the target)
+HRI_FOLLOW_CMDVEL_MAX_YAW = "0.8"          # yaw-rate cap (rad/s)
 # Window (s) for the ONE synchronous listen right after asking where the bag
 # goes (the robot is still then). The follow loop itself does not block-listen.
 HRI_FOLLOW_LISTEN_TIMEOUT_SEC = "5"

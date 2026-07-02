@@ -37,7 +37,9 @@ from tasks.base import StepResult, SubTask, Task, TaskContext
 
 from . import prompts
 from .identity import (
+    _detect_persons_xyxy,
     audit_identity_collisions,
+    caption_person_appearance,
     enroll_guest_frames,
     enroll_person_in_box,
     locate_people,
@@ -68,6 +70,7 @@ from tasks.skills import (
     remember_person_xy,
     reset_people_positions,
     scan_seats,
+    scan_seats_sweep,
     select_largest_person,
     side_relative_to_listener,
     sweep_snapshots,
@@ -124,8 +127,8 @@ class GreetAndLearn(SubTask):
 
     After the Q&A the robot steps back ~30 cm, says "say cheese", and captures a
     burst of face frames (head level) plus body/attire frames (head tilted down)
-    that are averaged into one robust enrollment for BOTH guests. Only guest 1's
-    appearance is also captioned in text (told to guest 2 at the introduction)."""
+    that are averaged into one robust enrollment for BOTH guests. Each guest's
+    appearance is also captioned in text (spoken in detail at the introduction)."""
 
     def __init__(self, guest: int):
         super().__init__(f"GreetAndLearn(guest {guest})")
@@ -136,7 +139,7 @@ class GreetAndLearn(SubTask):
         time.sleep(5) # wait for navigation to settle
         ctx.say(prompts.LOOKING_FOR_GUEST)
 
-        tilt_head(ctx, -0.15)
+        tilt_head(ctx, -0.400)
         if wait_for_person(ctx):
             print("[HRI] guest detected at the door")
         else:
@@ -214,22 +217,21 @@ class GreetAndLearn(SubTask):
         # Restore the level head for the next nav step.
         tilt_head(ctx, 0.0)
 
-        # Guest-1 only: TEXT appearance description told to guest 2 later. Use a
-        # head-LEVEL face frame (it needs hair/glasses/face), not a tilted-down one.
-        if self.guest == 1 and face_imgs:
-            try:
-                record["appearance"] = ctx.walkieAI.image.caption(
-                    face_imgs[0], prompt=prompts.APPEARANCE_CAPTION_PROMPT
-                )
-            except Exception as exc:
-                print(f"[HRI] appearance caption failed ({exc})")
+        # TEXT appearance description, spoken in detail at the introduction. Use
+        # a head-LEVEL face frame (it needs hair/glasses/face), not a tilted-down
+        # one. Both guests get one — each is described to the other.
+        if face_imgs:
+            record["appearance"] = caption_person_appearance(ctx, face_imgs[0])
 
         # Remember this guest's face + attire under a stable id (averaged over the
         # burst), so the introduction step can find them again after a seat switch.
+        # The caption rides along as the record's attributes (enroll_guest_frames
+        # re-captions only when it's missing).
         if face_imgs or app_imgs:
             enroll_guest_frames(
                 ctx, face_imgs, app_imgs, f"guest-{self.guest}",
                 name=record["name"] or "", drink=record["drink"] or "",
+                attributes=record["appearance"] or "",
             )
         else:
             print("[HRI] posed capture produced no frames; skipping enrollment")
@@ -251,8 +253,9 @@ class GuideToLivingRoom(SubTask):
 
 
 class OfferSeat(SubTask):
-    """Scan the room, let the LLM pick a seat and word the offer, face the
-    seat, then speak."""
+    """Sweep-scan the room (left/center/right), let the LLM pick a seat and
+    word the offer (any free seat works, next to the others preferred), face
+    the seat, then speak."""
 
     def __init__(self, guest: int):
         super().__init__(f"OfferSeat(guest {guest})")
@@ -260,48 +263,65 @@ class OfferSeat(SubTask):
 
     def run(self, ctx: TaskContext) -> StepResult:
         time.sleep(5) # wait for navigation to settle
-        seats, persons, snap = scan_seats(ctx)
-        img = snap.img if snap is not None else None
-        img_w = img.width if img is not None else 0
+        # Multiple snaps, like the introduction sweep: scan left/center/right so
+        # seats and seated people off to the side of a single forward frame are
+        # still found. Each seat keeps the snapshot of the very view it was
+        # detected in, so its bbox lifts against that frame's frozen geometry.
+        sweep = scan_seats_sweep(ctx)
+        snaps = sweep.snaps
+        img_w = snaps[0].img.width if snaps else 0
         host = ctx.data.setdefault("host", {})
         # First offer: the only seated person can be the host (guest 1 is
         # still standing next to the robot) — remember what they look like,
         # and enroll their face/attire as a distractor identity so a guest
-        # match at introduction time must beat the host's.
-        if self.guest == 1 and img is not None and not host.get("appearance"):
-            host["appearance"] = describe_seated_person(ctx, img, persons, seats)
-            host_box = find_seated_person_bbox(persons, seats)
+        # match at introduction time must beat the host's. Search every sweep
+        # view for a seated person; fall back to the center view's frame.
+        if self.guest == 1 and snaps and not host.get("appearance"):
+            host_fi, host_box = sweep.center_index, None
+            for fi in range(len(snaps)):
+                box = find_seated_person_bbox(
+                    sweep.persons_by_frame[fi], sweep.seats_by_frame[fi]
+                )
+                if box is not None:
+                    host_fi, host_box = fi, box
+                    break
+            host["appearance"] = describe_seated_person(
+                ctx, snaps[host_fi].img,
+                sweep.persons_by_frame[host_fi], sweep.seats_by_frame[host_fi],
+            )
             if host_box is not None:
                 enroll_person_in_box(
-                    ctx, img, host_box, "host",
+                    ctx, snaps[host_fi].img, host_box, "host",
                     name=os.getenv("HRI_HOST_NAME", "").strip(),
                     drink=os.getenv("HRI_HOST_DRINK", "").strip(),
                     attributes=host["appearance"] or "",
                 )
         # Recognize who is already seated (everyone enrolled except the guest
-        # standing next to the robot) and tie each to the seat they hold, so the
-        # picker seats the new guest near the host and steers clear of taken
-        # seats. A recognized person the seat detector found no chair under is
-        # surfaced too (match_people_to_seats' seatless map), so that spot still
-        # isn't offered as free.
+        # standing next to the robot) across all sweep views and tie each to
+        # the seat they hold, so the picker seats the new guest near the host
+        # and steers clear of taken seats. A recognized person the seat
+        # detector found no chair under is surfaced too (match_people_to_seats'
+        # seatless map), so that spot still isn't offered as free.
         seated_ids = [
             pid for pid in ("host", "guest-1", "guest-2")
             if pid != f"guest-{self.guest}"
         ]
-        located = locate_people(ctx, [img], seated_ids) if img is not None else {}
+        located = locate_people(ctx, [s.img for s in snaps], seated_ids) if snaps else {}
         # Persist where each already-seated person (the host, and any earlier
         # guest) is right now, so later steps can face them without re-scanning.
         # Latest-wins, so a re-scan after someone switched seats refreshes it.
-        if snap is not None:
-            remember_located_positions(ctx, located, [snap])
-        seat_occupants, seatless = match_people_to_seats(located, seats)
+        if snaps:
+            remember_located_positions(ctx, located, snaps)
+        seat_occupants, seatless = match_people_to_seats(
+            located, sweep.seats, seat_frames=sweep.seat_frames
+        )
         person_names = {
             "host": os.getenv("HRI_HOST_NAME", "").strip() or None,
             "guest-1": _guest(ctx, 1)["name"],
             "guest-2": _guest(ctx, 2)["name"],
         }
         seat, part, announcement = llm_pick_seat(
-            ctx, seats, persons, img_w,
+            ctx, sweep,
             guest=self.guest,
             guest_name=_guest(ctx, self.guest)["name"],
             host_name=os.getenv("HRI_HOST_NAME", "").strip() or None,
@@ -320,9 +340,13 @@ class OfferSeat(SubTask):
         # 3-seater aims at the middle, possibly onto whoever's already there.
         target_bbox = part.bbox_xyxy if part is not None else seat.bbox_xyxy
         # Lift the target to a map-frame point against the SCAN-TIME geometry
-        # frozen in the snapshot — exact despite the slow llm_pick_seat call
-        # above; facing then uses odometry + atan2.
-        world_xy = lift_bbox_world_xy(ctx, snap, target_bbox)
+        # frozen in the snapshot of the view the seat was detected in — exact
+        # despite the slow llm_pick_seat call above and the sweep rotations;
+        # facing then uses odometry + atan2. Falls back to the seat's sweep-time
+        # lifted center when the (smaller) cushion bbox yields no depth.
+        si = sweep.seats.index(seat)
+        world_xy = (lift_bbox_world_xy(ctx, snaps[sweep.seat_frames[si]], target_bbox)
+                    or sweep.seat_world[si])
         ctx.data.setdefault("seats", {})[self.guest] = (seat, img_w, world_xy)
         ctx.walkie.robot.arm.go_to_pose_relative(0.3, 0, 0.2, 0, -1.57, 0, group_name="right_arm", blocking=False)
         faced = face_point(ctx, *world_xy) if world_xy else False
@@ -421,9 +445,12 @@ class IntroduceGuests(SubTask):
 
     For each guest the robot turns to FACE THE OTHER guest (the listener) and
     tells them who is sitting beside them, with a left/right cue from the
-    listener's own point of view, e.g. "Bob, the person on your left is Alice,
-    and her favorite drink is cola." Both lines are worded by ONE LLM call
-    (llm_guest_intro_speeches); the host is not introduced.
+    listener's own point of view and a detailed appearance description, e.g.
+    "Bob, the person on your left is Alice — she's wearing a red sweater and
+    glasses — and her favorite drink is cola." Both lines are worded by ONE LLM
+    call (llm_guest_intro_speeches); the host is not introduced. Each subject's
+    appearance comes from the blackboard (captioned at the door), falling back
+    to their people-store record's attributes.
 
     Each guest is anchored to where they actually ARE (they may have switched
     seats), then the side is a 2D cross product of the listener's facing
@@ -431,6 +458,16 @@ class IntroduceGuests(SubTask):
     """
 
     GUESTS = (1, 2)
+
+    @staticmethod
+    def _appearance_of(ctx: TaskContext, n: int, record: dict) -> str | None:
+        """The guest's TEXT appearance: the blackboard caption from the door,
+        else the enrolled record's attributes (enroll_guest_frames auto-captions
+        when the caller supplied none)."""
+        if record.get("appearance"):
+            return record["appearance"]
+        rec = ctx.people.get(f"guest-{n}") if ctx.people is not None else None
+        return (rec.attributes or None) if rec is not None else None
 
     def run(self, ctx: TaskContext) -> StepResult:
         guests = {n: _guest(ctx, n) for n in self.GUESTS}
@@ -483,6 +520,7 @@ class IntroduceGuests(SubTask):
                 "listener_name": guests[listener]["name"],
                 "subject_name": guests[subject]["name"],
                 "subject_drink": guests[subject]["drink"],
+                "subject_appearance": self._appearance_of(ctx, subject, guests[subject]),
                 "side": side,
             })
 
@@ -696,14 +734,7 @@ class TestRememberAndFollowHost(SubTask):
 
         # Text appearance (best-effort), kept on the blackboard + as the record's
         # attributes, mirroring the real host capture in OfferSeat.
-        appearance = None
-        if face_imgs:
-            try:
-                appearance = ctx.walkieAI.image.caption(
-                    face_imgs[0], prompt=prompts.APPEARANCE_CAPTION_PROMPT
-                )
-            except Exception as exc:
-                print(f"[HRI] host appearance caption failed ({exc})")
+        appearance = caption_person_appearance(ctx, face_imgs[0]) if face_imgs else None
         ctx.data.setdefault("host", {})["appearance"] = appearance
 
         if face_imgs or app_imgs:
@@ -791,6 +822,44 @@ def _annotate_scan(snap, seats, persons, timings=None):
     return vis
 
 
+# Per-id box colours for the recognition display (host / guest-1 / guest-2).
+_RECOG_COLORS = {
+    "host": (255, 210, 80),
+    "guest-1": (0, 200, 0),
+    "guest-2": (40, 120, 255),
+}
+
+
+def _annotate_recognition(img, located, names, persons_xyxy=None):
+    """Draw recognition output onto *img* and return a PIL image.
+
+    Every detected person is boxed thin GRAY, so "someone is there but not
+    recognized" reads differently from "nobody is there" (otherwise a detection
+    failure and a recognition failure look identical). Each recognized person is
+    boxed thick in their per-id colour with an ``id (name)`` label, and a top
+    banner lists which enrolled ids were recognized this frame.
+    """
+    from PIL import ImageDraw
+
+    GRAY = (150, 150, 150)
+    vis = img.convert("RGB").copy()
+    draw = ImageDraw.Draw(vis)
+    for box in persons_xyxy or []:
+        x1, y1, x2, y2 = (int(v) for v in box)
+        draw.rectangle((x1, y1, x2, y2), outline=GRAY, width=1)
+    for pid, (_fi, box) in located.items():
+        color = _RECOG_COLORS.get(pid, (255, 255, 255))
+        x1, y1, x2, y2 = (int(v) for v in box)
+        draw.rectangle((x1, y1, x2, y2), outline=color, width=3)
+        name = names.get(pid)
+        _label(draw, x1, y1, f"{pid} ({name})" if name else pid, color)
+    found = [pid for pid in ("host", "guest-1", "guest-2") if pid in located]
+    text = f"recognized {len(found)}/3: " + (", ".join(found) or "(none)")
+    draw.rectangle((0, 0, vis.width, 20), fill=(0, 0, 0))
+    draw.text((6, 5), text, fill=(255, 255, 255))
+    return vis
+
+
 class TestScanSeats(SubTask):
     """Test task: scan for seats + people each tick and show what's detected.
 
@@ -871,6 +940,267 @@ class TestScanSeats(SubTask):
                 except Exception:
                     pass
         return StepResult.DONE
+
+
+class TestRememberAndDisplay(SubTask):
+    """Test task: enroll host + guest 1 + guest 2 in turn, then display who is
+    recognized in the live camera view forever.
+
+    A bring-up harness for the whole enroll -> recognize path
+    (:func:`enroll_guest_frames` + :func:`identity.locate_people`) with NO nav,
+    seats, or bag. For each of ``"host"``, ``"guest-1"``, ``"guest-2"`` it runs
+    the SAME posed burst GreetAndLearn uses — face frames head-level, attire
+    frames head tilted down, burst-averaged — after waiting for a face so the
+    operator can swap the person standing in front between enrollments, then
+    enrolls under that stable id. Then it loops forever: locate all three
+    enrolled people in the live frame, box every detected person thin gray and
+    each recognized one thick in their colour with an ``id (name)`` label, show
+    it in a cv2 window (falling back to writing ``HRI_RECOG_VIZ_PATH`` when
+    headless), and print a one-line summary. Press ``q``/Esc in the window to
+    stop. Ungated; run standalone with ``HRI_SLICE=remember_display``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("TestRememberAndDisplay")
+
+    def _specs(self):
+        """(id, name, drink, spoken label) for each person to enroll + display."""
+        return [
+            ("host", os.getenv("HRI_HOST_NAME", "").strip(),
+             os.getenv("HRI_HOST_DRINK", "").strip(), "the host"),
+            ("guest-1", "", "", "guest number one"),
+            ("guest-2", "", "", "guest number two"),
+        ]
+
+    def run(self, ctx: TaskContext) -> StepResult:
+        specs = self._specs()
+        names: dict[str, str] = {}
+        for person_id, name, drink, label in specs:
+            self._remember_person(ctx, person_id, name, drink, label)
+            rec = ctx.people.get(person_id) if ctx.people is not None else None
+            names[person_id] = ((rec.name if rec is not None else name) or "")
+        ctx.say("I have remembered the host, guest one, and guest two. "
+                "I will now show what I recognize in my camera view.")
+        self._display_forever(ctx, [pid for pid, *_ in specs], names)
+        return StepResult.DONE
+
+    def _remember_person(
+        self, ctx: TaskContext, person_id: str, name: str, drink: str, label: str
+    ) -> None:
+        """Posed burst of the person standing in front -> enroll under *person_id*.
+
+        Mirrors :meth:`GreetAndLearn._posed_capture` (same ``HRI_GREET_*`` knobs,
+        no auto-tilt toggling): wait for a face (so the operator can position each
+        person), step back so the whole body fits, shoot face frames head-level
+        then attire frames head-down, caption the appearance, and enroll the
+        burst-averaged face + OSNet attire embeddings. Best-effort throughout — a
+        capture/enroll failure logs and leaves whatever was already captured.
+        """
+        count = int(os.getenv("HRI_GREET_CAPTURE_COUNT", "3"))
+        backup_m = float(os.getenv("HRI_GREET_BACKUP_M", "0.30"))
+        face_tilt = float(os.getenv("HRI_GREET_FACE_TILT", "0.0"))
+        app_tilt = float(os.getenv("HRI_GREET_APPEARANCE_TILT", "0.15"))
+        tilt_settle = float(os.getenv("HRI_GREET_TILT_SETTLE_SEC", "0.8"))
+        cap_gap = float(os.getenv("HRI_GREET_CAPTURE_GAP_SEC", "0.3"))
+
+        def _burst() -> list:
+            imgs = []
+            for _ in range(count):
+                img = ctx.capture()
+                if img is not None:
+                    imgs.append(img)
+                if cap_gap > 0:
+                    time.sleep(cap_gap)
+            return imgs
+
+        ctx.say(f"Please stand in front of me and look at me. "
+                f"I will remember you as {label}.")
+        # Look level so a standing person's face is in frame, then wait for them
+        # to arrive (gives the operator time to swap people between enrollments).
+        tilt_head(ctx, face_tilt, settle=tilt_settle)
+        if not wait_for_person(ctx):
+            print(f"[HRI] no {person_id} face detected before timeout; capturing anyway")
+        ctx.say(prompts.PHOTO_SAY_CHEESE)
+        # Step back so the whole body fits for the attire crop, then shoot FACE
+        # frames head-level and ATTIRE frames head tilted DOWN to frame the body.
+        move_base_relative(ctx, -backup_m)
+        tilt_head(ctx, face_tilt, settle=tilt_settle)
+        face_imgs = _burst()
+        tilt_head(ctx, app_tilt, settle=tilt_settle)
+        app_imgs = _burst()
+        tilt_head(ctx, 0.0)  # restore the level head
+
+        attributes = caption_person_appearance(ctx, face_imgs[0]) if face_imgs else None
+
+        if face_imgs or app_imgs:
+            enroll_guest_frames(
+                ctx, face_imgs, app_imgs, person_id,
+                name=name, drink=drink, attributes=attributes or "",
+            )
+        else:
+            print(f"[HRI] {person_id} posed capture produced no frames; nothing enrolled")
+        ctx.say(f"Got it. I will remember you as {label}.")
+
+    def _display_forever(
+        self, ctx: TaskContext, ids: list[str], names: dict[str, str]
+    ) -> None:
+        """Loop forever: recognize the enrolled ids in the live view and show it.
+
+        Each tick locates all *ids* (:func:`identity.locate_people`), boxes every
+        detected person gray + each recognized one in colour (:func:`_annotate_recognition`),
+        shows the frame in a cv2 window when a display is available, and ALWAYS
+        writes it to ``HRI_RECOG_VIZ_PATH`` so it works headless too. ``q``/Esc in
+        the window stops it.
+        """
+        interval = float(os.getenv("HRI_RECOG_INTERVAL_SEC", "0.5"))
+        viz_path = os.getenv("HRI_RECOG_VIZ_PATH", "recog_viz.jpg")
+        window = "Walkie recognition"
+        try:
+            import cv2
+            import numpy as np
+        except Exception as exc:
+            print(f"[HRI] recog viz: cv2/numpy unavailable ({exc}); writing file only")
+            cv2 = None
+        can_show = cv2 is not None
+        try:
+            while True:
+                img = ctx.capture()
+                if img is None:
+                    print("[HRI] recognition: capture failed; retrying")
+                    time.sleep(interval)
+                    continue
+                located = locate_people(ctx, [img], ids)
+                persons_xyxy = _detect_persons_xyxy(ctx, img)
+                found = [pid for pid in ids if pid in located]
+                print(f"[HRI] recognized {len(found)}/{len(ids)}: "
+                      f"{', '.join(found) or '(none)'}  "
+                      f"({len(persons_xyxy)} persons detected)")
+                vis = _annotate_recognition(img, located, names, persons_xyxy)
+                vis.save(viz_path, "JPEG", quality=80)
+                if can_show:
+                    try:
+                        bgr = cv2.cvtColor(np.array(vis), cv2.COLOR_RGB2BGR)
+                        cv2.imshow(window, bgr)
+                        if (cv2.waitKey(max(1, int(interval * 1000))) & 0xFF) in (ord("q"), 27):
+                            break
+                        continue
+                    except Exception as exc:
+                        print(f"[HRI] recog viz: no display ({exc}); writing {viz_path} only")
+                        can_show = False
+                time.sleep(interval)
+        finally:
+            if cv2 is not None:
+                try:
+                    cv2.destroyAllWindows()
+                except Exception:
+                    pass
+
+
+class TestPersonAppearance(SubTask):
+    """Test task: detect the person in frame and caption their appearance, live.
+
+    A bring-up harness for the TEXT-appearance path the introductions speak
+    (:func:`identity.caption_person_appearance` — the same helper GreetAndLearn
+    and enroll_guest_frames use): each tick it captures a frame, pose-detects the
+    people in it, crops the largest (nearest) person, and captions their
+    appearance. The caption + person count are printed each tick and the frame is
+    annotated — every detected person boxed, the captioned one thick green with
+    the caption overlaid — shown in a cv2 window when a display is available and
+    ALWAYS written to ``HRI_APPEARANCE_VIZ_PATH`` (default
+    ``person_appearance_viz.jpg``) so it works headless too. With no person
+    detected it captions the whole frame, so the prompt itself can also be tuned
+    against an empty/rear view. Press ``q``/Esc in the window to stop. Ungated;
+    run standalone with ``HRI_SLICE=person_appearance``.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("TestPersonAppearance")
+
+    def run(self, ctx: TaskContext) -> StepResult:
+        interval = float(os.getenv("HRI_APPEARANCE_INTERVAL_SEC", "1.0"))
+        viz_path = os.getenv("HRI_APPEARANCE_VIZ_PATH", "person_appearance_viz.jpg")
+        window = "Walkie person appearance"
+        try:
+            import cv2
+            import numpy as np
+        except Exception as exc:
+            print(f"[HRI] appearance viz: cv2/numpy unavailable ({exc}); writing file only")
+            cv2 = None
+        print(f"[HRI] imported cv2")
+        can_show = cv2 is not None
+        try:
+            while True:
+                img = ctx.capture()
+                if img is None:
+                    print("[HRI] appearance test: capture failed; retrying")
+                    time.sleep(interval)
+                    continue
+                boxes = _detect_persons_xyxy(ctx, img)
+                target = (
+                    max(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+                    if boxes else None
+                )
+                t0 = time.monotonic()
+                caption = caption_person_appearance(ctx, img, target)
+                dt = time.monotonic() - t0
+                print(f"[HRI] appearance ({len(boxes)} persons, caption {dt * 1000:.0f}ms): "
+                      f"{caption or '(caption failed)'}")
+
+                vis = self._annotate(img, boxes, target, caption)
+                vis.save(viz_path, "JPEG", quality=80)
+                if can_show:
+                    try:
+                        bgr = cv2.cvtColor(np.array(vis), cv2.COLOR_RGB2BGR)
+                        cv2.imshow(window, bgr)
+                        if (cv2.waitKey(max(1, int(interval * 1000))) & 0xFF) in (ord("q"), 27):
+                            break
+                        continue
+                    except Exception as exc:
+                        print(f"[HRI] appearance viz: no display ({exc}); writing {viz_path} only")
+                        can_show = False
+                time.sleep(interval)
+        finally:
+            if cv2 is not None:
+                try:
+                    cv2.destroyAllWindows()
+                except Exception:
+                    pass
+        return StepResult.DONE
+
+    @staticmethod
+    def _annotate(img, boxes, target, caption):
+        """Box every person (gray), the captioned target (green), and overlay the
+        caption word-wrapped in a banner at the top; returns a PIL image."""
+        from PIL import ImageDraw
+
+        GRAY, TARGET = (150, 150, 150), (0, 200, 0)
+        vis = img.convert("RGB").copy()
+        draw = ImageDraw.Draw(vis)
+        for box in boxes:
+            x1, y1, x2, y2 = (int(v) for v in box)
+            draw.rectangle((x1, y1, x2, y2), outline=GRAY, width=1)
+        if target is not None:
+            x1, y1, x2, y2 = (int(v) for v in target)
+            draw.rectangle((x1, y1, x2, y2), outline=TARGET, width=3)
+            _label(draw, x1, y1, "captioned", TARGET)
+        # Word-wrap the caption into banner lines (~7 px per char at the default font).
+        words = (caption or "(caption failed)").split()
+        max_chars = max(20, vis.width // 7 - 2)
+        wrapped, cur = [], ""
+        for w in words:
+            if cur and len(cur) + 1 + len(w) > max_chars:
+                wrapped.append(cur)
+                cur = w
+            else:
+                cur = f"{cur} {w}".strip()
+        if cur:
+            wrapped.append(cur)
+        header = f"persons: {len(boxes)}" + ("" if target else "  (no person: whole frame captioned)")
+        lines = [(header, (255, 255, 255))] + [(t, (255, 210, 80)) for t in wrapped]
+        draw.rectangle((0, 0, vis.width, 6 + 14 * len(lines)), fill=(0, 0, 0))
+        for i, (text, color) in enumerate(lines):
+            draw.text((6, 5 + 14 * i), text, fill=color)
+        return vis
 
 
 class TestTask(SubTask):
@@ -978,3 +1308,13 @@ def build_greet_slice(ctx: TaskContext) -> Task:
 def build_follow_host_slice(ctx: TaskContext) -> Task:
     """Remember the host standing in front, then follow + drop the bag."""
     return Task("HRI:follow-host", [TestRememberAndFollowHost()], ctx)
+
+
+def build_remember_display_slice(ctx: TaskContext) -> Task:
+    """Remember the host + guest 1 + guest 2 in turn, then display recognition forever."""
+    return Task("HRI:remember-display", [TestRememberAndDisplay()], ctx)
+
+
+def build_person_appearance_slice(ctx: TaskContext) -> Task:
+    """Loop person detection + appearance captioning — tune the caption prompt alone."""
+    return Task("HRI:person-appearance", [TestPersonAppearance()], ctx)

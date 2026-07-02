@@ -24,6 +24,8 @@ from tasks.base import TaskContext
 
 from tasks.skills import BBox, cxcywh_to_xyxy, lift_bbox_world_xy
 
+from . import prompts
+
 
 def _avg_unit(vectors: list[list[float]]) -> list[float] | None:
     """L2-normalized mean of unit vectors, or None when the list is empty.
@@ -118,6 +120,71 @@ def _appearance_embedding(ctx: TaskContext, img: Image.Image, person_xyxy: BBox)
     except Exception as exc:
         print(f"[identity] appearance embed failed ({exc})")
         return None
+
+
+def distill_appearance_caption(ctx: TaskContext, raw: str | None) -> str | None:
+    """Distill a rambling VLM caption down to the PERSON's appearance only.
+
+    The server's caption model narrates the whole scene ("The image shows a
+    woman standing in front of a projector screen in a room with chairs...")
+    regardless of the prompt, so the LLM extracts just the person's own details
+    (clothing colors, hair, glasses, ...) before the text is stored or spoken.
+    Gated by ``HRI_APPEARANCE_DISTILL`` (default on); best-effort — any failure,
+    a ctx without an extractor (unit-test fakes), or a null extraction returns
+    *raw* unchanged.
+    """
+    if not raw or not raw.strip():
+        return raw
+    if os.getenv("HRI_APPEARANCE_DISTILL", "1").lower() not in ("1", "true", "yes"):
+        return raw
+    extract = getattr(ctx, "extract", None)
+    if extract is None:
+        return raw
+    try:
+        out = extract(
+            prompts.PersonAppearance, prompts.APPEARANCE_DISTILL_INSTRUCTIONS, raw
+        )
+    except Exception as exc:
+        print(f"[identity] appearance distill failed ({exc}); keeping raw caption")
+        return raw
+    desc = (out.description or "").strip() if out is not None else ""
+    if not desc:
+        return raw
+    if desc != raw.strip():
+        print(f"[identity] appearance distilled: {desc!r} (raw: {raw!r})")
+    return desc
+
+
+def caption_person_appearance(
+    ctx: TaskContext, img: Image.Image, person_xyxy: BBox | None = None
+) -> str | None:
+    """TEXT appearance description of the person in *img*; None on any failure.
+
+    Crops to *person_xyxy* (with a small margin so clothing isn't clipped at the
+    bbox edge) when given, else captions the whole frame and lets the prompt
+    single out the person. The caption is the spoken/introduction-facing sibling
+    of the OSNet attire embedding: clothing + colors, hair, glasses, distinctive
+    features (``prompts.APPEARANCE_CAPTION_PROMPT``). The raw caption is then
+    LLM-distilled to person-only details (:func:`distill_appearance_caption`),
+    since the caption model narrates the whole scene no matter the prompt.
+    Best-effort — never raises.
+    """
+    crop = img
+    if person_xyxy is not None:
+        x1, y1, x2, y2 = person_xyxy
+        m = 20  # px padding so clothing isn't clipped at the bbox edge
+        crop = img.crop((
+            max(0, int(x1 - m)), max(0, int(y1 - m)),
+            min(img.width, int(x2 + m)), min(img.height, int(y2 + m)),
+        ))
+    try:
+        raw = ctx.walkieAI.image.caption(
+            crop, prompt=prompts.APPEARANCE_CAPTION_PROMPT
+        )
+    except Exception as exc:
+        print(f"[identity] appearance caption failed ({exc})")
+        return None
+    return distill_appearance_caption(ctx, raw)
 
 
 def _detect_faces(ctx: TaskContext, img: Image.Image) -> list[FaceEmbedding]:
@@ -394,6 +461,9 @@ def enroll_guest_frames(
     identities the way the store's cross-session appearance averaging would — so
     we enroll ONCE with the burst-averaged vectors instead of N latest-wins
     overwrites. Outlier frames are dropped per modality first (:func:`_reject_outliers`).
+    When *attributes* is empty, a TEXT appearance caption of the best frame
+    (:func:`caption_person_appearance`) is stored in its place, so every
+    enrollment carries a spoken-introduction-ready description.
 
     Degrades on every failure (never raises): no face in any face-frame → enroll
     attire-only (zero face vector, treated by the store as "no face known"); no
@@ -454,6 +524,27 @@ def enroll_guest_frames(
         best_face.det_score if best_face is not None else 0.0,
         person_id,
     )
+
+    # TEXT appearance: when the caller didn't supply one, caption the best face
+    # frame's person crop (head-level — it carries hair/glasses/face, unlike the
+    # tilted-down attire frames), falling back to the first app frame's largest
+    # body. Stored as the record's attributes, so the introduction step can
+    # describe every enrolled person in detail. Best-effort — a caption failure
+    # enrolls without attributes exactly as before.
+    if not attributes:
+        cap_img, cap_box = None, None
+        if best_face is not None and best_face_img is not None:
+            cap_img = best_face_img
+            cap_box = _person_bbox_for_face(
+                best_face,
+                _detect_persons_xyxy(ctx, best_face_img),
+                best_face_img.width, best_face_img.height,
+            )
+        elif app_imgs:
+            cap_img = app_imgs[0]
+            cap_box = _largest_person_box(ctx, app_imgs[0])
+        if cap_img is not None:
+            attributes = caption_person_appearance(ctx, cap_img, cap_box) or ""
 
     # Thumbnail: the best face frame/bbox when we have a face, else the first app
     # frame (no face bbox → the archive step is skipped, which is fine).

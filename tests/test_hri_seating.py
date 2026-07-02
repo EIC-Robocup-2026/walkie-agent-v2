@@ -11,6 +11,7 @@ from tasks.skills import (
     SeatCandidate,
     find_seated_person_bbox,
     is_sofa_class,
+    match_people_to_seats,
     parse_sofa_parts,
     person_hip_anchor,
     person_seat_anchor,
@@ -99,22 +100,31 @@ def test_neighbor_box_clipping_free_seat_does_not_occupy_it():
     assert find_seated_person_bbox([person], [own_chair]) is not None
 
 
-def test_anchorless_person_uses_overlap_fallback():
-    # No hip keypoints: a box covering most of the LEFT cushion still occupies it.
+def test_anchorless_person_claims_cushion_under_lower_center():
+    # No hip keypoints: everyone in view is assumed seated, so the person claims
+    # the cushion under their bbox lower-centre anchor.
     sofa = (0, 0, 300, 100)
     big = _person(50, 50, 100, 100)  # box 0..100 == LEFT cushion, no keypoints
-    parts = parse_sofa_parts(sofa, [big], has_middle=True, hard_overlap=0.5)
+    parts = parse_sofa_parts(sofa, [big], has_middle=True)
     assert {pt.label: pt.occupied for pt in parts} == {
         "LEFT": True, "MIDDLE": False, "RIGHT": False
     }
 
 
-def test_anchorless_edge_clip_below_hard_overlap_is_free():
+def test_anchorless_boundary_person_claims_exactly_one_cushion():
     sofa = (0, 0, 300, 100)
-    # Box 80..120 straddles LEFT/MIDDLE boundary: 20% of LEFT, 20% of MIDDLE —
-    # both under the 0.5 hard floor, so with no hips nobody is seated.
+    # Anchor exactly on the LEFT/MIDDLE boundary (x=100): assumed seated, they
+    # occupy ONE cushion — never both sides of the boundary.
     edge = _person(100, 50, 40, 100)
-    parts = parse_sofa_parts(sofa, [edge], has_middle=True, hard_overlap=0.5)
+    parts = parse_sofa_parts(sofa, [edge], has_middle=True)
+    assert sum(pt.occupied for pt in parts) == 1
+
+
+def test_anchor_off_every_cushion_occupies_nothing():
+    sofa = (0, 0, 300, 100)
+    # Seated anchor (hips) on a different seat entirely: this sofa stays free.
+    elsewhere = _person(400, 50, 80, 100, _hips(400, 50))
+    parts = parse_sofa_parts(sofa, [elsewhere], has_middle=True)
     assert all(not pt.occupied for pt in parts)
 
 
@@ -155,3 +165,37 @@ def test_is_sofa_class():
     assert is_sofa_class("Couch")
     assert not is_sofa_class("chair")
     assert not is_sofa_class(None)
+
+
+# --- people <-> seats matching (multi-view aware) ------------------------------
+
+
+def _chair(x1, x2):
+    return SeatCandidate((x1, 0, x2, 100), "chair", 0.9, ((x1 + x2) / 2, 50), False)
+
+
+def test_match_people_to_seats_respects_seat_frames():
+    # Same pixel box in frame 0 and frame 1: each person may only claim a seat
+    # detected in THEIR frame (pixel overlap across frames is meaningless).
+    seats = [_chair(0, 100), _chair(0, 100)]
+    located = {
+        "host": (0, (10, 10, 90, 90)),
+        "guest-1": (1, (10, 10, 90, 90)),
+    }
+    occupants, seatless = match_people_to_seats(
+        located, seats, seat_frames=[0, 1], min_overlap=0.25
+    )
+    assert occupants == {0: "host", 1: "guest-1"}
+    assert seatless == {}
+
+
+def test_match_people_to_seats_seatless_keeps_frame():
+    # A person recognized in a view with no lined-up seat is surfaced as
+    # seatless WITH their frame index, so the scene description can name the view.
+    seats = [_chair(0, 100)]
+    located = {"guest-1": (2, (200, 10, 280, 90))}
+    occupants, seatless = match_people_to_seats(
+        located, seats, seat_frames=[0], min_overlap=0.25
+    )
+    assert occupants == {}
+    assert seatless == {"guest-1": (2, (200, 10, 280, 90))}

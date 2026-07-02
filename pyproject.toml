@@ -51,4 +51,4 @@ pythonpath = ["."]
 addopts = "-p no:launch_testing -p no:launch_ros -p no:ament_lint -p no:ament_flake8 -p no:ament_pep257 -p no:ament_mypy -p no:ament_copyright -p no:ament_xmllint"
 
 [tool.uv.sources]
-walkie-sdk = { path = "../walkie-sdk", editable = true }
+walkie-sdk = { git = "https://github.com/EIC-Robocup-2026/walkie-sdk.git" }

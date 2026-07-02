@@ -27,7 +27,7 @@ from interfaces.devices.camera import camera_pose
 from interfaces.perception.dbscan import dbscan_labels, statistical_outlier_removal
 from interfaces.perception.geometry import voxel_downsample
 from tasks.base import TaskContext
-from tasks.skills.navigation import creep_base_relative, tilt_head
+from tasks.skills.navigation import creep_base_relative, strafe_servo, tilt_head
 
 Vec3 = tuple[float, float, float]
 
@@ -1327,7 +1327,7 @@ def _approach_once(
     if not track:
         try:
             res = ctx.walkie.nav.go_to(
-                x=ox, y=oy, blocking=True, standoff=standoff_m, align_method="face_target",
+                x=ox, y=oy, blocking=True, standoff=standoff_m, align_method="nearest_edge",
             )
         except Exception as exc:  # noqa: BLE001
             print(f"[grasp] approach_object: nav raised ({exc})")
@@ -1339,7 +1339,7 @@ def _approach_once(
 
     try:
         ctx.walkie.nav.go_to(
-            x=ox, y=oy, blocking=False, standoff=standoff_m, align_method="face_target",
+            x=ox, y=oy, blocking=False, standoff=standoff_m, align_method="nearest_edge",
         )
     except Exception as exc:  # noqa: BLE001
         print(f"[grasp] approach_object: nav raised ({exc})")
@@ -1384,13 +1384,12 @@ def approach_object(
     physically unreachable (the classic case: an object in the *middle* of a table,
     so the standoff point sits inside the table footprint / Nav2 inflation layer),
     Nav2 drives the base to the closest reachable spot — the table edge — and then
-    reports the goal aborted (``creep_to_grasp_distance`` documents this same Nav2
-    "halts at the inflation boundary" behaviour). But that closest spot is usually
-    close enough to grasp from: the downstream creep pulls the base in by up to
-    ~0.35 m and the grasp is then rejected only past the arm reach
-    (``max_reach_xy_m`` ≈ 0.70 m), so any approach that parks within ~1.05 m still
-    yields a reachable grasp. *success_tolerance_m* defaults just inside that edge,
-    so a FAILED drive that left the base within it is accepted as ``"MOVED"``.
+    reports the goal aborted. But that closest spot is usually close enough to
+    grasp from: the downstream arm-align servo only moves the base laterally, and
+    the grasp is rejected only past the arm reach (``max_reach_xy_m`` ≈ 0.70 m).
+    *success_tolerance_m* defaults a little beyond that reach (an on-robot tuning
+    candidate now that no forward creep closes the gap), so a FAILED drive that
+    left the base within it is accepted as ``"MOVED"``.
 
     Otherwise a FAILED drive is retried up to *retries* times — the lingering goal
     is cancelled, the base settles for *retry_settle_sec*, and the drive is
@@ -1494,25 +1493,32 @@ def face_object_with_arm(ctx: TaskContext, xyz_map: Vec3, *, arm: str = "left") 
 
 
 def align_arm_to_object(ctx: TaskContext, xyz_map: Vec3, *, arm: str = "left") -> bool:
-    """Strafe the base sideways so *arm* lines up laterally with the object.
+    """Servo the base sideways until *arm* lines up laterally with the object.
 
     Walkie's base is omnidirectional, so instead of rotating to face the object
     with the arm (which swings the shoulder on an arc and re-aims the base), we
     *translate* the base sideways until the object's lateral offset in the base
     frame matches the arm's own lateral mounting offset — putting the object
-    directly in front of that arm and out of the centreline dead-zone. The goal
-    is an absolute map-frame pose at the **current heading** (a pure strafe), so
-    the map-frame grasp candidate stays valid (no re-plan needed).
+    directly in front of that arm and out of the centreline dead-zone. Heading is
+    held throughout (a pure strafe), so the map-frame grasp candidate stays valid
+    (no re-plan needed).
 
-    nav failure is deliberately ignored: a refused or clipped strafe usually just
-    means the base is already as far over as the footprint/obstacles allow, which
-    is good enough to grasp from. Best-effort; never raises.
+    The drive is a closed-loop :func:`strafe_servo`: the object is static in the
+    map frame, so the residual (object lateral offset − arm mounting offset) is
+    recomputed from live odometry every tick and the strafe self-corrects until
+    it is within tolerance. Obstacles are not a stop condition — the nav stack
+    scales cmd_vel down near them — so a base that is commanded but not moving
+    for a while is simply as far over as the world allows, and the servo stops
+    there: good enough to grasp from. Returns True when aligned within tolerance,
+    False when it stopped early (blocked/timeout/no odom) — callers treat either
+    as good enough and carry on. Never raises. Also used by ``place_object`` to
+    line the holding arm up with the placement spot.
     """
     side = (arm or "left").strip().lower()
     if side not in ("left", "right"):
         side = "left"
     frame = f"openarm_{side}_link3"
-    arm_left = 0.0
+    arm_left = 0.0  # static mounting offset in base_footprint — one lookup is enough
     try:
         tf = ctx.walkie.robot.transform.lookup("base_footprint", frame, timeout=5.0)
         if tf and "position" in tf:
@@ -1520,46 +1526,22 @@ def align_arm_to_object(ctx: TaskContext, xyz_map: Vec3, *, arm: str = "left") -
     except Exception as exc:  # noqa: BLE001 — fall back to the centreline
         print(f"[grasp] align_arm_to_object: transform.lookup({frame}) raised ({exc}); "
               f"assuming arm on centreline")
-    _, obj_left, _ = _world_to_base(ctx, xyz_map)
-    strafe = obj_left - arm_left  # base must move this far +left to line the arm up
-    print(f"[grasp] align_arm_to_object[{side}]: obj_left={obj_left:+.2f}m arm_left={arm_left:+.2f}m "
-          f"-> strafe {strafe:+.2f}m")
-    # Pure lateral creep via direct cmd_vel — NOT nav.go_to. A tiny strafe goal next
-    # to a table makes Nav2 route around the inflation / maneuver, nudging the base
-    # backwards; the direct omni drive just slides sideways. Failure ignored: a
-    # short/blocked strafe usually means the footprint is already as far over as it
-    # can go, which is good enough to grasp from.
-    creep_base_relative(ctx, 0.0, strafe)
-    return True
 
+    def _err() -> float | None:
+        """Metres the base must still move LEFT, from the live pose; None = no fix."""
+        try:
+            return _world_to_base(ctx, xyz_map)[1] - arm_left
+        except Exception:  # noqa: BLE001
+            return None
 
-def creep_to_grasp_distance(
-    ctx: TaskContext, xyz_map: Vec3, *, target_m: float = 0.50, max_advance_m: float = 0.35,
-) -> bool:
-    """Drive the base straight forward (along its heading) to close on the object.
-
-    Nav's ``NavigateToObject`` standoff is unreliable on this robot — Nav2 often
-    halts at the table/inflation boundary well short of the requested standoff, so
-    the planned grasp ends up too far to reach accurately. This is a final, direct
-    creep: a pure forward translation (heading held) that brings the object within
-    *target_m* metres (planar). The base has already been faced/strafed at the
-    object, so "forward" is "toward it". Pure translation keeps the map-frame grasp
-    candidate valid (no re-plan). Capped at *max_advance_m* so a bad estimate can't
-    drive the robot into the table. Best-effort; never raises.
-    """
-    dist = _xy_dist(ctx, xyz_map)
-    if dist <= target_m:
-        return True
-    advance = min(dist - target_m, max_advance_m)
-    print(f"[grasp] creep_to_grasp_distance: {dist:.2f}m -> {target_m:.2f}m "
-          f"(advance {advance:+.2f}m forward)")
-    # Pure forward creep via direct cmd_vel — NOT nav.go_to. With the object right at
-    # the table edge, the forward goal sits in Nav2's inflation layer, so the planner
-    # routes around it / the controller maneuvers and the base ends up backing off
-    # instead of closing in. A direct omni translation just drives straight at it.
-    # max_advance_m caps the open-loop reach so a bad estimate can't ram the table.
-    creep_base_relative(ctx, advance, 0.0)
-    return True
+    initial = _err()
+    print(f"[grasp] align_arm_to_object[{side}]: arm_left={arm_left:+.2f}m "
+          f"initial_err={initial if initial is None else format(initial, '+.2f')}m (servo)")
+    return strafe_servo(
+        ctx, _err,
+        tol_m=_f("WALKIE_GRASP_SERVO_TOL_M", "0.015"),
+        timeout_sec=_f("WALKIE_GRASP_SERVO_TIMEOUT_S", "12"),
+    )
 
 
 def aim_forward_candidate(
@@ -1768,7 +1750,6 @@ def pick_object(
     approach_weight: float | None = None,
     optimal_standoff_m: float = 0.55,
     approach_trigger_m: float = 0.60,
-    grasp_distance_m: float = 0.60,
     max_reach_xy_m: float = 0.70,
     min_grasp_z_m: float = 0.70,
     deadzone_half_m: float = 0.20,
@@ -1791,27 +1772,26 @@ def pick_object(
     2. If it's farther than *approach_trigger_m* (XY), drive to *optimal_standoff_m*
        facing it (head tracking), then re-locate from the new viewpoint.
     3. Pick the arm (``"auto"`` -> object's side, dead-centre -> *default_arm*).
-    4. Rotate the base so the chosen arm points straight at the object
-       (:func:`face_object_with_arm`, arm-forward = robot heading), recording the
-       pre-rotate heading. This makes "forward" point at the object for the creep below.
-    5. Creep the base straight forward (:func:`creep_to_grasp_distance`) so the
-       object ends within *grasp_distance_m* — the approach often halts short of the
-       table, leaving it too far to reach accurately. ``None`` disables the creep.
-    6. Run the ONE heavy grasp plan from the final pose: by default
+    4. Servo the base sideways (closed-loop cmd_vel strafe, heading held) until the
+       chosen arm is laterally lined up with the object (:func:`align_arm_to_object`);
+       ``WALKIE_GRASP_ARM_ALIGN=rotate`` falls back to turning the base instead
+       (:func:`face_object_with_arm`), recording the pre-rotate heading.
+    5. Run the ONE heavy grasp plan from the final pose: by default
        (``WALKIE_GRASP_FUSE_SNAPS`` > 1) take that many snapshots at the **current** head
        angle, dedup + fuse them into one lower-noise cloud, strip residue/background-bleed
        noise (:func:`_clean_object_cloud`), and run a single GraspNet inference
        (:func:`get_object_grasp_pos`).
-    7. With *point_at_object* (default), re-point the gripper straight forward along
+    6. With *point_at_object* (default), re-point the gripper straight forward along
        the robot heading (:func:`aim_forward_candidate`) instead of GraspNet's
        wrist orientation (often IK-unsolvable on OpenArm).
-    8. Execute the grasp with base-reposition retries (:func:`execute_grasp_with_retry`).
-    9. On success, tuck both arms into the travel pose (``WALKIE_CARRY_POSE``, default
+    7. Execute the grasp with base-reposition retries (:func:`execute_grasp_with_retry`).
+    8. On success, tuck both arms into the travel pose (``WALKIE_CARRY_POSE``, default
        ``"standby"``) so the base can navigate on — the grasping arm is left extended
        over the table otherwise and Nav2 won't plan around it. Stow in place (no base
        retreat).
-    10. Restore the pre-rotate heading (:func:`TaskContext.rotate_to`) so the base
-       ends the pick in its original orientation, whether or not the grasp succeeded.
+    9. Restore the pre-align heading (:func:`TaskContext.rotate_to`) so the base
+       ends the pick in its original orientation, whether or not the grasp succeeded
+       (a no-op for the default strafe path, which never changes heading).
 
     Returns True only when the grasp executed cleanly. Degrades to False (never
     raises) at any failing step.
@@ -1901,29 +1881,25 @@ def pick_object(
 
     # 4. Line the chosen arm up with the object so it's out of the centreline
     #    dead-zone. Two strategies (WALKIE_GRASP_ARM_ALIGN):
-    #      "rotate" (default — the usable PR #31 behaviour): turn the base so the arm
-    #        shoulder aims at the object (face_object_with_arm).
-    #      "strafe" (experimental): slide the omni base sideways with the heading HELD
-    #        (align_arm_to_object). Addresses an over-rotation seen when the object is
-    #        close (the shoulder->object bearing is ill-conditioned, so "rotate" can
-    #        over-shoot and face the wall) — but it is NOT yet validated on-robot, so
-    #        it stays opt-in. Flip to it only after an on-robot A/B.
+    #      "strafe" (default): closed-loop cmd_vel servo that slides the omni base
+    #        sideways with the heading HELD (align_arm_to_object), recomputing the
+    #        lateral error from live odom every tick. The nav stack scales cmd_vel
+    #        near obstacles, so a blocked strafe just stalls out and the pick
+    #        continues from there. Fixes the over-rotation seen when the object is
+    #        close (the shoulder->object bearing is ill-conditioned, so "rotate"
+    #        can over-shoot and face the wall). Gains robot-unverified.
+    #      "rotate" (fallback escape hatch — the usable PR #31 behaviour): turn the
+    #        base so the arm shoulder aims at the object (face_object_with_arm).
     #    We record the heading and restore it afterwards (no-op for the strafe path,
-    #    which never changed it) so the base ends the pick where it started.
+    #    which never changes it) so the base ends the pick where it started.
     original_heading = ctx.current_pose()["heading"]
-    if os.getenv("WALKIE_GRASP_ARM_ALIGN", "rotate").strip().lower() == "strafe":
-        align_arm_to_object(ctx, loc.xyz_map, arm=chosen)
-    else:
+    if os.getenv("WALKIE_GRASP_ARM_ALIGN", "strafe").strip().lower() == "rotate":
         face_object_with_arm(ctx, loc.xyz_map, arm=chosen)
+    else:
+        align_arm_to_object(ctx, loc.xyz_map, arm=chosen)
 
     try:
-        # 5. Creep the base straight forward to close the last gap — the approach often
-        #    stops short (Nav2 halts at the table/inflation boundary), leaving the object
-        #    too far to grasp accurately. Skipped when already within grasp_distance_m.
-        if grasp_distance_m is not None:
-            creep_to_grasp_distance(ctx, loc.xyz_map, target_m=grasp_distance_m)
-
-        # 6. The ONE heavy grasp plan, now that we're in the final pose: 2 snapshots at
+        # 5. The ONE heavy grasp plan, now that we're in the final pose: 2 snapshots at
         #    the configured head tilts, deduped + fused into one dense cloud, GraspNet once.
         cand = get_object_grasp_pos(
             ctx, prompts, attempts=attempts, standoff_m=pregrasp_standoff_m,
@@ -1938,14 +1914,14 @@ def pick_object(
                   f"(z={cand.grasp_xyz[2]:.2f}m); cannot reach")
             return False
 
-        # 7. Re-point the wrist straight forward at the object (instead of GraspNet's
+        # 6. Re-point the wrist straight forward at the object (instead of GraspNet's
         #    often-IK-unsolvable orientation), taking the arm's forward to be the robot's.
         #    The new candidate drives both the arm and the held-object record (so the placer
         #    reuses the real grasp pose). Keeps GraspNet's orientation when disabled.
         if approach_preference == "side" and point_at_object:
             cand = aim_forward_candidate(ctx, cand, standoff_m=pregrasp_standoff_m)
 
-        # 8. Execute, repositioning the base and retrying on arm-move failure.
+        # 7. Execute, repositioning the base and retrying on arm-move failure.
         ok = execute_grasp_with_retry(
             ctx, cand, arm=chosen, max_reach_xy_m=max_reach_xy_m, viz=viz,
         )
@@ -1988,7 +1964,8 @@ def pick_object(
                 print(f"[grasp] pick_object: stow ({stow_pose}) -> {stow_res} (continuing)")
         return ok
     finally:
-        # 9. Rotate back to the heading we had before facing the object (the arm is
-        #    home/tucked by now), so the base ends the pick in its original orientation.
+        # 8. Rotate back to the heading we had before aligning (the arm is home/tucked
+        #    by now), so the base ends the pick in its original orientation — a no-op
+        #    for the default strafe path, which never changes heading.
         print(f"[grasp] pick_object: restoring heading to {math.degrees(original_heading):+.0f}deg")
         ctx.rotate_to(original_heading)
