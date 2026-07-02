@@ -23,12 +23,18 @@ from __future__ import annotations
 
 import os
 
+from pathlib import Path
+
 import pytest
 from dotenv import load_dotenv
 
 from tasks.GPSR.parse import parse_command
 from tasks.GPSR.plan import render_plan_speech
 from walkie_world.map.vocab import load_world
+
+# The frozen, vocab-complete CompetitionTemplate arena (see tests/fixtures/).
+# The repo-root world.toml is the LIVE surveyed arena — no grammar vocab in it.
+WORLD_FIXTURE = Path(__file__).parent / "fixtures" / "world.competition_template.toml"
 
 load_dotenv()
 
@@ -79,7 +85,7 @@ def test_generator_parser_coverage():
     except ImportError as exc:
         pytest.skip(f"CommandGenerator not available: {exc}")
 
-    world = load_world(include_absent=True)  # full arena vocabulary
+    world = load_world(WORLD_FIXTURE, include_absent=True)  # full arena vocabulary
     corpus = gen_corpus.generate_corpus(world, CORPUS_N, seed=0)
     assert corpus, "empty corpus"
     model = _build_model()

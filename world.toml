@@ -3,6 +3,10 @@
 # Follows world.rulebook_2026.toml: pose = [x, y, heading_rad] (nav approach goal);
 # polygon = [[x,y], ...] (room boundary / furniture footprint / doorway region).
 
+# Person names the operator may reference (GPSR grammar vocabulary — see the
+# vocab block at the end of this file; top-level key must precede any [table]).
+names = ["Adel", "Angel", "Axel", "Charlie", "Jane", "Jules", "Morgan", "Paris", "Robin", "Simone"]
+
 [rooms]
 living_room  = { pose = [2.89, -0.6762, -1.5835], polygon = [[0.6675, 1.9414], [5.084, 1.9414], [5.084, -3.2254], [0.6675, -3.2254]] }
 kitchen_room = { pose = [6.1403, -0.9011, -0.0238], polygon = [[5.0875, 1.9321], [9.5736, 1.9321], [9.5736, -3.4283], [5.0875, -3.4283]] }
@@ -43,3 +47,34 @@ exit     = { pose = [0.6526, 3.9947, -3.1409], polygon = [], radius = 1.0 }
 #   <name>.<index> = { pose = [x,y,heading], polygon = [[x,y], ...], on = "<location>" }
 # [object_instances]
 # pringles.0 = { pose = [0,0,0], polygon = [], on = "cabinet" }
+
+# --- GPSR grammar vocabulary (parser grounding) ------------------------------
+# The map editor exports only the surveyed geometry; the parser ALSO needs the
+# object/name/gesture vocabulary from this same file (see load_world). These are
+# the official CompetitionTemplate defaults — REPLACE with the announced 2026
+# competition data (~2h before the test). Without them every object/name/gesture
+# reference is ungrounded and falls to Tier-2. (The companion `names` list is a
+# TOML top-level key, so it sits above [rooms] at the head of this file.)
+
+[object_categories]
+drinks            = ["juice_pack", "cola", "milk", "orange_juice", "tropical_juice", "red_wine", "iced_tea"]
+toys              = ["tennis_ball", "rubiks_cube", "baseball", "soccer_ball", "dice"]
+fruits            = ["orange", "pear", "peach", "strawberry", "apple", "lemon", "banana", "plum"]
+snacks            = ["cornflakes", "pringles", "cheezit"]
+dishes            = ["cup", "bowl", "fork", "plate", "knife", "spoon"]
+food              = ["chocolate_jello", "coffee_grounds", "mustard", "tomato_soup", "tuna", "strawberry_jello", "spam", "sugar"]
+cleaning_supplies = ["cleanser", "sponge"]
+
+# Recognizable gestures/poses → the keypoint-rule id the perception side uses
+# (Phase 1 wires these to is_calling-style heuristics). The keys are the canonical
+# descriptors the parser emits; aliases cover the generator's phrasings.
+
+[gestures]
+waving             = { aliases = ["waving person", "person waving"] }
+raising_left_arm   = { aliases = ["raising their left arm", "person raising their left arm", "left arm raised"] }
+raising_right_arm  = { aliases = ["raising their right arm", "person raising their right arm", "right arm raised"] }
+pointing_left      = { aliases = ["pointing to the left", "person pointing to the left"] }
+pointing_right     = { aliases = ["pointing to the right", "person pointing to the right"] }
+sitting            = { aliases = ["sitting person", "seated person", "person sitting"] }
+standing           = { aliases = ["standing person", "person standing"] }
+lying_down         = { aliases = ["lying person", "person lying down", "lying down"] }

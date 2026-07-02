@@ -26,6 +26,10 @@ from tasks.GPSR.parse import parse_command
 from tasks.GPSR.plan import render_plan_speech
 from walkie_world.map.vocab import load_world
 
+# The frozen, vocab-complete CompetitionTemplate arena (see tests/fixtures/).
+# The repo-root world.toml is the LIVE surveyed arena — no grammar vocab in it.
+WORLD_FIXTURE = Path(__file__).parent / "fixtures" / "world.competition_template.toml"
+
 load_dotenv()
 
 
@@ -83,7 +87,7 @@ def test_parser_coverage():
     # grammar, not which places are physically surveyed — so load the full vocab
     # (else every present=false noun reads as an ungrounded "miss"). Mirrors the
     # test_gpsr_parse fixture; the present-flag drop is tested separately there.
-    world = load_world(include_absent=True)
+    world = load_world(WORLD_FIXTURE, include_absent=True)
     model = _build_model()
     corpus = _load_corpus()
     assert corpus, "empty corpus"

@@ -228,7 +228,10 @@ def go_to_named(
         return False
     if state is not None and state.get("at") == name:
         return True  # already here this command — don't drive again
-    pose = world.resolve_place(name).pose
+    # Fast path via the vocab-level pose lookup, NOT resolve_place: this keeps the
+    # documented bare-WorldModel contract (tests/dry runs), and resolve_place can
+    # legitimately return None (an unguarded `.pose` here crashed the whole step).
+    pose = world.location_pose(name)
     if _pose_is_surveyed(pose):
         ok = _drive_to_pose(ctx, pose, ask_even_if_open=world.is_barrier(name))
         if ok and state is not None:
