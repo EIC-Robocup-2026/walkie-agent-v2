@@ -922,6 +922,44 @@ def test_execute_commands_uses_interleave_when_enabled(world, monkeypatch):
     assert all(c.status is CmdStatus.DONE for c in cmds)
 
 
+def test_serial_returns_to_instruction_point_between_commands(world, monkeypatch):
+    """GPSR_RETURN_BETWEEN_COMMANDS=1 (the real-run config): after finishing each
+    command the robot announces it and re-stations at the instruction point
+    BEFORE starting the next — command 1 -> instruction point -> command 2 —
+    but NOT after the last (ReturnToInstructionPoint owns the final return)."""
+    monkeypatch.setenv("GPSR_RETURN_BETWEEN_COMMANDS", "1")
+    monkeypatch.setenv("GPSR_INSTRUCTION_POINT_POSE", "5.0,6.0,0.5")
+    from tasks.GPSR.subtasks import Command, ExecuteCommands
+
+    ctx = _FakeCtx(ai=_FakeAI(dets=[_det()], people=[_plain_person((100, 100, 40, 120))]))
+    p1 = _kitchen_plan(world, "c1", RawStep(primitive="find_object", object="cola", room="kitchen", raw="find the cola"))
+    p2 = _kitchen_plan(world, "c2", RawStep(primitive="find_object", object="cola", room="kitchen", raw="find the cola"))
+    cmds = [Command(1, "c1", p1), Command(2, "c2", p2)]
+    ctx.world = world
+    ctx.data = {"brain": None, "commands": cmds}
+    ExecuteCommands().run(ctx)
+    assert ctx.gotos == [(1.0, 2.0, 0.0), (5.0, 6.0, 0.5), (1.0, 2.0, 0.0)]
+    assert any("instruction point" in s.lower() for s in ctx.saids)  # announced the return
+    assert all(c.status is CmdStatus.DONE for c in cmds)
+
+
+def test_serial_default_drives_command_to_command(world, monkeypatch):
+    """Knob unset (in-code default, consecutive mode): the serial executor goes
+    straight from command to command with no instruction-point hop between."""
+    monkeypatch.delenv("GPSR_RETURN_BETWEEN_COMMANDS", raising=False)
+    from tasks.GPSR.subtasks import Command, ExecuteCommands
+
+    ctx = _FakeCtx(ai=_FakeAI(dets=[_det()], people=[_plain_person((100, 100, 40, 120))]))
+    p1 = _kitchen_plan(world, "c1", RawStep(primitive="find_object", object="cola", room="kitchen", raw="find the cola"))
+    p2 = _kitchen_plan(world, "c2", RawStep(primitive="find_object", object="cola", room="kitchen", raw="find the cola"))
+    cmds = [Command(1, "c1", p1), Command(2, "c2", p2)]
+    ctx.world = world
+    ctx.data = {"brain": None, "commands": cmds}
+    ExecuteCommands().run(ctx)
+    assert ctx.gotos == [(1.0, 2.0, 0.0), (1.0, 2.0, 0.0)]  # kitchen per command, nothing between
+    assert all(c.status is CmdStatus.DONE for c in cmds)
+
+
 def test_interleave_isolates_per_command_scratch(world, monkeypatch):
     """Only the nav location is global across commands; per-command scratch is
     isolated — so an interleaved step of command B cannot clobber the target

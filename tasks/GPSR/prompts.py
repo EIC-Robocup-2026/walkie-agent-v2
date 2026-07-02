@@ -141,7 +141,8 @@ PLAN_NOT_UNDERSTOOD = (
 # --- Spoken lines -----------------------------------------------------------
 # The robot decides + advises how commands are issued (rulebook 5.3): it actively
 # requests all three at once to keep the interleave bonus reachable and save the
-# round-trips of returning between commands (§5.5).
+# listen round-trips (§5.5). Execution still re-stations at the instruction point
+# between commands (GPSR_RETURN_BETWEEN_COMMANDS).
 GREET_OPERATOR = (
     "Hello, I am Walkie. Please give me all three of your commands now, one after "
     "another, and I will plan and carry them out."
@@ -207,6 +208,13 @@ COMMAND_ANNOUNCE = "Working on command {n}: {command}"
 INTERLEAVE_ANNOUNCE = (
     "I will carry out all the commands together, interleaving them to save time "
     "and avoid unnecessary trips."
+)
+# Between-commands re-stationing (GPSR_RETURN_BETWEEN_COMMANDS / one-by-one
+# mode): spoken after finishing each command, right before driving back to the
+# instruction point to start the next one.
+RETURN_BETWEEN_ANNOUNCE = (
+    "I have finished command {n}. I am returning to the instruction point "
+    "before the next command."
 )
 RETURN_ANNOUNCE = "I have finished. Returning to the instruction point."
 ALL_DONE = "I have completed all the commands."

@@ -81,6 +81,16 @@ GPSR_VERIFY_EXHAUSTED = "skip"
 # interleaved-task bonus) or "one_by_one" (return to the instruction point
 # between each).
 GPSR_ISSUE_MODE = "consecutive"
+# 1 = after finishing EACH command, announce it and drive back to the
+# instruction point, re-stationing there BEFORE starting the next command —
+# command 1 done -> back at the instruction point -> command 2 -> back -> ...
+# Applies to the serial executor regardless of GPSR_ISSUE_MODE (one_by_one
+# always returns); the final return after the LAST command is the envelope's
+# ReturnToInstructionPoint, so this never double-drives the ending. In-code
+# default 0 (pre-change behaviour, what the unit tests exercise); ON here for
+# real runs. NB: moot under GPSR_INTERLEAVE=1 — the interleaved executor merges
+# all commands into one route and never returns mid-run (that IS the bonus).
+GPSR_RETURN_BETWEEN_COMMANDS = "1"
 # 1 = interleave all commands into one room-batched order to reduce movement (the
 # Interleaved Task Bonus, +200). 0 = strictly serial MVP (default — the bonus path
 # is riskier and falls back to serial on any scheduling error).

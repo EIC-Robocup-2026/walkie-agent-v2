@@ -256,9 +256,15 @@ scheduler that earns the bonus comes only after everything else works. Note the
 rulebook says the robot *decides and advises* how commands are issued — so the
 greeting should **actively request all three at once** (and fall back to
 one-by-one only if STT struggles), keeping the bonus reachable, rather than
-passively offering the operator a choice. Even when executed serially, taking all
-three up front also saves the round-trips of returning to the operator between
-commands — pure time win against the 7-min clock.
+passively offering the operator a choice. Taking all three up front still saves
+the *listen* round-trips; the *drive* round-trips between commands are
+deliberately kept in serial mode: after finishing each command the robot
+announces it and re-stations at the instruction point before starting the next
+(`GPSR_RETURN_BETWEEN_COMMANDS`, ON in config.toml for real runs — team
+procedure decision 2026-07-02: command 1 done → back at the instruction point →
+command 2 → back → …). The final return after the last command stays with
+`ReturnToInstructionPoint`; the interleaved executor (the bonus) never returns
+mid-run — that is the bonus.
 
 ---
 

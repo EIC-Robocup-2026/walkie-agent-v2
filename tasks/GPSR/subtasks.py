@@ -50,6 +50,17 @@ def _one_by_one() -> bool:
     return os.getenv("GPSR_ISSUE_MODE", "consecutive").strip().lower() == "one_by_one"
 
 
+def _return_between_commands() -> bool:
+    """Whether the serial executor ALWAYS drives back to the instruction point
+    after finishing each command, re-stationing there before starting the next
+    (GPSR_RETURN_BETWEEN_COMMANDS) — regardless of GPSR_ISSUE_MODE (one-by-one
+    mode already implied it). In-code default OFF (the pre-change behaviour, and
+    what the unit tests exercise); tasks/GPSR/config.toml turns it ON for real
+    runs. The final return after the LAST command stays owned by the envelope's
+    ReturnToInstructionPoint."""
+    return os.getenv("GPSR_RETURN_BETWEEN_COMMANDS", "0").lower() in ("1", "true", "yes")
+
+
 def _speak_plan_enabled() -> bool:
     return os.getenv("GPSR_SPEAK_PLAN", "1").lower() in ("1", "true", "yes")
 
@@ -194,8 +205,9 @@ class ReceiveAndPlanCommands(SubTask):
 
     Speaking the plan is what scores "demonstrate a plan has been generated"
     (3×100) and doubles as the operator's confirmation. The robot *requests all
-    three at once* (§5.5) to keep the interleave bonus reachable and save
-    round-trips; in one-by-one mode ExecuteCommands returns between commands.
+    three at once* (§5.5) to keep the interleave bonus reachable and save the
+    listen round-trips; ExecuteCommands still re-stations at the instruction
+    point between commands (GPSR_RETURN_BETWEEN_COMMANDS / one-by-one mode).
 
     Recovery (rulebook 5.3): re-ask only on an empty parse (§5.2 — each
     rephrasing costs −30), a bounded number of times, then **request a custom
@@ -449,8 +461,11 @@ class ExecuteCommands(SubTask):
     agent stack (Tier-2) for ungrounded/gated/failed steps; the per-command
     CmdStatus reflects partial scoring. Two modes:
 
-    - **Serial (default, the MVP):** run each command's plan fully, in order. In
-      one-by-one mode the robot returns to the operator between commands.
+    - **Serial (default, the MVP):** run each command's plan fully, in order.
+      After finishing each command the robot drives back and re-stations at the
+      instruction point before starting the next (GPSR_RETURN_BETWEEN_COMMANDS,
+      ON in config.toml for real runs; one-by-one mode always returns). The
+      final return after the last command stays with ReturnToInstructionPoint.
     - **Interleaved (`GPSR_INTERLEAVE`, the bonus):** merge all commands into one
       room-batched order (schedule.interleave) and walk it with a shared nav cache
       so each room is visited once — the "reduce unnecessary movements" the bonus
@@ -510,9 +525,12 @@ class ExecuteCommands(SubTask):
             if notes and not cmd.result_note:
                 cmd.result_note = "; ".join(notes)
             print(f"[gpsr] command {cmd.id} -> {cmd.status.name}")
-            if _one_by_one() and cmd.id < len(commands):
+            # Re-station at the instruction point before the NEXT command (never
+            # after the last — ReturnToInstructionPoint owns the final return).
+            if (_one_by_one() or _return_between_commands()) and cmd.id < len(commands):
+                ctx.say(prompts.RETURN_BETWEEN_ANNOUNCE.format(n=cmd.id))
                 x, y, h = _pose("GPSR_INSTRUCTION_POINT_POSE")
-                ctx.goto(x, y, h)  # return to operator for the next command
+                ctx.goto(x, y, h)
 
     def _run_interleaved(self, ctx, commands: list[Command], world, brain, manip: bool) -> bool:
         """Execute all planned commands in one room-batched interleave. Returns
