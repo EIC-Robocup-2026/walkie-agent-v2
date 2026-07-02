@@ -17,6 +17,7 @@ dependencies = [
     "pillow>=12.2.0",
     "pyaudio>=0.2.14",
     "pydub>=0.25.1",
+    "pynput>=1.8.2",
     "pytest>=9.0.2",
     "python-dotenv>=1.2.2",
     "rerun-sdk>=0.20",

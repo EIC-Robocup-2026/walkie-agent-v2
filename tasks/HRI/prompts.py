@@ -245,6 +245,7 @@ BAG_ASK_HANDOVER = (
     "I see you brought a bag. I will open my gripper now — please hang the bag "
     "on it."
 )
+BAG_PLACE = "Please place the bag on my hand. After you placed the bag, gently push down on my hand."
 BAG_CLOSING_WARNING = "I will close my gripper in 1 second, please be careful."
 BAG_RECEIVED = "Thank you, I have the bag."
 FOLLOW_HOST_NOT_AVAILABLE = (

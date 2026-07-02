@@ -373,7 +373,7 @@ HRI_FOLLOW_SEARCH_STEP_DEG = "10"
 HRI_FOLLOW_TIMEOUT_SEC = "450"
 # Consecutive lost frames (each predicting or turning to look for the host)
 # before giving up the search and placing the bag here.
-HRI_FOLLOW_MAX_LOST = "35"
+HRI_FOLLOW_MAX_LOST = "100"
 # --- Predictive re-acquisition (MotionPredictor) -----------------------------
 # 1 = when the host leaves the frame, extrapolate their recent map-frame
 # trajectory and drive to the predicted spot before falling back to rotating.

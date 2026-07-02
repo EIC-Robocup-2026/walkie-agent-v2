@@ -169,6 +169,33 @@ def pick_object(ctx: TaskContext, obj: DetectedObject) -> bool:
         return False
     return _pick_object(ctx, prompts=[obj.class_name])
 
+def _set_auto_tilt(ctx: TaskContext, enabled: bool) -> None:
+    try:
+        ctx.walkie.robot.head.set_auto_tilt(bool(enabled))
+    except Exception as exc:  # noqa: BLE001 — off-robot stub may lack robot.head
+        print(f"[inspection] set_auto_tilt({enabled}) failed ({exc})")
+
+def enter_through_door(ctx: TaskContext, x, y, heading_rad) -> bool:
+    """Wait at the entry door, notice it open (depth self-watch), drive inside.
+
+    ``request_open_door`` asks once then polls the depth camera and proceeds on its
+    own the instant the doorway reads clear — the "robot notices the open door"
+    behaviour the referee is checking. The head is levelled first so the depth read
+    sees the doorway, not the floor. Then it drives to the surveyed entry pose
+    (``go_to_through_door`` with ``ask_even_if_open=False``, since we already waited
+    for it to open), or creeps forward blindly when no entry pose is configured.
+    """
+    from tasks.skills import go_to_through_door, move_base_relative, request_open_door
+
+    ctx.say("I'm checking if the door is open")
+    _set_auto_tilt(ctx, False)  # hand the head back to nav
+    try:
+        request_open_door(ctx, prompt="Please open the door for me")
+    except Exception as exc:  # noqa: BLE001 — enter anyway if the door check fails
+        print(f"[inspection] door wait failed ({exc}); entering anyway")
+    ctx.say("Thank you! I'm coming through")
+    _set_auto_tilt(ctx, True)  # hand the head back to nav
+    return go_to_through_door(ctx, x, y, heading_rad, ask_even_if_open=False)
 
 def place_at(ctx: TaskContext, pose6: str) -> bool:
     """Release the held object on a clear surface in front — gated by PNP_ARM_CALIBRATED.
