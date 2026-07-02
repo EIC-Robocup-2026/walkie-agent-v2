@@ -98,11 +98,11 @@ class GoToDoor(SubTask):
 
     def run(self, ctx: TaskContext) -> StepResult:
         # Wait start task button
-        ctx.say("I'm waiting for the enter button to be pressed.")
+        ctx.say("I'm waiting for thex button to be pressed.")
         # input("Press Enter...")
         # print("[HRI] waiting for start button to be pressed...")
         while not ctx.walkie.robot.button.is_pressed:
-            print(ctx.walkie.robot.button.is_pressed)
+            # print(ctx.walkie.robot.button.is_pressed)
             pass
         ctx.say("Start button pressed. Heading to the door.")
         print("[HRI] start button pressed")
