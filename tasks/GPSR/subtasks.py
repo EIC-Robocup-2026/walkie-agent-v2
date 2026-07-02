@@ -124,7 +124,8 @@ class GoToInstructionPoint(SubTask):
     critical = True
 
     def run(self, ctx: TaskContext) -> StepResult:
-        # results = ctx.world.query_text("kitchen table")
+        # results = ctx.world.resolve_place("fridge")
+        # print(results)
         # for result in results:
         #     print(result.id, result.centroid)
 
@@ -139,6 +140,7 @@ class GoToInstructionPoint(SubTask):
             from tasks.skills import go_to_through_door, request_open_door
             # Fully-closed door: ask once, then self-watch the depth and walk in the
             # moment it reads open (no spoken confirmation needed).
+            # ctx.walkie.robot.head(0.4)
             request_open_door(ctx)
             # Then drive — and if a *partly*-open door blocks nav (the doorway reads
             # open but the gap is too narrow), ask for it to be opened wider and retry.
@@ -204,6 +206,7 @@ class ReceiveAndPlanCommands(SubTask):
             # (ctx.ask's default retries=1 would re-prompt internally and inflate
             # the −30 count + the clock).
             answer = ctx.ask(prompts.ASK_FOR_COMMANDS, retries=0)
+            print(f"[GPSR] heard: {answer}")
             if answer:
                 parsed = parse_commands(ctx.model, answer, world)
                 if any(plan for _, plan in parsed):  # at least one usable plan

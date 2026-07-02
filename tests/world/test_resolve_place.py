@@ -88,6 +88,40 @@ def test_scene_fallback(world, monkeypatch):
     assert m.pose is None and m.point == (1.5, 8.0)
 
 
+def test_waypoint_for(world):
+    # A map-seeded node (id "map:<location>") resolves to the location's surveyed
+    # waypoint — NOT its footprint centroid. A perceived object (no "map" source) has none.
+    class _MapNode:
+        id = "map:cabinet"
+        source = "map"
+        centroid = (4.5, 0.5, 0.7)  # footprint centre; deliberately != the waypoint
+
+    class _Perceived:
+        id = "obj-9"
+        source = "perception"
+        centroid = (1.5, 8.0, 0.6)
+
+    assert world.waypoint_for(_MapNode()) == (4, 0, 3.14)  # cabinet's [locations] pose
+    assert world.waypoint_for(_Perceived()) is None
+    assert world.waypoint_for(None) is None
+
+
+def test_scene_fallback_map_hit_promoted_to_waypoint(world, monkeypatch):
+    # A CLIP scene hit that is actually a map-seeded location must navigate to its
+    # approach waypoint (kind "location"), never its footprint centroid.
+    class _MapNode:
+        id = "map:cabinet"
+        source = "map"
+        class_name = "cabinet"
+        best_caption = "a cabinet"
+        centroid = (4.5, 0.5, 0.7)
+
+    monkeypatch.setattr(world, "query_text", lambda q, k=5, **kw: [_MapNode()])
+    m = world.resolve_place("fridge", room="kitchen")  # "fridge" isn't a map alias -> scene path
+    assert m.kind == "location" and m.source == "map" and m.name == "cabinet"
+    assert m.pose == (4, 0, 3.14) and m.point is None  # waypoint, not centroid
+
+
 def test_scene_fallback_disabled(world, monkeypatch):
     monkeypatch.setenv("WALKIE_RESOLVE_SCENE_FALLBACK", "0")
     monkeypatch.setattr(world, "query_text", lambda *a, **k: [object()])
