@@ -19,13 +19,21 @@ from walkie_world.map.locations import _reset_cache
 
 
 @pytest.fixture(autouse=True)
-def _fresh_location_book():
-    """Drop the process-wide LocationBook cache around every test.
+def _fresh_location_book(tmp_path, monkeypatch):
+    """Isolate every test from the LIVE repo-root world.toml + drop the cache.
 
-    The map gate reads ``get_location_book()`` (cached). Resetting before AND after
-    each test keeps the doors a map-gate test installs from leaking into the depth-only
-    tests (which must see the real, door-less repo-root world.toml → gate None → legacy).
+    The depth-only tests were written assuming the live map has no ``[doors]``;
+    the re-surveyed arena export then added real doors near the origin — exactly
+    where the fake ctx poses sit — flipping the map gate from None (legacy) to
+    True and failing 12 tests. Point WALKIE_MAP_FILE at a door-less stub instead
+    (the map-gate tests override it per-test via ``_map_with_door``), and reset
+    the process-wide LocationBook cache before AND after so nothing leaks
+    between tests. Offline tests must never read the live surveyed arena — it
+    legitimately changes on every re-survey (same lesson as tests/fixtures/).
     """
+    p = tmp_path / "world.doorless.toml"
+    p.write_text("[rooms]\n[locations]\n")
+    monkeypatch.setenv("WALKIE_MAP_FILE", str(p))
     _reset_cache()
     yield
     _reset_cache()
