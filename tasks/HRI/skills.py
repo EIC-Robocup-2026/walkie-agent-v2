@@ -333,7 +333,7 @@ def _guest_intro_fallback(
 
 
 def llm_guest_intro_speeches(ctx: TaskContext, acts: list[dict]) -> dict[int, str]:
-    """Word both guest-to-guest introductions in ONE LLM call: {listener: text}.
+    """Word each guest-to-guest introduction in its OWN LLM call: {listener: text}.
 
     *acts* is one dict per spoken line — the robot FACES that listener and
     presents the other guest beside them::
@@ -345,34 +345,35 @@ def llm_guest_intro_speeches(ctx: TaskContext, acts: list[dict]) -> dict[int, st
 
     ``subject_appearance`` is the presented guest's captioned look (clothing,
     hair, glasses, ...) — the LLM is instructed to describe it in detail so the
-    listener can actually spot them. Returns a speech keyed by listener number,
-    each falling back to a template on extraction failure.
+    listener can actually spot them. Each line is generated in a SEPARATE call
+    that names only its own listener and subject: a single call over both lines
+    would occasionally collapse the two (echoing one guest into both, flipping
+    only the side) when the two guests' details were similar. Returns a speech
+    keyed by listener number, each falling back to a template when its own
+    extraction fails.
     """
-    fallback = {
-        a["listener"]: _guest_intro_fallback(
+    out: dict[int, str] = {}
+    for a in acts:
+        fallback = _guest_intro_fallback(
             a["listener_name"], a["subject_name"], a["subject_drink"], a["side"],
             a.get("subject_appearance"),
         )
-        for a in acts
-    }
-    lines = []
-    for a in acts:
-        lines.append(
-            f"While facing guest {a['listener']} (name="
-            f"{a['listener_name'] or 'unknown'}), present the OTHER guest "
-            f"(name={a['subject_name'] or 'unknown'}; favorite drink="
-            f"{a['subject_drink'] or 'unknown'}; appearance="
-            f"{a.get('subject_appearance') or 'unknown'}), who is on guest "
-            f"{a['listener']}'s {a['side'] or 'unknown'} side."
+        # ONE line per call, naming only THIS listener and THIS subject, so the
+        # model has no second identity to confuse — a single call over both lines
+        # used to echo one guest's name/appearance into both introductions
+        # (flipping only the side), leaving the other guest never introduced.
+        line = (
+            f"You are facing the listener (name={a['listener_name'] or 'unknown'}). "
+            f"Present the OTHER guest beside them (name={a['subject_name'] or 'unknown'}; "
+            f"favorite drink={a['subject_drink'] or 'unknown'}; "
+            f"appearance={a.get('subject_appearance') or 'unknown'}), who is on the "
+            f"listener's {a['side'] or 'unknown'} side."
         )
-    speeches = ctx.extract(
-        prompts.GuestIntroSpeeches, prompts.GUEST_INTRO_INSTRUCTIONS, "\n".join(lines)
-    )
-    if speeches is None:
-        print("[skills] guest intro speech extraction failed; using template lines")
-        return fallback
-    by_listener = {
-        1: (speeches.facing_guest_1 or "").strip(),
-        2: (speeches.facing_guest_2 or "").strip(),
-    }
-    return {a["listener"]: by_listener.get(a["listener"], "") or fallback[a["listener"]] for a in acts}
+        speech = ctx.extract(prompts.GuestIntroSpeech, prompts.GUEST_INTRO_INSTRUCTIONS, line)
+        text = (speech.speech.strip() if speech is not None else "")
+        if not text:
+            print(f"[skills] guest intro speech extraction failed for listener "
+                  f"{a['listener']}; using template line")
+            text = fallback
+        out[a["listener"]] = text
+    return out

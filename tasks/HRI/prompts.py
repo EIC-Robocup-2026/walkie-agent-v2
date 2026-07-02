@@ -193,34 +193,35 @@ GENERIC_DRINK = "an unknown drink"
 GENERIC_OTHER_GUEST = "our other guest"
 
 
-class GuestIntroSpeeches(BaseModel):
-    """The two guest-to-guest introductions, generated in a single LLM call.
+class GuestIntroSpeech(BaseModel):
+    """ONE guest-to-guest introduction line, generated in its own LLM call.
 
-    Each field is spoken while the robot FACES that guest (the listener),
-    presenting the OTHER guest sitting beside them.
+    Spoken while the robot FACES the listener, presenting the single OTHER guest
+    sitting beside them. Generating each line in isolation — with only that
+    line's one listener and one subject named — makes it structurally impossible
+    for the model to swap or collapse the two introductions (a single call over
+    both lines used to echo one guest into both when their details were similar).
     """
 
-    facing_guest_1: str = Field(
+    speech: str = Field(
         default="",
-        description="Spoken while facing guest 1, telling them who the other guest beside them is",
-    )
-    facing_guest_2: str = Field(
-        default="",
-        description="Spoken while facing guest 2, telling them who the other guest beside them is",
+        description="The exact words the robot speaks to the listener, presenting the other guest beside them",
     )
 
 
 GUEST_INTRO_INSTRUCTIONS = (
-    "You are the receptionist robot at a party, introducing the two guests to "
-    "each other. For each line below you are told which guest the robot is "
-    "FACING (the listener), the name, favorite drink, and appearance of the "
-    "OTHER guest sitting beside them, and which side (left or right) that other "
-    "guest is on FROM THE LISTENER'S OWN POINT OF VIEW. Write the exact words "
-    "the robot should speak to the listener, presenting the other guest.\n"
+    "You are the receptionist robot at a party. You are FACING one guest (the "
+    "listener) and must tell them, out loud, who the OTHER guest sitting beside "
+    "them is. You are given the listener's name, and the other guest's name, "
+    "favorite drink, and appearance, plus which side (left or right) that other "
+    "guest is on FROM THE LISTENER'S OWN POINT OF VIEW. Write ONLY the words the "
+    "robot speaks to the listener about that one other guest.\n"
     "Rules:\n"
-    "- Address the listener and tell them who is beside them, e.g. 'Alice, the "
-    "person on your left is Bob — he's the one in the blue checked shirt with "
-    "glasses and short dark hair — and his favorite drink is cola.'\n"
+    "- Address the listener BY NAME and tell them who is beside them, e.g. "
+    "'Alice, the person on your left is Bob — he's the one in the blue checked "
+    "shirt with glasses and short dark hair — and his favorite drink is cola.'\n"
+    "- The person you PRESENT is the other guest, never the listener. Address "
+    "the listener; name the other guest as the one beside them.\n"
     "- Use the EXACT side word given (left or right); never flip it. If the "
     "side is unknown, say 'next to you' instead of naming a side.\n"
     "- ALWAYS state the other guest's name and favorite drink explicitly — both "
@@ -235,8 +236,7 @@ GUEST_INTRO_INSTRUCTIONS = (
     "inventing one.\n"
     "- Warm, natural spoken sentences only. No stage directions, no emoji, "
     "nothing that cannot be said aloud.\n"
-    "- Never invent facts; use only what is given.\n"
-    "- Vary the phrasing between the two lines so it sounds human."
+    "- Never invent facts; use only what is given."
 )
 
 # --- Bag handover (gated by HRI_ENABLE_BAG) ----------------------------------
