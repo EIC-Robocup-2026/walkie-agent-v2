@@ -27,6 +27,7 @@ from .lift import (
 from .seating import (
     SeatCandidate,
     SeatPart,
+    SeatSweep,
     find_persons,
     find_seated_person_bbox,
     is_sofa_class,
@@ -35,6 +36,7 @@ from .seating import (
     pick_free_seat,
     resolve_free_part,
     scan_seats,
+    scan_seats_sweep,
     split_seat_regions,
 )
 from .door import (
@@ -50,7 +52,6 @@ from .grasp import (
     aim_forward_candidate,
     align_arm_to_object,
     approach_object,
-    creep_to_grasp_distance,
     execute_grasp,
     execute_grasp_with_retry,
     face_object,
@@ -88,6 +89,7 @@ from .navigation import (
     move_base_relative,
     rotate_by,
     side_relative_to_listener,
+    strafe_servo,
     sweep_snapshots,
     tilt_head,
 )
@@ -118,7 +120,6 @@ __all__ = [
     "face_object",
     "face_object_with_arm",
     "align_arm_to_object",
-    "creep_to_grasp_distance",
     "aim_forward_candidate",
     "execute_grasp",
     "execute_grasp_with_retry",
@@ -148,6 +149,7 @@ __all__ = [
     "reset_people_positions",
     "SeatCandidate",
     "SeatPart",
+    "SeatSweep",
     "find_persons",
     "find_seated_person_bbox",
     "is_sofa_class",
@@ -156,6 +158,7 @@ __all__ = [
     "pick_free_seat",
     "resolve_free_part",
     "scan_seats",
+    "scan_seats_sweep",
     "split_seat_regions",
     "MotionPredictor",
     "approach_point",
@@ -166,6 +169,7 @@ __all__ = [
     "move_base_relative",
     "rotate_by",
     "side_relative_to_listener",
+    "strafe_servo",
     "sweep_snapshots",
     "tilt_head",
     "FaceTracker",

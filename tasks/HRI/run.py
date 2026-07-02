@@ -7,10 +7,12 @@
 Step-by-step on-robot bring-up — pick an isolated slice with HRI_SLICE (like the
 Restaurant / PickAndPlace runners; validate each piece before the whole flow):
 
-    HRI_SLICE=seats ...        # loop seat + people detection (tune seat detection)
-    HRI_SLICE=greet ...        # greet + learn one guest at the door
-    HRI_SLICE=follow_host ...  # remember the host, then follow + drop the bag
-    HRI_SLICE=full ...         # whole 12-step Receptionist flow (default)
+    HRI_SLICE=seats ...             # loop seat + people detection (tune seat detection)
+    HRI_SLICE=person_appearance ... # loop person detection + appearance captioning
+    HRI_SLICE=greet ...             # greet + learn one guest at the door
+    HRI_SLICE=follow_host ...       # remember the host, then follow + drop the bag
+    HRI_SLICE=remember_display ...  # enroll host + guest 1 + guest 2, then show recognition forever
+    HRI_SLICE=full ...              # whole 12-step Receptionist flow (default)
 
 Back-compat: HRI_TEST_FOLLOW_HOST=1 / HRI_TEST_SCAN_SEATS=1 still select the
 follow_host / seats slices. The bag handover/drop (the arm step) stays gated by
@@ -31,6 +33,8 @@ from .subtasks import (
     build_follow_host_slice,
     build_greet_slice,
     build_hri_task,
+    build_person_appearance_slice,
+    build_remember_display_slice,
     build_seats_slice,
     prepare_run,
 )
@@ -46,8 +50,10 @@ def _truthy(name: str, default: str = "0") -> bool:
 # Order = rough bring-up order: perception, then one guest, then follow, then all.
 _SLICES = {
     "seats": build_seats_slice,             # seat + people detection tuning
+    "person_appearance": build_person_appearance_slice,  # person detect + appearance caption
     "greet": build_greet_slice,             # greet + learn one guest
     "follow_host": build_follow_host_slice,  # follow-host re-ID + bag drop
+    "remember_display": build_remember_display_slice,  # enroll host+2 guests, show recognition
     "full": build_hri_task,                 # whole Receptionist flow
 }
 

@@ -5,16 +5,19 @@ Moved out of tasks/HRI/skills.py into the shared tasks.skills package.
 
 from __future__ import annotations
 
+import math
 import os
 import time
 
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from client import PersonPose
 from tasks.base import TaskContext
 
-from .geometry import BBox, _point_in_box, cxcywh_to_xyxy, overlap_fraction, person_hip_anchor, person_seat_anchor
+from .geometry import BBox, _point_in_box, cxcywh_to_xyxy, overlap_fraction, person_seat_anchor
+from .lift import lift_bbox_world_xy
 
 
 @dataclass
@@ -75,34 +78,25 @@ def _occupied_region_indices(
     persons: list[PersonPose],
     region_boxes: list[BBox],
     *,
-    hard_overlap: float,
     conf_thresh: float,
 ) -> set[int]:
     """Which of *region_boxes* a person is sitting on (one region per person).
 
-    Each person is placed on the single region containing their hip anchor; a
-    person whose hips weren't detected falls back to the region their box covers
-    most, but only when that coverage reaches *hard_overlap* — high enough that a
-    neighbour's box merely clipping a cushion's edge doesn't count as sitting on
-    it.
+    Everyone in view is assumed SEATED — during a seat scan the only standing
+    person (the newly arrived guest) is next to the robot, outside the seating
+    area. So each person simply claims the single region containing their
+    seating anchor (:func:`person_seat_anchor`: hips when detected, else the
+    bbox's lower-centre). A person whose anchor lies on none of these regions is
+    seated on something else (another seat, or one the detector missed) and
+    occupies none of them.
     """
     occupied: set[int] = set()
     for p in persons:
-        anchor = person_hip_anchor(p, conf_thresh)
-        if anchor is not None:
-            for i, rb in enumerate(region_boxes):
-                if _point_in_box(anchor, rb):
-                    occupied.add(i)
-                    break  # a person sits on one cushion
-            continue
-        pb = cxcywh_to_xyxy(p.bbox)
-        best_i, best_ov = None, hard_overlap
+        anchor = person_seat_anchor(p, conf_thresh)
         for i, rb in enumerate(region_boxes):
-            ov = overlap_fraction(pb, rb)
-            if ov >= best_ov:
-                best_i, best_ov = i, ov
-        if best_i is not None:
-            occupied.add(best_i)
+            if _point_in_box(anchor, rb):
+                occupied.add(i)
+                break  # a person sits on one cushion
     return occupied
 
 
@@ -111,20 +105,18 @@ def parse_sofa_parts(
     persons: list[PersonPose],
     *,
     has_middle: bool = True,
-    hard_overlap: float = 0.5,
     conf_thresh: float = 0.3,
 ) -> list[SeatPart]:
     """Split a sofa into cushions and mark each one occupied independently.
 
     A cushion is occupied when a person's seating anchor falls on it (see
-    :func:`_occupied_region_indices`). The result lets the picker offer a free
-    cushion of a sofa that already has someone on it, instead of writing the
-    whole sofa off as taken.
+    :func:`_occupied_region_indices` — everyone in view is assumed seated). The
+    result lets the picker offer a free cushion of a sofa that already has
+    someone on it, instead of writing the whole sofa off as taken.
     """
     regions = split_seat_regions(sofa_bbox, has_middle=has_middle)
     occ = _occupied_region_indices(
-        persons, [rb for _label, rb in regions],
-        hard_overlap=hard_overlap, conf_thresh=conf_thresh,
+        persons, [rb for _label, rb in regions], conf_thresh=conf_thresh,
     )
     parts: list[SeatPart] = []
     for i, (label, rb) in enumerate(regions):
@@ -210,11 +202,10 @@ def scan_seats(
             for c in os.getenv("HRI_SEAT_CLASSES", "chair,sofa,armchair,stool").split(",")
             if c.strip()
         ]
-        # Occupancy is decided from where people actually sit (their hip anchor); the
-        # overlap floor is only a fallback for a person whose hips weren't detected,
-        # so it's set high enough that a neighbour's box clipping a free seat's edge
-        # no longer marks it taken.
-        hard_overlap = float(os.getenv("HRI_SEAT_OCCUPIED_HARD_OVERLAP", "0.5"))
+        # Occupancy assumes everyone in view is SEATED: each person claims the
+        # seat/cushion under their seating anchor (hips when detected, else the
+        # bbox's lower-centre). The newly arrived guest stands next to the
+        # robot, outside the scanned seating area.
         conf_thresh = float(os.getenv("HRI_POSE_KP_CONF", "0.3"))
         sofa_has_middle = os.getenv("HRI_SOFA_HAS_MIDDLE", "1").lower() in ("1", "true", "yes")
 
@@ -285,14 +276,13 @@ def scan_seats(
                 # A sofa is parsed into cushions; it only counts as fully occupied
                 # when every cushion is taken — otherwise a free cushion is offered.
                 parts = parse_sofa_parts(
-                    bbox, persons, has_middle=sofa_has_middle,
-                    hard_overlap=hard_overlap, conf_thresh=conf_thresh,
+                    bbox, persons, has_middle=sofa_has_middle, conf_thresh=conf_thresh,
                 )
                 occupied = bool(parts) and all(p.occupied for p in parts)
             else:
                 parts = None
                 occupied = bool(_occupied_region_indices(
-                    persons, [bbox], hard_overlap=hard_overlap, conf_thresh=conf_thresh,
+                    persons, [bbox], conf_thresh=conf_thresh,
                 ))
             seats.append(
                 SeatCandidate(
@@ -318,6 +308,148 @@ def scan_seats(
             if per_class:
                 print("[skills]   detect breakdown: " + "  ".join(
                     f"{k.split(':', 1)[1]}={v * 1000:.0f}ms" for k, v in per_class.items()))
+
+
+@dataclass
+class SeatSweep:
+    """A multi-heading seat scan merged into one picture (see scan_seats_sweep).
+
+    ``seats`` is the cross-view de-duplicated list the picker chooses from;
+    ``seat_frames``/``seat_world`` are parallel to it (which snapshot each seat
+    was seen in, and its lifted map-frame centre when the lift succeeded).
+    ``seats_by_frame``/``persons_by_frame`` keep each frame's RAW scan output —
+    pixel coordinates are only comparable within one frame, so per-frame
+    consumers (find_seated_person_bbox, match_people_to_seats) read these.
+    """
+
+    seats: list[SeatCandidate] = field(default_factory=list)
+    seat_frames: list[int] = field(default_factory=list)
+    seat_world: list[tuple[float, float] | None] = field(default_factory=list)
+    seats_by_frame: list[list[SeatCandidate]] = field(default_factory=list)
+    persons_by_frame: list[list[PersonPose]] = field(default_factory=list)
+    snaps: list = field(default_factory=list)
+    offsets_deg: list[float] = field(default_factory=list)
+
+    @property
+    def frame_labels(self) -> list[str]:
+        """Human-readable view name per frame ("CENTER view", "20° LEFT view")."""
+        return [
+            "CENTER view" if abs(o) < 1e-6
+            else f"{abs(o):.0f}° {'LEFT' if o > 0 else 'RIGHT'} view"
+            for o in self.offsets_deg
+        ]
+
+    @property
+    def center_index(self) -> int:
+        """Index of the most forward-facing frame (smallest |heading offset|)."""
+        if not self.offsets_deg:
+            return 0
+        return min(range(len(self.offsets_deg)), key=lambda i: abs(self.offsets_deg[i]))
+
+
+def scan_seats_sweep(
+    ctx: TaskContext,
+    offsets_deg: Sequence[float] | None = None,
+) -> SeatSweep:
+    """Scan for seats at several base headings and merge into one SeatSweep.
+
+    A single forward frame can miss seats (and seated people) off to the side,
+    so — like the introduction's sweep_snapshots — the base rotates to each
+    heading offset (degrees relative to the heading at entry, positive = left/
+    CCW), runs a full :func:`scan_seats` there, and faces forward again. Each
+    seat keeps the CameraSnapshot of the very frame it was detected in, so its
+    bbox lifts to the correct map-frame point no matter where the robot was
+    pointing.
+
+    The views overlap, so the same physical seat is detected more than once;
+    every seat's bbox centre is lifted to a map-frame point and instances of the
+    same single/multi-seat kind within ``HRI_SEAT_SWEEP_DEDUP_M`` (sofas:
+    ``HRI_SEAT_SWEEP_DEDUP_SOFA_M`` — their clipped-view centres wander more)
+    are merged. The MOST CENTRAL view's instance is kept: a side view can clip a
+    sofa at the frame edge and misjudge its free cushions, so the deliberate
+    head-on look is trusted. A seat whose lift failed is kept as-is (it just
+    can't dedupe).
+
+    *offsets_deg* defaults to ``(D, 0, -D)`` with ``D = HRI_SEAT_SWEEP_DEG``
+    (left, center, right); ``HRI_SEAT_SWEEP_DEG=0`` degrades to one forward
+    scan, as does odometry being unavailable (a rotation would aim arbitrarily).
+    Best-effort throughout: a failed capture drops that frame, never raises.
+    """
+    if offsets_deg is None:
+        sweep_deg = float(os.getenv("HRI_SEAT_SWEEP_DEG", "20"))
+        offsets_deg = (sweep_deg, 0.0, -sweep_deg) if sweep_deg > 0 else (0.0,)
+    try:
+        pose = ctx.walkie.status.get_position()
+    except Exception as exc:
+        print(f"[skills] scan_seats_sweep: odometry unavailable ({exc}); single scan")
+        pose = None
+    if not pose or all(abs(o) < 1e-6 for o in offsets_deg):
+        seats, persons, snap = scan_seats(ctx)
+        if snap is None:
+            return SeatSweep()
+        world = [lift_bbox_world_xy(ctx, snap, s.bbox_xyxy) for s in seats]
+        return SeatSweep(
+            seats=seats, seat_frames=[0] * len(seats), seat_world=world,
+            seats_by_frame=[seats], persons_by_frame=[persons],
+            snaps=[snap], offsets_deg=[0.0],
+        )
+
+    center = pose["heading"]
+    settle = float(os.getenv("HRI_SWEEP_SETTLE_SEC", "1.0"))
+    snaps: list = []
+    kept_offsets: list[float] = []
+    seats_by_frame: list[list[SeatCandidate]] = []
+    persons_by_frame: list[list[PersonPose]] = []
+    for off in offsets_deg:
+        ctx.rotate_to(center + math.radians(off))
+        if settle > 0:
+            time.sleep(settle)  # let the base + depth settle before capturing
+        frame_seats, frame_persons, snap = scan_seats(ctx)
+        if snap is None:
+            print(f"[skills] scan_seats_sweep: capture failed at {off:+.0f}°; skipping")
+            continue
+        snaps.append(snap)
+        kept_offsets.append(off)
+        seats_by_frame.append(frame_seats)
+        persons_by_frame.append(frame_persons)
+    ctx.rotate_to(center)  # leave the robot facing forward again
+
+    # Lift every seat, then de-dup across views, most central frame first so the
+    # kept instance carries the best (head-on) geometry and occupancy call.
+    dedup_m = float(os.getenv("HRI_SEAT_SWEEP_DEDUP_M", "0.5"))
+    sofa_dedup_m = float(os.getenv("HRI_SEAT_SWEEP_DEDUP_SOFA_M", "1.0"))
+    entries: list[tuple[int, SeatCandidate, tuple[float, float] | None]] = [
+        (fi, seat, lift_bbox_world_xy(ctx, snaps[fi], seat.bbox_xyxy))
+        for fi in range(len(snaps))
+        for seat in seats_by_frame[fi]
+    ]
+    kept: list[tuple[int, SeatCandidate, tuple[float, float] | None]] = []
+    for idx in sorted(range(len(entries)), key=lambda i: abs(kept_offsets[entries[i][0]])):
+        fi, seat, xy = entries[idx]
+        sofa = is_sofa_class(seat.class_name)
+        thresh = sofa_dedup_m if sofa else dedup_m
+        dup = xy is not None and any(
+            kxy is not None
+            and is_sofa_class(kseat.class_name) == sofa
+            and math.hypot(xy[0] - kxy[0], xy[1] - kxy[1]) < thresh
+            for _kfi, kseat, kxy in kept
+        )
+        if not dup:
+            kept.append((fi, seat, xy))
+    kept.sort(key=lambda e: (e[0], e[1].center_px[0]))  # stable left→right reading order
+    n_raw = sum(len(s) for s in seats_by_frame)
+    if n_raw != len(kept):
+        print(f"[skills] scan_seats_sweep: {n_raw} detections across "
+              f"{len(snaps)} views -> {len(kept)} distinct seats")
+    return SeatSweep(
+        seats=[s for _fi, s, _xy in kept],
+        seat_frames=[fi for fi, _s, _xy in kept],
+        seat_world=[xy for _fi, _s, xy in kept],
+        seats_by_frame=seats_by_frame,
+        persons_by_frame=persons_by_frame,
+        snaps=snaps,
+        offsets_deg=kept_offsets,
+    )
 
 
 def pick_free_seat(seats: list[SeatCandidate]) -> SeatCandidate | None:
@@ -376,35 +508,39 @@ def match_people_to_seats(
     located: dict[str, tuple[int, BBox]],
     seats: list[SeatCandidate],
     *,
+    seat_frames: list[int] | None = None,
     frame_index: int = 0,
     min_overlap: float | None = None,
-) -> tuple[dict[int, str], dict[str, BBox]]:
+) -> tuple[dict[int, str], dict[str, tuple[int, BBox]]]:
     """Tie each recognized person to the detected seat they occupy.
 
     *located* is :func:`identity.locate_people`'s output
-    (``{id: (frame_index, person_bbox)}``); only entries from *frame_index* are
-    used, since the seats come from one frame and a person seen in another sweep
-    view can't be lined up against them. A person claims the seat their box
-    overlaps most (at least *min_overlap*, default ``HRI_SEAT_OCCUPIED_OVERLAP``
-    — the same floor :func:`scan_seats` uses for occupancy), strongest overlap
-    first so a confident match isn't blocked by a weak one; one person per seat.
+    (``{id: (frame_index, person_bbox)}``). Pixel overlap is only meaningful
+    within one frame, so a person is compared against the seats detected in the
+    frame THEY were recognized in: *seat_frames* (parallel to *seats*, e.g.
+    ``SeatSweep.seat_frames``) says which frame each seat came from; without it
+    every seat is assumed to be from *frame_index*. A person claims the
+    same-frame seat their box overlaps most (at least *min_overlap*, default
+    ``HRI_SEAT_OCCUPIED_OVERLAP``), strongest overlap first so a confident match
+    isn't blocked by a weak one; one person per seat.
 
     Returns ``(seat_occupants, seatless)``: *seat_occupants* maps a seat index
-    to the id sitting in it; *seatless* maps the id of every person recognized
-    in the frame whose box overlapped NO detected seat to that box — the
-    detector missed their chair, or they're on something off-vocabulary (a couch
-    arm, a stool, the floor). The caller still knows those people are present
-    and roughly where, so the spot isn't wrongly offered as free.
+    to the id sitting in it; *seatless* maps the id of every recognized person
+    who claimed NO seat to their ``(frame_index, box)`` — the detector missed
+    their chair, they're on something off-vocabulary (a couch arm, a stool, the
+    floor), or their seat was seen (and de-duplicated away) in a different sweep
+    view. The caller still knows those people are present and roughly where, so
+    the spot isn't wrongly offered as free.
     """
     if min_overlap is None:
         min_overlap = float(os.getenv("HRI_SEAT_OCCUPIED_OVERLAP", "0.25"))
-    present: dict[str, BBox] = {
-        pid: box for pid, (fi, box) in located.items() if fi == frame_index
-    }
+    if seat_frames is None:
+        seat_frames = [frame_index] * len(seats)
     pairs = [
         (overlap_fraction(box, seat.bbox_xyxy), pid, i)
-        for pid, box in present.items()
+        for pid, (fi, box) in located.items()
         for i, seat in enumerate(seats)
+        if seat_frames[i] == fi
     ]
     seat_occupants: dict[int, str] = {}
     claimed_seats: set[int] = set()
@@ -415,7 +551,10 @@ def match_people_to_seats(
         seat_occupants[i] = pid
         claimed_seats.add(i)
         claimed_pids.add(pid)
-    seatless = {pid: box for pid, box in present.items() if pid not in claimed_pids}
+    seatless = {
+        pid: (fi, box) for pid, (fi, box) in located.items()
+        if pid not in claimed_pids
+    }
     return seat_occupants, seatless
 
 
