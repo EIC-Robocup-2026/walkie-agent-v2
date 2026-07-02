@@ -229,7 +229,11 @@ beats a rephrasing penalty. (Mirrors HRI's "no non-essential questions" instinct
 > rejected one (−30 each, bounded) and recovering a merged-away command before
 > executing anything. "No re-ask to confirm" still holds for the *parse-empty*
 > path; the verification gate is the deliberate exception: a −30 re-ask is cheap
-> insurance against a multi-minute wrong errand on the 7-minute clock.
+> insurance against a multi-minute wrong errand on the 7-minute clock. A command
+> that stays unconfirmed after the re-capture budget follows
+> `GPSR_VERIFY_EXHAUSTED` — "execute" the best understanding, or "skip" it
+> (config default: the operator rejected that text repeatedly, so the minutes
+> are better spent on the confirmed commands).
 
 ### 5.3 Design against drift — re-detect, don't trust stored coordinates
 Same as Restaurant §5.1. The world-model pose gets the robot *near* a room/

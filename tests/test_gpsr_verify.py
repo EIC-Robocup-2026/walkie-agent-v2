@@ -27,17 +27,21 @@ def _plan(source: str) -> Plan:
 
 
 def _fake_parse(model, utterance, world):
-    """Stub parser: one command per ';'-separated segment; 'bad' segments fail.
+    """Stub parser: one command per ';'-separated segment; 'bad' segments fail;
+    'vague' segments parse to text with an EMPTY (unusable) plan.
 
     Mirrors the real contract (list of (text, plan) pairs, [] when nothing was
-    understood) while letting a test script multi-command batches and garbage
-    re-captures without an LLM.
+    understood, empty-steps Plan when the text grounded to nothing) while
+    letting a test script multi-command batches and garbage re-captures
+    without an LLM.
     """
     out = []
     for part in utterance.split(";"):
         part = part.strip()
-        if part and "bad" not in part.lower():
-            out.append((part, _plan(part)))
+        if not part or "bad" in part.lower():
+            continue
+        plan = Plan(steps=[], source=part) if "vague" in part.lower() else _plan(part)
+        out.append((part, plan))
     return out
 
 
@@ -169,6 +173,73 @@ def test_recaptures_bounded_then_best_effort(_verify_on, monkeypatch):
     assert prompts.VERIFY_BEST_EFFORT.format(n=1) in ctx.saids
     assert prompts.VERIFY_RECAPTURE_MISSED in ctx.saids
     assert _pen_count(ctx) == 1                      # bounded by the budget
+
+
+def test_mixed_answer_treated_as_negative(_verify_on):
+    """Negative is checked FIRST (mirrors _confirm_plan): on 'okay, no, that is
+    wrong', wrongly keeping a misheard command wastes an errand; wrongly
+    re-capturing a correct one costs only −30 — bias toward the cheap mistake."""
+    ctx = _Ctx([
+        "go to the kitchen",
+        "okay, no, that is wrong",     # affirmative token + negative -> negative wins
+        "go to the bedroom",           # re-speak
+        "yes",                         # confirm the corrected command
+        "yes",                         # got-all
+    ])
+    assert _run(ctx) is StepResult.DONE
+    assert _texts(ctx) == ["go to the bedroom"]
+    assert _pen_count(ctx) == 1
+
+
+def test_unplannable_recapture_is_not_read_back(_verify_on):
+    """A re-capture that parses to text with an UNUSABLE plan must not be read
+    back for confirmation — that round would end in a guaranteed forfeit."""
+    ctx = _Ctx([
+        "go to the kitchen",
+        "no",                      # reject
+        "do the vague thing",      # parses, but empty plan -> treated as missed
+        "yes",                     # re-confirm of the ORIGINAL text
+        "yes",                     # got-all
+    ])
+    assert _run(ctx) is StepResult.DONE
+    assert _texts(ctx) == ["go to the kitchen"]   # original kept, vague never adopted
+    assert prompts.VERIFY_RECAPTURE_MISSED in ctx.saids
+    assert not any("vague" in a for a in ctx.asked)
+
+
+def test_exhausted_skip_mode_declines_instead_of_executing(_verify_on, monkeypatch):
+    """GPSR_VERIFY_EXHAUSTED=skip (the config value): a command the operator
+    rejected past the budget is announced, kept unconfirmed (so ExecuteCommands
+    skips it via the existing decline machinery), and its plan is not spoken."""
+    monkeypatch.setenv("GPSR_VERIFY_MAX_RECAPTURES", "0")
+    monkeypatch.setenv("GPSR_VERIFY_EXHAUSTED", "skip")
+    ctx = _Ctx([
+        "go to the kitchen; count the apples; guide charlie to the exit",
+        "no",    # command 1 rejected -> budget (0) already spent -> give up
+        "yes",   # command 2
+        "yes",   # command 3
+    ])
+    assert _run(ctx) is StepResult.DONE
+    cmds = ctx.data["commands"]
+    assert [c.confirmed for c in cmds] == [False, True, True]
+    assert cmds[0].result_note == "skipped: operator could not confirm the command"
+    assert prompts.VERIFY_GIVE_UP.format(n=1) in ctx.saids
+    # No plan speech (and no claimed speak_plan point) for the declined command.
+    assert prompts.PLAN_PREAMBLE.format(n=1) not in " ".join(ctx.saids)
+    assert sum(1 for k, _ in ctx.scored if k == "speak_plan") == 2
+    assert _pen_count(ctx) == 0                   # budget 0: no re-ask was made
+
+
+def test_exhausted_execute_mode_is_default(monkeypatch, _verify_on):
+    """In-code default keeps the pre-knob behaviour: best effort still runs."""
+    monkeypatch.setenv("GPSR_VERIFY_MAX_RECAPTURES", "0")
+    ctx = _Ctx([
+        "go to the kitchen; count the apples; guide charlie to the exit",
+        "no", "yes", "yes",
+    ])
+    _run(ctx)
+    assert [c.confirmed for c in ctx.data["commands"]] == [True, True, True]
+    assert prompts.VERIFY_BEST_EFFORT.format(n=1) in ctx.saids
 
 
 # --- gate on: mis-split (merged-command) recovery ----------------------------

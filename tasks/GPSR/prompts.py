@@ -183,6 +183,10 @@ ASK_REPEAT_ONE = "Okay. Please repeat only command {n}, and nothing else."
 VERIFY_CONFIRMED = "Command {n} confirmed."
 VERIFY_RECAPTURE_MISSED = "Sorry, I did not catch that."
 VERIFY_BEST_EFFORT = "I will go with my best understanding of command {n}."
+# GPSR_VERIFY_EXHAUSTED="skip": the operator rejected this text repeatedly, so
+# executing it is a likely-wrong errand — announce the skip and save the clock
+# for the confirmed commands.
+VERIFY_GIVE_UP = "I am sorry, I could not confirm command {n}, so I will skip it."
 # Mis-split recovery: halting speech can MERGE two commands into one parse
 # entry, silently dropping a command. When fewer than the expected number were
 # heard, ask — a "no" captures the missing command(s) one at a time.

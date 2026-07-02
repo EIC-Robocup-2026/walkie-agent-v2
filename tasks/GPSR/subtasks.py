@@ -84,6 +84,16 @@ def _verify_enabled() -> bool:
     return os.getenv("GPSR_VERIFY_COMMANDS", "0").lower() in ("1", "true", "yes")
 
 
+def _verify_exhausted_skip() -> bool:
+    """When a command stays unconfirmed after the re-capture budget: execute the
+    best understanding anyway (in-code default — preserves the pre-knob
+    behaviour) or skip it (GPSR_VERIFY_EXHAUSTED="skip", what config.toml sets:
+    the operator explicitly rejected that text N times, so executing it is a
+    likely-wrong errand — the sure-points play is spending those minutes on the
+    confirmed commands instead)."""
+    return os.getenv("GPSR_VERIFY_EXHAUSTED", "execute").strip().lower() == "skip"
+
+
 def _batch_listen_kwargs() -> dict:
     """ctx.ask kwargs for the ONE continuous 3-command capture. The referee reads
     all three in a row, often haltingly, so the capture needs a wide window and a
@@ -248,9 +258,10 @@ class ReceiveAndPlanCommands(SubTask):
             if answer:
                 parsed = parse_commands(ctx.model, answer, world)
                 if any(plan for _, plan in parsed):  # at least one usable plan
+                    declined: set[int] = set()
                     if _verify_enabled():
-                        parsed = self._verify_commands(ctx, world, parsed)
-                    return self._build_commands(ctx, parsed)
+                        parsed, declined = self._verify_commands(ctx, world, parsed)
+                    return self._build_commands(ctx, parsed, declined=declined)
             # Nothing usable this round — escalate (rephrase, then custom operator).
             if rephrasings < max_rephrasings:
                 rephrasings += 1
@@ -267,55 +278,71 @@ class ReceiveAndPlanCommands(SubTask):
             else:
                 return []  # rephrasings + custom operator exhausted
 
-    def _verify_commands(self, ctx: TaskContext, world, parsed) -> list:
+    def _verify_commands(self, ctx: TaskContext, world, parsed) -> tuple[list, set[int]]:
         """Read each heard command back for a yes/no, then recover any command
         the split merged away (GPSR_VERIFY_COMMANDS — the sure-points gate).
 
         Execution starts only after every command is confirmed: the referee
         reads all three in one halting stream, so per-command verification
         converts a mishear/mis-split into one cheap re-capture instead of a
-        wasted multi-minute errand.
+        wasted multi-minute errand. Returns ``(pairs, declined)`` — the verified
+        (text, plan) pairs plus the 1-based positions that stayed UNCONFIRMED
+        after the re-capture budget and must not execute
+        (GPSR_VERIFY_EXHAUSTED="skip"); empty in "execute" mode.
         """
-        verified = [
-            self._verify_one(ctx, world, i, text, plan)
-            for i, (text, plan) in enumerate(parsed, 1)
-        ]
-        return self._recover_missing(ctx, world, verified)
+        verified: list = []
+        declined: set[int] = set()
+        for i, (text, plan) in enumerate(parsed, 1):
+            text, plan, ok = self._verify_one(ctx, world, i, text, plan)
+            verified.append((text, plan))
+            if not ok:
+                declined.add(i)
+        self._recover_missing(ctx, world, verified, declined)
+        return verified, declined
 
     def _verify_one(self, ctx: TaskContext, world, n: int, text: str, plan: Plan):
         """Confirm command *n* with the operator; on "no" re-capture JUST it.
 
-        A clear "yes" keeps the command as heard; a clear "no" asks the operator
-        to repeat only that command (−30 rephrasing each, bounded by
-        GPSR_VERIFY_MAX_RECAPTURES), re-parses and re-confirms. An unclear/silent
-        verdict follows GPSR_CONFIRM_DEFAULT: "proceed" (default) keeps the
-        command as heard — a mumbled "yes" must not forfeit it — while "skip"
-        demands a clear yes and treats unclear as "no". Once the re-capture
-        budget is spent the best understanding stands (a possibly-wrong command
-        still beats a forfeited one — partial credit exists, zero doesn't).
-        Returns the (possibly re-captured) ``(text, plan)`` pair.
+        A clear "no" asks the operator to repeat only that command (−30
+        rephrasing each, bounded by GPSR_VERIFY_MAX_RECAPTURES), re-parses and
+        re-confirms; a clear "yes" keeps it as heard. Negative is checked FIRST
+        (mirrors _confirm_plan): on a mixed answer ("okay, no, that's wrong"),
+        wrongly keeping a misheard command wastes a multi-minute errand while
+        wrongly re-capturing a correct one costs only −30 — bias toward the
+        cheap mistake. An unclear/silent verdict follows GPSR_CONFIRM_DEFAULT:
+        "proceed" (default) keeps the command as heard — a mumbled "yes" must
+        not forfeit it — while "skip" demands a clear yes. A re-capture is
+        accepted only when it parses to a USABLE plan; reading back an
+        unplannable text would waste a confirmation round on a guaranteed
+        forfeit. Returns ``(text, plan, confirmed)`` — ``confirmed`` False only
+        when the budget ran out in GPSR_VERIFY_EXHAUSTED="skip" mode.
         """
         max_recaptures = int(os.getenv("GPSR_VERIFY_MAX_RECAPTURES", "2"))
         recaptures = 0
         while True:
             answer = ctx.ask(prompts.ASK_VERIFY_COMMAND.format(n=n, command=text), retries=1)
-            if _is_affirmative(answer):
+            if _is_negative(answer):
+                pass  # fall through to the re-capture below
+            elif _is_affirmative(answer):
                 ctx.say(prompts.VERIFY_CONFIRMED.format(n=n))
-                return text, plan
-            if not _is_negative(answer) and _confirm_default_proceed():
+                return text, plan, True
+            elif _confirm_default_proceed():
                 print(f"[gpsr] command {n}: unclear verification {answer!r} -> keep as heard")
-                return text, plan
+                return text, plan, True
             # Clear "no" (or strict mode on an unclear answer) -> re-capture.
             if recaptures >= max_recaptures:
+                if _verify_exhausted_skip():
+                    ctx.say(prompts.VERIFY_GIVE_UP.format(n=n))
+                    return text, plan, False
                 ctx.say(prompts.VERIFY_BEST_EFFORT.format(n=n))
-                return text, plan
+                return text, plan, True
             recaptures += 1
             ctx.score("pen_rephrasing")  # asking to re-say costs −30 (§5.2)
             heard = ctx.ask(prompts.ASK_REPEAT_ONE.format(n=n), retries=0,
                             **_single_listen_kwargs())
             if heard:
                 reparsed = parse_commands(ctx.model, heard, world)
-                if reparsed:
+                if reparsed and reparsed[0][1]:  # need a usable plan, not just text
                     if len(reparsed) > 1:
                         print(f"[gpsr] re-capture of command {n} split into "
                               f"{len(reparsed)} commands; keeping the first")
@@ -323,7 +350,7 @@ class ReceiveAndPlanCommands(SubTask):
                     continue  # loop re-confirms the corrected version
             ctx.say(prompts.VERIFY_RECAPTURE_MISSED)  # then re-confirm what we had
 
-    def _recover_missing(self, ctx: TaskContext, world, commands: list) -> list:
+    def _recover_missing(self, ctx: TaskContext, world, commands: list, declined: set[int]) -> None:
         """Recover commands the batch split merged away (halting speech blurs the
         seam between two commands, leaving fewer than the operator gave).
 
@@ -332,6 +359,7 @@ class ReceiveAndPlanCommands(SubTask):
         rest. A "yes"/unclear answer moves on — operators legitimately give
         fewer than three in practice runs. Any capture/parse failure breaks out
         rather than looping (the clock outweighs a maybe-recoverable command).
+        Mutates ``commands``/``declined`` in place.
         """
         max_n = int(os.getenv("GPSR_MAX_COMMANDS", "3"))
         while len(commands) < max_n:
@@ -345,14 +373,30 @@ class ReceiveAndPlanCommands(SubTask):
                 ctx.say(prompts.VERIFY_RECAPTURE_MISSED)
                 break
             for text, plan in reparsed[: max_n - len(commands)]:
-                commands.append(self._verify_one(ctx, world, len(commands) + 1, text, plan))
-        return commands
+                text, plan, ok = self._verify_one(ctx, world, len(commands) + 1, text, plan)
+                commands.append((text, plan))
+                if not ok:
+                    declined.add(len(commands))
 
-    def _build_commands(self, ctx: TaskContext, parsed) -> list[Command]:
-        """Turn parsed (text, Plan) pairs into Commands, speaking each plan."""
+    def _build_commands(
+        self, ctx: TaskContext, parsed, declined: set[int] = frozenset()
+    ) -> list[Command]:
+        """Turn parsed (text, Plan) pairs into Commands, speaking each plan.
+
+        ``declined`` (1-based positions from _verify_commands) marks commands the
+        operator could not confirm in GPSR_VERIFY_EXHAUSTED="skip" mode: they
+        keep their plan (status PLANNED) but are built unconfirmed so
+        ExecuteCommands skips them — the existing decline machinery. Their plan
+        is NOT spoken (the robot just announced it is skipping that command;
+        speaking a plan for it would contradict that) and no speak_plan point is
+        claimed.
+        """
         commands: list[Command] = []
         for i, (text, plan) in enumerate(parsed, 1):
             cmd = Command(id=i, utterance=text, plan=plan)
+            if i in declined:  # verify budget spent in "skip" mode -> never execute
+                cmd.confirmed = False
+                cmd.result_note = "skipped: operator could not confirm the command"
             # The command reached us as text → STT understood it (80 each). Typing it
             # instead (DISABLE_LISTENING) bypasses STT: forfeits the +80, costs −50.
             if ctx.disable_listening:
@@ -361,11 +405,12 @@ class ReceiveAndPlanCommands(SubTask):
                 ctx.score("understand_stt")
             if plan:
                 cmd.status = CmdStatus.PLANNED
-                if _speak_plan_enabled():
+                if _speak_plan_enabled() and i not in declined:
                     ctx.say(render_plan_speech(plan, preamble=prompts.PLAN_PREAMBLE.format(n=i)))
                     ctx.score("speak_plan")  # demonstrated a generated plan (100 each)
                 # Optional human approval gate: "plan is this — okay to do it?"
-                if _confirm_plan_enabled():
+                # (moot for a command verification already declined)
+                if _confirm_plan_enabled() and cmd.confirmed:
                     cmd.confirmed = self._confirm_plan(ctx, i)
                 if not plan.is_complete:
                     print(f"[gpsr] command {i} plan has ungrounded steps: {plan.source!r}")
@@ -445,7 +490,8 @@ class ExecuteCommands(SubTask):
     def _run_serial(self, ctx, commands: list[Command], world, brain, manip: bool) -> None:
         for cmd in commands:
             if cmd.plan and not cmd.confirmed:  # operator declined the plan -> skip
-                cmd.result_note = "skipped: plan not approved"
+                # (or-guard: don't clobber a verify-gate skip reason set at build)
+                cmd.result_note = cmd.result_note or "skipped: plan not approved"
                 ctx.say(prompts.COMMAND_SKIPPED.format(n=cmd.id))
                 print(f"[gpsr] command {cmd.id} skipped (plan not approved)")
                 continue
@@ -485,7 +531,8 @@ class ExecuteCommands(SubTask):
             if c.id in scheduled:
                 c.status = CmdStatus.IN_PROGRESS
             elif c.plan and not c.confirmed:
-                c.result_note = "skipped: plan not approved"  # declined -> stays PLANNED, not run
+                # declined -> stays PLANNED, not run (or-guard keeps a verify-gate reason)
+                c.result_note = c.result_note or "skipped: plan not approved"
             else:
                 c.status = CmdStatus.FAILED  # had no usable plan
         statuses = execute_interleaved(ctx, indexed, world, brain, manip_enabled=manip, order=order)

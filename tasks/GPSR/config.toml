@@ -47,6 +47,11 @@ GPSR_MAX_COMMANDS = "3"
 # recording; MIN_SILENCE is how long the referee must stay quiet before the VAD
 # calls the utterance finished (raise it if captures still end mid-stream; lower
 # it if the robot waits too long after the referee clearly finished).
+# NB (verify on-robot before raising further): a 90 s capture must round-trip
+# the STT server in one request — walkie-ai-server must (a) transcribe clips
+# longer than Whisper's native 30 s window without truncating, and (b) return
+# within the HTTP client's 60 s timeout (client/base.py). Test once with a real
+# ~60 s utterance; if it truncates/times out, lower this or fix the server.
 GPSR_LISTEN_TIMEOUT_SEC = "90"
 GPSR_LISTEN_MIN_SILENCE_MS = "2500"
 # Re-capture of ONE corrected command (after a "no" in verification, or a
@@ -63,9 +68,15 @@ GPSR_RELISTEN_MIN_SILENCE_MS = "1500"
 # command as heard). In-code default is 0 (pre-change behaviour, what the unit
 # tests exercise); this file turns it ON for real runs.
 GPSR_VERIFY_COMMANDS = "1"
-# Re-captures per command before going with the best understanding anyway (a
-# possibly-wrong command still beats a forfeited one — partial credit exists).
+# Re-captures per command before the exhausted policy below applies.
 GPSR_VERIFY_MAX_RECAPTURES = "2"
+# What to do with a command the operator could NOT confirm after the re-capture
+# budget: "execute" (in-code default — run the best understanding; partial
+# credit beats a forfeit) or "skip" (set here — the operator explicitly rejected
+# that text N times, so executing it is a likely-WRONG errand; the sure-points
+# play is spending those minutes on the confirmed commands instead). A skipped
+# command keeps its plan but is announced and never executed.
+GPSR_VERIFY_EXHAUSTED = "skip"
 # How the operator issues commands: "consecutive" (all at once, enables the
 # interleaved-task bonus) or "one_by_one" (return to the instruction point
 # between each).
