@@ -208,6 +208,22 @@ class WalkieWorld:
     def location_pose(self, canonical: str) -> Pose | None:
         return self.vocab.location_pose(canonical)
 
+    def waypoint_for(self, node) -> Pose | None:
+        """The surveyed nav waypoint for a scene node, or ``None`` if it has none.
+
+        A ``source="map"`` node (id ``map:<location>``, seeded from world.toml) IS a
+        surveyed place — its ``centroid`` is the object's footprint centre, NOT where
+        to stand. Drive to the location's **approach pose** instead (``location_pose``).
+        A genuinely perceived object (a cup on a table) has no waypoint -> ``None``;
+        the caller approaches its ``centroid`` directly. Use this to turn a
+        ``query_text`` hit into a nav target: ``world.waypoint_for(hit) or approach(hit.centroid)``.
+        """
+        if node is None or getattr(node, "source", None) != "map":
+            return None
+        name = str(getattr(node, "id", "")).removeprefix("map:")
+        pose = self.location_pose(name)
+        return pose if _pose_surveyed(pose) else None
+
     def is_barrier(self, canonical: str | None) -> bool:
         return self.vocab.is_barrier(canonical)
 
@@ -448,6 +464,15 @@ class WalkieWorld:
                 hits = []
             if hits:
                 n = hits[0]
+                # A map-seeded hit (id `map:<location>`) IS a surveyed place — drive to
+                # its approach waypoint, never its footprint centroid (see waypoint_for).
+                wp = self.waypoint_for(n)
+                if wp is not None:
+                    loc_name = n.id.removeprefix("map:")
+                    return PlaceMatch(kind="location", label=loc_name.replace("_", " "),
+                                      name=loc_name, pose=wp,
+                                      room=getattr(self.locations.get(loc_name), "room", None)
+                                      or canon_room, source="map")
                 return PlaceMatch(kind="object", label=(n.best_caption or n.class_name),
                                   name=n.id, point=(float(n.centroid[0]), float(n.centroid[1])),
                                   room=canon_room, source="scene")

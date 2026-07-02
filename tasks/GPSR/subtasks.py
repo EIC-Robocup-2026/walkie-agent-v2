@@ -12,7 +12,7 @@ the deterministic Tier-1 skill dispatch.
 
 Blackboard layout (ctx.data):
     brain:    WalkieBrain          # the agent stack (Tier-2 fallback), set by run.py
-    world:    WorldModel           # arena nouns, set by run.py
+    world:    WalkieWorld          # ctx.world: arena nouns + scene graph + people, set by run.py
     commands: list[Command]        # parsed + planned operator commands
 
 Live scoring (ctx.score, GPSR_SHEET): unlike PnP/Restaurant/HRI — whose tallies are
@@ -124,7 +124,8 @@ class GoToInstructionPoint(SubTask):
     critical = True
 
     def run(self, ctx: TaskContext) -> StepResult:
-        # results = ctx.world.query_text("kitchen table")
+        # results = ctx.world.resolve_place("fridge")
+        # print(results)
         # for result in results:
         #     print(result.id, result.centroid)
 
@@ -139,6 +140,7 @@ class GoToInstructionPoint(SubTask):
             from tasks.skills import go_to_through_door, request_open_door
             # Fully-closed door: ask once, then self-watch the depth and walk in the
             # moment it reads open (no spoken confirmation needed).
+            # ctx.walkie.robot.head(0.4)
             request_open_door(ctx)
             # Then drive — and if a *partly*-open door blocks nav (the doorway reads
             # open but the gap is too narrow), ask for it to be opened wider and retry.
@@ -204,6 +206,7 @@ class ReceiveAndPlanCommands(SubTask):
             # (ctx.ask's default retries=1 would re-prompt internally and inflate
             # the −30 count + the clock).
             answer = ctx.ask(prompts.ASK_FOR_COMMANDS, retries=0)
+            print(f"[GPSR] heard: {answer}")
             if answer:
                 parsed = parse_commands(ctx.model, answer, world)
                 if any(plan for _, plan in parsed):  # at least one usable plan
@@ -327,11 +330,18 @@ class ExecuteCommands(SubTask):
                 continue
             cmd.status = CmdStatus.IN_PROGRESS
             ctx.say(prompts.COMMAND_ANNOUNCE.format(n=cmd.id, command=cmd.utterance))
+            state: dict = {}  # per-command scratch; also collects Tier-2 fallback notes
             try:
-                cmd.status = execute_plan(ctx, cmd.plan, world, brain, manip_enabled=manip)
+                cmd.status = execute_plan(ctx, cmd.plan, world, brain, manip_enabled=manip, state=state)
             except Exception as exc:
                 print(f"[gpsr] command {cmd.id} execution raised ({exc})")
                 cmd.status = CmdStatus.FAILED
+            # Surface what any scoped Tier-2 fallback did (dispatch stashes each
+            # sub-agent's spoken line in state["_notes"]) without clobbering a note
+            # already set (e.g. a skip reason).
+            notes = state.get("_notes")
+            if notes and not cmd.result_note:
+                cmd.result_note = "; ".join(notes)
             print(f"[gpsr] command {cmd.id} -> {cmd.status.name}")
             if _one_by_one() and cmd.id < len(commands):
                 x, y, h = _pose("GPSR_INSTRUCTION_POINT_POSE")

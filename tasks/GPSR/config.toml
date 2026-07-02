@@ -5,7 +5,7 @@
 
 [gpsr]
 # Map-frame waypoint "x,y,heading_rad" announced ~2h before the test.
-GPSR_INSTRUCTION_POINT_POSE = "8.28,3.34,-1.54"
+GPSR_INSTRUCTION_POINT_POSE = "6.59,3.65,1.65"
 # 1 = on entry, ask a human to open the arena door and wait for it before driving
 # to the instruction point (the robot starts outside a possibly-closed door). Uses
 # the shared tasks.skills.request_open_door. Default OFF so dev/practice runs with
@@ -14,7 +14,7 @@ GPSR_INSTRUCTION_POINT_POSE = "8.28,3.34,-1.54"
 # centre (head tilted down -> floor, or a near wall) within WALKIE_DOOR_CLEAR_M and
 # false-reads "closed", spamming "please open the door". Re-enable ("1") for the real
 # arena entry (and level the head before the check if it still false-triggers).
-GPSR_REQUEST_DOOR = "0"
+GPSR_REQUEST_DOOR = "1"
 # 1 = when a named navigation can't reach its goal, check whether a closed door is
 # blocking the way (depth) and, if so, ask a human to open it and retry
 # (tasks.skills.go_to_through_door). Only asks on a nav FAILURE and not when the

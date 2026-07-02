@@ -22,10 +22,11 @@ from typing import TYPE_CHECKING
 from . import prompts
 from .plan import Plan, PlanStep, Primitive
 from .prompts import RawPlan, RawStep
-from walkie_world.map.vocab import WorldModel, load_world
+from walkie_world.map.vocab import load_world
 
 if TYPE_CHECKING:  # type-only; importing these at runtime would pull no hardware,
     from pydantic import BaseModel  # but keep the pure core import-light regardless.
+    from walkie_world.world import WalkieWorld  # ctx.world; only its vocab surface is used here
 
 # Closed value sets for the property/info "which" fields (loose-normalized).
 _OBJECT_PROPERTIES = {"size", "weight", "category", "color", "colour"}
@@ -84,7 +85,7 @@ def _ground(unresolved: list[tuple[str, str]], field: str, text: str | None, res
     return val
 
 
-def _ground_target(unresolved, raw: RawStep, world: WorldModel) -> str | None:
+def _ground_target(unresolved, raw: RawStep, world: WalkieWorld) -> str | None:
     """A navigation target: a specific location wins, else a room."""
     text = raw.location or raw.room or raw.to_location
     if not text:
@@ -102,7 +103,7 @@ def _ground_target(unresolved, raw: RawStep, world: WorldModel) -> str | None:
 _OPERATOR_REFS = {"me", "myself", "i", "operator", "you", "yourself"}
 
 
-def _ground_person(unresolved, raw: RawStep, world: WorldModel) -> dict:
+def _ground_person(unresolved, raw: RawStep, world: WalkieWorld) -> dict:
     """Ground a person reference. Returns args fragment {descriptor, kind}.
 
     name -> must match the names list; gesture/pose -> must match the gesture
@@ -134,7 +135,7 @@ def _ground_person(unresolved, raw: RawStep, world: WorldModel) -> dict:
     return {"descriptor": text, "kind": "clothing"}
 
 
-def _ground_person_where(unresolved, raw: RawStep, world: WorldModel) -> dict:
+def _ground_person_where(unresolved, raw: RawStep, world: WalkieWorld) -> dict:
     """Ground WHERE a person is, for find_person / greet / count-persons.
 
     Accepts a room OR a beacon/location: ``meetPrsAtBeac`` ("meet Charlie at the
@@ -167,7 +168,7 @@ def _ground_which(unresolved, raw: RawStep, allowed: set[str]) -> str | None:
     return None
 
 
-def ground_step(raw: RawStep, world: WorldModel) -> PlanStep:
+def ground_step(raw: RawStep, world: WalkieWorld) -> PlanStep:
     """Map one RawStep onto canonical world args, recording grounding gaps. Pure."""
     try:
         primitive = Primitive(raw.primitive)
@@ -274,7 +275,7 @@ def ground_step(raw: RawStep, world: WorldModel) -> PlanStep:
     return PlanStep(primitive=primitive, args=args, raw=raw.raw, unresolved=unresolved)
 
 
-def ground_plan(raw: RawPlan, world: WorldModel, *, source: str = "") -> Plan:
+def ground_plan(raw: RawPlan, world: WalkieWorld, *, source: str = "") -> Plan:
     """Ground every step of a RawPlan. Pure — the offline-testable core."""
     return Plan(steps=[ground_step(s, world) for s in raw.steps], source=source)
 
@@ -322,7 +323,7 @@ def _extract(model, schema: "type[BaseModel]", instructions: str, text: str):
     return None
 
 
-def parse_command(model, command: str, world: WorldModel) -> Plan:
+def parse_command(model, command: str, world: WalkieWorld) -> Plan:
     """Parse ONE command string into a grounded Plan (needs the LLM)."""
     instructions = f"{prompts.PARSE_INSTRUCTIONS}\n\n{world.vocab_prompt()}"
     raw = _extract(model, RawPlan, instructions, command)
@@ -336,7 +337,7 @@ def parse_command(model, command: str, world: WorldModel) -> Plan:
     return plan
 
 
-def parse_commands(model, utterance: str, world: WorldModel) -> list[tuple[str, Plan]]:
+def parse_commands(model, utterance: str, world: WalkieWorld) -> list[tuple[str, Plan]]:
     """Split an utterance into commands and parse each into a Plan.
 
     Returns ``[(command_text, plan), ...]`` capped at GPSR_MAX_COMMANDS. An empty

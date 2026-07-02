@@ -79,7 +79,7 @@ def build_inspection_task(ctx: TaskContext) -> Task:
     return Task(
         "Inspection",
         [
-            # EnterThroughDoor(),
+            EnterThroughDoor(),
             # SafetyStop(),
             # VisitInspectionPoints(),
             # DeclareDevices(),

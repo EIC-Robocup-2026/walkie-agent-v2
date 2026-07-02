@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import time
 import uuid
+from typing import TYPE_CHECKING
 
 from langchain.messages import HumanMessage
 
@@ -31,7 +32,9 @@ from tasks.base import TaskContext
 
 from .plan import CmdStatus, Plan, prefer_tier1, summarize_status
 from .skills import SKILLS
-from walkie_world.map.vocab import WorldModel
+
+if TYPE_CHECKING:
+    from walkie_world.world import WalkieWorld  # `world` is ctx.world; dispatch only forwards it
 
 
 # --- scoped Tier-2 fallback -------------------------------------------------
@@ -85,13 +88,31 @@ _SCOPE_DIRECTIVE: dict[str, str] = {
 }
 
 
+def _final_message_text(result) -> str:
+    """The last message's text from a LangGraph invoke result, or '' — defensively.
+
+    A scoped sub-agent's only user-facing output is its final ``speak``; capturing
+    that AIMessage content gives the executor a human-readable note of what the
+    Tier-2 recovery did (logged + folded into the command's ``result_note``).
+    Exception-safe: a fake/empty result (``{"messages": []}``) yields ''."""
+    try:
+        msgs = result.get("messages") if isinstance(result, dict) else None
+        if msgs:
+            return (getattr(msgs[-1], "content", "") or "").strip()
+    except Exception:  # noqa: BLE001 — a note is best-effort, never fatal
+        pass
+    return ""
+
+
 def _scoped_fallback(ctx: TaskContext, brain, step, *, state: dict, source: str) -> bool:
     """Hand one failed step to the single sub-agent that owns its kind of work.
 
     Routed by primitive (`_FALLBACK_ROUTE`) to one sub-agent on `brain`; that agent
     only holds its own tools, so recovery stays scoped to the failed step (no full
-    orchestrator, no escalation). Returns ``False`` (step stays failed) when there's
-    no brain, no clause, or no route for the primitive.
+    orchestrator, no escalation). Captures the agent's final spoken line into
+    ``state["_notes"]`` so the serial executor can surface it on the command.
+    Returns ``False`` (step stays failed) when there's no brain, no clause, or no
+    route for the primitive.
     """
     clause = step.raw or source
     route = _FALLBACK_ROUTE.get(step.primitive.value)
@@ -103,13 +124,17 @@ def _scoped_fallback(ctx: TaskContext, brain, step, *, state: dict, source: str)
         return False
     print(f"[gpsr.dispatch] scoped fallback -> {route}: {clause!r}")
     try:
-        agent.invoke(
+        result = agent.invoke(
             {"messages": [HumanMessage(content=_SCOPE_DIRECTIVE[route] + clause)]},
             config={"configurable": {"thread_id": f"gpsr-{route}-{uuid.uuid4()}"}},
         )
     except Exception as exc:
         print(f"[gpsr.dispatch] scoped fallback ({route}) failed ({exc})")
         return False
+    note = _final_message_text(result)
+    if note:
+        print(f"[gpsr.dispatch] scoped fallback ({route}) said: {note!r}")
+        state.setdefault("_notes", []).append(note)
     # An actuator fallback may have driven the robot, so the deterministic nav cache
     # (state["at"]) can no longer be trusted — drop it so a following navigate to a
     # "known" place still actually drives. A vision-only fallback never moves, so the
@@ -119,7 +144,7 @@ def _scoped_fallback(ctx: TaskContext, brain, step, *, state: dict, source: str)
     return True
 
 
-def _run_skill_with_retry(ctx, skill, step, world: WorldModel, state: dict) -> bool:
+def _run_skill_with_retry(ctx, skill, step, world: WalkieWorld, state: dict) -> bool:
     """Run a Tier-1 skill, retrying a few times before deferring to the fallback.
 
     Most Tier-1 failures are transient (a flickered detection, a nav goal that needs
@@ -149,7 +174,7 @@ def _run_skill_with_retry(ctx, skill, step, world: WorldModel, state: dict) -> b
 def execute_step(
     ctx: TaskContext,
     step,
-    world: WorldModel,
+    world: WalkieWorld,
     brain,
     *,
     manip_enabled: bool,
@@ -176,7 +201,7 @@ def execute_step(
 def execute_plan(
     ctx: TaskContext,
     plan: Plan,
-    world: WorldModel,
+    world: WalkieWorld,
     brain,
     *,
     manip_enabled: bool,
@@ -196,7 +221,7 @@ def execute_plan(
 def execute_interleaved(
     ctx: TaskContext,
     indexed: list[tuple[int, Plan]],
-    world: WorldModel,
+    world: WalkieWorld,
     brain,
     *,
     manip_enabled: bool,

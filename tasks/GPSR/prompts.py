@@ -28,7 +28,15 @@ class CommandList(BaseModel):
             "At most three. Empty if none understood."
         ),
     )
-
+# --- entry door --------------------------------------------------------------
+READY_ANNOUNCE = "Hello, I am Walkie. I am set up at the entry door and ready for inspection."
+# request_open_door asks ONCE, then watches the depth camera and drives in on its own
+# the moment the doorway reads clear — so this is a calm heads-up, not a plea.
+ENTRY_DOOR_PROMPT = (
+    "I am at the entry. Please open the door whenever you are ready, and I will "
+    "notice it and come in."
+)
+ENTERED_ANNOUNCE = "The door is open. I am coming through now."
 
 SPLIT_COMMANDS_INSTRUCTIONS = (
     "You receive a speech-to-text transcript of an operator giving a service robot "
